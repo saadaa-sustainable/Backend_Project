@@ -1,0 +1,2026 @@
+{
+  "abandonedCheckouts": {
+    "fields": [
+      "id",
+      "abandonedCheckoutUrl",
+      "completedAt",
+      "createdAt",
+      "defaultCursor",
+      "discountCodes",
+      "name",
+      "note",
+      "taxesIncluded",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "AbandonedCheckout",
+    "path": [
+      "abandonedCheckouts"
+    ],
+    "query": "query Abandonedcheckouts($first: Int!, $after: String) {\n  abandonedCheckouts(first: $first, after: $after) {\n    edges { node { id abandonedCheckoutUrl completedAt createdAt defaultCursor discountCodes name note taxesIncluded updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "abandonedCheckoutsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "abandonedCheckoutsCount"
+    ],
+    "query": "query Abandonedcheckoutscount {\n  abandonedCheckoutsCount { count precision }\n}"
+  },
+  "app": {
+    "fields": [
+      "id",
+      "apiKey",
+      "appStoreAppUrl",
+      "appStoreDeveloperUrl",
+      "description",
+      "developerName",
+      "developerType",
+      "embedded",
+      "features",
+      "handle",
+      "installUrl",
+      "isPostPurchaseAppInUse",
+      "previouslyInstalled",
+      "pricingDetails",
+      "pricingDetailsSummary",
+      "privacyPolicyUrl",
+      "publicCategory",
+      "published",
+      "shopifyDeveloped",
+      "title",
+      "uninstallMessage",
+      "webhookApiVersion"
+    ],
+    "kind": "singleton",
+    "node_type": "App",
+    "path": [
+      "app"
+    ],
+    "query": "query App {\n  app { id apiKey appStoreAppUrl appStoreDeveloperUrl description developerName developerType embedded features handle installUrl isPostPurchaseAppInUse previouslyInstalled pricingDetails pricingDetailsSummary privacyPolicyUrl publicCategory published shopifyDeveloped title uninstallMessage webhookApiVersion }\n}"
+  },
+  "appDiscountTypesNodes": {
+    "fields": [
+      "appKey",
+      "description",
+      "discountClasses",
+      "functionId",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "AppDiscountType",
+    "path": [
+      "appDiscountTypesNodes"
+    ],
+    "query": "query Appdiscounttypesnodes($first: Int!, $after: String) {\n  appDiscountTypesNodes(first: $first, after: $after) {\n    edges { node { appKey description discountClasses functionId title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "appInstallation": {
+    "fields": [
+      "id",
+      "launchUrl",
+      "uninstallUrl"
+    ],
+    "kind": "singleton",
+    "node_type": "AppInstallation",
+    "path": [
+      "appInstallation"
+    ],
+    "query": "query Appinstallation {\n  appInstallation { id launchUrl uninstallUrl }\n}"
+  },
+  "appInstallations": {
+    "fields": [
+      "id",
+      "launchUrl",
+      "uninstallUrl"
+    ],
+    "kind": "connection",
+    "node_type": "AppInstallation",
+    "path": [
+      "appInstallations"
+    ],
+    "query": "query Appinstallations($first: Int!, $after: String) {\n  appInstallations(first: $first, after: $after) {\n    edges { node { id launchUrl uninstallUrl } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "articleAuthors": {
+    "fields": [
+      "name"
+    ],
+    "kind": "connection",
+    "node_type": "ArticleAuthor",
+    "path": [
+      "articleAuthors"
+    ],
+    "query": "query Articleauthors($first: Int!, $after: String) {\n  articleAuthors(first: $first, after: $after) {\n    edges { node { name } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "articles": {
+    "fields": [
+      "id",
+      "body",
+      "createdAt",
+      "defaultCursor",
+      "handle",
+      "isPublished",
+      "publishedAt",
+      "summary",
+      "tags",
+      "templateSuffix",
+      "title",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Article",
+    "path": [
+      "articles"
+    ],
+    "query": "query Articles($first: Int!, $after: String) {\n  articles(first: $first, after: $after) {\n    edges { node { id body createdAt defaultCursor handle isPublished publishedAt summary tags templateSuffix title updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "assignedFulfillmentOrders": {
+    "fields": [
+      "id",
+      "createdAt",
+      "fulfillAt",
+      "fulfillBy",
+      "orderId",
+      "orderName",
+      "orderProcessedAt",
+      "requestStatus",
+      "status",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "FulfillmentOrder",
+    "path": [
+      "assignedFulfillmentOrders"
+    ],
+    "query": "query Assignedfulfillmentorders($first: Int!, $after: String) {\n  assignedFulfillmentOrders(first: $first, after: $after) {\n    edges { node { id createdAt fulfillAt fulfillBy orderId orderName orderProcessedAt requestStatus status updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "automaticDiscountSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "automaticDiscountSavedSearches"
+    ],
+    "query": "query Automaticdiscountsavedsearches($first: Int!, $after: String) {\n  automaticDiscountSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "backupRegion": {
+    "fields": [
+      "id",
+      "name"
+    ],
+    "kind": "singleton",
+    "node_type": "MarketRegion",
+    "path": [
+      "backupRegion"
+    ],
+    "query": "query Backupregion {\n  backupRegion { id name }\n}"
+  },
+  "blogs": {
+    "fields": [
+      "id",
+      "commentPolicy",
+      "createdAt",
+      "handle",
+      "tags",
+      "templateSuffix",
+      "title",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Blog",
+    "path": [
+      "blogs"
+    ],
+    "query": "query Blogs($first: Int!, $after: String) {\n  blogs(first: $first, after: $after) {\n    edges { node { id commentPolicy createdAt handle tags templateSuffix title updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "blogsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "blogsCount"
+    ],
+    "query": "query Blogscount {\n  blogsCount { count precision }\n}"
+  },
+  "bulkOperations": {
+    "fields": [
+      "id",
+      "completedAt",
+      "createdAt",
+      "errorCode",
+      "fileSize",
+      "objectCount",
+      "partialDataUrl",
+      "query",
+      "rootObjectCount",
+      "status",
+      "type",
+      "url"
+    ],
+    "kind": "connection",
+    "node_type": "BulkOperation",
+    "path": [
+      "bulkOperations"
+    ],
+    "query": "query Bulkoperations($first: Int!, $after: String) {\n  bulkOperations(first: $first, after: $after) {\n    edges { node { id completedAt createdAt errorCode fileSize objectCount partialDataUrl query rootObjectCount status type url } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "businessEntity": {
+    "fields": [
+      "id",
+      "archived",
+      "companyName",
+      "displayName",
+      "legalEntityId",
+      "primary"
+    ],
+    "kind": "singleton",
+    "node_type": "BusinessEntity",
+    "path": [
+      "businessEntity"
+    ],
+    "query": "query Businessentity {\n  businessEntity { id archived companyName displayName legalEntityId primary }\n}"
+  },
+  "carrierServices": {
+    "fields": [
+      "id",
+      "active",
+      "callbackUrl",
+      "formattedName",
+      "name",
+      "supportsServiceDiscovery"
+    ],
+    "kind": "connection",
+    "node_type": "DeliveryCarrierService",
+    "path": [
+      "carrierServices"
+    ],
+    "query": "query Carrierservices($first: Int!, $after: String) {\n  carrierServices(first: $first, after: $after) {\n    edges { node { id active callbackUrl formattedName name supportsServiceDiscovery } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "cartTransforms": {
+    "fields": [
+      "id",
+      "blockOnFailure",
+      "functionId"
+    ],
+    "kind": "connection",
+    "node_type": "CartTransform",
+    "path": [
+      "cartTransforms"
+    ],
+    "query": "query Carttransforms($first: Int!, $after: String) {\n  cartTransforms(first: $first, after: $after) {\n    edges { node { id blockOnFailure functionId } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "cashDrawers": {
+    "fields": [
+      "id",
+      "name"
+    ],
+    "kind": "connection",
+    "node_type": "CashDrawer",
+    "path": [
+      "cashDrawers"
+    ],
+    "query": "query Cashdrawers($first: Int!, $after: String) {\n  cashDrawers(first: $first, after: $after) {\n    edges { node { id name } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "cashTrackingSessions": {
+    "fields": [
+      "id",
+      "cashTrackingEnabled",
+      "closingNote",
+      "closingTime",
+      "openingNote",
+      "openingTime",
+      "registerName"
+    ],
+    "kind": "connection",
+    "node_type": "CashTrackingSession",
+    "path": [
+      "cashTrackingSessions"
+    ],
+    "query": "query Cashtrackingsessions($first: Int!, $after: String) {\n  cashTrackingSessions(first: $first, after: $after) {\n    edges { node { id cashTrackingEnabled closingNote closingTime openingNote openingTime registerName } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "catalogs": {
+    "fields": [
+      "id",
+      "status",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "Catalog",
+    "path": [
+      "catalogs"
+    ],
+    "query": "query Catalogs($first: Int!, $after: String) {\n  catalogs(first: $first, after: $after) {\n    edges { node { id status title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "catalogsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "catalogsCount"
+    ],
+    "query": "query Catalogscount {\n  catalogsCount { count precision }\n}"
+  },
+  "channels": {
+    "fields": [
+      "id",
+      "accountId",
+      "accountName",
+      "activeRegions",
+      "handle",
+      "name",
+      "specificationHandle",
+      "supportsFuturePublishing"
+    ],
+    "kind": "connection",
+    "node_type": "Channel",
+    "path": [
+      "channels"
+    ],
+    "query": "query Channels($first: Int!, $after: String) {\n  channels(first: $first, after: $after) {\n    edges { node { id accountId accountName activeRegions handle name specificationHandle supportsFuturePublishing } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "checkoutAndAccountsConfigurations": {
+    "fields": [
+      "id",
+      "createdAt",
+      "editedAt",
+      "isPublished",
+      "name",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "CheckoutAndAccountsConfiguration",
+    "path": [
+      "checkoutAndAccountsConfigurations"
+    ],
+    "query": "query Checkoutandaccountsconfigurations($first: Int!, $after: String) {\n  checkoutAndAccountsConfigurations(first: $first, after: $after) {\n    edges { node { id createdAt editedAt isPublished name updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "codeDiscountSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "codeDiscountSavedSearches"
+    ],
+    "query": "query Codediscountsavedsearches($first: Int!, $after: String) {\n  codeDiscountSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "collectionSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "collectionSavedSearches"
+    ],
+    "query": "query Collectionsavedsearches($first: Int!, $after: String) {\n  collectionSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "collections": {
+    "fields": [
+      "id",
+      "description",
+      "descriptionHtml",
+      "handle",
+      "legacyResourceId",
+      "sortOrder",
+      "templateSuffix",
+      "title",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Collection",
+    "path": [
+      "collections"
+    ],
+    "query": "query Collections($first: Int!, $after: String) {\n  collections(first: $first, after: $after) {\n    edges { node { id description descriptionHtml handle legacyResourceId sortOrder templateSuffix title updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "collectionsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "collectionsCount"
+    ],
+    "query": "query Collectionscount {\n  collectionsCount { count precision }\n}"
+  },
+  "comments": {
+    "fields": [
+      "id",
+      "body",
+      "bodyHtml",
+      "createdAt",
+      "ip",
+      "isPublished",
+      "publishedAt",
+      "status",
+      "updatedAt",
+      "userAgent"
+    ],
+    "kind": "connection",
+    "node_type": "Comment",
+    "path": [
+      "comments"
+    ],
+    "query": "query Comments($first: Int!, $after: String) {\n  comments(first: $first, after: $after) {\n    edges { node { id body bodyHtml createdAt ip isPublished publishedAt status updatedAt userAgent } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "companies": {
+    "fields": [
+      "id",
+      "createdAt",
+      "customerSince",
+      "defaultCursor",
+      "externalId",
+      "hasTimelineComment",
+      "lifetimeDuration",
+      "name",
+      "note",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Company",
+    "path": [
+      "companies"
+    ],
+    "query": "query Companies($first: Int!, $after: String) {\n  companies(first: $first, after: $after) {\n    edges { node { id createdAt customerSince defaultCursor externalId hasTimelineComment lifetimeDuration name note updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "companiesCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "companiesCount"
+    ],
+    "query": "query Companiescount {\n  companiesCount { count precision }\n}"
+  },
+  "companyLocations": {
+    "fields": [
+      "id",
+      "createdAt",
+      "currency",
+      "defaultCursor",
+      "externalId",
+      "hasTimelineComment",
+      "locale",
+      "name",
+      "note",
+      "phone",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "CompanyLocation",
+    "path": [
+      "companyLocations"
+    ],
+    "query": "query Companylocations($first: Int!, $after: String) {\n  companyLocations(first: $first, after: $after) {\n    edges { node { id createdAt currency defaultCursor externalId hasTimelineComment locale name note phone updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "currentAppInstallation": {
+    "fields": [
+      "id",
+      "launchUrl",
+      "uninstallUrl"
+    ],
+    "kind": "singleton",
+    "node_type": "AppInstallation",
+    "path": [
+      "currentAppInstallation"
+    ],
+    "query": "query Currentappinstallation {\n  currentAppInstallation { id launchUrl uninstallUrl }\n}"
+  },
+  "currentStaffMember": {
+    "fields": [
+      "id",
+      "accountType",
+      "active",
+      "email",
+      "exists",
+      "firstName",
+      "initials",
+      "isShopOwner",
+      "lastName",
+      "locale",
+      "name",
+      "phone"
+    ],
+    "kind": "singleton",
+    "node_type": "StaffMember",
+    "path": [
+      "currentStaffMember"
+    ],
+    "query": "query Currentstaffmember {\n  currentStaffMember { id accountType active email exists firstName initials isShopOwner lastName locale name phone }\n}"
+  },
+  "customerAccountPages": {
+    "fields": [
+      "id",
+      "defaultCursor",
+      "handle",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "CustomerAccountPage",
+    "path": [
+      "customerAccountPages"
+    ],
+    "query": "query Customeraccountpages($first: Int!, $after: String) {\n  customerAccountPages(first: $first, after: $after) {\n    edges { node { id defaultCursor handle title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "customers": {
+    "fields": [
+      "id",
+      "canDelete",
+      "createdAt",
+      "dataSaleOptOut",
+      "displayName",
+      "firstName",
+      "lastName",
+      "legacyResourceId",
+      "lifetimeDuration",
+      "locale",
+      "multipassIdentifier",
+      "note",
+      "numberOfOrders",
+      "productSubscriberStatus",
+      "state",
+      "tags",
+      "taxExempt",
+      "taxExemptions",
+      "updatedAt",
+      "verifiedEmail"
+    ],
+    "kind": "connection",
+    "node_type": "Customer",
+    "path": [
+      "customers"
+    ],
+    "query": "query Customers($first: Int!, $after: String) {\n  customers(first: $first, after: $after) {\n    edges { node { id canDelete createdAt dataSaleOptOut displayName firstName lastName legacyResourceId lifetimeDuration locale multipassIdentifier note numberOfOrders productSubscriberStatus state tags taxExempt taxExemptions updatedAt verifiedEmail } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "customersCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "customersCount"
+    ],
+    "query": "query Customerscount {\n  customersCount { count precision }\n}"
+  },
+  "deliveryCustomizations": {
+    "fields": [
+      "id",
+      "enabled",
+      "functionId",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "DeliveryCustomization",
+    "path": [
+      "deliveryCustomizations"
+    ],
+    "query": "query Deliverycustomizations($first: Int!, $after: String) {\n  deliveryCustomizations(first: $first, after: $after) {\n    edges { node { id enabled functionId title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "deliveryProfiles": {
+    "fields": [
+      "id",
+      "activeMethodDefinitionsCount",
+      "coversAllItems",
+      "default",
+      "locationsWithoutRatesCount",
+      "name",
+      "originLocationCount",
+      "version",
+      "zoneCountryCount"
+    ],
+    "kind": "connection",
+    "node_type": "DeliveryProfile",
+    "path": [
+      "deliveryProfiles"
+    ],
+    "query": "query Deliveryprofiles($first: Int!, $after: String) {\n  deliveryProfiles(first: $first, after: $after) {\n    edges { node { id activeMethodDefinitionsCount coversAllItems default locationsWithoutRatesCount name originLocationCount version zoneCountryCount } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "deliveryPromiseSettings": {
+    "fields": [
+      "deliveryDatesEnabled",
+      "processingTime"
+    ],
+    "kind": "singleton",
+    "node_type": "DeliveryPromiseSetting",
+    "path": [
+      "deliveryPromiseSettings"
+    ],
+    "query": "query Deliverypromisesettings {\n  deliveryPromiseSettings { deliveryDatesEnabled processingTime }\n}"
+  },
+  "discountCodesCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "discountCodesCount"
+    ],
+    "query": "query Discountcodescount {\n  discountCodesCount { count precision }\n}"
+  },
+  "discountNodes": {
+    "fields": [
+      "id"
+    ],
+    "kind": "connection",
+    "node_type": "DiscountNode",
+    "path": [
+      "discountNodes"
+    ],
+    "query": "query Discountnodes($first: Int!, $after: String) {\n  discountNodes(first: $first, after: $after) {\n    edges { node { id } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "discountNodesCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "discountNodesCount"
+    ],
+    "query": "query Discountnodescount {\n  discountNodesCount { count precision }\n}"
+  },
+  "discountRedeemCodeSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "discountRedeemCodeSavedSearches"
+    ],
+    "query": "query Discountredeemcodesavedsearches($first: Int!, $after: String) {\n  discountRedeemCodeSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "disputes": {
+    "fields": [
+      "id",
+      "evidenceDueBy",
+      "evidenceSentOn",
+      "finalizedOn",
+      "initiatedAt",
+      "legacyResourceId",
+      "status",
+      "type"
+    ],
+    "kind": "connection",
+    "node_type": "ShopifyPaymentsDispute",
+    "path": [
+      "disputes"
+    ],
+    "query": "query Disputes($first: Int!, $after: String) {\n  disputes(first: $first, after: $after) {\n    edges { node { id evidenceDueBy evidenceSentOn finalizedOn initiatedAt legacyResourceId status type } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "draftOrderSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "draftOrderSavedSearches"
+    ],
+    "query": "query Draftordersavedsearches($first: Int!, $after: String) {\n  draftOrderSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "draftOrders": {
+    "fields": [
+      "id",
+      "acceptAutomaticDiscounts",
+      "allVariantPricesOverridden",
+      "allowDiscountCodesInCheckout",
+      "anyVariantPricesOverridden",
+      "billingAddressMatchesShippingAddress",
+      "completedAt",
+      "createdAt",
+      "currencyCode",
+      "defaultCursor",
+      "discountCodes",
+      "email",
+      "hasTimelineComment",
+      "invoiceEmailTemplateSubject",
+      "invoiceSentAt",
+      "invoiceUrl",
+      "legacyResourceId",
+      "name",
+      "note2",
+      "phone",
+      "poNumber",
+      "presentmentCurrencyCode",
+      "ready",
+      "reserveInventoryUntil",
+      "status",
+      "tags",
+      "taxExempt",
+      "taxesIncluded",
+      "totalQuantityOfLineItems",
+      "totalWeight",
+      "transformerFingerprint",
+      "updatedAt",
+      "visibleToCustomer"
+    ],
+    "kind": "connection",
+    "node_type": "DraftOrder",
+    "path": [
+      "draftOrders"
+    ],
+    "query": "query Draftorders($first: Int!, $after: String) {\n  draftOrders(first: $first, after: $after) {\n    edges { node { id acceptAutomaticDiscounts allVariantPricesOverridden allowDiscountCodesInCheckout anyVariantPricesOverridden billingAddressMatchesShippingAddress completedAt createdAt currencyCode defaultCursor discountCodes email hasTimelineComment invoiceEmailTemplateSubject invoiceSentAt invoiceUrl legacyResourceId name note2 phone poNumber presentmentCurrencyCode ready reserveInventoryUntil status tags taxExempt taxesIncluded totalQuantityOfLineItems totalWeight transformerFingerprint updatedAt visibleToCustomer } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "draftOrdersCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "draftOrdersCount"
+    ],
+    "query": "query Draftorderscount {\n  draftOrdersCount { count precision }\n}"
+  },
+  "events": {
+    "fields": [
+      "id",
+      "action",
+      "appTitle",
+      "attributeToApp",
+      "attributeToUser",
+      "createdAt",
+      "criticalAlert",
+      "message"
+    ],
+    "kind": "connection",
+    "node_type": "Event",
+    "path": [
+      "events"
+    ],
+    "query": "query Events($first: Int!, $after: String) {\n  events(first: $first, after: $after) {\n    edges { node { id action appTitle attributeToApp attributeToUser createdAt criticalAlert message } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "eventsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "eventsCount"
+    ],
+    "query": "query Eventscount {\n  eventsCount { count precision }\n}"
+  },
+  "fileSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "fileSavedSearches"
+    ],
+    "query": "query Filesavedsearches($first: Int!, $after: String) {\n  fileSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "files": {
+    "fields": [
+      "id",
+      "alt",
+      "createdAt",
+      "fileStatus",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "File",
+    "path": [
+      "files"
+    ],
+    "query": "query Files($first: Int!, $after: String) {\n  files(first: $first, after: $after) {\n    edges { node { id alt createdAt fileStatus updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "financeAppAccessPolicy": {
+    "fields": [
+      "access"
+    ],
+    "kind": "singleton",
+    "node_type": "FinanceAppAccessPolicy",
+    "path": [
+      "financeAppAccessPolicy"
+    ],
+    "query": "query Financeappaccesspolicy {\n  financeAppAccessPolicy { access }\n}"
+  },
+  "financeKycInformation": {
+    "fields": [
+      "businessType",
+      "legalName"
+    ],
+    "kind": "singleton",
+    "node_type": "FinanceKycInformation",
+    "path": [
+      "financeKycInformation"
+    ],
+    "query": "query Financekycinformation {\n  financeKycInformation { businessType legalName }\n}"
+  },
+  "fulfillmentOrders": {
+    "fields": [
+      "id",
+      "createdAt",
+      "fulfillAt",
+      "fulfillBy",
+      "orderId",
+      "orderName",
+      "orderProcessedAt",
+      "requestStatus",
+      "status",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "FulfillmentOrder",
+    "path": [
+      "fulfillmentOrders"
+    ],
+    "query": "query Fulfillmentorders($first: Int!, $after: String) {\n  fulfillmentOrders(first: $first, after: $after) {\n    edges { node { id createdAt fulfillAt fulfillBy orderId orderName orderProcessedAt requestStatus status updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "giftCards": {
+    "fields": [
+      "id",
+      "createdAt",
+      "crossCurrencyRedemptionStrategy",
+      "deactivatedAt",
+      "enabled",
+      "expiresOn",
+      "isRedeemable",
+      "lastCharacters",
+      "maskedCode",
+      "note",
+      "templateSuffix",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "GiftCard",
+    "path": [
+      "giftCards"
+    ],
+    "query": "query Giftcards($first: Int!, $after: String) {\n  giftCards(first: $first, after: $after) {\n    edges { node { id createdAt crossCurrencyRedemptionStrategy deactivatedAt enabled expiresOn isRedeemable lastCharacters maskedCode note templateSuffix updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "giftCardsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "giftCardsCount"
+    ],
+    "query": "query Giftcardscount {\n  giftCardsCount { count precision }\n}"
+  },
+  "inventoryItems": {
+    "fields": [
+      "id",
+      "countryCodeOfOrigin",
+      "createdAt",
+      "duplicateSkuCount",
+      "harmonizedSystemCode",
+      "inventoryHistoryUrl",
+      "legacyResourceId",
+      "provinceCodeOfOrigin",
+      "requiresShipping",
+      "sku",
+      "tracked",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "InventoryItem",
+    "path": [
+      "inventoryItems"
+    ],
+    "query": "query Inventoryitems($first: Int!, $after: String) {\n  inventoryItems(first: $first, after: $after) {\n    edges { node { id countryCodeOfOrigin createdAt duplicateSkuCount harmonizedSystemCode inventoryHistoryUrl legacyResourceId provinceCodeOfOrigin requiresShipping sku tracked updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "inventoryShipments": {
+    "fields": [
+      "id",
+      "barcode",
+      "dateCreated",
+      "dateReceived",
+      "dateShipped",
+      "lineItemTotalQuantity",
+      "name",
+      "status",
+      "totalAcceptedQuantity",
+      "totalReceivedQuantity",
+      "totalRejectedQuantity"
+    ],
+    "kind": "connection",
+    "node_type": "InventoryShipment",
+    "path": [
+      "inventoryShipments"
+    ],
+    "query": "query Inventoryshipments($first: Int!, $after: String) {\n  inventoryShipments(first: $first, after: $after) {\n    edges { node { id barcode dateCreated dateReceived dateShipped lineItemTotalQuantity name status totalAcceptedQuantity totalReceivedQuantity totalRejectedQuantity } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "inventoryTransfers": {
+    "fields": [
+      "id",
+      "dateCreated",
+      "hasTimelineComment",
+      "name",
+      "note",
+      "receivedQuantity",
+      "referenceName",
+      "status",
+      "tags",
+      "totalQuantity"
+    ],
+    "kind": "connection",
+    "node_type": "InventoryTransfer",
+    "path": [
+      "inventoryTransfers"
+    ],
+    "query": "query Inventorytransfers($first: Int!, $after: String) {\n  inventoryTransfers(first: $first, after: $after) {\n    edges { node { id dateCreated hasTimelineComment name note receivedQuantity referenceName status tags totalQuantity } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "location": {
+    "fields": [
+      "id",
+      "activatable",
+      "addressVerified",
+      "createdAt",
+      "deactivatable",
+      "deactivatedAt",
+      "deletable",
+      "fulfillsOnlineOrders",
+      "hasActiveInventory",
+      "hasUnfulfilledOrders",
+      "isActive",
+      "isFulfillmentService",
+      "legacyResourceId",
+      "name",
+      "shipsInventory",
+      "updatedAt"
+    ],
+    "kind": "singleton",
+    "node_type": "Location",
+    "path": [
+      "location"
+    ],
+    "query": "query Location {\n  location { id activatable addressVerified createdAt deactivatable deactivatedAt deletable fulfillsOnlineOrders hasActiveInventory hasUnfulfilledOrders isActive isFulfillmentService legacyResourceId name shipsInventory updatedAt }\n}"
+  },
+  "locations": {
+    "fields": [
+      "id",
+      "activatable",
+      "addressVerified",
+      "createdAt",
+      "deactivatable",
+      "deactivatedAt",
+      "deletable",
+      "fulfillsOnlineOrders",
+      "hasActiveInventory",
+      "hasUnfulfilledOrders",
+      "isActive",
+      "isFulfillmentService",
+      "legacyResourceId",
+      "name",
+      "shipsInventory",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Location",
+    "path": [
+      "locations"
+    ],
+    "query": "query Locations($first: Int!, $after: String) {\n  locations(first: $first, after: $after) {\n    edges { node { id activatable addressVerified createdAt deactivatable deactivatedAt deletable fulfillsOnlineOrders hasActiveInventory hasUnfulfilledOrders isActive isFulfillmentService legacyResourceId name shipsInventory updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "locationsAvailableForDeliveryProfilesConnection": {
+    "fields": [
+      "id",
+      "activatable",
+      "addressVerified",
+      "createdAt",
+      "deactivatable",
+      "deactivatedAt",
+      "deletable",
+      "fulfillsOnlineOrders",
+      "hasActiveInventory",
+      "hasUnfulfilledOrders",
+      "isActive",
+      "isFulfillmentService",
+      "legacyResourceId",
+      "name",
+      "shipsInventory",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Location",
+    "path": [
+      "locationsAvailableForDeliveryProfilesConnection"
+    ],
+    "query": "query Locationsavailablefordeliveryprofilesconnection($first: Int!, $after: String) {\n  locationsAvailableForDeliveryProfilesConnection(first: $first, after: $after) {\n    edges { node { id activatable addressVerified createdAt deactivatable deactivatedAt deletable fulfillsOnlineOrders hasActiveInventory hasUnfulfilledOrders isActive isFulfillmentService legacyResourceId name shipsInventory updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "locationsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "locationsCount"
+    ],
+    "query": "query Locationscount {\n  locationsCount { count precision }\n}"
+  },
+  "manualHoldsFulfillmentOrders": {
+    "fields": [
+      "id",
+      "createdAt",
+      "fulfillAt",
+      "fulfillBy",
+      "orderId",
+      "orderName",
+      "orderProcessedAt",
+      "requestStatus",
+      "status",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "FulfillmentOrder",
+    "path": [
+      "manualHoldsFulfillmentOrders"
+    ],
+    "query": "query Manualholdsfulfillmentorders($first: Int!, $after: String) {\n  manualHoldsFulfillmentOrders(first: $first, after: $after) {\n    edges { node { id createdAt fulfillAt fulfillBy orderId orderName orderProcessedAt requestStatus status updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "marketingActivities": {
+    "fields": [
+      "id",
+      "activityListUrl",
+      "createdAt",
+      "formData",
+      "hierarchyLevel",
+      "inMainWorkflowVersion",
+      "isExternal",
+      "marketingChannelType",
+      "parentActivityId",
+      "parentRemoteId",
+      "sourceAndMedium",
+      "status",
+      "statusBadgeTypeV2",
+      "statusLabel",
+      "statusTransitionedAt",
+      "tactic",
+      "targetStatus",
+      "title",
+      "updatedAt",
+      "urlParameterValue"
+    ],
+    "kind": "connection",
+    "node_type": "MarketingActivity",
+    "path": [
+      "marketingActivities"
+    ],
+    "query": "query Marketingactivities($first: Int!, $after: String) {\n  marketingActivities(first: $first, after: $after) {\n    edges { node { id activityListUrl createdAt formData hierarchyLevel inMainWorkflowVersion isExternal marketingChannelType parentActivityId parentRemoteId sourceAndMedium status statusBadgeTypeV2 statusLabel statusTransitionedAt tactic targetStatus title updatedAt urlParameterValue } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "marketingEvents": {
+    "fields": [
+      "id",
+      "channelHandle",
+      "description",
+      "endedAt",
+      "legacyResourceId",
+      "manageUrl",
+      "marketingChannelType",
+      "previewUrl",
+      "remoteId",
+      "scheduledToEndAt",
+      "sourceAndMedium",
+      "startedAt",
+      "type",
+      "utmCampaign",
+      "utmMedium",
+      "utmSource"
+    ],
+    "kind": "connection",
+    "node_type": "MarketingEvent",
+    "path": [
+      "marketingEvents"
+    ],
+    "query": "query Marketingevents($first: Int!, $after: String) {\n  marketingEvents(first: $first, after: $after) {\n    edges { node { id channelHandle description endedAt legacyResourceId manageUrl marketingChannelType previewUrl remoteId scheduledToEndAt sourceAndMedium startedAt type utmCampaign utmMedium utmSource } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "markets": {
+    "fields": [
+      "id",
+      "handle",
+      "name",
+      "status",
+      "type"
+    ],
+    "kind": "connection",
+    "node_type": "Market",
+    "path": [
+      "markets"
+    ],
+    "query": "query Markets($first: Int!, $after: String) {\n  markets(first: $first, after: $after) {\n    edges { node { id handle name status type } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "menus": {
+    "fields": [
+      "id",
+      "handle",
+      "isDefault",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "Menu",
+    "path": [
+      "menus"
+    ],
+    "query": "query Menus($first: Int!, $after: String) {\n  menus(first: $first, after: $after) {\n    edges { node { id handle isDefault title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "metafieldDefinition": {
+    "fields": [
+      "id",
+      "description",
+      "key",
+      "metafieldsCount",
+      "name",
+      "namespace",
+      "ownerType",
+      "pinnedPosition",
+      "useAsCollectionCondition",
+      "validationStatus"
+    ],
+    "kind": "singleton",
+    "node_type": "MetafieldDefinition",
+    "path": [
+      "metafieldDefinition"
+    ],
+    "query": "query Metafielddefinition {\n  metafieldDefinition { id description key metafieldsCount name namespace ownerType pinnedPosition useAsCollectionCondition validationStatus }\n}"
+  },
+  "metaobjectDefinitions": {
+    "fields": [
+      "id",
+      "createdAt",
+      "description",
+      "displayNameKey",
+      "hasThumbnailField",
+      "metaobjectsCount",
+      "name",
+      "type",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "MetaobjectDefinition",
+    "path": [
+      "metaobjectDefinitions"
+    ],
+    "query": "query Metaobjectdefinitions($first: Int!, $after: String) {\n  metaobjectDefinitions(first: $first, after: $after) {\n    edges { node { id createdAt description displayNameKey hasThumbnailField metaobjectsCount name type updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "orderAttributionDefinitions": {
+    "fields": [
+      "id",
+      "displayName",
+      "handle",
+      "icon"
+    ],
+    "kind": "connection",
+    "node_type": "OrderAttributionDefinition",
+    "path": [
+      "orderAttributionDefinitions"
+    ],
+    "query": "query Orderattributiondefinitions($first: Int!, $after: String) {\n  orderAttributionDefinitions(first: $first, after: $after) {\n    edges { node { id displayName handle icon } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "orderSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "orderSavedSearches"
+    ],
+    "query": "query Ordersavedsearches($first: Int!, $after: String) {\n  orderSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "orders": {
+    "fields": [
+      "id",
+      "billingAddressMatchesShippingAddress",
+      "canMarkAsPaid",
+      "canNotifyCustomer",
+      "cancelReason",
+      "cancelledAt",
+      "capturable",
+      "cartToken",
+      "checkoutToken",
+      "clientIp",
+      "closed",
+      "closedAt",
+      "confirmationNumber",
+      "confirmed",
+      "createdAt",
+      "currencyCode",
+      "currentSubtotalLineItemsQuantity",
+      "currentTotalWeight",
+      "customerAcceptsMarketing",
+      "customerLocale",
+      "discountCode",
+      "discountCodes",
+      "displayFinancialStatus",
+      "displayFulfillmentStatus",
+      "dutiesIncluded",
+      "edited",
+      "email",
+      "estimatedTaxes",
+      "fulfillable",
+      "fullyPaid",
+      "hasTimelineComment",
+      "legacyResourceId",
+      "merchantEditable",
+      "merchantEditableErrors",
+      "name",
+      "note",
+      "number",
+      "paymentGatewayNames",
+      "phone",
+      "poNumber",
+      "presentmentCurrencyCode",
+      "processedAt",
+      "productNetwork",
+      "refundable",
+      "registeredSourceUrl",
+      "requiresShipping",
+      "restockable",
+      "returnStatus",
+      "sourceIdentifier",
+      "sourceName",
+      "statusPageUrl",
+      "subtotalLineItemsQuantity",
+      "tags",
+      "taxExempt",
+      "taxesIncluded",
+      "test",
+      "totalWeight",
+      "unpaid",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Order",
+    "path": [
+      "orders"
+    ],
+    "query": "query Orders($first: Int!, $after: String) {\n  orders(first: $first, after: $after) {\n    edges { node { id billingAddressMatchesShippingAddress canMarkAsPaid canNotifyCustomer cancelReason cancelledAt capturable cartToken checkoutToken clientIp closed closedAt confirmationNumber confirmed createdAt currencyCode currentSubtotalLineItemsQuantity currentTotalWeight customerAcceptsMarketing customerLocale discountCode discountCodes displayFinancialStatus displayFulfillmentStatus dutiesIncluded edited email estimatedTaxes fulfillable fullyPaid hasTimelineComment legacyResourceId merchantEditable merchantEditableErrors name note number paymentGatewayNames phone poNumber presentmentCurrencyCode processedAt productNetwork refundable registeredSourceUrl requiresShipping restockable returnStatus sourceIdentifier sourceName statusPageUrl subtotalLineItemsQuantity tags taxExempt taxesIncluded test totalWeight unpaid updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "ordersCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "ordersCount"
+    ],
+    "query": "query Orderscount {\n  ordersCount { count precision }\n}"
+  },
+  "pages": {
+    "fields": [
+      "id",
+      "body",
+      "bodySummary",
+      "createdAt",
+      "defaultCursor",
+      "handle",
+      "isPublished",
+      "publishedAt",
+      "templateSuffix",
+      "title",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "Page",
+    "path": [
+      "pages"
+    ],
+    "query": "query Pages($first: Int!, $after: String) {\n  pages(first: $first, after: $after) {\n    edges { node { id body bodySummary createdAt defaultCursor handle isPublished publishedAt templateSuffix title updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "pagesCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "pagesCount"
+    ],
+    "query": "query Pagescount {\n  pagesCount { count precision }\n}"
+  },
+  "paymentCustomizations": {
+    "fields": [
+      "id",
+      "enabled",
+      "functionId",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "PaymentCustomization",
+    "path": [
+      "paymentCustomizations"
+    ],
+    "query": "query Paymentcustomizations($first: Int!, $after: String) {\n  paymentCustomizations(first: $first, after: $after) {\n    edges { node { id enabled functionId title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "pendingOrdersCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "pendingOrdersCount"
+    ],
+    "query": "query Pendingorderscount {\n  pendingOrdersCount { count precision }\n}"
+  },
+  "pointOfSaleDevicePaymentSessions": {
+    "fields": [
+      "id",
+      "closingNote",
+      "closingTime",
+      "currency",
+      "openingNote",
+      "openingTime",
+      "status",
+      "totalsReady"
+    ],
+    "kind": "connection",
+    "node_type": "PointOfSaleDevicePaymentSession",
+    "path": [
+      "pointOfSaleDevicePaymentSessions"
+    ],
+    "query": "query Pointofsaledevicepaymentsessions($first: Int!, $after: String) {\n  pointOfSaleDevicePaymentSessions(first: $first, after: $after) {\n    edges { node { id closingNote closingTime currency openingNote openingTime status totalsReady } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "priceLists": {
+    "fields": [
+      "id",
+      "currency",
+      "fixedPricesCount",
+      "name"
+    ],
+    "kind": "connection",
+    "node_type": "PriceList",
+    "path": [
+      "priceLists"
+    ],
+    "query": "query Pricelists($first: Int!, $after: String) {\n  priceLists(first: $first, after: $after) {\n    edges { node { id currency fixedPricesCount name } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "productFeeds": {
+    "fields": [
+      "id",
+      "channelId",
+      "country",
+      "language",
+      "status"
+    ],
+    "kind": "connection",
+    "node_type": "ProductFeed",
+    "path": [
+      "productFeeds"
+    ],
+    "query": "query Productfeeds($first: Int!, $after: String) {\n  productFeeds(first: $first, after: $after) {\n    edges { node { id channelId country language status } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "productSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "productSavedSearches"
+    ],
+    "query": "query Productsavedsearches($first: Int!, $after: String) {\n  productSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "productVariants": {
+    "fields": [
+      "id",
+      "availableForSale",
+      "barcode",
+      "compareAtPrice",
+      "createdAt",
+      "defaultCursor",
+      "displayName",
+      "inventoryPolicy",
+      "inventoryQuantity",
+      "legacyResourceId",
+      "position",
+      "price",
+      "requiresComponents",
+      "sellableOnlineQuantity",
+      "showUnitPrice",
+      "sku",
+      "taxable",
+      "title",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "ProductVariant",
+    "path": [
+      "productVariants"
+    ],
+    "query": "query Productvariants($first: Int!, $after: String) {\n  productVariants(first: $first, after: $after) {\n    edges { node { id availableForSale barcode compareAtPrice createdAt defaultCursor displayName inventoryPolicy inventoryQuantity legacyResourceId position price requiresComponents sellableOnlineQuantity showUnitPrice sku taxable title updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "productVariantsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "productVariantsCount"
+    ],
+    "query": "query Productvariantscount {\n  productVariantsCount { count precision }\n}"
+  },
+  "products": {
+    "fields": [
+      "id",
+      "combinedListingRole",
+      "createdAt",
+      "defaultCursor",
+      "description",
+      "descriptionHtml",
+      "giftCardTemplateSuffix",
+      "handle",
+      "hasOnlyDefaultVariant",
+      "hasOutOfStockVariants",
+      "hasVariantsThatRequiresComponents",
+      "isGiftCard",
+      "legacyResourceId",
+      "onlineStorePreviewUrl",
+      "onlineStoreUrl",
+      "productType",
+      "publishedAt",
+      "requiresSellingPlan",
+      "status",
+      "tags",
+      "templateSuffix",
+      "title",
+      "totalInventory",
+      "tracksInventory",
+      "updatedAt",
+      "vendor"
+    ],
+    "kind": "connection",
+    "node_type": "Product",
+    "path": [
+      "products"
+    ],
+    "query": "query Products($first: Int!, $after: String) {\n  products(first: $first, after: $after) {\n    edges { node { id combinedListingRole createdAt defaultCursor description descriptionHtml giftCardTemplateSuffix handle hasOnlyDefaultVariant hasOutOfStockVariants hasVariantsThatRequiresComponents isGiftCard legacyResourceId onlineStorePreviewUrl onlineStoreUrl productType publishedAt requiresSellingPlan status tags templateSuffix title totalInventory tracksInventory updatedAt vendor } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "productsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "productsCount"
+    ],
+    "query": "query Productscount {\n  productsCount { count precision }\n}"
+  },
+  "publications": {
+    "fields": [
+      "id",
+      "autoPublish",
+      "supportsFuturePublishing"
+    ],
+    "kind": "connection",
+    "node_type": "Publication",
+    "path": [
+      "publications"
+    ],
+    "query": "query Publications($first: Int!, $after: String) {\n  publications(first: $first, after: $after) {\n    edges { node { id autoPublish supportsFuturePublishing } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "publicationsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "publicationsCount"
+    ],
+    "query": "query Publicationscount {\n  publicationsCount { count precision }\n}"
+  },
+  "returnReasonDefinitions": {
+    "fields": [
+      "id",
+      "deleted",
+      "handle",
+      "name"
+    ],
+    "kind": "connection",
+    "node_type": "ReturnReasonDefinition",
+    "path": [
+      "returnReasonDefinitions"
+    ],
+    "query": "query Returnreasondefinitions($first: Int!, $after: String) {\n  returnReasonDefinitions(first: $first, after: $after) {\n    edges { node { id deleted handle name } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "scriptTags": {
+    "fields": [
+      "id",
+      "cache",
+      "createdAt",
+      "displayScope",
+      "legacyResourceId",
+      "src",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "ScriptTag",
+    "path": [
+      "scriptTags"
+    ],
+    "query": "query Scripttags($first: Int!, $after: String) {\n  scriptTags(first: $first, after: $after) {\n    edges { node { id cache createdAt displayScope legacyResourceId src updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "segmentFilters": {
+    "fields": [
+      "localizedName",
+      "multiValue",
+      "queryName"
+    ],
+    "kind": "connection",
+    "node_type": "SegmentFilter",
+    "path": [
+      "segmentFilters"
+    ],
+    "query": "query Segmentfilters($first: Int!, $after: String) {\n  segmentFilters(first: $first, after: $after) {\n    edges { node { localizedName multiValue queryName } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "segments": {
+    "fields": [
+      "id",
+      "creationDate",
+      "lastEditDate",
+      "name",
+      "query"
+    ],
+    "kind": "connection",
+    "node_type": "Segment",
+    "path": [
+      "segments"
+    ],
+    "query": "query Segments($first: Int!, $after: String) {\n  segments(first: $first, after: $after) {\n    edges { node { id creationDate lastEditDate name query } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "segmentsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "segmentsCount"
+    ],
+    "query": "query Segmentscount {\n  segmentsCount { count precision }\n}"
+  },
+  "sellingPlanGroups": {
+    "fields": [
+      "id",
+      "appId",
+      "createdAt",
+      "description",
+      "merchantCode",
+      "name",
+      "options",
+      "position",
+      "summary"
+    ],
+    "kind": "connection",
+    "node_type": "SellingPlanGroup",
+    "path": [
+      "sellingPlanGroups"
+    ],
+    "query": "query Sellingplangroups($first: Int!, $after: String) {\n  sellingPlanGroups(first: $first, after: $after) {\n    edges { node { id appId createdAt description merchantCode name options position summary } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "serverPixel": {
+    "fields": [
+      "id",
+      "status",
+      "webhookEndpointAddress"
+    ],
+    "kind": "singleton",
+    "node_type": "ServerPixel",
+    "path": [
+      "serverPixel"
+    ],
+    "query": "query Serverpixel {\n  serverPixel { id status webhookEndpointAddress }\n}"
+  },
+  "shop": {
+    "fields": [
+      "id",
+      "checkoutApiSupported",
+      "contactEmail",
+      "createdAt",
+      "currencyCode",
+      "customerAccounts",
+      "description",
+      "email",
+      "enabledPresentmentCurrencies",
+      "ianaTimezone",
+      "marketingSmsConsentEnabledAtCheckout",
+      "myshopifyDomain",
+      "name",
+      "orderNumberFormatPrefix",
+      "orderNumberFormatSuffix",
+      "richTextEditorUrl",
+      "setupRequired",
+      "shipsToCountries",
+      "shopOwnerName",
+      "taxShipping",
+      "taxesIncluded",
+      "timezoneAbbreviation",
+      "timezoneOffset",
+      "timezoneOffsetMinutes",
+      "transactionalSmsDisabled",
+      "unitSystem",
+      "updatedAt",
+      "url",
+      "weightUnit"
+    ],
+    "kind": "singleton",
+    "node_type": "Shop",
+    "path": [
+      "shop"
+    ],
+    "query": "query Shop {\n  shop { id checkoutApiSupported contactEmail createdAt currencyCode customerAccounts description email enabledPresentmentCurrencies ianaTimezone marketingSmsConsentEnabledAtCheckout myshopifyDomain name orderNumberFormatPrefix orderNumberFormatSuffix richTextEditorUrl setupRequired shipsToCountries shopOwnerName taxShipping taxesIncluded timezoneAbbreviation timezoneOffset timezoneOffsetMinutes transactionalSmsDisabled unitSystem updatedAt url weightUnit }\n}"
+  },
+  "shopBillingPreferences": {
+    "fields": [
+      "currency"
+    ],
+    "kind": "singleton",
+    "node_type": "ShopBillingPreferences",
+    "path": [
+      "shopBillingPreferences"
+    ],
+    "query": "query Shopbillingpreferences {\n  shopBillingPreferences { currency }\n}"
+  },
+  "shopPayPaymentRequestReceipts": {
+    "fields": [
+      "createdAt",
+      "sourceIdentifier",
+      "token"
+    ],
+    "kind": "connection",
+    "node_type": "ShopPayPaymentRequestReceipt",
+    "path": [
+      "shopPayPaymentRequestReceipts"
+    ],
+    "query": "query Shoppaypaymentrequestreceipts($first: Int!, $after: String) {\n  shopPayPaymentRequestReceipts(first: $first, after: $after) {\n    edges { node { createdAt sourceIdentifier token } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "shopifyFunctions": {
+    "fields": [
+      "id",
+      "apiType",
+      "apiVersion",
+      "appKey",
+      "description",
+      "handle",
+      "inputQuery",
+      "title",
+      "useCreationUi"
+    ],
+    "kind": "connection",
+    "node_type": "ShopifyFunction",
+    "path": [
+      "shopifyFunctions"
+    ],
+    "query": "query Shopifyfunctions($first: Int!, $after: String) {\n  shopifyFunctions(first: $first, after: $after) {\n    edges { node { id apiType apiVersion appKey description handle inputQuery title useCreationUi } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "shopifyPaymentsAccount": {
+    "fields": [
+      "id",
+      "accountOpenerName",
+      "activated",
+      "country",
+      "defaultCurrency",
+      "onboardable",
+      "payoutStatementDescriptor"
+    ],
+    "kind": "singleton",
+    "node_type": "ShopifyPaymentsAccount",
+    "path": [
+      "shopifyPaymentsAccount"
+    ],
+    "query": "query Shopifypaymentsaccount {\n  shopifyPaymentsAccount { id accountOpenerName activated country defaultCurrency onboardable payoutStatementDescriptor }\n}"
+  },
+  "staffMember": {
+    "fields": [
+      "id",
+      "accountType",
+      "active",
+      "email",
+      "exists",
+      "firstName",
+      "initials",
+      "isShopOwner",
+      "lastName",
+      "locale",
+      "name",
+      "phone"
+    ],
+    "kind": "singleton",
+    "node_type": "StaffMember",
+    "path": [
+      "staffMember"
+    ],
+    "query": "query Staffmember {\n  staffMember { id accountType active email exists firstName initials isShopOwner lastName locale name phone }\n}"
+  },
+  "staffMembers": {
+    "fields": [
+      "id",
+      "accountType",
+      "active",
+      "email",
+      "exists",
+      "firstName",
+      "initials",
+      "isShopOwner",
+      "lastName",
+      "locale",
+      "name",
+      "phone"
+    ],
+    "kind": "connection",
+    "node_type": "StaffMember",
+    "path": [
+      "staffMembers"
+    ],
+    "query": "query Staffmembers($first: Int!, $after: String) {\n  staffMembers(first: $first, after: $after) {\n    edges { node { id accountType active email exists firstName initials isShopOwner lastName locale name phone } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "standardMetafieldDefinitionTemplates": {
+    "fields": [
+      "id",
+      "description",
+      "key",
+      "name",
+      "namespace",
+      "ownerTypes",
+      "visibleToStorefrontApi"
+    ],
+    "kind": "connection",
+    "node_type": "StandardMetafieldDefinitionTemplate",
+    "path": [
+      "standardMetafieldDefinitionTemplates"
+    ],
+    "query": "query Standardmetafielddefinitiontemplates($first: Int!, $after: String) {\n  standardMetafieldDefinitionTemplates(first: $first, after: $after) {\n    edges { node { id description key name namespace ownerTypes visibleToStorefrontApi } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "storeCreditConfiguration": {
+    "fields": [
+      "storeCreditEnabled"
+    ],
+    "kind": "singleton",
+    "node_type": "StoreCreditConfiguration",
+    "path": [
+      "storeCreditConfiguration"
+    ],
+    "query": "query Storecreditconfiguration {\n  storeCreditConfiguration { storeCreditEnabled }\n}"
+  },
+  "subscriptionBillingAttempts": {
+    "fields": [
+      "id",
+      "completedAt",
+      "createdAt",
+      "idempotencyKey",
+      "originTime",
+      "paymentGroupId",
+      "paymentSessionId",
+      "respectInventoryPolicy"
+    ],
+    "kind": "connection",
+    "node_type": "SubscriptionBillingAttempt",
+    "path": [
+      "subscriptionBillingAttempts"
+    ],
+    "query": "query Subscriptionbillingattempts($first: Int!, $after: String) {\n  subscriptionBillingAttempts(first: $first, after: $after) {\n    edges { node { id completedAt createdAt idempotencyKey originTime paymentGroupId paymentSessionId respectInventoryPolicy } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "subscriptionContracts": {
+    "fields": [
+      "id",
+      "appAdminUrl",
+      "createdAt",
+      "currencyCode",
+      "lastBillingAttemptErrorType",
+      "lastPaymentStatus",
+      "nextBillingDate",
+      "note",
+      "revisionId",
+      "status",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "SubscriptionContract",
+    "path": [
+      "subscriptionContracts"
+    ],
+    "query": "query Subscriptioncontracts($first: Int!, $after: String) {\n  subscriptionContracts(first: $first, after: $after) {\n    edges { node { id appAdminUrl createdAt currencyCode lastBillingAttemptErrorType lastPaymentStatus nextBillingDate note revisionId status updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "tenderTransactions": {
+    "fields": [
+      "id",
+      "paymentMethod",
+      "processedAt",
+      "remoteReference",
+      "test"
+    ],
+    "kind": "connection",
+    "node_type": "TenderTransaction",
+    "path": [
+      "tenderTransactions"
+    ],
+    "query": "query Tendertransactions($first: Int!, $after: String) {\n  tenderTransactions(first: $first, after: $after) {\n    edges { node { id paymentMethod processedAt remoteReference test } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "themes": {
+    "fields": [
+      "id",
+      "createdAt",
+      "name",
+      "prefix",
+      "processing",
+      "processingFailed",
+      "role",
+      "themeStoreId",
+      "updatedAt"
+    ],
+    "kind": "connection",
+    "node_type": "OnlineStoreTheme",
+    "path": [
+      "themes"
+    ],
+    "query": "query Themes($first: Int!, $after: String) {\n  themes(first: $first, after: $after) {\n    edges { node { id createdAt name prefix processing processingFailed role themeStoreId updatedAt } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "urlRedirectSavedSearches": {
+    "fields": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "query",
+      "resourceType",
+      "searchTerms"
+    ],
+    "kind": "connection",
+    "node_type": "SavedSearch",
+    "path": [
+      "urlRedirectSavedSearches"
+    ],
+    "query": "query Urlredirectsavedsearches($first: Int!, $after: String) {\n  urlRedirectSavedSearches(first: $first, after: $after) {\n    edges { node { id legacyResourceId name query resourceType searchTerms } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "urlRedirects": {
+    "fields": [
+      "id",
+      "path",
+      "target"
+    ],
+    "kind": "connection",
+    "node_type": "UrlRedirect",
+    "path": [
+      "urlRedirects"
+    ],
+    "query": "query Urlredirects($first: Int!, $after: String) {\n  urlRedirects(first: $first, after: $after) {\n    edges { node { id path target } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "urlRedirectsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "urlRedirectsCount"
+    ],
+    "query": "query Urlredirectscount {\n  urlRedirectsCount { count precision }\n}"
+  },
+  "validations": {
+    "fields": [
+      "id",
+      "blockOnFailure",
+      "enabled",
+      "title"
+    ],
+    "kind": "connection",
+    "node_type": "Validation",
+    "path": [
+      "validations"
+    ],
+    "query": "query Validations($first: Int!, $after: String) {\n  validations(first: $first, after: $after) {\n    edges { node { id blockOnFailure enabled title } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "webPixel": {
+    "fields": [
+      "id",
+      "settings"
+    ],
+    "kind": "singleton",
+    "node_type": "WebPixel",
+    "path": [
+      "webPixel"
+    ],
+    "query": "query Webpixel {\n  webPixel { id settings }\n}"
+  },
+  "webPresences": {
+    "fields": [
+      "id",
+      "subfolderSuffix"
+    ],
+    "kind": "connection",
+    "node_type": "MarketWebPresence",
+    "path": [
+      "webPresences"
+    ],
+    "query": "query Webpresences($first: Int!, $after: String) {\n  webPresences(first: $first, after: $after) {\n    edges { node { id subfolderSuffix } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "webhookSubscriptions": {
+    "fields": [
+      "id",
+      "createdAt",
+      "filter",
+      "format",
+      "includeFields",
+      "legacyResourceId",
+      "metafieldNamespaces",
+      "name",
+      "topic",
+      "updatedAt",
+      "uri"
+    ],
+    "kind": "connection",
+    "node_type": "WebhookSubscription",
+    "path": [
+      "webhookSubscriptions"
+    ],
+    "query": "query Webhooksubscriptions($first: Int!, $after: String) {\n  webhookSubscriptions(first: $first, after: $after) {\n    edges { node { id createdAt filter format includeFields legacyResourceId metafieldNamespaces name topic updatedAt uri } cursor }\n    pageInfo { hasNextPage endCursor }\n  }\n}"
+  },
+  "webhookSubscriptionsCount": {
+    "fields": [
+      "count",
+      "precision"
+    ],
+    "kind": "singleton",
+    "node_type": "Count",
+    "path": [
+      "webhookSubscriptionsCount"
+    ],
+    "query": "query Webhooksubscriptionscount {\n  webhookSubscriptionsCount { count precision }\n}"
+  }
+}
