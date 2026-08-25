@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.meta.entity_flatten import refresh_entity_tables
+from app.services.silver.ad_lifecycle import refresh_ad_lifecycle
 from app.services.silver.insights_flatten import refresh_insights_tables
 from app.services.silver.instagram_flatten import refresh_insta_data
 
@@ -49,6 +50,18 @@ FLATTEN_REGISTRY: dict[str, FlattenJob] = {
         source_table="raw_dump_meta",
         target_tables=("campaign_insights", "adset_insights", "ad_insights"),
         refresh=refresh_insights_tables,
+    ),
+    "ad_lifecycle": FlattenJob(
+        key="ad_lifecycle",
+        label="Ad performance + Winner/Loser category (ae_raw_view/summary_table equivalent)",
+        # ad_insights is the primary driver (performance metrics change far more
+        # often than ad_status) -- staleness checking only watches this one source,
+        # so a meta_ads-only change (e.g. an ad getting paused) won't mark this job
+        # stale on its own. Known simplification: FlattenJob only supports one
+        # source_table today.
+        source_table="ad_insights",
+        target_tables=("ad_lifecycle",),
+        refresh=refresh_ad_lifecycle,
     ),
 }
 

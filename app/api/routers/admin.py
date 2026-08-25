@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.api.deps import CoordinatorDep
+from app.core.meta_registry import InsightsLevel
 from app.database.session import get_engine
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -1055,6 +1056,13 @@ class IngestRequest(BaseModel):
     #: (new table) or auto-resuming from the table's own last-updated
     #: point (existing table) -- an explicit override of both.
     since: date | None = None
+    #: Meta only, optional. Which Insights levels to fetch -- omit for all
+    #: four (account/campaign/adset/ad, existing default behavior).
+    #: Regardless of the order given here, execution always follows
+    #: META_LEVEL_FETCH_ORDER (ad -> adset -> campaign -> account) -- an
+    #: explicit user policy ("this should be the flow of fetching meta ads
+    #: related data", 2026-08-24), not a per-request choice.
+    meta_levels: list[Literal["account", "campaign", "adset", "ad"]] | None = None
 
 
 class IngestSourceResult(BaseModel):
@@ -1117,12 +1125,28 @@ def _all_finished(run: IngestRunStatus) -> bool:
     return all(s.status in ("succeeded", "failed", "skipped", "stopped") for s in run.sources.values())
 
 
+#: Fixed execution order for the Fetch UI's Meta level selection --
+#: explicit user policy, not a per-request choice ("the fetching should
+#: include all the ads data, followed by adset data and then campaign
+#: level data -- this should be the flow of fetching meta ads related
+#: data", 2026-08-24). Account level (not part of that stated flow) sorts
+#: last if selected at all. Whatever subset the UI's checkboxes send comes
+#: back through this order, regardless of the order they arrive in.
+META_LEVEL_FETCH_ORDER: list[InsightsLevel] = [
+    InsightsLevel.AD,
+    InsightsLevel.ADSET,
+    InsightsLevel.CAMPAIGN,
+    InsightsLevel.ACCOUNT,
+]
+
+
 async def _run_meta(
     run_id: str,
     coordinator: CoordinatorDep,
     target_table: str,
     date_start: date | None,
     date_end: date | None,
+    meta_levels: list[str] | None = None,
 ) -> None:
     """target_table is always passed to coordinator.sync_insights() now --
     threads through to InsightsSyncService's dynamic model resolution (see
@@ -1132,7 +1156,15 @@ async def _run_meta(
     the table has no existing insights data and no date_start was given,
     rather than silently defaulting to something arbitrary. Cancellable
     (started via asyncio.create_task(), see trigger_ingest) same as
-    _run_instagram."""
+    _run_instagram.
+
+    meta_levels: None means "every level, existing default behavior"
+    (passed straight through as levels=None, which InsightsSyncService.sync()
+    itself defaults to list(InsightsLevel)). A given subset is always
+    reordered to META_LEVEL_FETCH_ORDER before being sent -- the level
+    loop inside sync() runs levels in the order given, so this is what
+    actually produces the ad -> adset -> campaign -> account sequencing,
+    not just a display convention."""
     run = _RUNS[run_id]
     try:
         resolved_start = date_start
@@ -1148,11 +1180,16 @@ async def _run_meta(
             resolved_start = last_covered + timedelta(days=1)
         resolved_end = date_end or datetime.now(timezone.utc).date()
 
+        resolved_levels = (
+            [lvl for lvl in META_LEVEL_FETCH_ORDER if lvl.value in meta_levels] if meta_levels else None
+        )
+
         results = await coordinator.sync_insights(
             date_range=(resolved_start, resolved_end),
             sync_type="manual",
             triggered_by="admin_panel",
             target_table=target_table,
+            levels=resolved_levels,
         )
         total_fetched = sum(r.batch.records_fetched for r in results)
         total_failed = sum(r.batch.records_failed for r in results)
@@ -1296,7 +1333,12 @@ async def trigger_ingest(body: IngestRequest, coordinator: CoordinatorDep) -> In
                     status="started",
                     supports_date_range=True,
                     detail=(
-                        f"Fetching all 4 levels into '{body.target_table}'"
+                        (
+                            f"Fetching {', '.join(lvl.value for lvl in META_LEVEL_FETCH_ORDER if lvl.value in body.meta_levels)}"
+                            if body.meta_levels
+                            else "Fetching all 4 levels"
+                        )
+                        + f" into '{body.target_table}'"
                         + (f" from {body.date_start}" if body.date_start else ", resuming from its own last-covered date")
                         + "."
                     ),
@@ -1304,7 +1346,9 @@ async def trigger_ingest(body: IngestRequest, coordinator: CoordinatorDep) -> In
             )
             run.sources["meta"] = SourceStatus(status="running")
             _TASKS[run_id] = asyncio.create_task(
-                _run_meta(run_id, coordinator, body.target_table, body.date_start, body.date_end)
+                _run_meta(
+                    run_id, coordinator, body.target_table, body.date_start, body.date_end, body.meta_levels
+                )
             )
         elif source == "instagram":
             assert body.target_table is not None  # validated above
