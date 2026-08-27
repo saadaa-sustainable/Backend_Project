@@ -48,6 +48,9 @@ from sqlalchemy import text
 from app.api.deps import CoordinatorDep
 from app.core.meta_registry import InsightsLevel
 from app.database.session import get_engine
+from app.services.gold.ad_performance import COLUMN_FORMULAS as _AD_PERFORMANCE_SUMMARY_FORMULAS
+from app.services.gold.cpis import COLUMN_FORMULAS as _CPIS_BY_SKU_FORMULAS
+from app.services.silver.ad_lifecycle import COLUMN_FORMULAS as _AD_LIFECYCLE_FORMULAS
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -55,13 +58,15 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 # deliberately, see that script's own docstring) -- this is the one
 # accepted exception in the other direction: importing its already-async,
 # argparse-free _run() core is far less work and risk than duplicating
-# ~700 lines of Meta/Instagram fetch logic into app/services/. If this
-# grows beyond Instagram, revisit whether that logic should move into
-# app/services/ instead of scripts/ importing back and forth.
+# ~700 lines of Meta/Instagram/Shopify fetch logic into app/services/. If
+# this grows beyond these three, revisit whether that logic should move
+# into app/services/ instead of scripts/ importing back and forth.
 _SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 import ingest_instagram_chronological as ig_chronological  # noqa: E402
+import ingest_shopify  # noqa: E402
+from shopify_client import discover_stores as discover_shopify_stores  # noqa: E402
 
 
 # ----------------------------------------------------------------------
@@ -93,6 +98,7 @@ class ColumnOut(BaseModel):
     data_type: str
     is_nullable: bool
     kind: ColumnKind
+    formula: str | None = None
 
 
 class TableOut(BaseModel):
@@ -123,6 +129,17 @@ _ROW_COUNTS_SQL = text(
     """
 )
 
+# Every Silver table with hand-written "customised formula" columns (as
+# opposed to columns copied straight through from a raw source) -- lets the
+# Schema Browser show *how* a column like `roas` or `category` was computed
+# instead of that only living in the flatten module's SQL. Add an entry here
+# whenever a new table gets its own COLUMN_FORMULAS dict.
+_COLUMN_FORMULA_REGISTRY: dict[str, dict[str, str]] = {
+    "ad_lifecycle": _AD_LIFECYCLE_FORMULAS,
+    "ad_performance_summary": _AD_PERFORMANCE_SUMMARY_FORMULAS,
+    "cpis_by_sku": _CPIS_BY_SKU_FORMULAS,
+}
+
 
 @router.get("/tables", response_model=TablesResponse)
 async def list_tables() -> TablesResponse:
@@ -145,12 +162,14 @@ async def list_tables() -> TablesResponse:
 
     tables_by_name: dict[str, list[ColumnOut]] = {}
     for row in columns_result:
+        formulas = _COLUMN_FORMULA_REGISTRY.get(row.table_name, {})
         tables_by_name.setdefault(row.table_name, []).append(
             ColumnOut(
                 name=row.column_name,
                 data_type=row.data_type,
                 is_nullable=row.is_nullable == "YES",
                 kind=_classify_column(row.column_name, row.data_type),
+                formula=formulas.get(row.column_name),
             )
         )
 
@@ -1031,6 +1050,43 @@ async def _meta_last_covered_date(conn, table: str) -> date | None:
     return result.scalar_one_or_none()
 
 
+#: Which JSON field each Shopify object type's "as of" date lives under --
+#: used by _shopify_last_covered_date below. sessions rows have no
+#: updatedAt (they're day-bucketed aggregates, see ingest_shopify.py's
+#: module docstring) -- 'day' itself is the resume signal there.
+_SHOPIFY_DATE_FIELD_BY_TYPE = {
+    "orders": "updatedAt",
+    "customers": "updatedAt",
+    "products": "updatedAt",
+    "sessions": "day",
+}
+
+
+async def _shopify_last_covered_date(conn, table: str, object_types: list[str]) -> date | None:
+    """The latest date actually covered across the requested object types
+    in an existing Shopify raw table -- same "resume from here" spirit as
+    _meta_last_covered_date, adapted since Shopify rows don't share Meta's
+    date_start/date_stop window shape. Returns the MIN across types (not
+    MAX) so resuming re-covers any type that's further behind rather than
+    silently leaving a gap in it."""
+    dates: list[date] = []
+    for object_type in object_types:
+        field = _SHOPIFY_DATE_FIELD_BY_TYPE.get(object_type)
+        if field is None:  # e.g. "shop" -- a singleton with no date field to resume from
+            continue
+        result = await conn.execute(
+            text(
+                f"SELECT MAX((raw_payload ->> '{field}')::date) AS d FROM \"{table}\" "
+                "WHERE object_type = :object_type"
+            ),
+            {"object_type": object_type},
+        )
+        d = result.scalar_one_or_none()
+        if d is not None:
+            dates.append(d)
+    return min(dates) if dates else None
+
+
 # ----------------------------------------------------------------------
 # POST /admin/ingest + GET /admin/ingest/{run_id}
 # ----------------------------------------------------------------------
@@ -1063,6 +1119,12 @@ class IngestRequest(BaseModel):
     #: explicit user policy ("this should be the flow of fetching meta ads
     #: related data", 2026-08-24), not a per-request choice.
     meta_levels: list[Literal["account", "campaign", "adset", "ad"]] | None = None
+    #: Shopify only, optional. Which object types to fetch -- omit for the
+    #: default set (shop/products/orders/customers/sessions, see
+    #: ingest_shopify.py's DEFAULT_OBJECT_TYPES). Uses date_start/date_end
+    #: above (a real range, unlike Instagram's single `since`) -- Shopify's
+    #: GraphQL `query` search filter supports both bounds.
+    shopify_object_types: list[Literal["shop", "products", "orders", "customers", "sessions"]] | None = None
 
 
 class IngestSourceResult(BaseModel):
@@ -1307,12 +1369,103 @@ async def _run_instagram(run_id: str, target_table: str, since_override: date | 
         _TASKS.pop(run_id, None)
 
 
+async def _run_shopify(
+    run_id: str,
+    target_table: str,
+    date_start: date | None,
+    date_end: date | None,
+    object_types: list[str] | None,
+) -> None:
+    """Awaits ingest_shopify.py's run_for_admin() core directly (no
+    subprocess) -- same accepted scripts/->app/ import exception as
+    _run_instagram. date_start omitted means "auto-resume": computed from
+    target_table's own last-covered date across the requested object types
+    (see _shopify_last_covered_date) +1 day, same spirit as _run_meta.
+    A brand-new/empty table still requires an explicit date_start.
+    Cancellable via asyncio.create_task() same as _run_meta/_run_instagram."""
+    run = _RUNS[run_id]
+    levels: dict[tuple[str, str], LevelStatus] = {}
+
+    def on_progress(info: dict[str, Any]) -> None:
+        levels[(info["account"], info["edge"])] = LevelStatus(
+            account_key=info["account"], label=info["edge"],
+            status=info["status"], error=info.get("error"),
+        )
+        run.sources["shopify"] = SourceStatus(
+            status="running", rows_ingested=info.get("inserted_so_far"), levels=list(levels.values())
+        )
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_SCRIPTS_DIR.parent / ".env")
+
+        resolved_types = object_types or ingest_shopify.DEFAULT_OBJECT_TYPES
+
+        resolved_start = date_start
+        if resolved_start is None:
+            engine = get_engine()
+            async with engine.connect() as conn:
+                last_covered = await _shopify_last_covered_date(conn, target_table, resolved_types)
+            if last_covered is None:
+                raise RuntimeError(
+                    f"'{target_table}' has no existing data to resume from for {resolved_types} -- "
+                    "provide a start date."
+                )
+            resolved_start = last_covered + timedelta(days=1)
+        resolved_end = date_end or datetime.now(timezone.utc).date()
+
+        stores_by_key = discover_shopify_stores()
+        if not stores_by_key:
+            raise RuntimeError("No Shopify stores configured -- set SHOP_DOMAIN/ADMIN_ACCESS_TOKEN in .env.")
+        stores = [stores_by_key[k] for k in sorted(stores_by_key, key=int)]
+
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL is not set in .env.")
+        api_version = os.environ.get("SHOPIFY_API_VERSION", ingest_shopify.DEFAULT_API_VERSION)
+
+        ok = await ingest_shopify.run_for_admin(
+            stores, resolved_types, database_url, target_table,
+            api_version=api_version, date_start=resolved_start, date_end=resolved_end,
+            on_progress=on_progress,
+        )
+        # The last on_progress call already left the final running total on
+        # run.sources["shopify"].rows_ingested -- read it before replacing
+        # the SourceStatus object so the final status carries it forward.
+        final_rows_ingested = run.sources["shopify"].rows_ingested if "shopify" in run.sources else None
+        run.sources["shopify"] = SourceStatus(
+            status="succeeded" if ok else "failed",
+            rows_ingested=final_rows_ingested,
+            error=(
+                "One or more object types failed -- see logs/shopify_ingest_errors.log" if not ok else None
+            ),
+            levels=list(levels.values()),
+        )
+    except asyncio.CancelledError:
+        partial = run.sources["shopify"].rows_ingested if "shopify" in run.sources else None
+        run.sources["shopify"] = SourceStatus(
+            status="stopped", rows_ingested=partial, error="Stopped by user.", levels=list(levels.values())
+        )
+    except Exception as exc:  # noqa: BLE001 -- reported to the admin panel, not raised into a background task void
+        partial = run.sources["shopify"].rows_ingested if "shopify" in run.sources else None
+        run.sources["shopify"] = SourceStatus(
+            status="failed", rows_ingested=partial, error=str(exc)[:500], levels=list(levels.values())
+        )
+    finally:
+        if _all_finished(run):
+            run.finished_at = datetime.now(timezone.utc)
+        _TASKS.pop(run_id, None)
+
+
 @router.post("/ingest", response_model=IngestRunResponse)
 async def trigger_ingest(body: IngestRequest, coordinator: CoordinatorDep) -> IngestRunResponse:
     if "meta" in body.sources and not body.target_table:
         raise HTTPException(400, "target_table is required when 'meta' is in sources.")
     if "instagram" in body.sources and not body.target_table:
         raise HTTPException(400, "target_table is required when 'instagram' is in sources.")
+    if "shopify" in body.sources and not body.target_table:
+        raise HTTPException(400, "target_table is required when 'shopify' is in sources.")
 
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
@@ -1366,13 +1519,34 @@ async def trigger_ingest(body: IngestRequest, coordinator: CoordinatorDep) -> In
             )
             run.sources["instagram"] = SourceStatus(status="running")
             _TASKS[run_id] = asyncio.create_task(_run_instagram(run_id, body.target_table, body.since))
+        elif source == "shopify":
+            assert body.target_table is not None  # validated above
+            resolved_types = body.shopify_object_types or ingest_shopify.DEFAULT_OBJECT_TYPES
+            results.append(
+                IngestSourceResult(
+                    source="shopify",
+                    status="started",
+                    supports_date_range=True,
+                    detail=(
+                        f"Fetching {', '.join(resolved_types)} into '{body.target_table}'"
+                        + (f" from {body.date_start}" if body.date_start else ", resuming from its own last-covered date")
+                        + "."
+                    ),
+                )
+            )
+            run.sources["shopify"] = SourceStatus(status="running")
+            _TASKS[run_id] = asyncio.create_task(
+                _run_shopify(
+                    run_id, body.target_table, body.date_start, body.date_end, body.shopify_object_types
+                )
+            )
         else:
             results.append(
                 IngestSourceResult(
                     source=source,
                     status="skipped",
                     supports_date_range=False,
-                    detail=_NOT_YET_DYNAMIC.format(script="shopify"),
+                    detail=_NOT_YET_DYNAMIC.format(script=source),
                 )
             )
             run.sources[source] = SourceStatus(status="skipped")

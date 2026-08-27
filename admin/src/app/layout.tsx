@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { Nav } from "@/components/Nav";
+import { AppNav } from "@/components/AppNav";
 import { SelectionProvider } from "@/lib/SelectionContext";
 import "./globals.css";
 
@@ -25,10 +25,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-slate-50 font-sans text-slate-900">
+      <body className="flex h-full bg-bg-base font-sans text-text-primary">
         <SelectionProvider>
-          <Nav />
-          <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>
+          <AppNav />
+          <main className="min-w-0 flex-1 overflow-y-auto">
+            <div className="mx-auto w-full max-w-7xl px-8 py-8">{children}</div>
+          </main>
         </SelectionProvider>
       </body>
     </html>

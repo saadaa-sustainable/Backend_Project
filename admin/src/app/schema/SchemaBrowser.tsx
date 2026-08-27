@@ -13,10 +13,10 @@ import { FlattenPanel } from "./FlattenPanel";
 import { JsonbColumnExplorer } from "./JsonbColumnExplorer";
 
 const KIND_STYLES: Record<ColumnKind, string> = {
-  identity: "bg-sky-100 text-sky-700",
-  numeric: "bg-amber-100 text-amber-700",
-  jsonb: "bg-indigo-100 text-indigo-700",
-  other: "bg-slate-100 text-slate-500",
+  identity: "bg-info-bg text-info-text",
+  numeric: "bg-warning-bg text-warning-text",
+  jsonb: "bg-accent-indigo-bg text-accent-indigo",
+  other: "bg-bg-muted text-text-secondary",
 };
 
 export function SchemaBrowser() {
@@ -76,12 +76,12 @@ export function SchemaBrowser() {
   }
 
   if (loading) {
-    return <div className="text-sm text-slate-500">Loading tables…</div>;
+    return <div className="text-sm text-text-secondary">Loading tables…</div>;
   }
 
   if (error) {
     return (
-      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+      <div className="rounded-lg border border-error-mid bg-error-bg p-4 text-sm text-error-text">
         {error}
       </div>
     );
@@ -89,7 +89,7 @@ export function SchemaBrowser() {
 
   if (!tables || tables.length === 0) {
     return (
-      <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
+      <div className="rounded-lg border border-border-primary bg-white p-4 text-sm text-text-secondary">
         No tables found in the target Supabase project.
       </div>
     );
@@ -104,9 +104,9 @@ export function SchemaBrowser() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Filter tables…"
-            className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+            className="rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
           />
-          <div className="flex max-h-[560px] flex-col gap-1 overflow-y-auto rounded-md border border-slate-200 bg-white p-1">
+          <div className="flex max-h-[560px] flex-col gap-1 overflow-y-auto rounded-md border border-border-primary bg-white p-1">
             {filteredTables.map((t) => (
               <button
                 key={t.name}
@@ -116,12 +116,12 @@ export function SchemaBrowser() {
                 }}
                 className={`flex items-center justify-between rounded px-3 py-2 text-left text-sm transition-colors ${
                   t.name === activeTable
-                    ? "bg-sky-50 text-sky-700"
-                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-800"
+                    ? "bg-accent-yellow-bg text-accent-yellow"
+                    : "text-text-secondary hover:bg-bg-surface hover:text-text-primary"
                 }`}
               >
                 <span className="truncate font-mono text-[13px]">{t.name}</span>
-                <span className="ml-2 shrink-0 text-[11px] text-slate-400">
+                <span className="ml-2 shrink-0 text-[11px] text-text-tertiary">
                   {t.columns.length} cols
                   {selection[t.name] ? ` · ${selection[t.name].size} sel` : ""}
                 </span>
@@ -131,14 +131,14 @@ export function SchemaBrowser() {
         </div>
 
         {/* Column detail */}
-        <div className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white p-4">
+        <div className="flex flex-col gap-3 rounded-md border border-border-primary bg-white p-4">
           {active ? (
             <>
               <FlattenPanel table={active.name} />
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="font-mono text-sm text-slate-900">{active.name}</h2>
-                  <p className="mt-0.5 text-xs text-slate-500">
+                  <h2 className="font-mono text-sm text-text-primary">{active.name}</h2>
+                  <p className="mt-0.5 text-xs text-text-secondary">
                     {active.columns.length} columns
                     {active.row_count !== null ? ` · ${active.row_count.toLocaleString()} rows` : ""}
                   </p>
@@ -147,19 +147,20 @@ export function SchemaBrowser() {
                   value={columnSearch}
                   onChange={(e) => setColumnSearch(e.target.value)}
                   placeholder="Filter metrics…"
-                  className="w-52 rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                  className="w-52 rounded-md border border-border-primary bg-bg-surface px-3 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
                 />
               </div>
 
               <div className="max-h-[480px] overflow-y-auto">
                 <table className="w-full border-collapse text-sm">
                   <thead className="sticky top-0 bg-white">
-                    <tr className="border-b border-slate-200 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                    <tr className="border-b border-border-primary text-left text-[11px] uppercase tracking-wide text-text-secondary">
                       <th className="w-8 py-2"></th>
                       <th className="py-2 pr-4">Column</th>
                       <th className="py-2 pr-4">Type</th>
                       <th className="py-2 pr-4">Kind</th>
-                      <th className="py-2">Nullable</th>
+                      <th className="py-2 pr-4">Nullable</th>
+                      <th className="py-2">Formula</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -168,20 +169,20 @@ export function SchemaBrowser() {
                       const isExpanded = expandedColumn === col.name;
                       return (
                         <Fragment key={col.name}>
-                          <tr className="border-b border-slate-100 hover:bg-slate-50">
+                          <tr className="border-b border-border-soft hover:bg-bg-surface">
                             <td className="py-1.5">
                               <input
                                 type="checkbox"
                                 checked={checked}
                                 onChange={() => toggleColumn(active.name, col.name)}
-                                className="h-3.5 w-3.5 accent-sky-600"
+                                className="h-3.5 w-3.5 accent-accent-yellow"
                               />
                             </td>
-                            <td className="py-1.5 pr-4 font-mono text-[13px] text-slate-800">
+                            <td className="py-1.5 pr-4 font-mono text-[13px] text-text-primary">
                               {col.kind === "jsonb" ? (
                                 <button
                                   onClick={() => setExpandedColumn(isExpanded ? null : col.name)}
-                                  className="flex items-center gap-1.5 hover:text-slate-950"
+                                  className="flex items-center gap-1.5 hover:text-text-primary"
                                 >
                                   <span className={`transition-transform ${isExpanded ? "rotate-90" : ""}`}>
                                     ›
@@ -192,7 +193,7 @@ export function SchemaBrowser() {
                                 col.name
                               )}
                             </td>
-                            <td className="py-1.5 pr-4 font-mono text-[12px] text-slate-500">
+                            <td className="py-1.5 pr-4 font-mono text-[12px] text-text-secondary">
                               {col.data_type}
                             </td>
                             <td className="py-1.5 pr-4">
@@ -202,13 +203,27 @@ export function SchemaBrowser() {
                                 {col.kind}
                               </span>
                             </td>
-                            <td className="py-1.5 text-[12px] text-slate-500">
+                            <td className="py-1.5 pr-4 text-[12px] text-text-secondary">
                               {col.is_nullable ? "yes" : "no"}
+                            </td>
+                            <td className="py-1.5 text-[12px] text-text-secondary">
+                              {col.formula ? (
+                                <span title={col.formula} className="cursor-help">
+                                  <span className="mr-1 rounded bg-success-bg px-1 py-0.5 text-[10px] font-medium text-success-text">
+                                    ƒ
+                                  </span>
+                                  {col.formula.length > 60
+                                    ? `${col.formula.slice(0, 60)}…`
+                                    : col.formula}
+                                </span>
+                              ) : (
+                                <span className="text-text-tertiary">—</span>
+                              )}
                             </td>
                           </tr>
                           {isExpanded && (
-                            <tr className="border-b border-slate-100">
-                              <td colSpan={5} className="pb-2">
+                            <tr className="border-b border-border-soft">
+                              <td colSpan={6} className="pb-2">
                                 <JsonbColumnExplorer
                                   table={active.name}
                                   column={col.name}
@@ -227,22 +242,22 @@ export function SchemaBrowser() {
               </div>
             </>
           ) : (
-            <p className="text-sm text-slate-500">Select a table.</p>
+            <p className="text-sm text-text-secondary">Select a table.</p>
           )}
         </div>
       </div>
 
       {/* Selection summary */}
-      <div className="rounded-md border border-slate-200 bg-white p-4">
+      <div className="rounded-md border border-border-primary bg-white p-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-medium text-slate-800">
+          <h3 className="text-sm font-medium text-text-primary">
             Selected metrics ({selectionCount})
           </h3>
           <div className="flex gap-2">
             <button
               onClick={copySelection}
               disabled={selectionCount === 0}
-              className="rounded-md bg-slate-100 border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40"
+              className="rounded-md bg-bg-muted border border-border-primary px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-bg-muted disabled:opacity-40"
             >
               Copy as JSON
             </button>
@@ -251,8 +266,8 @@ export function SchemaBrowser() {
               aria-disabled={selectionCount === 0}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                 selectionCount === 0
-                  ? "pointer-events-none bg-slate-100 text-slate-400"
-                  : "bg-sky-600 text-white hover:bg-sky-500"
+                  ? "pointer-events-none bg-bg-muted text-text-tertiary"
+                  : "bg-accent-yellow text-white hover:bg-accent-yellow-hover"
               }`}
             >
               Build custom table →
@@ -260,7 +275,7 @@ export function SchemaBrowser() {
           </div>
         </div>
         {selectionCount === 0 ? (
-          <p className="mt-2 text-xs text-slate-400">
+          <p className="mt-2 text-xs text-text-tertiary">
             Check metrics above to build a selection — useful for scoping a Gold-layer table or a
             new custom metric definition.
           </p>
@@ -268,8 +283,8 @@ export function SchemaBrowser() {
           <div className="mt-3 flex flex-col gap-2">
             {Object.entries(selection).map(([table, cols]) => (
               <div key={table} className="text-xs">
-                <span className="font-mono text-slate-700">{table}</span>
-                <span className="text-slate-400"> — {[...cols].sort().join(", ")}</span>
+                <span className="font-mono text-text-primary">{table}</span>
+                <span className="text-text-tertiary"> — {[...cols].sort().join(", ")}</span>
               </div>
             ))}
           </div>

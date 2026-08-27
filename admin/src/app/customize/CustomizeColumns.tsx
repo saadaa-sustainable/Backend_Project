@@ -38,24 +38,24 @@ export function CustomizeColumns() {
 
   if (error) {
     return (
-      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+      <div className="rounded-lg border border-error-mid bg-error-bg p-4 text-sm text-error-text">
         {error}
       </div>
     );
   }
 
   if (!tableNames) {
-    return <div className="text-sm text-slate-500">Loading tables…</div>;
+    return <div className="text-sm text-text-secondary">Loading tables…</div>;
   }
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-md border border-slate-200 bg-white p-4">
-        <label className="mb-1 block text-xs text-slate-600">Table</label>
+      <div className="rounded-md border border-border-primary bg-white p-4">
+        <label className="mb-1 block text-xs text-text-secondary">Table</label>
         <select
           value={selectedTable ?? ""}
           onChange={(e) => setSelectedTable(e.target.value)}
-          className="w-full max-w-sm rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+          className="w-full max-w-sm rounded-md border border-border-primary bg-bg-surface px-3 py-2 font-mono text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
         >
           {tableNames.map((t) => (
             <option key={t} value={t}>
@@ -165,11 +165,11 @@ function TableCustomizer({ table }: { table: string }) {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">
       {/* Create custom metric */}
-      <div className="rounded-md border border-slate-200 bg-white p-4">
-        <h3 className="mb-3 text-sm font-medium text-slate-800">Create custom metric</h3>
+      <div className="rounded-md border border-border-primary bg-white p-4">
+        <h3 className="mb-3 text-sm font-medium text-text-primary">Create custom metric</h3>
 
         {columnsError && (
-          <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <div className="mb-3 rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">
             {columnsError}
           </div>
         )}
@@ -177,7 +177,7 @@ function TableCustomizer({ table }: { table: string }) {
         {columns && (
           <div className="flex flex-col gap-3">
             <div>
-              <label className="mb-1 block text-xs text-slate-600">Metric name</label>
+              <label className="mb-1 block text-xs text-text-secondary">Metric name</label>
               <input
                 value={name}
                 onChange={(e) => {
@@ -186,20 +186,20 @@ function TableCustomizer({ table }: { table: string }) {
                   setResult(null);
                 }}
                 placeholder="CTR %"
-                className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                className="w-full rounded-md border border-border-primary bg-bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
               />
             </div>
 
             <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
               <div>
-                <label className="mb-1 block text-xs text-slate-600">Column A</label>
+                <label className="mb-1 block text-xs text-text-secondary">Column A</label>
                 <select
                   value={columnA}
                   onChange={(e) => {
                     setColumnA(e.target.value);
                     setPreview(null);
                   }}
-                  className="w-full rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                  className="w-full rounded-md border border-border-primary bg-bg-surface px-2 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
                 >
                   <option value="">— select —</option>
                   {columns.map((c) => (
@@ -210,14 +210,14 @@ function TableCustomizer({ table }: { table: string }) {
                 </select>
               </div>
               <div>
-                <label className="mb-1 block text-xs text-slate-600">Op</label>
+                <label className="mb-1 block text-xs text-text-secondary">Op</label>
                 <select
                   value={operation}
                   onChange={(e) => {
                     setOperation(e.target.value as MetricOperation);
                     setPreview(null);
                   }}
-                  className="rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                  className="rounded-md border border-border-primary bg-bg-surface px-2 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
                 >
                   {OP_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
@@ -227,7 +227,7 @@ function TableCustomizer({ table }: { table: string }) {
                 </select>
               </div>
               <div>
-                <label className="mb-1 block text-xs text-slate-600">Column B</label>
+                <label className="mb-1 block text-xs text-text-secondary">Column B</label>
                 <select
                   value={operandBType === "column" ? operandBColumn : ""}
                   onChange={(e) => {
@@ -235,7 +235,7 @@ function TableCustomizer({ table }: { table: string }) {
                     setOperandBColumn(e.target.value);
                     setPreview(null);
                   }}
-                  className="w-full rounded-md border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                  className="w-full rounded-md border border-border-primary bg-bg-surface px-2 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
                 >
                   <option value="">— select —</option>
                   {columns.map((c) => (
@@ -248,7 +248,7 @@ function TableCustomizer({ table }: { table: string }) {
             </div>
 
             <div className="flex items-center gap-3">
-              <label className="flex items-center gap-1.5 text-xs text-slate-600">
+              <label className="flex items-center gap-1.5 text-xs text-text-secondary">
                 <input
                   type="radio"
                   checked={operandBType === "constant"}
@@ -256,7 +256,7 @@ function TableCustomizer({ table }: { table: string }) {
                     setOperandBType("constant");
                     setPreview(null);
                   }}
-                  className="accent-sky-600"
+                  className="accent-accent-yellow"
                 />
                 or a constant:
               </label>
@@ -268,10 +268,10 @@ function TableCustomizer({ table }: { table: string }) {
                   setPreview(null);
                 }}
                 placeholder="e.g. 1000"
-                className="w-32 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+                className="w-32 rounded-md border border-border-primary bg-bg-surface px-2 py-1.5 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
               />
               {operation === "divide" && (
-                <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600">
+                <label className="ml-auto flex items-center gap-1.5 text-xs text-text-secondary">
                   <input
                     type="checkbox"
                     checked={asPercentage}
@@ -279,7 +279,7 @@ function TableCustomizer({ table }: { table: string }) {
                       setAsPercentage(e.target.checked);
                       setPreview(null);
                     }}
-                    className="accent-sky-600"
+                    className="accent-accent-yellow"
                   />
                   Show as percentage (× 100)
                 </label>
@@ -287,13 +287,13 @@ function TableCustomizer({ table }: { table: string }) {
             </div>
 
             {formulaPreview && (
-              <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600">
+              <p className="rounded-md border border-border-primary bg-bg-surface px-3 py-2 font-mono text-xs text-text-secondary">
                 {formulaPreview}
               </p>
             )}
 
             {formError && (
-              <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">
                 {formError}
               </div>
             )}
@@ -302,14 +302,14 @@ function TableCustomizer({ table }: { table: string }) {
               <button
                 onClick={handlePreview}
                 disabled={!canBuild || busy !== null}
-                className="rounded-md bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 border border-slate-200 disabled:opacity-40"
+                className="rounded-md bg-bg-muted px-4 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-bg-muted border border-border-primary disabled:opacity-40"
               >
                 {busy === "preview" ? "Generating…" : "Preview SQL"}
               </button>
               <button
                 onClick={handleCreate}
                 disabled={!canBuild || !preview || busy !== null}
-                className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:opacity-40"
+                className="rounded-md bg-accent-yellow px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-yellow-hover disabled:opacity-40"
               >
                 {busy === "create" ? "Adding…" : "Add to table"}
               </button>
@@ -317,10 +317,10 @@ function TableCustomizer({ table }: { table: string }) {
 
             {preview && !result && (
               <details className="text-xs" open>
-                <summary className="cursor-pointer text-slate-500 hover:text-slate-700">
+                <summary className="cursor-pointer text-text-secondary hover:text-text-primary">
                   Generated SQL
                 </summary>
-                <pre className="mt-2 overflow-x-auto rounded-md border border-slate-200 bg-slate-50 p-3 font-mono text-[11px] leading-relaxed text-slate-700">
+                <pre className="mt-2 overflow-x-auto rounded-md border border-border-primary bg-bg-surface p-3 font-mono text-[11px] leading-relaxed text-text-primary">
                   {preview.sql}
                 </pre>
               </details>
@@ -330,8 +330,8 @@ function TableCustomizer({ table }: { table: string }) {
               <div
                 className={`rounded-md border p-3 text-sm ${
                   result.status === "created"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                    : "border-red-200 bg-red-50 text-red-700"
+                    ? "border-success-mid bg-success-bg text-success-text"
+                    : "border-error-mid bg-error-bg text-error-text"
                 }`}
               >
                 {result.status === "created" ? (
@@ -339,7 +339,7 @@ function TableCustomizer({ table }: { table: string }) {
                 ) : (
                   <>Failed: {result.error}</>
                 )}
-                <pre className="mt-2 overflow-x-auto rounded-md border border-slate-200 bg-slate-50 p-2 font-mono text-[11px] leading-relaxed text-slate-600">
+                <pre className="mt-2 overflow-x-auto rounded-md border border-border-primary bg-bg-surface p-2 font-mono text-[11px] leading-relaxed text-text-secondary">
                   {result.sql}
                 </pre>
               </div>
@@ -349,23 +349,23 @@ function TableCustomizer({ table }: { table: string }) {
       </div>
 
       {/* Current columns */}
-      <div className="rounded-md border border-slate-200 bg-white p-4">
-        <h3 className="mb-1 text-sm font-medium text-slate-800">
+      <div className="rounded-md border border-border-primary bg-white p-4">
+        <h3 className="mb-1 text-sm font-medium text-text-primary">
           {columns ? `${columns.length} columns` : "Columns"}
         </h3>
-        <p className="mb-3 text-xs text-slate-500 font-mono">{table}</p>
+        <p className="mb-3 text-xs text-text-secondary font-mono">{table}</p>
         <div className="flex max-h-[480px] flex-col gap-1 overflow-y-auto">
           {columns?.map((c) => (
             <div
               key={c.name}
-              className="flex items-center justify-between rounded-md border border-slate-200 px-2.5 py-1.5"
+              className="flex items-center justify-between rounded-md border border-border-primary px-2.5 py-1.5"
             >
-              <span className="font-mono text-xs text-slate-800">{c.name}</span>
-              <span className="text-[10px] text-slate-500">{c.data_type}</span>
+              <span className="font-mono text-xs text-text-primary">{c.name}</span>
+              <span className="text-[10px] text-text-secondary">{c.data_type}</span>
             </div>
           ))}
         </div>
-        <p className="mt-2 text-[11px] text-slate-400">
+        <p className="mt-2 text-[11px] text-text-tertiary">
           Only {numericColumns.length} of these look numeric — formulas work on any column, but
           non-numeric ones will fail at execution if they don&apos;t cast cleanly.
         </p>

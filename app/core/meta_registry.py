@@ -506,6 +506,36 @@ def validate_field_breakdown_compatibility(fields: list[str], breakdowns: list[s
         )
 
 
+#: Pre-defined, VALIDATED breakdown combos for the most common audience-
+#: segment analyses -- each key is meant to become its own Silver table
+#: (e.g. insights_ad_breakdown_demographic) once wired into a sync call, the
+#: same pattern app/services/silver/insights_flatten.py already uses for the
+#: unbroken-down levels. Every combo here has been checked against this
+#: module's OWN validate_breakdown_combination/validate_breakdown_level_compatibility
+#: (2026-08-25) -- not copied from an external source's assumptions, which
+#: got the platform combo wrong (publisher_platform + platform_position
+#: together is actually one of MUTUALLY_EXCLUSIVE_BREAKDOWN_FAMILIES's
+#: exclusive trios, not a valid pairing -- 'placement' is the correct
+#: shorthand to combine with impression_device instead).
+#:
+#: NOT yet wired into any scheduler job or sync call -- adding real
+#: breakdown-fetching to the daily/hourly cron is a bigger decision (new
+#: Bronze row volume per combo, new Silver tables, real API-quota cost) than
+#: "the combo definitions are structurally valid," and this project's Meta
+#: API access is on Development Access tier with a demonstrated low
+#: request-volume ceiling (see DATE_CHUNK_DAYS / _should_use_async in
+#: app/services/meta/insights.py) -- revisit this constant when there's a
+#: concrete need for one of these breakdowns' data before turning any of
+#: them on by default.
+RECOMMENDED_BREAKDOWN_COMBOS: dict[str, list[list[str]]] = {
+    "demographic": [["age", "gender"]],
+    "geographic": [["country"], ["region"], ["dma"]],
+    "platform": [["placement", "impression_device"]],
+    "product": [["product_id"]],
+    "hourly": [["hourly_stats_aggregated_by_advertiser_time_zone"]],
+}
+
+
 # ==========================================================================
 # Insights fields — the exhaustive metric registry
 # ==========================================================================

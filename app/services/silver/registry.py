@@ -14,10 +14,15 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.gold.ad_performance import refresh_ad_performance_summary
+from app.services.gold.cpis import refresh_cpis_by_sku
+from app.services.gold.landing_page import refresh_landing_page_tables
 from app.services.meta.entity_flatten import refresh_entity_tables
 from app.services.silver.ad_lifecycle import refresh_ad_lifecycle
 from app.services.silver.insights_flatten import refresh_insights_tables
 from app.services.silver.instagram_flatten import refresh_insta_data
+from app.services.silver.shopify_ad_attribution import refresh_attribution_tables
+from app.services.silver.shopify_flatten import refresh_shopify_tables
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,67 @@ FLATTEN_REGISTRY: dict[str, FlattenJob] = {
         source_table="ad_insights",
         target_tables=("ad_lifecycle",),
         refresh=refresh_ad_lifecycle,
+    ),
+    "shopify_data": FlattenJob(
+        key="shopify_data",
+        label="Shopify orders / customers / sessions",
+        source_table="raw_dump_shopify",
+        target_tables=(
+            "shopify_orders", "shopify_customers", "shopify_sessions", "shopify_fulfillments",
+            "shopify_customer_analytics", "shopify_sales", "shopify_discounts", "shopify_inventory",
+        ),
+        refresh=refresh_shopify_tables,
+    ),
+    "shopify_ad_attribution": FlattenJob(
+        key="shopify_ad_attribution",
+        label="Shopify order attribution + landing page analysis (mapped to Meta ads)",
+        # Depends on shopify_orders/shopify_sessions (Silver, not Bronze) --
+        # same "source_table is itself a Silver table" pattern as
+        # ad_lifecycle's source_table="ad_insights". Known simplification:
+        # FlattenJob only supports one source_table, so staleness checking
+        # only watches shopify_orders -- a shopify_sessions-only update
+        # (sessions refreshed, orders untouched) won't mark this stale on
+        # its own. Same simplification ad_lifecycle already accepts.
+        source_table="shopify_orders",
+        target_tables=("shopify_order_attribution", "shopify_landing_page_analysis"),
+        refresh=refresh_attribution_tables,
+    ),
+    "ad_performance_summary": FlattenJob(
+        key="ad_performance_summary",
+        label="Gold: Ad performance summary (Meta metrics + Shopify-attributed revenue, per ad)",
+        # Depends on ad_lifecycle AND shopify_order_attribution (both Silver) --
+        # same one-source_table simplification as shopify_ad_attribution's own
+        # entry above. ad_lifecycle is the primary driver since every ad has a
+        # lifecycle row but not every ad has Shopify-attributed orders.
+        source_table="ad_lifecycle",
+        target_tables=("ad_performance_summary",),
+        refresh=refresh_ad_performance_summary,
+    ),
+    "landing_page_gold": FlattenJob(
+        key="landing_page_gold",
+        label="Gold: Landing-page performance (legacy landing_page_analysis_30d/ad_breakdown_30d/sessions_daily, ported from live legacy DB)",
+        # Depends on shopify_sessions (Silver), ad_performance_summary (Gold),
+        # raw_dump_meta ad-creative rows (Bronze), and shopify_order_attribution
+        # (Silver) -- shopify_sessions picked as the primary driver since it's
+        # the highest-frequency-changing of the four. Same one-source_table
+        # simplification as every other multi-source job in this registry.
+        source_table="shopify_sessions",
+        target_tables=(
+            "landing_page_sessions_daily", "landing_page_analysis_30d", "landing_page_ad_breakdown_30d",
+        ),
+        refresh=refresh_landing_page_tables,
+    ),
+    "cpis_by_sku": FlattenJob(
+        key="cpis_by_sku",
+        label="Gold: CPIS by master SKU (cost per NCP / cost per item sold, 1d/7d/30d windows)",
+        # Depends on shopify_inventory (daily per-SKU units, the real
+        # window source) and ad_lifecycle (spend/ncp, lifetime-only --
+        # see cpis.py's module docstring). shopify_inventory picked as the
+        # primary driver since its daily grain is what actually makes the
+        # window recompute meaningfully.
+        source_table="shopify_inventory",
+        target_tables=("cpis_by_sku",),
+        refresh=refresh_cpis_by_sku,
     ),
 }
 

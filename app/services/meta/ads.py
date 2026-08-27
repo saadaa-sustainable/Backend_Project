@@ -55,7 +55,17 @@ class AdSyncService(BaseMetaSyncService):
         else:
             base = f"{self.client.credentials.ad_account_id_prefixed}/ads"
 
-        async for item in self.client.paginate(base, params=params):
+        # The creative expansion nests several sub-objects per ad
+        # (object_story_spec.link_data, asset_feed_spec.link_urls,
+        # template_url_spec, degrees_of_freedom_spec) -- at the default
+        # page size (250) Meta rejects the request outright with a 500
+        # "Please reduce the amount of data you're asking for" (confirmed
+        # live 2026-08-27, retries don't help since it's a payload-size
+        # rejection, not a transient error). A much smaller page keeps
+        # each response under whatever limit triggers that.
+        page_size = 25 if request_params.get("include_creative_expansion") else None
+
+        async for item in self.client.paginate(base, params=params, page_size=page_size):
             yield item
 
     def extract_parent_ids(self, item: dict[str, Any]) -> dict[str, Any] | None:

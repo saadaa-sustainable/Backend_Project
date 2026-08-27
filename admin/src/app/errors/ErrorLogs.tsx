@@ -21,7 +21,7 @@ function formatDateTime(value: string): string {
 
 function ErrorMessage({ message }: { message: string }) {
   return (
-    <pre className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-50 border border-slate-200 p-2 text-xs text-slate-500">
+    <pre className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-bg-surface border border-border-primary p-2 text-xs text-text-secondary">
       {message}
     </pre>
   );
@@ -67,37 +67,37 @@ function FailedJobsSection() {
   }
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="rounded-lg border border-border-primary bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-medium text-slate-900">Meta — failed jobs (retryable)</h2>
-          <p className="mt-0.5 text-xs text-slate-500">
-            Unresolved rows in <code className="text-slate-500">failed_jobs</code> — the scheduler also
+          <h2 className="text-sm font-medium text-text-primary">Meta — failed jobs (retryable)</h2>
+          <p className="mt-0.5 text-xs text-text-secondary">
+            Unresolved rows in <code className="text-text-secondary">failed_jobs</code> — the scheduler also
             retries these automatically every few minutes.
           </p>
         </div>
         <button
           onClick={handleRetry}
           disabled={retrying || jobs.length === 0}
-          className="shrink-0 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-sky-500 disabled:opacity-50"
+          className="shrink-0 rounded-md bg-accent-yellow px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-yellow-hover disabled:opacity-50"
         >
           {retrying ? "Retrying…" : "Retry all now"}
         </button>
       </div>
 
-      {retryResult && <p className="mt-2 text-xs text-slate-600">{retryResult}</p>}
-      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+      {retryResult && <p className="mt-2 text-xs text-text-secondary">{retryResult}</p>}
+      {error && <p className="mt-2 text-xs text-error-text">{error}</p>}
 
       {!loading && (
         <div className="mt-4 flex flex-col gap-2">
-          {jobs.length === 0 && <p className="text-sm text-slate-400">No unresolved failed jobs.</p>}
+          {jobs.length === 0 && <p className="text-sm text-text-tertiary">No unresolved failed jobs.</p>}
           {jobs.map((job) => (
-            <div key={job.id} className="rounded-md border border-slate-200 p-3">
+            <div key={job.id} className="rounded-md border border-border-primary p-3">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-800">
+                <span className="text-text-primary">
                   {job.endpoint} — {job.account_name ?? job.account_key ?? "no account"}
                 </span>
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-text-secondary">
                   attempt {job.attempt_count} · last {formatDateTime(job.last_attempted_at)}
                 </span>
               </div>
@@ -113,13 +113,13 @@ function FailedJobsSection() {
 function statusBadgeClass(status: BatchSummary["status"]): string {
   switch (status) {
     case "success":
-      return "bg-emerald-100 text-emerald-700";
+      return "bg-success-bg text-success-text";
     case "failed":
-      return "bg-red-100 text-red-700";
+      return "bg-error-bg text-error-text";
     case "partial_failure":
-      return "bg-amber-100 text-amber-700";
+      return "bg-warning-bg text-warning-text";
     default:
-      return "bg-slate-100 text-slate-500";
+      return "bg-bg-muted text-text-secondary";
   }
 }
 
@@ -147,24 +147,24 @@ function BatchLogSection() {
   }, []);
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-      <h2 className="text-sm font-medium text-slate-900">Meta — recent batch log</h2>
-      <p className="mt-0.5 text-xs text-slate-500">Every sync attempt, most recent first, success and failure alike.</p>
+    <div className="rounded-lg border border-border-primary bg-white p-5 shadow-sm">
+      <h2 className="text-sm font-medium text-text-primary">Meta — recent batch log</h2>
+      <p className="mt-0.5 text-xs text-text-secondary">Every sync attempt, most recent first, success and failure alike.</p>
 
-      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+      {error && <p className="mt-2 text-xs text-error-text">{error}</p>}
 
       {!loading && (
         <div className="mt-4 flex flex-col gap-2">
-          {batches.length === 0 && <p className="text-sm text-slate-400">No batches logged yet.</p>}
+          {batches.length === 0 && <p className="text-sm text-text-tertiary">No batches logged yet.</p>}
           {batches
             .filter((b) => b.status !== "success")
             .map((b) => (
-              <div key={b.batch_id} className="rounded-md border border-slate-200 p-3">
+              <div key={b.batch_id} className="rounded-md border border-border-primary p-3">
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-slate-800">
+                  <span className="text-text-primary">
                     {b.endpoint} — {b.account_name ?? b.account_key ?? "no account"}
                   </span>
-                  <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <div className="flex items-center gap-2 text-xs text-text-secondary">
                     <span>{formatDateTime(b.started_at)}</span>
                     <span className={`rounded-full px-2 py-0.5 font-medium ${statusBadgeClass(b.status)}`}>
                       {b.status}
@@ -175,7 +175,7 @@ function BatchLogSection() {
               </div>
             ))}
           {batches.length > 0 && batches.every((b) => b.status === "success") && (
-            <p className="text-sm text-slate-400">Every recent batch succeeded.</p>
+            <p className="text-sm text-text-tertiary">Every recent batch succeeded.</p>
           )}
         </div>
       )}
@@ -209,30 +209,30 @@ function FileErrorsSection({ source, title }: { source: FileErrorSource; title: 
   }, []);
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="rounded-lg border border-border-primary bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-medium text-slate-900">{title}</h2>
-          <p className="mt-0.5 text-xs text-slate-500">
+          <h2 className="text-sm font-medium text-text-primary">{title}</h2>
+          <p className="mt-0.5 text-xs text-text-secondary">
             Runs as a standalone script, no DB access — errors come from{" "}
-            <code className="text-slate-500">logs/{source}_ingest_errors.log</code>.
+            <code className="text-text-secondary">logs/{source}_ingest_errors.log</code>.
           </p>
         </div>
-        <span className="text-xs text-slate-500">{total} total</span>
+        <span className="text-xs text-text-secondary">{total} total</span>
       </div>
 
-      {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+      {error && <p className="mt-2 text-xs text-error-text">{error}</p>}
 
       {!loading && (
         <div className="mt-4 flex flex-col gap-2">
-          {entries.length === 0 && <p className="text-sm text-slate-400">No errors logged.</p>}
+          {entries.length === 0 && <p className="text-sm text-text-tertiary">No errors logged.</p>}
           {entries.map((e, i) => (
-            <div key={i} className="rounded-md border border-slate-200 p-3">
+            <div key={i} className="rounded-md border border-border-primary p-3">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-800">
+                <span className="text-text-primary">
                   {e.object_type} — {e.label}
                 </span>
-                <span className="text-xs text-slate-500">{formatDateTime(e.timestamp)}</span>
+                <span className="text-xs text-text-secondary">{formatDateTime(e.timestamp)}</span>
               </div>
               <ErrorMessage message={e.message} />
             </div>

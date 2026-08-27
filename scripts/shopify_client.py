@@ -43,7 +43,9 @@ import os
 import re
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -124,10 +126,51 @@ def describe_store_safely(store: ShopifyStore) -> str:
     return f"{store.key} ({store.name}) -> {store.domain}"
 
 
-def _throttle_status(extensions: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not extensions:
-        return None
-    return (extensions.get("cost") or {}).get("throttleStatus")
+def _throttle_delay(errors: list[dict[str, Any]]) -> float:
+    """Two DIFFERENT cost-extension shapes exist across Shopify's APIs, both
+    confirmed live (2026-08-26) -- and the cost info lives on the
+    individual ERROR's own `extensions.cost` (inside `errors[i]`), not
+    `body["extensions"]`, which is absent/unrelated on a THROTTLED response:
+
+    1. Regular Admin GraphQL: `extensions.cost.throttleStatus.
+       {maximumAvailable, currentlyAvailable, restoreRate}` -- what this
+       function originally (and wrongly) assumed was the only shape.
+    2. ShopifyQL (`shopifyqlQuery`): `extensions.cost.{requestedQueryCost,
+       maximumAvailable, currentlyAvailable, windowResetAt}` -- NO nested
+       `throttleStatus`, no `restoreRate`, an absolute reset timestamp
+       instead. A 90-field fulfillments query costs ~331 against a 1000
+       budget -- confirmed live this shape's mismatch with the old code
+       silently fell through to a useless flat 1.0s delay every time
+       (`_throttle_status` returned None, since `.get("throttleStatus")`
+       on a dict that doesn't have that key is None), so 4 retries burned
+       ~4s total while Shopify's own `windowResetAt` needed tens of
+       seconds -- the fetch failed identically twice before this was
+       caught. `windowResetAt` is authoritative when present; use it
+       directly instead of estimating from a restore rate that isn't in
+       this shape at all.
+    """
+    cost = None
+    for e in errors:
+        c = (e.get("extensions") or {}).get("cost")
+        if c:
+            cost = c
+            break
+    if not cost:
+        return MIN_THROTTLE_BACKOFF_SECONDS
+
+    window_reset_at = cost.get("windowResetAt")
+    if window_reset_at:
+        try:
+            reset_dt = datetime.fromisoformat(window_reset_at.replace("Z", "+00:00"))
+            remaining = (reset_dt - datetime.now(timezone.utc)).total_seconds()
+            return max(MIN_THROTTLE_BACKOFF_SECONDS, remaining + 0.5)  # small buffer past the reset instant
+        except ValueError:
+            pass  # fall through to the cost/restore-rate estimate below
+
+    throttle_status = cost.get("throttleStatus") or cost
+    needed = max(0.0, float(cost.get("requestedQueryCost", 1)) - float(throttle_status.get("currentlyAvailable", 0)))
+    restore_rate = float(throttle_status.get("restoreRate", 1)) or 1.0
+    return max(MIN_THROTTLE_BACKOFF_SECONDS, needed / restore_rate)
 
 
 async def graphql_request(
@@ -182,13 +225,7 @@ async def graphql_request(
         is_throttled = "THROTTLED" in error_codes or "MAX_COST_EXCEEDED" in error_codes
 
         if is_throttled and attempt <= MAX_RETRIES:
-            throttle = _throttle_status(body.get("extensions"))
-            if throttle:
-                needed = max(0.0, 1.0 - float(throttle.get("currentlyAvailable", 0)))
-                restore_rate = float(throttle.get("restoreRate", 1)) or 1.0
-                delay = max(MIN_THROTTLE_BACKOFF_SECONDS, needed / restore_rate)
-            else:
-                delay = MIN_THROTTLE_BACKOFF_SECONDS
+            delay = _throttle_delay(errors)
             print(f"    throttled (attempt {attempt}/{MAX_RETRIES}), sleeping {delay:.1f}s: store={store.key}")
             await asyncio.sleep(delay)
             continue
@@ -210,12 +247,21 @@ async def paginate_connection(
     page_size: int = 50,
     variables: dict[str, Any] | None = None,
     max_pages: int | None = None,
+    on_page: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
 ) -> list[dict[str, Any]]:
     """Walk a Relay-style connection to exhaustion (or `max_pages`).
     `query_template` must accept `$first: Int!` and `$after: String` and
     return a connection (edges { node }, pageInfo { hasNextPage, endCursor })
     reachable by following `connection_path` (a list of dict keys) from
     the top-level `data` object, e.g. ["products"] or ["shop", "orders"].
+
+    `on_page`, if given, is awaited with just that page's nodes right after
+    each page is fetched -- lets a caller write to the DB incrementally
+    (page by page) instead of only after the whole connection is exhausted,
+    which matters once a connection spans many pages (a full-year date
+    range can be thousands of pages) and a caller wants real progress
+    rather than one write at the very end. The full accumulated list is
+    still returned either way, unchanged.
     """
     items: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -228,7 +274,10 @@ async def paginate_connection(
         for key in connection_path:
             node = node.get(key) or {}
         edges = node.get("edges", [])
-        items.extend(edge["node"] for edge in edges)
+        page_items = [edge["node"] for edge in edges]
+        items.extend(page_items)
+        if on_page and page_items:
+            await on_page(page_items)
         page_info = node.get("pageInfo", {})
         if not page_info.get("hasNextPage") or (max_pages and page >= max_pages):
             break

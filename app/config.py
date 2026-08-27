@@ -113,7 +113,17 @@ class MetaAPISettings(BaseSettings):
         default=120.0, alias="META_RETRY_BACKOFF_MAX_SECONDS"
     )
     page_size: int = Field(default=250, alias="META_PAGE_SIZE")
-    max_concurrent_requests: int = Field(default=8, alias="META_MAX_CONCURRENT_REQUESTS")
+    #: Concurrent HTTP requests to ONE account's Meta API client. Lowered from
+    #: 8 to 2 (2026-08-25) after live testing showed repeated "Application
+    #: request limit reached" / "reduce the amount of data" failures compound
+    #: under heavy same-session concurrent usage -- this, combined with
+    #: MAX_CONCURRENT_ENDPOINT_SYNCS below, previously allowed up to 32
+    #: simultaneous requests against a single account's own rate-limit
+    #: budget. Cross-account concurrency (MAX_CONCURRENT_ACCOUNT_SYNCS in
+    #: orchestrator.py) is lower-risk by comparison -- confirmed live that
+    #: each account_id has its own independent ads_insights BUC usage
+    #: bucket, not a shared one.
+    max_concurrent_requests: int = Field(default=2, alias="META_MAX_CONCURRENT_REQUESTS")
     rate_limit_sleep_buffer_seconds: float = Field(
         default=5.0, alias="META_RATE_LIMIT_SLEEP_BUFFER_SECONDS"
     )

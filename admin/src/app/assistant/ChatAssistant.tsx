@@ -14,7 +14,7 @@ import {
   uploadContextDocument,
 } from "@/lib/api";
 
-function AssistantMarkdown({ content }: { content: string }) {
+export function AssistantMarkdown({ content }: { content: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -24,16 +24,16 @@ function AssistantMarkdown({ content }: { content: string }) {
             <table className="border-collapse text-xs">{children}</table>
           </div>
         ),
-        thead: ({ children }) => <thead className="bg-slate-200/70">{children}</thead>,
+        thead: ({ children }) => <thead className="bg-bg-muted/70">{children}</thead>,
         th: ({ children }) => (
-          <th className="border border-slate-300 px-2 py-1 text-left font-medium text-slate-700">{children}</th>
+          <th className="border border-border-mid px-2 py-1 text-left font-medium text-text-primary">{children}</th>
         ),
-        td: ({ children }) => <td className="border border-slate-300 px-2 py-1 text-slate-800">{children}</td>,
+        td: ({ children }) => <td className="border border-border-mid px-2 py-1 text-text-primary">{children}</td>,
         p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
         ul: ({ children }) => <ul className="mb-2 list-disc pl-5 last:mb-0">{children}</ul>,
         ol: ({ children }) => <ol className="mb-2 list-decimal pl-5 last:mb-0">{children}</ol>,
         code: ({ children }) => (
-          <code className="rounded bg-slate-200/70 px-1 py-0.5 font-mono text-[0.85em]">{children}</code>
+          <code className="rounded bg-bg-muted/70 px-1 py-0.5 font-mono text-[0.85em]">{children}</code>
         ),
         pre: ({ children }) => (
           <pre className="mb-2 overflow-x-auto rounded-md bg-slate-900 p-3 text-xs text-slate-100 last:mb-0">
@@ -47,7 +47,7 @@ function AssistantMarkdown({ content }: { content: string }) {
   );
 }
 
-export function ChatAssistant() {
+export function ChatAssistant({ allowUpload = true }: { allowUpload?: boolean }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -118,15 +118,15 @@ export function ChatAssistant() {
 
   return (
     <div className="flex h-[calc(100vh-14rem)] flex-col gap-4 lg:flex-row">
-      <div className="flex flex-1 flex-col rounded-lg border border-slate-200 bg-white">
+      <div className="flex flex-1 flex-col rounded-lg border border-border-primary bg-white">
         {models.length > 0 && (
-          <div className="border-b border-slate-200 px-4 py-2.5">
+          <div className="border-b border-border-primary px-4 py-2.5">
             <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-slate-500">Model</label>
+              <label className="text-xs font-medium text-text-secondary">Model</label>
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-800 focus:border-sky-500 focus:outline-none"
+                className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs text-text-primary focus:border-accent-yellow focus:outline-none"
               >
                 <optgroup label="Cloudflare Workers AI">
                   {models
@@ -151,14 +151,14 @@ export function ChatAssistant() {
             {(() => {
               const note = models.find((m) => m.id === selectedModel)?.note;
               return note ? (
-                <p className="mt-1.5 text-[11px] text-amber-700">⚠ {note}</p>
+                <p className="mt-1.5 text-[11px] text-warning-text">⚠ {note}</p>
               ) : null;
             })()}
           </div>
         )}
         <div className="flex-1 overflow-y-auto p-5">
           {messages.length === 0 && (
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-text-secondary">
               Ask about the data -- e.g. &ldquo;How many Instagram posts does saadaadesigns have?&rdquo; This
               assistant is read-only: it can query the database and read uploaded context documents, but it
               cannot create, alter, or delete anything.
@@ -174,8 +174,8 @@ export function ChatAssistant() {
                 <div
                   className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
                     message.role === "user"
-                      ? "whitespace-pre-wrap bg-sky-600 text-white"
-                      : "bg-slate-100 text-slate-900"
+                      ? "whitespace-pre-wrap bg-accent-yellow text-white"
+                      : "bg-bg-muted text-text-primary"
                   }`}
                 >
                   {message.role === "user" ? (
@@ -187,13 +187,13 @@ export function ChatAssistant() {
               </div>
             ))}
 
-            {loading && <p className="text-sm text-slate-500">Thinking…</p>}
-            {error && <p className="text-sm text-red-600">{error}</p>}
+            {loading && <p className="text-sm text-text-secondary">Thinking…</p>}
+            {error && <p className="text-sm text-error-text">{error}</p>}
           </div>
           <div ref={bottomRef} />
         </div>
 
-        <div className="flex gap-2 border-t border-slate-200 p-4">
+        <div className="flex gap-2 border-t border-border-primary p-4">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -205,48 +205,52 @@ export function ChatAssistant() {
             }}
             placeholder="Ask about the data…"
             rows={2}
-            className="flex-1 resize-none rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+            className="flex-1 resize-none rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
           />
           <button
             onClick={handleSend}
             disabled={loading || !input.trim()}
-            className="self-end rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:opacity-50"
+            className="self-end rounded-md bg-accent-yellow px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-yellow-hover disabled:opacity-50"
           >
             Send
           </button>
         </div>
       </div>
 
-      <div className="flex w-full flex-col rounded-lg border border-slate-200 bg-white p-4 lg:w-72">
-        <h2 className="text-sm font-medium text-slate-900">Context documents</h2>
-        <p className="mt-1 text-xs text-slate-500">
+      <div className="flex w-full flex-col rounded-lg border border-border-primary bg-white p-4 lg:w-72">
+        <h2 className="text-sm font-medium text-text-primary">Context documents</h2>
+        <p className="mt-1 text-xs text-text-secondary">
           Upload .md or .pptx files with business context -- the assistant can read these when answering.
         </p>
 
-        <label className="mt-3 flex cursor-pointer items-center justify-center rounded-md border border-dashed border-slate-300 px-3 py-4 text-xs text-slate-500 hover:border-sky-400 hover:text-slate-700">
-          {uploading ? "Uploading…" : "Choose a file…"}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".md,.txt,.pptx"
-            className="hidden"
-            disabled={uploading}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleUpload(file);
-            }}
-          />
-        </label>
-        {uploadError && <p className="mt-2 text-xs text-red-600">{uploadError}</p>}
+        {allowUpload && (
+          <>
+            <label className="mt-3 flex cursor-pointer items-center justify-center rounded-md border border-dashed border-border-mid px-3 py-4 text-xs text-text-secondary hover:border-accent-yellow hover:text-text-primary">
+              {uploading ? "Uploading…" : "Choose a file…"}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".md,.txt,.pptx"
+                className="hidden"
+                disabled={uploading}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleUpload(file);
+                }}
+              />
+            </label>
+            {uploadError && <p className="mt-2 text-xs text-error-text">{uploadError}</p>}
+          </>
+        )}
 
         <ul className="mt-4 flex flex-col gap-2 overflow-y-auto">
           {documents.map((doc) => (
-            <li key={doc.id} className="rounded-md border border-slate-200 bg-slate-50 p-2">
-              <p className="truncate text-xs font-medium text-slate-800">{doc.filename}</p>
-              <p className="mt-0.5 text-[11px] text-slate-500">{doc.char_count.toLocaleString()} chars</p>
+            <li key={doc.id} className="rounded-md border border-border-primary bg-bg-surface p-2">
+              <p className="truncate text-xs font-medium text-text-primary">{doc.filename}</p>
+              <p className="mt-0.5 text-[11px] text-text-secondary">{doc.char_count.toLocaleString()} chars</p>
             </li>
           ))}
-          {documents.length === 0 && <p className="text-xs text-slate-400">No documents uploaded yet.</p>}
+          {documents.length === 0 && <p className="text-xs text-text-tertiary">No documents uploaded yet.</p>}
         </ul>
       </div>
     </div>

@@ -162,6 +162,58 @@ _COMPUTED_COLUMNS: list[tuple[str, str]] = [
 ]
 
 
+# Human-readable mirror of the SQL in `_INSERT` below, keyed by column name --
+# exists purely so the Schema Browser (admin.py's `/admin/tables`) can show
+# "how was this computed" next to a customised column instead of that only
+# living in this file's SQL. Keep in sync by hand when `_INSERT` changes --
+# no code generates one from the other, deliberately (the SQL is written for
+# Postgres to execute; this is written for a human skimming the UI).
+COLUMN_FORMULAS: dict[str, str] = {
+    "ad_status": "meta_ads.ad_status (joined on ad_id)",
+    "ad_effective_status": "meta_ads.ad_effective_status (joined on ad_id)",
+    "ad_created_time": "meta_ads.created_time (joined on ad_id)",
+    "purchases": "first match in actions[]: omni_purchase, else purchase",
+    "conv_value": "first match in action_values[]: omni_purchase, else purchase",
+    "checkout_initiate": "first match in actions[]: omni_initiated_checkout, else initiate_checkout",
+    "add_to_cart": "first match in actions[]: omni_add_to_cart, else add_to_cart",
+    "ncp_count": "SUM(actions[] where action_type = 'offsite_conversion.custom.<id>') for every custom-conversion id named \"NCP\" (matched globally across accounts, summed if more than one exists)",
+    "ftewv_count": "SUM(actions[] where action_type = 'offsite_conversion.custom.<id>') for every custom-conversion id named \"First-time EWV\" (matched globally across accounts)",
+    "cost_per_purchase": "spend / purchases",
+    "thruplays": "video_thruplay_watched_actions[0].value",
+    "three_sec_video_plays": "actions[] match action_type = video_view",
+    "video_play_time": "video_avg_time_watched_actions[0].value",
+    "outbound_clicks_count": "outbound_clicks[0].value",
+    "post_engagements": "inline_post_engagement (raw Insights field, renamed)",
+    "engagement_count": "thruplays + comments + reactions + saves + shares + likes + inline_link_clicks (\"Simran Jadon formula\")",
+    "ctr_pct": "inline_link_clicks / impressions * 100",
+    "cpc_link": "spend / inline_link_clicks",
+    "cpr_1000": "spend / reach * 1000",
+    "checkout_compl_pct": "purchases / checkout_initiate * 100",
+    "cr_lc_pct": "purchases / inline_link_clicks * 100",
+    "atc_lc_pct": "add_to_cart / inline_link_clicks * 100",
+    "ci_atc_pct": "checkout_initiate / add_to_cart * 100",
+    "roas": "conv_value / spend",
+    "cost_per_ncp": "spend / ncp_count",
+    "cost_per_ftewv": "spend / ftewv_count",
+    "profit_efficiency": "conv_value - spend",
+    "contrib_margin_pct": "(1 - spend / conv_value) * 100, else -100 if conv_value is 0",
+    "f1_pass": "impressions >= 50,000",
+    "f2_pass": "spend > 0 AND conv_value / spend >= 3.0",
+    "f3_pass": "ncp_count > 0 AND spend / ncp_count <= 525",
+    "f4_pass": "ftewv_count > 0 AND spend / ftewv_count <= 12",
+    "category": (
+        "F1 AND (F2 OR F3) AND F4 -> Incremental Winner; "
+        "F1 AND (F2 OR F3) -> Winner; "
+        "F1 AND F4 -> P0 analysis; "
+        "F1 only -> P1 analysis; "
+        "F2 only -> P2 analysis; "
+        "ad created < 14 days ago -> Result Awaited; "
+        "else -> Discarded"
+    ),
+    "lifecycle_refreshed_at": "now() at the time this row was last (re)computed",
+}
+
+
 def _ddl_statements() -> list[str]:
     cols = [f"{name} {sql_type}" for name, sql_type in _AD_INSIGHTS_COLUMNS]
     cols[0] = cols[0] + " PRIMARY KEY"  # ad_id, always first

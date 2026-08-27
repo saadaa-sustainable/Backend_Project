@@ -28,14 +28,19 @@ logger = get_logger(__name__)
 #: How many independent endpoint syncs to run concurrently. Bounded well
 #: below the client's own per-request semaphore so a single `/sync/all`
 #: call cannot starve other traffic sharing the same Meta app/token.
-MAX_CONCURRENT_ENDPOINT_SYNCS = 4
+#: Lowered from 4 to 3 (2026-08-25) alongside MetaAPISettings.max_concurrent_requests
+#: -- see that field's docstring for the live-testing rationale.
+MAX_CONCURRENT_ENDPOINT_SYNCS = 3
 
 #: How many accounts :class:`MultiAccountSyncCoordinator` processes
 #: concurrently. Each account gets its own DB connection (via
 #: `session_scope`) and its own Meta API rate-limit budget (via its own
 #: `MetaAPIClient`), so this is really a cap on concurrent DB connections
 #: opened by one multi-account sync call, not a Meta-side throttle.
-MAX_CONCURRENT_ACCOUNT_SYNCS = 4
+#: Lowered from 4 to 3 (2026-08-25) for consistency with the other two
+#: concurrency caps, though cross-account concurrency is lower-risk than
+#: same-account concurrency (see MAX_CONCURRENT_ENDPOINT_SYNCS).
+MAX_CONCURRENT_ACCOUNT_SYNCS = 3
 
 
 class SyncOrchestrator:

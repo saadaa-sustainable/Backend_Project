@@ -223,8 +223,8 @@ _ENVELOPE_NAMES = {"account_id", "account_name", "ad_id", "ad_name", "adset_id",
 _METRIC_FIELDS = ["date_start", "date_stop"] + sorted(set(FIELD_TYPES) - _ENVELOPE_NAMES - {"date_start", "date_stop"})
 
 
-def _cast_expr(field: str, sql_type: str) -> str:
-    col = f"raw_payload ->> '{field}'"
+def _cast_expr(field: str, sql_type: str, *, prefix: str = "") -> str:
+    col = f"{prefix}raw_payload ->> '{field}'"
     if sql_type == "numeric":
         return f"NULLIF({col}, '')::numeric AS {field}"
     if sql_type in ("timestamptz", "date"):
@@ -232,7 +232,7 @@ def _cast_expr(field: str, sql_type: str) -> str:
     if sql_type == "boolean":
         return f"({col})::boolean AS {field}"
     if sql_type == "jsonb":
-        return f"(raw_payload -> '{field}') AS {field}"
+        return f"({prefix}raw_payload -> '{field}') AS {field}"
     return f"{col} AS {field}"
 
 
@@ -262,21 +262,56 @@ def _insert_sql(level: str) -> str:
     target = TARGET_TABLE_BY_LEVEL[level]
     metric_fields = [f for f in _METRIC_FIELDS if f not in envelope]
 
-    select_cols = [f"meta_id AS {pk}"]
-    select_cols += [f"raw_payload ->> '{c}' AS {c}" for c in envelope if c != pk]
-    select_cols += [_cast_expr(f, FIELD_TYPES.get(f, "jsonb")) for f in metric_fields]
-    select_cols += ["extracted_at", "extracted_at AS updated_at"]
+    select_cols = [f"a.meta_id AS {pk}"]
+    select_cols += [f"a.raw_payload ->> '{c}' AS {c}" for c in envelope if c != pk]
+    select_cols += [_cast_expr(f, FIELD_TYPES.get(f, "jsonb"), prefix="a.") for f in metric_fields]
+    select_cols += ["a.extracted_at", "a.extracted_at AS updated_at"]
 
+    # Two-stage instead of a plain `DISTINCT ON (meta_id) ... ORDER BY
+    # meta_id, extracted_at DESC` over the raw scan: that form forces
+    # Postgres to evaluate every one of this level's ~170 JSONB field
+    # extractions for EVERY matching row (not just the surviving latest-per-
+    # entity one) before it can dedup, since DISTINCT ON needs the full
+    # target list already projected to compare/discard adjacent rows.
+    # `latest` below touches only meta_id/extracted_at (both plain columns,
+    # covered by the partial index in ensure_insights_tables) to find the
+    # winning row per entity first, so the expensive JSONB projection only
+    # ever runs for the rows that actually survive into the target table --
+    # confirmed live 2026-08-25 this was required, not just an index, once
+    # raw_dump_meta passed ~300K insights rows (the DISTINCT ON form alone
+    # still blew the 2-minute statement_timeout at the ad level).
     return (
+        "WITH latest AS (\n"
+        "  SELECT meta_id, MAX(extracted_at) AS extracted_at\n"
+        "  FROM raw_dump_meta\n"
+        "  WHERE object_type = 'insights' AND parent_ids ->> 'level' = :level\n"
+        "  GROUP BY meta_id\n"
+        ")\n"
         f"INSERT INTO {target}\n"
-        f"SELECT DISTINCT ON (meta_id)\n  " + ",\n  ".join(select_cols) + "\n"
-        "FROM raw_dump_meta\n"
-        "WHERE object_type = 'insights' AND parent_ids ->> 'level' = :level\n"
-        "ORDER BY meta_id, extracted_at DESC"
+        f"SELECT\n  " + ",\n  ".join(select_cols) + "\n"
+        "FROM raw_dump_meta a\n"
+        "JOIN latest ON latest.meta_id = a.meta_id AND latest.extracted_at = a.extracted_at\n"
+        "WHERE a.object_type = 'insights' AND a.parent_ids ->> 'level' = :level"
     )
 
 
+# Supports the WHERE/ORDER BY in _insert_sql() below -- without it, every
+# level's INSERT has to filter raw_dump_meta's full insights set (300K+ rows
+# and growing) by the unindexed `parent_ids ->> 'level'` expression, then
+# sort for DISTINCT ON, which blew the pooler's 2-minute statement_timeout
+# once raw_dump_meta reached ~314K insights rows (confirmed live 2026-08-25 --
+# every level failed identically, not just the largest one, since the scan
+# cost is paid before level-specific result size matters).
+_BRONZE_INSIGHTS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS ix_raw_dump_meta_insights_level_meta_extracted "
+    "ON raw_dump_meta ((parent_ids ->> 'level'), meta_id, extracted_at DESC) "
+    "WHERE object_type = 'insights'"
+)
+
+
 async def ensure_insights_tables(session: AsyncSession) -> None:
+    await session.execute(text(_BRONZE_INSIGHTS_INDEX))
+    await session.commit()
     for level in ("campaign", "adset", "ad"):
         for statement in _ddl_statements(level):
             await session.execute(text(statement))

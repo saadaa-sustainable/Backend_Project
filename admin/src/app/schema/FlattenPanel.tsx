@@ -46,24 +46,24 @@ function FlattenJobCard({ job, table, onUpdate }: { job: FlattenJob; table: stri
   }
 
   return (
-    <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-4">
+    <div className="mb-3 rounded-md border border-border-primary bg-bg-surface p-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-medium text-slate-800">Flatten — {job.label}</h3>
-          <p className="mt-0.5 font-mono text-xs text-slate-500">
+          <h3 className="text-sm font-medium text-text-primary">Flatten — {job.label}</h3>
+          <p className="mt-0.5 font-mono text-xs text-text-secondary">
             {job.source_table} → {job.target_tables.join(", ")}
           </p>
         </div>
         <span
           className={`rounded px-2 py-0.5 text-[11px] font-medium ${
-            job.is_stale ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+            job.is_stale ? "bg-warning-bg text-warning-text" : "bg-success-bg text-success-text"
           }`}
         >
           {job.is_stale ? "Stale — raw data has changed" : "Up to date"}
         </span>
       </div>
 
-      <p className="mt-2 text-xs text-slate-500">
+      <p className="mt-2 text-xs text-text-secondary">
         {isSource
           ? "This is the raw (Bronze) source for this flatten job."
           : "This table is built from the flatten job below."}{" "}
@@ -73,31 +73,31 @@ function FlattenJobCard({ job, table, onUpdate }: { job: FlattenJob; table: stri
       </p>
 
       {job.last_rows_written && (
-        <p className="mt-1 font-mono text-[11px] text-slate-500">
+        <p className="mt-1 font-mono text-[11px] text-text-secondary">
           {Object.entries(job.last_rows_written)
             .map(([t, c]) => `${t}: ${c.toLocaleString()} rows`)
             .join(" · ")}
         </p>
       )}
 
-      {job.last_error && <p className="mt-1 text-xs text-red-600">Last error: {job.last_error}</p>}
-      {error && <p className="mt-1 text-xs text-red-600">{error}</p>}
+      {job.last_error && <p className="mt-1 text-xs text-error-text">Last error: {job.last_error}</p>}
+      {error && <p className="mt-1 text-xs text-error-text">{error}</p>}
 
       <div className="mt-3 flex items-center gap-3">
         <button
           onClick={handleRun}
           disabled={running}
-          className="rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-sky-500 disabled:opacity-40"
+          className="rounded-md bg-accent-yellow px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-yellow-hover disabled:opacity-40"
         >
           {running ? "Flattening…" : "Flatten now"}
         </button>
-        <label className="flex items-center gap-1.5 text-xs text-slate-600">
+        <label className="flex items-center gap-1.5 text-xs text-text-secondary">
           <input
             type="checkbox"
             checked={job.auto_enabled}
             onChange={handleToggleAuto}
             disabled={togglingAuto}
-            className="h-3.5 w-3.5 accent-sky-600"
+            className="h-3.5 w-3.5 accent-accent-yellow"
           />
           Auto-flatten when raw data updates
         </label>
@@ -128,7 +128,7 @@ export function FlattenPanel({ table }: { table: string }) {
   }, [table]);
 
   if (!jobs || jobs.length === 0) {
-    return error ? <p className="mb-4 text-xs text-red-600">{error}</p> : null;
+    return error ? <p className="mb-4 text-xs text-error-text">{error}</p> : null;
   }
 
   function updateJob(updated: FlattenJob) {

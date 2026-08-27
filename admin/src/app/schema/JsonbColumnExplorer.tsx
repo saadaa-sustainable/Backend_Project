@@ -10,23 +10,34 @@ import {
 } from "@/lib/api";
 
 const TYPE_STYLES: Record<string, string> = {
-  string: "bg-emerald-100 text-emerald-700",
-  number: "bg-amber-100 text-amber-700",
-  boolean: "bg-sky-100 text-sky-700",
-  object: "bg-indigo-100 text-indigo-700",
+  string: "bg-success-bg text-success-text",
+  number: "bg-warning-bg text-warning-text",
+  boolean: "bg-info-bg text-info-text",
+  object: "bg-accent-indigo-bg text-accent-indigo",
   array: "bg-fuchsia-100 text-fuchsia-700",
-  null: "bg-slate-100 text-slate-500",
+  null: "bg-bg-muted text-text-secondary",
 };
 
 interface Props {
   table: string;
   column: string;
   hasObjectType: boolean;
-  selectedKeys: Set<string>;
-  onToggleKey: (key: string) => void;
+  selectedKeys?: Set<string>;
+  onToggleKey?: (key: string) => void;
+  // Hides the selection checkbox column entirely -- used by the read-only
+  // user-facing Schema Browser, which has no "Build custom table" flow for
+  // a selection to feed into.
+  showSelection?: boolean;
 }
 
-export function JsonbColumnExplorer({ table, column, hasObjectType, selectedKeys, onToggleKey }: Props) {
+export function JsonbColumnExplorer({
+  table,
+  column,
+  hasObjectType,
+  selectedKeys = new Set(),
+  onToggleKey,
+  showSelection = true,
+}: Props) {
   const [objectTypes, setObjectTypes] = useState<ObjectTypeCount[] | null>(null);
   const [selectedObjectType, setSelectedObjectType] = useState<string | null>(null);
   const [objectTypeSearch, setObjectTypeSearch] = useState("");
@@ -93,22 +104,22 @@ export function JsonbColumnExplorer({ table, column, hasObjectType, selectedKeys
   );
 
   return (
-    <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+    <div className="mt-2 rounded-md border border-border-primary bg-bg-surface p-3">
       {hasObjectType && (
         <div className="mb-3">
           <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-600">
+            <span className="text-xs font-medium text-text-secondary">
               object_type ({objectTypes?.length ?? "…"})
             </span>
             <input
               value={objectTypeSearch}
               onChange={(e) => setObjectTypeSearch(e.target.value)}
               placeholder="Filter…"
-              className="w-40 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+              className="w-40 rounded border border-border-primary bg-white px-2 py-1 text-xs text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
             />
           </div>
           {loadingTypes ? (
-            <p className="text-xs text-slate-400">Loading object types…</p>
+            <p className="text-xs text-text-tertiary">Loading object types…</p>
           ) : (
             <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
               {filteredObjectTypes?.map((o) => (
@@ -117,8 +128,8 @@ export function JsonbColumnExplorer({ table, column, hasObjectType, selectedKeys
                   onClick={() => setSelectedObjectType(o.value)}
                   className={`rounded-full px-2.5 py-1 text-xs transition-colors ${
                     o.value === selectedObjectType
-                      ? "bg-sky-600 text-white"
-                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      ? "bg-accent-yellow text-white"
+                      : "bg-bg-muted text-text-secondary hover:bg-bg-muted"
                   }`}
                 >
                   {o.value} <span className="opacity-60">({o.row_count})</span>
@@ -130,24 +141,24 @@ export function JsonbColumnExplorer({ table, column, hasObjectType, selectedKeys
       )}
 
       {error && (
-        <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+        <div className="rounded border border-error-mid bg-error-bg p-2 text-xs text-error-text">
           {error}
         </div>
       )}
 
-      {loadingKeys && <p className="text-xs text-slate-400">Scanning rows…</p>}
+      {loadingKeys && <p className="text-xs text-text-tertiary">Scanning rows…</p>}
 
       {!loadingKeys && keys && (
         <>
-          <p className="mb-2 text-xs text-slate-500">
+          <p className="mb-2 text-xs text-text-secondary">
             {keys.length} unique keys found across all {rowsScanned} row{rowsScanned === 1 ? "" : "s"}
             {selectedObjectType ? ` where object_type = '${selectedObjectType}'` : ""} — not a sample.
           </p>
           <div className="max-h-72 overflow-y-auto">
             <table className="w-full border-collapse text-xs">
-              <thead className="sticky top-0 bg-slate-50">
-                <tr className="border-b border-slate-200 text-left uppercase tracking-wide text-slate-400">
-                  <th className="w-6 py-1.5"></th>
+              <thead className="sticky top-0 bg-bg-surface">
+                <tr className="border-b border-border-primary text-left uppercase tracking-wide text-text-tertiary">
+                  {showSelection && <th className="w-6 py-1.5"></th>}
                   <th className="py-1.5 pr-3">Key</th>
                   <th className="py-1.5 pr-3">Type(s)</th>
                   <th className="py-1.5">Present</th>
@@ -158,29 +169,31 @@ export function JsonbColumnExplorer({ table, column, hasObjectType, selectedKeys
                   const compositeKey = `${column}.${k.key}`;
                   const checked = selectedKeys.has(compositeKey);
                   return (
-                    <tr key={k.key} className="border-b border-slate-100 hover:bg-slate-50">
-                      <td className="py-1">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => onToggleKey(compositeKey)}
-                          className="h-3 w-3 accent-sky-600"
-                        />
-                      </td>
-                      <td className="py-1 pr-3 font-mono text-slate-800">{k.key}</td>
+                    <tr key={k.key} className="border-b border-border-soft hover:bg-bg-surface">
+                      {showSelection && (
+                        <td className="py-1">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => onToggleKey?.(compositeKey)}
+                            className="h-3 w-3 accent-accent-yellow"
+                          />
+                        </td>
+                      )}
+                      <td className="py-1 pr-3 font-mono text-text-primary">{k.key}</td>
                       <td className="py-1 pr-3">
                         <div className="flex gap-1">
                           {k.types.map((t) => (
                             <span
                               key={t}
-                              className={`rounded px-1 py-0.5 text-[9px] font-medium ${TYPE_STYLES[t] ?? "bg-slate-100 text-slate-500"}`}
+                              className={`rounded px-1 py-0.5 text-[9px] font-medium ${TYPE_STYLES[t] ?? "bg-bg-muted text-text-secondary"}`}
                             >
                               {t}
                             </span>
                           ))}
                         </div>
                       </td>
-                      <td className="py-1 text-slate-500">{k.presence_pct}%</td>
+                      <td className="py-1 text-text-secondary">{k.presence_pct}%</td>
                     </tr>
                   );
                 })}

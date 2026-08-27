@@ -171,6 +171,12 @@ async def check_and_maybe_run(
     try:
         rows_written = await job.refresh(session)
     except Exception as exc:  # noqa: BLE001 -- logged to flatten_runs, not swallowed
+        # A failure inside job.refresh() (e.g. a statement timeout mid-INSERT)
+        # leaves the session's transaction aborted -- asyncpg refuses every
+        # further command on it until a ROLLBACK, which would otherwise make
+        # the "record the failure" UPDATE below itself raise
+        # InFailedSQLTransactionError and mask the real error.
+        await session.rollback()
         await session.execute(
             text(
                 "UPDATE flatten_runs SET status = 'failed', error_message = :error, finished_at = now() "

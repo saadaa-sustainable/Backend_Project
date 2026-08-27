@@ -12,6 +12,7 @@ export interface TableColumn {
   data_type: string;
   is_nullable: boolean;
   kind: ColumnKind;
+  formula: string | null;
 }
 
 export interface TableSchema {
@@ -28,17 +29,22 @@ export interface TablesResponse {
 export type IngestSource = "meta" | "shopify" | "instagram";
 
 export type MetaInsightsLevel = "account" | "campaign" | "adset" | "ad";
+export type ShopifyObjectType = "shop" | "products" | "orders" | "customers" | "sessions";
 
 export interface IngestRequest {
   sources: IngestSource[];
   date_start?: string; // YYYY-MM-DD -- required when "meta" is in sources
   date_end?: string; // YYYY-MM-DD -- required when "meta" is in sources
-  target_table?: string; // required when "instagram" is in sources
+  target_table?: string; // required when "instagram" or "shopify" is in sources
   since?: string; // YYYY-MM-DD -- instagram only, optional start-date override
   // Meta only, optional -- omit for all four levels. Execution always runs
   // ad -> adset -> campaign -> account regardless of the order sent here
   // (backend re-sorts to META_LEVEL_FETCH_ORDER).
   meta_levels?: MetaInsightsLevel[];
+  // Shopify only, optional -- omit for the default set (shop/products/
+  // orders/customers/sessions). Uses date_start/date_end above (a real
+  // range, unlike Instagram's single `since`).
+  shopify_object_types?: ShopifyObjectType[];
 }
 
 export interface IngestSourceResult {
@@ -465,6 +471,583 @@ export interface RetryFailedJobsResponse {
   retried: number;
   resolved: number;
   still_failing: number;
+}
+
+export interface AdLifecycleRow {
+  ad_id: string;
+  ad_name: string | null;
+  account_name: string | null;
+  campaign_name: string | null;
+  ad_effective_status: string | null;
+  category: string | null;
+  spend: number | null;
+  roas: number | null;
+  cost_per_ncp: number | null;
+  cost_per_ftewv: number | null;
+  purchases: number | null;
+  ncp_count: number | null;
+  ftewv_count: number | null;
+  impressions: number | null;
+  ctr_pct: number | null;
+  f1_pass: boolean | null;
+  f2_pass: boolean | null;
+  f3_pass: boolean | null;
+  f4_pass: boolean | null;
+  lifecycle_refreshed_at: string | null;
+}
+
+export interface AdLifecycleResponse {
+  rows: AdLifecycleRow[];
+  total: number;
+  category_counts: Record<string, number>;
+}
+
+export type AdLifecycleSort = "spend" | "roas" | "impressions" | "cost_per_ncp" | "cost_per_ftewv";
+
+export interface AdLifecycleParams {
+  account_name?: string;
+  category?: string;
+  ad_effective_status?: string;
+  search?: string;
+  sort?: AdLifecycleSort;
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchAdLifecycle(params: AdLifecycleParams = {}): Promise<AdLifecycleResponse> {
+  const qs = new URLSearchParams();
+  if (params.account_name) qs.set("account_name", params.account_name);
+  if (params.category) qs.set("category", params.category);
+  if (params.ad_effective_status) qs.set("ad_effective_status", params.ad_effective_status);
+  if (params.search) qs.set("search", params.search);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<AdLifecycleResponse>(`/admin/analytics/ad-lifecycle${s ? `?${s}` : ""}`);
+}
+
+// ---------------------------------------------------------------------
+// Ads Analyse -- wide per-ad table (Meta + Shopify-attributed revenue)
+// ---------------------------------------------------------------------
+
+export interface AdsAnalyseRow {
+  ad_id: string;
+  ad_name: string | null;
+  ad_status: string | null;
+  ad_effective_status: string | null;
+  adset_name: string | null;
+  campaign_name: string | null;
+  account_name: string | null;
+  category: string | null;
+  spend: number | null;
+  impressions: number | null;
+  purchases: number | null;
+  meta_conv_value: number | null;
+  meta_roas: number | null;
+  cost_per_purchase: number | null;
+  ctr_pct: number | null;
+  shopify_orders: number | null;
+  shopify_revenue: number | null;
+  shopify_aov: number | null;
+  shopify_roas: number | null;
+  cost_per_shopify_order: number | null;
+  gold_refreshed_at: string | null;
+}
+
+export interface AdsAnalyseResponse {
+  rows: AdsAnalyseRow[];
+  total: number;
+}
+
+export type AdsAnalyseSort = "spend" | "meta_roas" | "shopify_roas" | "shopify_revenue" | "impressions";
+
+export interface AdsAnalyseParams {
+  account_name?: string;
+  campaign_name?: string;
+  ad_effective_status?: string;
+  search?: string;
+  only_with_shopify_orders?: boolean;
+  sort?: AdsAnalyseSort;
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnalyseResponse> {
+  const qs = new URLSearchParams();
+  if (params.account_name) qs.set("account_name", params.account_name);
+  if (params.campaign_name) qs.set("campaign_name", params.campaign_name);
+  if (params.ad_effective_status) qs.set("ad_effective_status", params.ad_effective_status);
+  if (params.search) qs.set("search", params.search);
+  if (params.only_with_shopify_orders) qs.set("only_with_shopify_orders", "true");
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<AdsAnalyseResponse>(`/admin/analytics/ads-analyse${s ? `?${s}` : ""}`);
+}
+
+// ---------------------------------------------------------------------
+// Last Click UTM -- order-level Shopify -> Meta attribution
+// ---------------------------------------------------------------------
+
+export type UtmChannel = "Meta" | "Google" | "Retention" | "Other";
+
+export interface UtmOrderRow {
+  order_id: string;
+  name: string | null;
+  total_price: number | null;
+  created_at: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  utm_content: string | null;
+  utm_term: string | null;
+  tier: string | null;
+  matched_ad_id: string | null;
+  matched_ad_name: string | null;
+  matched_campaign_id: string | null;
+  matched_campaign_name: string | null;
+  channel: UtmChannel;
+}
+
+export interface ChannelSummary {
+  count: number;
+  sales: number;
+}
+
+export interface UtmOrderResponse {
+  rows: UtmOrderRow[];
+  total: number;
+  channel_counts: Record<UtmChannel, ChannelSummary>;
+  tier_counts: Record<string, number>;
+}
+
+export interface LastClickUtmParams {
+  channel?: UtmChannel;
+  tier?: string;
+  utm_source?: string;
+  utm_campaign?: string;
+  search?: string;
+  sort?: "created_at" | "total_price";
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchLastClickUtm(params: LastClickUtmParams = {}): Promise<UtmOrderResponse> {
+  const qs = new URLSearchParams();
+  if (params.channel) qs.set("channel", params.channel);
+  if (params.tier) qs.set("tier", params.tier);
+  if (params.utm_source) qs.set("utm_source", params.utm_source);
+  if (params.utm_campaign) qs.set("utm_campaign", params.utm_campaign);
+  if (params.search) qs.set("search", params.search);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<UtmOrderResponse>(`/admin/analytics/last-click-utm${s ? `?${s}` : ""}`);
+}
+
+// ---------------------------------------------------------------------
+// Landing Page Analysis
+// ---------------------------------------------------------------------
+
+export interface LandingPageRow {
+  landing_page_path: string;
+  window_from: string | null;
+  window_to: string | null;
+  sessions: number | null;
+  visitors: number | null;
+  cart_addition_sessions: number | null;
+  checkout_sessions: number | null;
+  bounces: number | null;
+  ad_spend: number | null;
+  ad_impressions: number | null;
+  ad_conv_value: number | null;
+  distinct_ads: number | null;
+  atc_rate: number | null;
+  checkout_rate: number | null;
+  bounce_rate: number | null;
+  cost_per_session: number | null;
+}
+
+export interface LandingPageResponse {
+  rows: LandingPageRow[];
+  total: number;
+}
+
+export interface LandingPageParams {
+  search?: string;
+  sort?: "sessions" | "ad_spend" | "cost_per_session" | "checkout_rate";
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchLandingPages(params: LandingPageParams = {}): Promise<LandingPageResponse> {
+  const qs = new URLSearchParams();
+  if (params.search) qs.set("search", params.search);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<LandingPageResponse>(`/admin/analytics/landing-pages${s ? `?${s}` : ""}`);
+}
+
+export interface LandingPageAdRow {
+  landing_page_path: string;
+  ad_id: string;
+  ad_name: string | null;
+  ad_status: string | null;
+  campaign_name: string | null;
+  adset_name: string | null;
+  account_name: string | null;
+  preview_link: string | null;
+  ad_link: string | null;
+  impressions: number | null;
+  spend: number | null;
+  conv_value: number | null;
+  purchases: number | null;
+  meta_roas: number | null;
+  shopify_orders: number | null;
+  shopify_sales: number | null;
+  shopify_roas: number | null;
+  roas_gap_pct: number | null;
+  page_sessions: number | null;
+  page_atc_rate: number | null;
+  page_bounce_rate: number | null;
+  page_cost_per_sess: number | null;
+}
+
+export interface LandingPageAdBreakdownResponse {
+  rows: LandingPageAdRow[];
+  total: number;
+}
+
+export function fetchLandingPageAdBreakdown(landingPagePath: string): Promise<LandingPageAdBreakdownResponse> {
+  const encoded = landingPagePath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  return request<LandingPageAdBreakdownResponse>(`/admin/analytics/landing-pages/${encoded}/ads`);
+}
+
+// ---------------------------------------------------------------------
+// Shopify Explorer -- ad-hoc metric x dimension pivot
+// ---------------------------------------------------------------------
+
+export interface ShopifyExplorerField {
+  key: string;
+  label: string;
+}
+
+export interface ShopifyExplorerSchemaDataset {
+  key: string;
+  label: string;
+  date_dimension: string | null;
+  dimensions: ShopifyExplorerField[];
+  metrics: ShopifyExplorerField[];
+}
+
+export interface ShopifyExplorerSchemaResponse {
+  datasets: ShopifyExplorerSchemaDataset[];
+}
+
+export function fetchShopifyExplorerSchema(): Promise<ShopifyExplorerSchemaResponse> {
+  return request<ShopifyExplorerSchemaResponse>(`/admin/analytics/shopify-explorer/schema`);
+}
+
+export interface ShopifyExplorerQueryRequest {
+  dataset: string;
+  dimensions: string[];
+  metrics: string[];
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+}
+
+export interface ShopifyExplorerQueryResponse {
+  columns: string[];
+  rows: Record<string, string | number | null>[];
+}
+
+export function queryShopifyExplorer(body: ShopifyExplorerQueryRequest): Promise<ShopifyExplorerQueryResponse> {
+  return request<ShopifyExplorerQueryResponse>(`/admin/analytics/shopify-explorer/query`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---------------------------------------------------------------------
+// Meta Explorer -- ad-hoc metric x dimension pivot over the full-width
+// Meta insights tables (ad_lifecycle / adset_insights / campaign_insights)
+// ---------------------------------------------------------------------
+
+export interface MetaExplorerSchemaDataset {
+  key: string;
+  label: string;
+  date_dimension: string | null;
+  dimensions: ShopifyExplorerField[];
+  metrics: ShopifyExplorerField[];
+}
+
+export interface MetaExplorerSchemaResponse {
+  datasets: MetaExplorerSchemaDataset[];
+}
+
+export function fetchMetaExplorerSchema(): Promise<MetaExplorerSchemaResponse> {
+  return request<MetaExplorerSchemaResponse>(`/admin/analytics/meta-explorer/schema`);
+}
+
+export interface MetaExplorerQueryRequest {
+  dataset: string;
+  dimensions: string[];
+  metrics: string[];
+  date_from?: string;
+  date_to?: string;
+  limit?: number;
+}
+
+export interface MetaExplorerQueryResponse {
+  columns: string[];
+  rows: Record<string, string | number | null>[];
+}
+
+export function queryMetaExplorer(body: MetaExplorerQueryRequest): Promise<MetaExplorerQueryResponse> {
+  return request<MetaExplorerQueryResponse>(`/admin/analytics/meta-explorer/query`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ---------------------------------------------------------------------
+// Customer Journey -- order <-> ad match, extended to the customer
+// ---------------------------------------------------------------------
+
+export interface CustomerJourneyOrderRow {
+  order_id: string;
+  name: string | null;
+  total_price: number | null;
+  created_at: string | null;
+  tier: string | null;
+  matched_ad_id: string | null;
+  matched_ad_name: string | null;
+  matched_campaign_id: string | null;
+  matched_campaign_name: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  customer_email: string | null;
+  customer_city: string | null;
+  customer_country: string | null;
+  customer_lifetime_orders: number | null;
+  customer_lifetime_spend: number | null;
+  rfm_group: string | null;
+  predicted_spend_tier: string | null;
+  customer_cohort_month: string | null;
+  days_since_last_order: number | null;
+}
+
+export interface CustomerJourneyResponse {
+  rows: CustomerJourneyOrderRow[];
+  total: number;
+  rfm_counts: Record<string, number>;
+}
+
+export interface CustomerJourneyParams {
+  rfm_group?: string;
+  tier?: string;
+  only_matched?: boolean;
+  only_with_customer?: boolean;
+  search?: string;
+  sort?: "created_at" | "total_price" | "customer_lifetime_spend";
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchCustomerJourney(params: CustomerJourneyParams = {}): Promise<CustomerJourneyResponse> {
+  const qs = new URLSearchParams();
+  if (params.rfm_group) qs.set("rfm_group", params.rfm_group);
+  if (params.tier) qs.set("tier", params.tier);
+  if (params.only_matched) qs.set("only_matched", "true");
+  if (params.only_with_customer) qs.set("only_with_customer", "true");
+  if (params.search) qs.set("search", params.search);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<CustomerJourneyResponse>(`/admin/analytics/customer-journey${s ? `?${s}` : ""}`);
+}
+
+export interface CustomerJourneyDetailOrderRow {
+  order_id: string;
+  name: string | null;
+  total_price: number | null;
+  created_at: string | null;
+  tier: string | null;
+  matched_ad_id: string | null;
+  matched_ad_name: string | null;
+  matched_campaign_name: string | null;
+}
+
+export interface CustomerJourneyDetailResponse {
+  customer_id: string;
+  customer_name: string | null;
+  email: string | null;
+  lifetime_orders: number | null;
+  lifetime_spend: number | null;
+  rfm_group: string | null;
+  predicted_spend_tier: string | null;
+  first_order_date: string | null;
+  last_order_date: string | null;
+  orders: CustomerJourneyDetailOrderRow[];
+  ads_touched: string[];
+}
+
+export function fetchCustomerJourneyDetail(customerId: string): Promise<CustomerJourneyDetailResponse> {
+  return request<CustomerJourneyDetailResponse>(`/admin/analytics/customer-journey/${encodeURIComponent(customerId)}`);
+}
+
+// ---------------------------------------------------------------------
+// CPIS -- cost per NCP / cost per item sold, by master SKU
+// ---------------------------------------------------------------------
+
+export type CpisWindow = "1d" | "7d" | "30d";
+
+export interface CpisRow {
+  master_sku: string;
+  window_key: CpisWindow;
+  window_from: string | null;
+  window_to: string | null;
+  units_sold: number | null;
+  ending_inventory_units: number | null;
+  avg_sell_through_rate: number | null;
+  matched_ad_count: number | null;
+  ad_spend: number | null;
+  ncp_count: number | null;
+  cost_per_ncp: number | null;
+  cost_per_unit_sold: number | null;
+}
+
+export interface CpisResponse {
+  rows: CpisRow[];
+  total: number;
+}
+
+export interface CpisParams {
+  window?: CpisWindow;
+  search?: string;
+  only_matched?: boolean;
+  sort?: "ad_spend" | "cost_per_ncp" | "cost_per_unit_sold" | "units_sold";
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchCpis(params: CpisParams = {}): Promise<CpisResponse> {
+  const qs = new URLSearchParams();
+  if (params.window) qs.set("window", params.window);
+  if (params.search) qs.set("search", params.search);
+  if (params.only_matched) qs.set("only_matched", "true");
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<CpisResponse>(`/admin/analytics/cpis${s ? `?${s}` : ""}`);
+}
+
+export interface CpisMatchedAdRow {
+  ad_id: string;
+  ad_name: string | null;
+  spend: number | null;
+  ncp_count: number | null;
+  category: string | null;
+}
+
+export interface CpisMatchedAdsResponse {
+  master_sku: string;
+  ads: CpisMatchedAdRow[];
+}
+
+export function fetchCpisMatchedAds(masterSku: string): Promise<CpisMatchedAdsResponse> {
+  return request<CpisMatchedAdsResponse>(`/admin/analytics/cpis/${encodeURIComponent(masterSku)}/ads`);
+}
+
+// ---------------------------------------------------------------------
+// Saturation curve -- real Python-computed power-law fit (spend vs.
+// conversions), not a canned table
+// ---------------------------------------------------------------------
+
+export type SaturationYMetric = "ncp_count" | "purchases" | "ftewv_count";
+
+export interface SaturationPoint {
+  ad_id: string;
+  ad_name: string | null;
+  spend: number;
+  y: number;
+}
+
+export interface SaturationFit {
+  a: number;
+  b: number;
+  r_squared: number;
+  is_saturating: boolean;
+  curve_points: { x: number; y: number }[];
+}
+
+export interface SaturationCurveResponse {
+  y_metric: SaturationYMetric;
+  y_label: string;
+  points: SaturationPoint[];
+  fit: SaturationFit | null;
+  excluded_zero_or_missing: number;
+}
+
+export interface SaturationCurveParams {
+  y_metric?: SaturationYMetric;
+  master_sku?: string;
+  category?: string;
+  account_name?: string;
+}
+
+export function fetchSaturationCurve(params: SaturationCurveParams = {}): Promise<SaturationCurveResponse> {
+  const qs = new URLSearchParams();
+  if (params.y_metric) qs.set("y_metric", params.y_metric);
+  if (params.master_sku) qs.set("master_sku", params.master_sku);
+  if (params.category) qs.set("category", params.category);
+  if (params.account_name) qs.set("account_name", params.account_name);
+  const s = qs.toString();
+  return request<SaturationCurveResponse>(`/admin/analytics/saturation-curve${s ? `?${s}` : ""}`);
+}
+
+// ---------------------------------------------------------------------
+// Overview summary -- powers the Dashboard tab's widget tiles
+// ---------------------------------------------------------------------
+
+export interface BreakdownItem {
+  label: string;
+  value: number;
+}
+
+export interface TopLandingPage {
+  landing_page_path: string;
+  sessions: number;
+  ad_spend: number;
+}
+
+export interface TopCpisSku {
+  master_sku: string;
+  ad_spend: number;
+  cost_per_ncp: number | null;
+}
+
+export interface OverviewSummaryResponse {
+  total_spend: number;
+  total_impressions: number;
+  total_shopify_revenue: number;
+  total_shopify_orders: number;
+  category_breakdown: BreakdownItem[];
+  channel_breakdown: BreakdownItem[];
+  top_landing_pages: TopLandingPage[];
+  top_cpis_skus: TopCpisSku[];
+}
+
+export function fetchOverviewSummary(): Promise<OverviewSummaryResponse> {
+  return request<OverviewSummaryResponse>(`/admin/analytics/overview-summary`);
 }
 
 export function retryFailedJobs(maxJobs = 100): Promise<RetryFailedJobsResponse> {

@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.error_handlers import register_error_handlers
 from app.api.routers.admin import router as admin_router
+from app.api.routers.analytics import router as analytics_router
 from app.api.routers.assistant import router as assistant_router
 from app.api.routers.failed_jobs import router as failed_jobs_router
 from app.api.routers.flatten import router as flatten_router
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(assistant_router)
     app.include_router(ops_router)
     app.include_router(flatten_router)
+    app.include_router(analytics_router)
 
     return app
 

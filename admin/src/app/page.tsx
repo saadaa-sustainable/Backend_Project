@@ -54,10 +54,10 @@ export default function Home() {
   return (
     <div className="flex flex-col gap-8">
       <div>
-        <h1 className="text-xl font-semibold text-slate-900">
+        <h1 className="text-xl font-semibold text-text-primary">
           Bronze / Silver Admin
         </h1>
-        <p className="mt-1 max-w-2xl text-sm text-slate-600">
+        <p className="mt-1 max-w-2xl text-sm text-text-secondary">
           Internal panel for the medallion ingestion pipeline. Reads and triggers go through the
           FastAPI service — nothing here talks to Supabase directly.
         </p>
@@ -69,25 +69,25 @@ export default function Home() {
             key={section.title}
             href={section.href}
             aria-disabled={section.status === "planned"}
-            className={`rounded-lg border border-slate-200 bg-white p-5 shadow-sm transition-colors ${
+            className={`rounded-lg border border-border-primary bg-white p-5 shadow-sm transition-colors ${
               section.status === "planned"
                 ? "pointer-events-none opacity-50"
-                : "hover:border-sky-300 hover:shadow-md"
+                : "hover:border-accent-yellow hover:shadow-md"
             }`}
           >
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-medium text-slate-900">{section.title}</h2>
+              <h2 className="text-sm font-medium text-text-primary">{section.title}</h2>
               <span
                 className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
                   section.status === "live"
-                    ? "bg-emerald-100 text-emerald-700"
-                    : "bg-slate-100 text-slate-500"
+                    ? "bg-success-bg text-success-text"
+                    : "bg-bg-muted text-text-secondary"
                 }`}
               >
                 {section.status === "live" ? "live" : "planned"}
               </span>
             </div>
-            <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            <p className="mt-2 text-sm leading-relaxed text-text-secondary">
               {section.description}
             </p>
           </Link>

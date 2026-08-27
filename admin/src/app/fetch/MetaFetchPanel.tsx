@@ -43,23 +43,23 @@ function LevelSelector({
 }) {
   return (
     <div className="mt-3">
-      <label className="mb-1 block text-xs font-medium text-slate-600">
+      <label className="mb-1 block text-xs font-medium text-text-secondary">
         Levels to fetch
       </label>
       <div className="flex flex-wrap gap-3">
         {LEVEL_OPTIONS.map((opt) => (
-          <label key={opt.value} className="flex items-center gap-1.5 text-xs text-slate-700">
+          <label key={opt.value} className="flex items-center gap-1.5 text-xs text-text-primary">
             <input
               type="checkbox"
               checked={selected.includes(opt.value)}
               onChange={() => onToggle(opt.value)}
-              className="h-3.5 w-3.5 accent-sky-600"
+              className="h-3.5 w-3.5 accent-accent-yellow"
             />
             {opt.label}
           </label>
         ))}
       </div>
-      <p className="mt-1 text-[11px] text-slate-400">
+      <p className="mt-1 text-[11px] text-text-tertiary">
         Always runs in this order — Ads → Ad Sets → Campaigns → Account — regardless of which
         boxes are checked.
       </p>
@@ -182,17 +182,17 @@ export function MetaFetchPanel() {
   const canCreateFetch = Boolean(createdTable) && dateStart.length > 0;
 
   return (
-    <div className="flex flex-col gap-5 rounded-md border border-slate-200 bg-white p-5">
+    <div className="flex flex-col gap-5 rounded-md border border-border-primary bg-white p-5">
       <div className="flex items-center gap-2">
         <SourceLogo source="meta" className="h-5 w-5 shrink-0" />
-        <h3 className="text-sm font-medium text-slate-800">Meta Ads</h3>
+        <h3 className="text-sm font-medium text-text-primary">Meta Ads</h3>
       </div>
 
       <div className="flex gap-2">
         <button
           onClick={() => setMode("existing")}
           className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            mode === "existing" ? "bg-sky-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            mode === "existing" ? "bg-accent-yellow text-white" : "bg-bg-muted text-text-secondary hover:bg-bg-muted"
           }`}
         >
           Select existing table
@@ -200,7 +200,7 @@ export function MetaFetchPanel() {
         <button
           onClick={() => setMode("new")}
           className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            mode === "new" ? "bg-sky-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            mode === "new" ? "bg-accent-yellow text-white" : "bg-bg-muted text-text-secondary hover:bg-bg-muted"
           }`}
         >
           Create new table
@@ -209,11 +209,11 @@ export function MetaFetchPanel() {
 
       {mode === "existing" ? (
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">Table</label>
+          <label className="mb-1 block text-xs font-medium text-text-secondary">Table</label>
           <select
             value={selectedTable}
             onChange={(e) => setSelectedTable(e.target.value)}
-            className="w-full max-w-sm rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+            className="w-full max-w-sm rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
           >
             {tables?.map((t) => (
               <option key={t.name} value={t.name}>
@@ -222,7 +222,7 @@ export function MetaFetchPanel() {
             ))}
           </select>
           {selected && (
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1 text-xs text-text-secondary">
               Last updated: {formatDateTime(selected.last_updated)} — leave the dates below blank
               to resume automatically from the last date this table's insights cover.
             </p>
@@ -230,25 +230,25 @@ export function MetaFetchPanel() {
 
           <div className="mt-3 grid grid-cols-2 gap-3 max-w-sm">
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">
+              <label className="mb-1 block text-xs font-medium text-text-secondary">
                 Start date (optional)
               </label>
               <input
                 type="date"
                 value={dateStart}
                 onChange={(e) => setDateStart(e.target.value)}
-                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                className="w-full rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">
+              <label className="mb-1 block text-xs font-medium text-text-secondary">
                 End date (optional, default today)
               </label>
               <input
                 type="date"
                 value={dateEnd}
                 onChange={(e) => setDateEnd(e.target.value)}
-                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                className="w-full rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
               />
             </div>
           </div>
@@ -259,7 +259,7 @@ export function MetaFetchPanel() {
             <button
               onClick={() => selected && handleStartFetch(selected.name)}
               disabled={!selected || submitting || isRunning}
-              className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:opacity-40"
+              className="rounded-md bg-accent-yellow px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-yellow-hover disabled:opacity-40"
             >
               {submitting ? "Starting…" : "Update table"}
             </button>
@@ -267,7 +267,7 @@ export function MetaFetchPanel() {
               <button
                 onClick={handleStop}
                 disabled={stopping}
-                className="rounded-md bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-40"
+                className="rounded-md bg-error-bg px-4 py-2 text-sm font-medium text-error-text transition-colors hover:bg-error-mid/10 disabled:opacity-40"
               >
                 {stopping ? "Stopping…" : "Stop"}
               </button>
@@ -276,7 +276,7 @@ export function MetaFetchPanel() {
         </div>
       ) : (
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-600">New table name</label>
+          <label className="mb-1 block text-xs font-medium text-text-secondary">New table name</label>
           <div className="flex gap-2">
             <input
               value={newTableName}
@@ -285,41 +285,41 @@ export function MetaFetchPanel() {
                 setCreatedTable(null);
               }}
               placeholder="raw_dump_meta_2"
-              className="w-full max-w-sm rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none"
+              className="w-full max-w-sm rounded-md border border-border-primary bg-white px-3 py-2 font-mono text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
             />
             <button
               onClick={handleCreateTable}
               disabled={creating || !newTableName.trim() || Boolean(createdTable)}
-              className="shrink-0 rounded-md bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40"
+              className="shrink-0 rounded-md bg-bg-muted px-4 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-bg-muted disabled:opacity-40"
             >
               {creating ? "Creating…" : createdTable ? "Created" : "Create table"}
             </button>
           </div>
-          {createError && <p className="mt-2 text-xs text-red-700">{createError}</p>}
+          {createError && <p className="mt-2 text-xs text-error-text">{createError}</p>}
 
           {createdTable && (
             <>
               <div className="mt-3 grid grid-cols-2 gap-3 max-w-sm">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-600">
+                  <label className="mb-1 block text-xs font-medium text-text-secondary">
                     Start date (required — Meta has no auto-discovery)
                   </label>
                   <input
                     type="date"
                     value={dateStart}
                     onChange={(e) => setDateStart(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                    className="w-full rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-600">
+                  <label className="mb-1 block text-xs font-medium text-text-secondary">
                     End date (optional, default today)
                   </label>
                   <input
                     type="date"
                     value={dateEnd}
                     onChange={(e) => setDateEnd(e.target.value)}
-                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none"
+                    className="w-full rounded-md border border-border-primary bg-white px-3 py-2 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
                   />
                 </div>
               </div>
@@ -330,7 +330,7 @@ export function MetaFetchPanel() {
                 <button
                   onClick={() => handleStartFetch(createdTable)}
                   disabled={!canCreateFetch || submitting || isRunning}
-                  className="rounded-md bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:opacity-40"
+                  className="rounded-md bg-accent-yellow px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-yellow-hover disabled:opacity-40"
                 >
                   {submitting ? "Starting…" : "Start fetching"}
                 </button>
@@ -338,7 +338,7 @@ export function MetaFetchPanel() {
                   <button
                     onClick={handleStop}
                     disabled={stopping}
-                    className="rounded-md bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-40"
+                    className="rounded-md bg-error-bg px-4 py-2 text-sm font-medium text-error-text transition-colors hover:bg-error-mid/10 disabled:opacity-40"
                   >
                     {stopping ? "Stopping…" : "Stop"}
                   </button>
@@ -350,29 +350,29 @@ export function MetaFetchPanel() {
       )}
 
       {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+        <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>
       )}
 
       {metaStatus && (
-        <div className="rounded-md border border-slate-200 px-3 py-2">
+        <div className="rounded-md border border-border-primary px-3 py-2">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-800">
-              Run <span className="font-mono text-xs text-slate-500">{status?.run_id}</span>
+            <span className="text-text-primary">
+              Run <span className="font-mono text-xs text-text-secondary">{status?.run_id}</span>
             </span>
             <div className="flex items-center gap-3 text-xs">
               {metaStatus.rows_ingested !== null && (
-                <span className="text-slate-500">{metaStatus.rows_ingested} records fetched</span>
+                <span className="text-text-secondary">{metaStatus.rows_ingested} records fetched</span>
               )}
-              {metaStatus.error && <span className="text-red-700">{metaStatus.error}</span>}
+              {metaStatus.error && <span className="text-error-text">{metaStatus.error}</span>}
               <span
                 className={`rounded-full px-2 py-0.5 font-medium ${
                   metaStatus.status === "succeeded"
-                    ? "bg-emerald-100 text-emerald-700"
+                    ? "bg-success-bg text-success-text"
                     : metaStatus.status === "failed"
-                      ? "bg-red-100 text-red-700"
+                      ? "bg-error-bg text-error-text"
                       : metaStatus.status === "stopped"
-                        ? "bg-slate-100 text-slate-500"
-                        : "bg-amber-100 text-amber-700"
+                        ? "bg-bg-muted text-text-secondary"
+                        : "bg-warning-bg text-warning-text"
                 }`}
               >
                 {metaStatus.status}

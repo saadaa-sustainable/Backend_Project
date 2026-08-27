@@ -1,8 +1,69 @@
 @import "tailwindcss";
 
+/* Professional data-platform palette (Snowflake/Databricks-inspired):
+   cool neutral gray/white base, a dark slate sidebar, one crisp blue
+   accent for every interactive/primary element, and standard-shade
+   status tokens (success/warning/error/info). Replaces the first pass's
+   warm-ecru legacy-dashboard port (2026-08-27) -- kept the SAME token
+   names (bg-base, text-primary, accent-yellow -> now "primary", etc.) so
+   every component already wired to this token system (the whole
+   Analytics section) picks up the new look from this file alone, no
+   per-component edits needed. `--accent-yellow`/`--color-accent-yellow`
+   is intentionally still called that (not renamed to `primary`) to avoid
+   a second mechanical rename pass across every file that references it --
+   its value is the primary blue now, not yellow. */
 :root {
   --background: #f8fafc;
   --foreground: #0f172a;
+
+  --bg-base: #f8fafc;
+  --bg-surface: #f1f5f9;
+  --bg-white: #ffffff;
+  --bg-muted: #eef2f6;
+
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --text-tertiary: #94a3b8;
+  --text-link: #2563eb;
+
+  --border-primary: #e2e8f0;
+  --border-soft: #edf1f5;
+  --border-mid: #cbd5e1;
+
+  /* Primary accent -- CTAs, active states, links. Kept the historical
+     var name `accent-yellow` (see file docstring above). */
+  --accent-yellow: #2563eb;
+  --accent-yellow-hover: #1d4ed8;
+  --accent-yellow-bg: #eff6ff;
+  --accent-amber: #93c5fd;
+
+  --success-text: #15803d;
+  --success-mid: #16a34a;
+  --success-bg: #f0fdf4;
+  --warning-text: #b45309;
+  --warning-mid: #d97706;
+  --warning-bg: #fffbeb;
+  --warning-border: #fde68a;
+  --error-text: #b91c1c;
+  --error-mid: #dc2626;
+  --error-bg: #fef2f2;
+  --info-text: #1d4ed8;
+  --info-mid: #2563eb;
+  --info-bg: #eff6ff;
+
+  --accent-purple: #7c3aed;
+  --accent-purple-bg: #f5f3ff;
+  --accent-pink: #db2777;
+  --accent-pink-bg: #fdf2f8;
+  --accent-indigo: #4f46e5;
+  --accent-indigo-bg: #eef2ff;
+
+  --sb-bg: #0f172a;
+  --sb-surface: #1e293b;
+  --sb-text: #cbd5e1;
+  --sb-text-muted: #64748b;
+  --sb-active: #2563eb;
+  --sb-border: #1e293b;
 }
 
 @theme inline {
@@ -10,12 +71,67 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-bg-base: var(--bg-base);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-white: var(--bg-white);
+  --color-bg-muted: var(--bg-muted);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-text-link: var(--text-link);
+
+  --color-border-primary: var(--border-primary);
+  --color-border-soft: var(--border-soft);
+  --color-border-mid: var(--border-mid);
+
+  --color-accent-yellow: var(--accent-yellow);
+  --color-accent-yellow-hover: var(--accent-yellow-hover);
+  --color-accent-yellow-bg: var(--accent-yellow-bg);
+  --color-accent-amber: var(--accent-amber);
+
+  --color-success-text: var(--success-text);
+  --color-success-mid: var(--success-mid);
+  --color-success-bg: var(--success-bg);
+  --color-warning-text: var(--warning-text);
+  --color-warning-mid: var(--warning-mid);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+  --color-error-text: var(--error-text);
+  --color-error-mid: var(--error-mid);
+  --color-error-bg: var(--error-bg);
+  --color-info-text: var(--info-text);
+  --color-info-mid: var(--info-mid);
+  --color-info-bg: var(--info-bg);
+
+  --color-accent-purple: var(--accent-purple);
+  --color-accent-purple-bg: var(--accent-purple-bg);
+  --color-accent-pink: var(--accent-pink);
+  --color-accent-pink-bg: var(--accent-pink-bg);
+  --color-accent-indigo: var(--accent-indigo);
+  --color-accent-indigo-bg: var(--accent-indigo-bg);
+
+  --color-sb-bg: var(--sb-bg);
+  --color-sb-surface: var(--sb-surface);
+  --color-sb-text: var(--sb-text);
+  --color-sb-text-muted: var(--sb-text-muted);
+  --color-sb-active: var(--sb-active);
+  --color-sb-border: var(--sb-border);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* Numeric/data cells read better tabular (fixed-width digits) so columns
+   of numbers align -- standard in every data-platform grid this section
+   takes cues from. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Indeterminate progress bar -- used while a fetch source is "running" and
