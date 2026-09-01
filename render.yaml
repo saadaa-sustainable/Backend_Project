@@ -46,6 +46,16 @@ services:
     healthCheckPath: /health
 
     envVars:
+      # --- Python runtime pin ---
+      # Render defaults to whatever "latest stable" Python it currently
+      # ships (2026-09: Python 3.14). Our pinned deps -- especially
+      # pydantic-core 2.23.4 -- don't ship a pre-built wheel for 3.14
+      # yet, so pip falls through to a source build with maturin +
+      # Rust, which fails on Render's read-only build filesystem. Pin
+      # to 3.12 (matches local .venv, has full wheel coverage).
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+
       # --- REQUIRED (fill these in the Render dashboard) ---
       - key: META_ACCESS_TOKEN
         sync: false
