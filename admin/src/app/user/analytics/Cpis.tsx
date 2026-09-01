@@ -17,7 +17,11 @@ import {
 import { SaturationCurveChart } from "./charts/SaturationCurveChart";
 import { KwikTile } from "./KwikTile";
 
-const PAGE_SIZE = 50;
+// Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
+// sums represent the entire matched SKU set, not just the first page.
+// Total distinct SKUs across every window stays <100, so a single-page
+// fetch is still fast.
+const PAGE_SIZE = 500;
 const SATURATION_Y_METRICS: { value: SaturationYMetric; label: string }[] = [
   { value: "ncp_count", label: "NCP" },
   { value: "purchases", label: "Purchases" },
@@ -556,7 +560,16 @@ function CpisView() {
         open={openKpi}
         onToggle={() => setOpenKpi((v) => !v)}
       >
-        {rows.length > 0 && <CpisKpiStrip rows={rows} />}
+        {rows.length > 0 && (
+          <CpisKpiStrip
+            rows={rows}
+            windowLabel={
+              fromDate && toDate
+                ? `${fromDate} → ${toDate}`
+                : `Last ${window_}`
+            }
+          />
+        )}
       </CollapsibleSection>
 
       {/* Collapsible saturation curve. */}
@@ -1256,7 +1269,7 @@ function CategoryFlagPill({ category }: { category: string }) {
  *  All numbers come from the name-matched columns (ads whose ad_name
  *  contains the master SKU) and the product/inventory context, since UTM
  *  attribution is deferred to the per-color-variant view. */
-function CpisKpiStrip({ rows }: { rows: CpisUtmRow[] }) {
+function CpisKpiStrip({ rows, windowLabel }: { rows: CpisUtmRow[]; windowLabel: string }) {
   const totalSkus = rows.length;
   // Distinct-ad de-dupe isn't possible client-side (ad_ids aren't in the
   // row payload), so surface the raw sum labeled "matches" -- clear
@@ -1288,21 +1301,23 @@ function CpisKpiStrip({ rows }: { rows: CpisUtmRow[] }) {
       <KwikTile
         icon={<span>₹</span>}
         iconColor="amber"
-        label="Ad spend (lifetime)"
+        label="Ad spend"
         value={fmtINRCompact(totalSpend)}
-        subLine="name-matched ads"
+        subLine={windowLabel}
       />
       <KwikTile
         icon={<span>🛒</span>}
         iconColor="emerald"
-        label="NCP (lifetime)"
+        label="NCP"
         value={fmtNumCompact(totalNcp)}
+        subLine={windowLabel}
       />
       <KwikTile
         icon={<span>💸</span>}
         iconColor={blendedCostPerNcp !== null && blendedCostPerNcp <= 500 ? "emerald" : "rose"}
         label="Cost / NCP (blended)"
         value={blendedCostPerNcp !== null ? fmtINRCompact(blendedCostPerNcp) : "—"}
+        subLine={windowLabel}
       />
       <KwikTile
         icon={<span>📦</span>}
