@@ -456,6 +456,30 @@ function CpisView() {
   const [search, setSearch] = useState("");
   const [onlyMatched, setOnlyMatched] = useState(true);
   const [sort, setSort] = useState<CpisUtmSort>("attributed_units");
+  // Attribution mode toggle:
+  //   equal          - ad_spend / cost_per_order / cost_per_unit_sold / roas
+  //   value_weighted - ad_spend_vw / cost_per_order_vw / cost_per_unit_sold_vw / roas_vw
+  // Both columns come from the same /cpis-utm response -- no refetch on toggle.
+  const [attributionMode, setAttributionMode] =
+    useState<"equal" | "value_weighted">("equal");
+  // Date range picker -- same pattern as Ads Analyse (2026-09-01):
+  // a preset <select> plus two <input type="date"> fields always
+  // visible. When both dates are filled, the /cpis-utm endpoint hits
+  // the daily-sum path (cpis_by_sku_daily); when empty, falls back to
+  // the pre-computed cpis_by_sku_utm rollup for `window_`.
+  const [datePreset, setDatePreset] = useState<string>("30d");
+  const [fromDate, setFromDate] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 29);
+    return d.toISOString().slice(0, 10);
+  });
+  const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  // Collapse toggles for each of the three analytics blocks (KPI strip,
+  // saturation curve, main table). Default: everything open. Merchant
+  // can fold anything they don't need so the section stops eating scroll.
+  const [openKpi, setOpenKpi] = useState(true);
+  const [openSaturation, setOpenSaturation] = useState(true);
+  const [openTable, setOpenTable] = useState(true);
   // Row-click drilldown -- opens the ads modal for the clicked master
   // SKU showing every name-matched ad's status / category / spend /
   // ROAS / cost-per-NCP. Row includes the product_name so the modal
@@ -472,8 +496,11 @@ function CpisView() {
   const [error, setError] = useState<string | null>(null);
 
   const filters = useMemo(
-    () => ({ window: window_, search: search || undefined, only_matched: onlyMatched, sort }),
-    [window_, search, onlyMatched, sort],
+    () =>
+      fromDate && toDate
+        ? { from_date: fromDate, to_date: toDate, search: search || undefined, only_matched: onlyMatched, sort }
+        : { window: window_, search: search || undefined, only_matched: onlyMatched, sort },
+    [fromDate, toDate, window_, search, onlyMatched, sort],
   );
 
   useEffect(() => {
@@ -522,40 +549,98 @@ function CpisView() {
         per-color-variant drill-down (coming soon) and is intentionally not shown here.
       </p>
 
-      {/* Aggregate KPI strip -- sums the name-matched signals across
-          every SKU currently in view. Gives the merchant a top-line to
-          sanity-check individual SKU rows against and to see the whole
-          business picture at a glance. */}
-      {rows.length > 0 && <CpisKpiStrip rows={rows} />}
+      {/* Collapsible KPI strip. */}
+      <CollapsibleSection
+        title="Aggregate KPIs"
+        subtitle="Sum of name-matched metrics across every SKU in view"
+        open={openKpi}
+        onToggle={() => setOpenKpi((v) => !v)}
+      >
+        {rows.length > 0 && <CpisKpiStrip rows={rows} />}
+      </CollapsibleSection>
 
-      {/* Saturation curve — kept from the legacy view (2026-08-29 UX
-          decision that the shape of spend-vs-conversions is the first
-          thing users want to see, not something they scroll past).
-          Not scoped to a SKU here since the new table doesn't have a
-          row-click drilldown yet; it fits ALL ads, giving a whole-
-          business diminishing-returns read. */}
-      <SaturationCurveSection masterSkuFilter={null} />
+      {/* Collapsible saturation curve. */}
+      <CollapsibleSection
+        title="Saturation curve"
+        subtitle="Spend vs conversions -- shape of diminishing returns across all ads"
+        open={openSaturation}
+        onToggle={() => setOpenSaturation((v) => !v)}
+      >
+        <SaturationCurveSection masterSkuFilter={null} />
+      </CollapsibleSection>
 
+      {/* Collapsible "Analytics table" block. Wraps the filter bar +
+          main SKU-level table so the merchant can fold the whole
+          scrolling grid away when they only care about the top
+          summary cards above. Toggled independently from KPI /
+          Saturation. */}
+      <CollapsibleSection
+        title="Analytics table"
+        subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
+        open={openTable}
+        onToggle={() => setOpenTable((v) => !v)}
+      >
       {/* Filter bar. Kwikengage puts the window pills flush left, then a
           search box, then dropdowns/toggles trailing to the right. The
           whole strip lives inside one card so it reads as a single
           control zone, not a scatter of chips. */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-3">
-        <div className="flex overflow-hidden rounded-md border border-border-primary">
-          {UTM_WINDOWS.map((w) => (
-            <button
-              key={w}
-              onClick={() => setWindow(w)}
-              className={`px-3 py-1.5 text-[13px] font-medium transition-colors ${
-                window_ === w
-                  ? "bg-slate-900 text-white"
-                  : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
-              }`}
-            >
-              {w}
-            </button>
-          ))}
-        </div>
+        {/* Date range picker -- ported directly from Ads Analyse
+            (AdsAnalyse.tsx :720). A preset <select> auto-fills the two
+            date inputs; typing directly into either input flips the
+            preset to "custom" so the two controls always stay in sync. */}
+        <select
+          value={datePreset}
+          onChange={(e) => {
+            const v = e.target.value;
+            setDatePreset(v);
+            const today = new Date().toISOString().slice(0, 10);
+            const daysAgo = (n: number) => {
+              const d = new Date();
+              d.setDate(d.getDate() - n);
+              return d.toISOString().slice(0, 10);
+            };
+            if (v === "all")       { setFromDate(""); setToDate(""); }
+            else if (v === "today") { setFromDate(today); setToDate(today); }
+            else if (v === "7d")   { setFromDate(daysAgo(6));  setToDate(today); }
+            else if (v === "14d")  { setFromDate(daysAgo(13)); setToDate(today); }
+            else if (v === "30d")  { setFromDate(daysAgo(29)); setToDate(today); }
+            else if (v === "90d")  { setFromDate(daysAgo(89)); setToDate(today); }
+          }}
+          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
+          title="Date-range window applied to CPIS metrics"
+        >
+          <option value="all">All time (uses pre-computed rollup)</option>
+          <option value="today">Today</option>
+          <option value="7d">Last 7 days</option>
+          <option value="14d">Last 14 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="90d">Last 90 days</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <input
+          type="date"
+          value={fromDate}
+          onChange={(e) => { setFromDate(e.target.value); setDatePreset("custom"); }}
+          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
+          title="Window start (YYYY-MM-DD)"
+        />
+        <span className="text-[12px] text-text-secondary">→</span>
+        <input
+          type="date"
+          value={toDate}
+          onChange={(e) => { setToDate(e.target.value); setDatePreset("custom"); }}
+          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
+          title="Window end (YYYY-MM-DD)"
+        />
+        {fromDate && toDate && (
+          <span
+            className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
+            title="Daily-sum path (cpis_by_sku_daily) for this exact date range"
+          >
+            windowed
+          </span>
+        )}
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -577,6 +662,29 @@ function CpisView() {
             </option>
           ))}
         </select>
+        {/* Attribution-mode toggle. Both columns come from the same
+            response -- the toggle just swaps which set of 4 cells the
+            Last-Click group renders. No refetch. See refresh_cpis_utm.py. */}
+        <div className="flex overflow-hidden rounded-md border border-border-primary">
+          {(["equal", "value_weighted"] as const).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setAttributionMode(mode)}
+              title={
+                mode === "equal"
+                  ? "Ad spend split equally across all orders the ad drove, then within each order by line-item revenue"
+                  : "Ad spend split proportional to each order's total value — larger baskets absorb more spend"
+              }
+              className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                attributionMode === mode
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
+              }`}
+            >
+              {mode === "equal" ? "Equal / order" : "Value-weighted"}
+            </button>
+          ))}
+        </div>
         <span className="ml-auto text-[11px] text-text-secondary">{total.toLocaleString()} SKUs</span>
       </div>
 
@@ -637,7 +745,31 @@ function CpisView() {
                     → line_items.sku attribution. */}
                 <th className="border-l border-border-soft px-3 py-3 text-right" title="Revenue from orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Revenue</th>
                 <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Orders</th>
-                <th className="px-3 py-3 text-right" title="Windowed ad spend / last-click orders">LC Cost/Order</th>
+                {/* 3 mode-dependent cells: LC Ad Spend, LC Cost/Order, LC ROAS.
+                    Header labels the current attribution mode so the merchant
+                    can see at a glance which set of numbers they're looking at. */}
+                <th className="px-3 py-3 text-right" title={
+                  attributionMode === "equal"
+                    ? "Equal-per-order allocation: ad spend split evenly across orders driven, then within-order by line-item revenue"
+                    : "Value-weighted allocation: ad spend split proportional to each order's total revenue"
+                }>
+                  LC Ad Spend
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
+                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders (toggles with attribution mode)">
+                  LC Cost/Order
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
+                <th className="px-3 py-3 text-right" title="Attributed revenue / allocated ad spend (toggles with attribution mode)">
+                  LC ROAS
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
                 <th className="px-3 py-3 text-right" title="Average order value of last-click orders containing this SKU">LC AOV</th>
                 <th className="px-3 py-3 text-right" title="Average units of THIS SKU per attributed order (some orders will have multiple units of the same SKU)">Qty/Order</th>
                 <th className="px-3 py-3 text-right" title="Average selling price NET (attributed_revenue / attributed_units)">ASP Net</th>
@@ -761,8 +893,19 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(row.attributed_orders)}
                   </td>
+                  {/* 3 mode-dependent cells -- toggle with the pill above. */}
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.cost_per_order)}
+                    {fmtINRFull(
+                      attributionMode === "equal" ? row.ad_spend : row.ad_spend_vw,
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {fmtINRFull(
+                      attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw,
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtINRFull(row.lc_avg_order_value)}
@@ -830,6 +973,7 @@ function CpisView() {
           )}
         </div>
       )}
+      </CollapsibleSection>
       {drilldownSku && (
         <MatchedAdsModal
           masterSku={drilldownSku.master_sku}
@@ -838,6 +982,41 @@ function CpisView() {
         />
       )}
     </>
+  );
+}
+
+
+/** Accordion-style section header with a chevron toggle. Used to fold
+ *  the KPI strip / saturation curve / main table so the CPIS page stops
+ *  eating scroll when the merchant isn't looking at one of them. */
+function CollapsibleSection({
+  title,
+  subtitle,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-border-primary bg-white shadow-sm">
+      <button
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-bg-surface"
+        aria-expanded={open}
+      >
+        <div className="flex flex-col">
+          <span className="text-[13px] font-semibold text-text-primary">{title}</span>
+          {subtitle && <span className="text-[11px] text-text-secondary">{subtitle}</span>}
+        </div>
+        <span className={`text-[13px] text-text-secondary transition-transform ${open ? "rotate-180" : ""}`}>▼</span>
+      </button>
+      {open && <div className="border-t border-border-soft p-3">{children}</div>}
+    </div>
   );
 }
 

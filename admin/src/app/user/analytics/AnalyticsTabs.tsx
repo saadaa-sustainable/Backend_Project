@@ -82,8 +82,6 @@ function loadTabOrder(): Tab[] {
 export function AnalyticsTabs() {
   const [tabOrder, setTabOrder] = useState<Tab[]>(DEFAULT_TAB_ORDER);
   const [tab, setTab] = useState<Tab>("dashboard");
-  const [draggingTab, setDraggingTab] = useState<Tab | null>(null);
-  const [dragOverTab, setDragOverTab] = useState<Tab | null>(null);
 
   useEffect(() => {
     setTabOrder(loadTabOrder());
@@ -112,41 +110,14 @@ export function AnalyticsTabs() {
     }
   }, [tab]);
 
-  function persistOrder(next: Tab[]) {
-    setTabOrder(next);
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // localStorage unavailable -- reordering still works this session, just doesn't persist.
-    }
-  }
-
-  function handleDrop(targetTab: Tab) {
-    if (!draggingTab || draggingTab === targetTab) {
-      setDraggingTab(null);
-      setDragOverTab(null);
-      return;
-    }
-    const next = [...tabOrder];
-    const fromIdx = next.indexOf(draggingTab);
-    const toIdx = next.indexOf(targetTab);
-    next.splice(fromIdx, 1);
-    next.splice(toIdx, 0, draggingTab);
-    persistOrder(next);
-    setDraggingTab(null);
-    setDragOverTab(null);
-  }
 
   return (
     <div className="flex flex-col gap-5">
-      {/* Level-1 tab bar: kwikengage.ai "Marketing Insights" pattern
-          (2026-08-31 screenshot). Page title on left, tab strip flush
-          right beside it, active tab = text with a 2px blue underline
-          (no bg fill). This is the entity-scope switcher — each tab is
-          a whole sub-app, not a filter. Level-2 filter pills (e.g.
-          CPIS's "By UTM / By ad name", the date presets in Ads Analyse)
-          live INSIDE each section so they scope only that section.
-          Drag-to-reorder is preserved on the tab buttons. */}
+      {/* Kwikengage-style horizontal tab strip. Page title on the left,
+          tabs flush right, active tab underlined. URL-hash sync + browser
+          back/forward supported. Drag-to-reorder was removed on
+          2026-09-01 since the dropdown attempt turned out to be for the
+          CPIS-internal analytics view, not this level-1 nav. */}
       <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border-primary">
         <div className="flex flex-wrap items-end gap-1">
           <h1 className="mr-4 pb-3 text-[20px] font-semibold tracking-tight text-text-primary">
@@ -158,34 +129,16 @@ export function AnalyticsTabs() {
               return (
                 <button
                   key={t}
-                  draggable
                   onClick={() => setTab(t)}
-                  onDragStart={() => setDraggingTab(t)}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setDragOverTab(t);
-                  }}
-                  onDragLeave={() => setDragOverTab((prev) => (prev === t ? null : prev))}
-                  onDrop={() => handleDrop(t)}
-                  onDragEnd={() => {
-                    setDraggingTab(null);
-                    setDragOverTab(null);
-                  }}
-                  title="Drag to reorder"
-                  className={`relative cursor-grab px-3 pb-3 pt-1 text-[13px] font-medium transition-colors active:cursor-grabbing ${
+                  className={`relative px-3 pb-3 pt-1 text-[13px] font-medium transition-colors ${
                     active
                       ? "text-text-primary"
-                      : dragOverTab === t
-                        ? "text-text-primary"
-                        : "text-text-secondary hover:text-text-primary"
-                  } ${draggingTab === t ? "opacity-40" : ""}`}
+                      : "text-text-secondary hover:text-text-primary"
+                  }`}
                 >
                   {TAB_META[t].label}
                   {active && (
                     <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-yellow" />
-                  )}
-                  {!active && dragOverTab === t && (
-                    <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-amber" />
                   )}
                 </button>
               );

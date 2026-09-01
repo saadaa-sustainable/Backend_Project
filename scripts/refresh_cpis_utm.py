@@ -71,7 +71,14 @@ ALTER TABLE cpis_by_sku_utm
     ADD COLUMN IF NOT EXISTS halo_units     numeric,
     ADD COLUMN IF NOT EXISTS halo_revenue   numeric,
     ADD COLUMN IF NOT EXISTS halo_spend     numeric,
-    ADD COLUMN IF NOT EXISTS primary_weight numeric;
+    ADD COLUMN IF NOT EXISTS primary_weight numeric,
+    -- Value-weighted spend allocation. ad_spend above uses per-order
+    -- equal split; ad_spend_vw uses per-order value-weighted split.
+    -- Both columns computed in the same refresh pass.
+    ADD COLUMN IF NOT EXISTS ad_spend_vw           numeric,
+    ADD COLUMN IF NOT EXISTS cost_per_order_vw     numeric,
+    ADD COLUMN IF NOT EXISTS cost_per_unit_sold_vw numeric,
+    ADD COLUMN IF NOT EXISTS roas_vw               numeric;
 """
 
 
@@ -166,19 +173,28 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
     spend_map: dict[str, float] = {r[0]: float(r[1] or 0) for r in cur.fetchall()}
     print(f"[{window_key}]   -> {len(spend_map)} distinct ad_ids with spend", flush=True)
 
-    # Normalize spend allocation:
-    #   for each ad A, spend is split EVENLY across the distinct orders A
-    #   drove (per_order_share = A.total_spend / A.n_orders), THEN each
-    #   order's share is split across its own line items by revenue ratio.
-    # This sums to A.total_spend exactly -- earlier draft skipped the
-    # per-order normalization and blew SMCP spend up 10x.
+    # Compute TWO spend allocations in the same pass:
+    #
+    #   ad_spend    -- equal per order: per_order_share = A.spend / A.n_orders,
+    #                  then within-order share by line-item revenue ratio.
+    #                  Each conversion event counts equally regardless of value.
+    #
+    #   ad_spend_vw -- value-weighted per order: line_spend = A.spend ×
+    #                  (line_rev / SUM_of_all_line_revs_for_A). Simplifies
+    #                  because per_order_share × within_order_share collapses
+    #                  to (line_rev / total_ad_rev). Larger baskets absorb
+    #                  proportionally more spend.
+    #
+    # Both sum to A.spend exactly. Frontend toggle picks which to display.
     ad_order_counts: dict[str, set] = defaultdict(set)
-    for ad_id, order_id, *_ in lines:
+    ad_total_rev:    dict[str, float] = defaultdict(float)
+    for ad_id, order_id, _sku, _q, line_rev, _otr, _otq in lines:
         ad_order_counts[ad_id].add(order_id)
+        ad_total_rev[ad_id] += float(line_rev or 0)
 
     sku_agg: dict[str, dict] = defaultdict(lambda: {
         "orders": set(), "units": 0, "revenue": 0.0,
-        "ad_spend": 0.0, "ad_ids": set(),
+        "ad_spend": 0.0, "ad_spend_vw": 0.0, "ad_ids": set(),
     })
     for ad_id, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
         qty      = int(qty or 0)
@@ -192,6 +208,8 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         agg["ad_ids"].add(ad_id)
 
         ad_total_spend  = spend_map.get(ad_id, 0.0)
+
+        # --- equal-per-order allocation ---
         n_orders_for_ad = len(ad_order_counts[ad_id]) or 1
         per_order_share = ad_total_spend / n_orders_for_ad
         if order_total_rev > 0:
@@ -202,15 +220,29 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             within_order_share = 0.0
         agg["ad_spend"] += per_order_share * within_order_share
 
+        # --- value-weighted allocation ---
+        ad_rev_total = ad_total_rev[ad_id]
+        if ad_rev_total > 0:
+            agg["ad_spend_vw"] += ad_total_spend * (line_rev / ad_rev_total)
+        else:
+            # Whole ad drove zero revenue -- fall back to the equal-split
+            # slice so the two columns stay consistent when there's no
+            # signal to weight by.
+            agg["ad_spend_vw"] += per_order_share * within_order_share
+
     rows: list[tuple] = []
     for master_sku, agg in sku_agg.items():
-        orders   = len(agg["orders"])
-        units    = agg["units"]
-        revenue  = agg["revenue"]
-        ad_spend = agg["ad_spend"]
-        cost_per_order     = (ad_spend / orders) if orders else None
-        cost_per_unit_sold = (ad_spend / units)  if units  else None
-        roas               = (revenue / ad_spend) if ad_spend else None
+        orders      = len(agg["orders"])
+        units       = agg["units"]
+        revenue     = agg["revenue"]
+        ad_spend    = agg["ad_spend"]
+        ad_spend_vw = agg["ad_spend_vw"]
+        cost_per_order        = (ad_spend    / orders) if orders else None
+        cost_per_unit_sold    = (ad_spend    / units)  if units  else None
+        roas                  = (revenue     / ad_spend)    if ad_spend    else None
+        cost_per_order_vw     = (ad_spend_vw / orders) if orders else None
+        cost_per_unit_sold_vw = (ad_spend_vw / units)  if units  else None
+        roas_vw               = (revenue     / ad_spend_vw) if ad_spend_vw else None
         rows.append((
             master_sku, window_key, window_from, window_to,
             orders, units, revenue,
@@ -219,6 +251,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             # halo_* remain 0 pending a better halo-mapping approach.
             0, 0, 0.0, 0.0,
             None,  # primary_weight NULL under Option A (deterministic revenue split, not weighted)
+            ad_spend_vw, cost_per_order_vw, cost_per_unit_sold_vw, roas_vw,
         ))
 
     if rows:
@@ -231,11 +264,13 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
               matched_ad_count, ad_spend,
               cost_per_order, cost_per_unit_sold, roas,
               halo_orders, halo_units, halo_revenue, halo_spend,
-              primary_weight, computed_at
+              primary_weight,
+              ad_spend_vw, cost_per_order_vw, cost_per_unit_sold_vw, roas_vw,
+              computed_at
             ) VALUES %s
             """,
             rows,
-            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
         )
     print(f"[{window_key}]   -> inserted {len(rows)} rows", flush=True)
     return len(rows)

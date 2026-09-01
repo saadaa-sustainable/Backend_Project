@@ -2031,7 +2031,7 @@ _CPIS_UTM_SORT_COLUMNS = {
 
 class CpisUtmRow(BaseModel):
     master_sku: str
-    window_key: str
+    window_key: str | None  # None when a custom from_date/to_date range is used
     window_from: date | None
     window_to: date | None
     # Product-context (from raw_dump_shopify products with matching
@@ -2109,10 +2109,12 @@ class CpisUtmRow(BaseModel):
     mm_oos_days_90: int | None
     mm_lead_time: int | None
     mm_buffer_days: int | None
-    # UTM-attributed metrics (from cpis_by_sku_utm) -- kept as secondary
-    # comparison signal. Populated by refresh_cpis_utm.py with ad-name-
-    # weighted attribution (2026-09-01): primary = order lines whose SKU
-    # matches the ad's own name, halo = the rest of the same basket.
+    # UTM-attributed metrics (from cpis_by_sku_utm). Two spend allocations
+    # populated in one refresh pass -- frontend picks which to display via
+    # the "attribution mode" toggle:
+    #   ad_spend / cost_per_order / cost_per_unit_sold / roas          -- equal per order
+    #   ad_spend_vw / cost_per_order_vw / cost_per_unit_sold_vw / roas_vw -- value-weighted per order
+    # Both reconcile to the same total Meta ad-spend for UTM-attributed ads.
     attributed_orders: int | None
     attributed_units: int | None
     attributed_revenue: float | None
@@ -2121,6 +2123,10 @@ class CpisUtmRow(BaseModel):
     cost_per_order: float | None
     cost_per_unit_sold: float | None
     roas: float | None
+    ad_spend_vw: float | None
+    cost_per_order_vw: float | None
+    cost_per_unit_sold_vw: float | None
+    roas_vw: float | None
     # Halo counterpart -- basket effect from the same ad-driven orders.
     # Not counted in CPIS / ROAS (those use primary only); exposed here
     # so a merchant can see the full basket-level footprint per SKU.
@@ -2142,6 +2148,8 @@ class CpisUtmResponse(BaseModel):
 async def get_cpis_utm(
     session: SessionDep,
     window: Literal["7d", "30d", "90d"] = Query(default="30d"),
+    from_date: date | None = Query(default=None, description="Custom date range start. When provided together with to_date, overrides `window` and pulls a summed row set from cpis_by_sku_daily instead of the pre-computed cpis_by_sku_utm."),
+    to_date:   date | None = Query(default=None, description="Custom date range end (inclusive). Requires from_date."),
     search: str | None = Query(default=None, description="Matches master_sku, case-insensitive substring."),
     only_matched: bool = Query(default=True, description="Only SKUs with at least one attributed order."),
     sort: Literal["ad_spend", "attributed_orders", "attributed_units", "attributed_revenue", "cost_per_order", "cost_per_unit_sold", "roas"] = Query(default="attributed_units"),
@@ -2174,37 +2182,97 @@ async def get_cpis_utm(
     """
     sort_column = _CPIS_UTM_SORT_COLUMNS[sort]
 
-    where_clauses = ["c.window_key = :window"]
-    params: dict[str, object] = {"window": window}
-    if search:
-        where_clauses.append("c.master_sku ILIKE :search")
-        params["search"] = f"%{search}%"
-    if only_matched:
-        where_clauses.append("c.attributed_orders > 0")
-    where_sql = "WHERE " + " AND ".join(where_clauses)
+    # Two data paths:
+    #   1. Custom date range given (from_date + to_date) -> sum from
+    #      cpis_by_sku_daily on the fly, derived metrics recomputed at
+    #      the summed grain.
+    #   2. Otherwise -> use the pre-computed cpis_by_sku_utm (7d/30d/90d).
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+    if from_date and to_date:
+        params["from_date"] = from_date
+        params["to_date"]   = to_date
+        page_where = "WHERE day BETWEEN :from_date AND :to_date"
+        if search:
+            page_where += " AND master_sku ILIKE :search"
+            params["search"] = f"%{search}%"
+        having_clause = "HAVING SUM(attributed_orders) > 0" if only_matched else ""
+        # Aggregate cpis_by_sku_daily. SUM the raw metrics; derive the
+        # cost/ROAS columns from the sums so ratios stay honest at the
+        # summed grain (SUM(cost_per_order) would be nonsense).
+        page_cte = f"""
+          page AS (
+            SELECT master_sku,
+                   NULL::text  AS window_key,
+                   CAST(:from_date AS date) AS window_from,
+                   CAST(:to_date AS date)   AS window_to,
+                   SUM(attributed_orders)::int  AS attributed_orders,
+                   SUM(attributed_units)::int   AS attributed_units,
+                   SUM(attributed_revenue)      AS attributed_revenue,
+                   MAX(matched_ad_count)::int   AS matched_ad_count,
+                   SUM(ad_spend)                AS ad_spend,
+                   SUM(ad_spend_vw)             AS ad_spend_vw,
+                   CASE WHEN SUM(attributed_orders) > 0 THEN SUM(ad_spend)    / SUM(attributed_orders) END AS cost_per_order,
+                   CASE WHEN SUM(attributed_units)  > 0 THEN SUM(ad_spend)    / SUM(attributed_units)  END AS cost_per_unit_sold,
+                   CASE WHEN SUM(ad_spend)          > 0 THEN SUM(attributed_revenue) / SUM(ad_spend)    END AS roas,
+                   CASE WHEN SUM(attributed_orders) > 0 THEN SUM(ad_spend_vw) / SUM(attributed_orders) END AS cost_per_order_vw,
+                   CASE WHEN SUM(attributed_units)  > 0 THEN SUM(ad_spend_vw) / SUM(attributed_units)  END AS cost_per_unit_sold_vw,
+                   CASE WHEN SUM(ad_spend_vw)       > 0 THEN SUM(attributed_revenue) / SUM(ad_spend_vw) END AS roas_vw,
+                   0::int      AS halo_orders,
+                   0::numeric  AS halo_units,
+                   0::numeric  AS halo_revenue,
+                   0::numeric  AS halo_spend,
+                   NULL::numeric AS primary_weight
+            FROM cpis_by_sku_daily
+            {page_where}
+            GROUP BY master_sku
+            {having_clause}
+            ORDER BY {sort_column} DESC NULLS LAST
+            LIMIT :limit OFFSET :offset
+          ),
+          bounds AS (
+            SELECT CAST(:from_date AS date) AS lo, CAST(:to_date AS date) AS hi
+          ),
+        """
+        count_sql = (
+            "SELECT COUNT(*) FROM ("
+            "  SELECT master_sku FROM cpis_by_sku_daily "
+            f" {page_where} GROUP BY master_sku "
+            f" {having_clause}"
+            ") x"
+        )
+    else:
+        params["window"] = window
+        where_clauses = ["c.window_key = :window"]
+        if search:
+            where_clauses.append("c.master_sku ILIKE :search")
+            params["search"] = f"%{search}%"
+        if only_matched:
+            where_clauses.append("c.attributed_orders > 0")
+        where_sql_page = "WHERE " + " AND ".join(where_clauses)
+        page_cte = f"""
+          page AS (
+            SELECT master_sku, window_key, window_from, window_to,
+                   attributed_orders, attributed_units, attributed_revenue,
+                   matched_ad_count, ad_spend,
+                   cost_per_order, cost_per_unit_sold, roas,
+                   halo_orders, halo_units, halo_revenue, halo_spend,
+                   primary_weight,
+                   ad_spend_vw, cost_per_order_vw, cost_per_unit_sold_vw, roas_vw
+            FROM cpis_by_sku_utm c
+            {where_sql_page}
+            ORDER BY c.{sort_column} DESC NULLS LAST
+            LIMIT :limit OFFSET :offset
+          ),
+          bounds AS (
+            SELECT MIN(window_from) AS lo, MAX(window_to) AS hi
+            FROM cpis_by_sku_utm
+            WHERE window_key = :window
+          ),
+        """
+        count_sql = f"SELECT COUNT(*) FROM cpis_by_sku_utm c {where_sql_page}"
 
     sql = f"""
-      WITH page AS (
-        SELECT master_sku, window_key, window_from, window_to,
-               attributed_orders, attributed_units, attributed_revenue,
-               matched_ad_count, ad_spend,
-               cost_per_order, cost_per_unit_sold, roas,
-               halo_orders, halo_units, halo_revenue, halo_spend,
-               primary_weight
-        FROM cpis_by_sku_utm c
-        {where_sql}
-        ORDER BY c.{sort_column} DESC NULLS LAST
-        LIMIT :limit OFFSET :offset
-      ),
-      -- Window bounds derived from cpis_by_sku_utm's stored window_from
-      -- / window_to (anchored at max(insights.date_start) by the refresh
-      -- script). Same value across every row for a given window_key, so
-      -- one MIN/MAX collapse is fine.
-      bounds AS (
-        SELECT MIN(window_from) AS lo, MAX(window_to) AS hi
-        FROM cpis_by_sku_utm
-        WHERE window_key = :window
-      ),
+      WITH {page_cte}
       -- Windowed per-ad metrics from the materialised insights_daily_by_ad
       -- table (see scripts/refresh_insights_daily_by_ad.py). This
       -- replaces the earlier raw_dump_meta JSONB scan that took 60+s
@@ -2426,6 +2494,7 @@ async def get_cpis_utm(
              p.cost_per_order, p.cost_per_unit_sold, p.roas,
              p.halo_orders, p.halo_units, p.halo_revenue, p.halo_spend,
              p.primary_weight,
+             p.ad_spend_vw, p.cost_per_order_vw, p.cost_per_unit_sold_vw, p.roas_vw,
              CASE WHEN COALESCE(p.attributed_units, 0) > 0
                   THEN p.attributed_revenue / p.attributed_units
                   ELSE NULL END AS avg_selling_price
@@ -2463,11 +2532,9 @@ async def get_cpis_utm(
         row_dict["spend_trend_current"] = parsed
         rows.append(CpisUtmRow(**row_dict))
 
-    total = (
-        await session.execute(
-            text(f"SELECT COUNT(*) FROM cpis_by_sku_utm c {where_sql}"), params
-        )
-    ).scalar_one()
+    # `count_sql` was built above alongside `page_cte` to match whichever
+    # source we picked (daily vs pre-computed) -- reuse it here.
+    total = (await session.execute(text(count_sql), params)).scalar_one()
 
     return CpisUtmResponse(rows=rows, total=total)
 

@@ -1192,17 +1192,26 @@ export interface CpisUtmRow {
   mm_oos_days_90: number | null;
   mm_lead_time: number | null;
   mm_buffer_days: number | null;
-  // UTM-attributed (secondary comparison signal) -- ad-name-weighted
-  // attribution (2026-09-01): primary = order lines whose SKU matches
-  // the ad's own name; halo = the rest of the same basket.
+  // UTM-attributed (secondary comparison signal). Two spend allocations
+  // populated in one refresh pass -- attribution-mode toggle picks which
+  // to render:
+  //   equal   : each order carries the same slice of ad spend, then
+  //             within-order split by line-item revenue
+  //   value_weighted : each order carries spend proportional to its own
+  //                    value (bigger baskets absorb more)
+  // Both reconcile to the exact same total Meta ad-spend.
   attributed_orders: number | null;
   attributed_units: number | null;
   attributed_revenue: number | null;
   matched_ad_count: number | null;
-  ad_spend: number | null;
+  ad_spend: number | null;              // equal-per-order
   cost_per_order: number | null;
   cost_per_unit_sold: number | null;
   roas: number | null;
+  ad_spend_vw: number | null;           // value-weighted
+  cost_per_order_vw: number | null;
+  cost_per_unit_sold_vw: number | null;
+  roas_vw: number | null;
   // Halo counterpart -- basket effect from the same ad-driven orders.
   // Not counted in CPIS / ROAS (those use primary only).
   halo_orders: number | null;
@@ -1214,6 +1223,8 @@ export interface CpisUtmRow {
   avg_selling_price: number | null;
 }
 
+export type CpisAttributionMode = "equal" | "value_weighted";
+
 export interface CpisUtmResponse {
   rows: CpisUtmRow[];
   total: number;
@@ -1221,6 +1232,10 @@ export interface CpisUtmResponse {
 
 export interface CpisUtmParams {
   window?: CpisUtmWindow;
+  // Custom date range. When both are set, overrides `window` and pulls
+  // a summed row set from cpis_by_sku_daily on the fly.
+  from_date?: string;    // YYYY-MM-DD
+  to_date?:   string;    // YYYY-MM-DD
   search?: string;
   only_matched?: boolean;
   sort?: CpisUtmSort;
@@ -1230,7 +1245,12 @@ export interface CpisUtmParams {
 
 export function fetchCpisUtm(params: CpisUtmParams = {}): Promise<CpisUtmResponse> {
   const qs = new URLSearchParams();
-  if (params.window) qs.set("window", params.window);
+  if (params.from_date && params.to_date) {
+    qs.set("from_date", params.from_date);
+    qs.set("to_date",   params.to_date);
+  } else if (params.window) {
+    qs.set("window", params.window);
+  }
   if (params.search) qs.set("search", params.search);
   if (params.only_matched !== undefined) qs.set("only_matched", String(params.only_matched));
   if (params.sort) qs.set("sort", params.sort);
