@@ -2,8 +2,13 @@
 // (app/api/routers/admin.py). Kept deliberately free of any UI concerns —
 // pages import types and call functions from here, nothing more.
 
+// Default port is 8002 (was 8001 before a stuck-socket incident on
+// 2026-08-29). Port 8000 is typically occupied by CTD's api_ae.py in
+// local dev on this machine. Override with NEXT_PUBLIC_API_BASE_URL
+// in .env.local if you're running this project's FastAPI backend
+// somewhere else.
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8002";
 
 export type ColumnKind = "identity" | "numeric" | "jsonb" | "other";
 
@@ -533,6 +538,9 @@ export function fetchAdLifecycle(params: AdLifecycleParams = {}): Promise<AdLife
 
 export interface AdsAnalyseRow {
   ad_id: string;
+  adset_id: string | null;
+  campaign_id: string | null;
+  account_id: string | null;
   ad_name: string | null;
   ad_status: string | null;
   ad_effective_status: string | null;
@@ -542,7 +550,10 @@ export interface AdsAnalyseRow {
   category: string | null;
   spend: number | null;
   impressions: number | null;
+  reach: number | null;
+  frequency: number | null;
   purchases: number | null;
+  conv_value: number | null;
   meta_conv_value: number | null;
   meta_roas: number | null;
   cost_per_purchase: number | null;
@@ -553,21 +564,98 @@ export interface AdsAnalyseRow {
   shopify_roas: number | null;
   cost_per_shopify_order: number | null;
   gold_refreshed_at: string | null;
+  f1_pass: boolean | null;
+  f2_pass: boolean | null;
+  f3_pass: boolean | null;
+  f4_pass: boolean | null;
+  ncp_count: number | null;
+  ftewv_count: number | null;
+  cost_per_ncp: number | null;
+  cost_per_ftewv: number | null;
+  roas: number | null;
+  contrib_margin_pct: number | null;
+  profit_efficiency: number | null;
+  cpr_1000: number | null;
+  cpc_link: number | null;
+  checkout_compl_pct: number | null;
+  cr_lc_pct: number | null;
+  atc_lc_pct: number | null;
+  ci_atc_pct: number | null;
+  ad_created_date: string | null;
+  // Tier-2 derivables (backend computes in SELECT)
+  link_clicks_raw: number | null;
+  atc_count: number | null;
+  ci_count: number | null;
+  engagement_count: number | null;
+  cost_per_1000: number | null;
+  meta_shop_diff_pct: number | null;
+  pct_reach_ftewv: number | null;
+  ltv_reach: number | null;
+  ltv_frequency: number | null;
+  first_seen_date: string | null;
+}
+
+export interface AdsAnalyseTotals {
+  ad_count: number;
+  spend: number;
+  impressions: number;
+  reach: number;
+  purchases: number;
+  conv_value: number;
+  shopify_orders: number;
+  shopify_revenue: number;
+  ncp_count: number;
+  ftewv_count: number;
+  avg_meta_roas: number | null;
+  avg_shopify_roas: number | null;
+  avg_ctr_pct: number | null;
 }
 
 export interface AdsAnalyseResponse {
   rows: AdsAnalyseRow[];
   total: number;
+  /** Ad count per category under the current filters (except `category` itself).
+   * Powers the KPI tiles that mirror CTD's Creative Testing view. */
+  category_counts: Record<string, number>;
+  /** Aggregate totals for the KPI strip -- kwikengage-style Marketing Insights row.
+   * Reflects the same filter set as `rows`. */
+  totals: AdsAnalyseTotals;
 }
 
-export type AdsAnalyseSort = "spend" | "meta_roas" | "shopify_roas" | "shopify_revenue" | "impressions";
+export type AdsAnalyseDateField = "created" | "first_seen" | "delivery";
+
+export type AdsAnalyseSort =
+  | "spend"
+  | "meta_roas"
+  | "shopify_roas"
+  | "shopify_revenue"
+  | "impressions"
+  | "cost_per_ncp"
+  | "cost_per_ftewv"
+  | "contrib_margin_pct"
+  | "roas";
 
 export interface AdsAnalyseParams {
   account_name?: string;
   campaign_name?: string;
   ad_effective_status?: string;
+  category?: string;
+  /** Filter to ads that passed / failed a specific F-test. Backend accepts
+   * each F flag independently; combine them for e.g. "F1+F2 passed but F3
+   * failed" -- exactly the CTD Creative Testing power-user pattern. */
+  f1_pass?: boolean;
+  f2_pass?: boolean;
+  f3_pass?: boolean;
+  f4_pass?: boolean;
   search?: string;
   only_with_shopify_orders?: boolean;
+  /** When both from_date and to_date are set, the window is applied
+   * per date_field: 'created' filters rows by ad_created_date;
+   * 'first_seen' filters by first_seen_date; 'delivery' keeps every
+   * row but overlays windowed spend/impressions/reach. YYYY-MM-DD. */
+  from_date?: string;
+  to_date?: string;
+  date_field?: AdsAnalyseDateField;
   sort?: AdsAnalyseSort;
   limit?: number;
   offset?: number;
@@ -578,8 +666,16 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   if (params.account_name) qs.set("account_name", params.account_name);
   if (params.campaign_name) qs.set("campaign_name", params.campaign_name);
   if (params.ad_effective_status) qs.set("ad_effective_status", params.ad_effective_status);
+  if (params.category) qs.set("category", params.category);
+  if (params.f1_pass !== undefined) qs.set("f1_pass", String(params.f1_pass));
+  if (params.f2_pass !== undefined) qs.set("f2_pass", String(params.f2_pass));
+  if (params.f3_pass !== undefined) qs.set("f3_pass", String(params.f3_pass));
+  if (params.f4_pass !== undefined) qs.set("f4_pass", String(params.f4_pass));
   if (params.search) qs.set("search", params.search);
   if (params.only_with_shopify_orders) qs.set("only_with_shopify_orders", "true");
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.date_field) qs.set("date_field", params.date_field);
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
@@ -591,13 +687,23 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
 // Last Click UTM -- order-level Shopify -> Meta attribution
 // ---------------------------------------------------------------------
 
-export type UtmChannel = "Meta" | "Google" | "Retention" | "Other";
+export type UtmChannel =
+  | "Meta"
+  | "Google"
+  | "Organic (IG)"
+  | "Retention"
+  | "Brand Collab"
+  | "AI"
+  | "Organic (Direct)"
+  | "Loyalty"
+  | "Other";
 
 export interface UtmOrderRow {
   order_id: string;
   name: string | null;
   total_price: number | null;
   created_at: string | null;
+  customer_id: string | null;
   utm_source: string | null;
   utm_medium: string | null;
   utm_campaign: string | null;
@@ -606,12 +712,22 @@ export interface UtmOrderRow {
   tier: string | null;
   matched_ad_id: string | null;
   matched_ad_name: string | null;
+  matched_adset_id: string | null;
   matched_campaign_id: string | null;
   matched_campaign_name: string | null;
+  contact_email: string | null;
+  customer_num_orders: number | null;
   channel: UtmChannel;
+  has_match: boolean;
 }
 
 export interface ChannelSummary {
+  count: number;
+  sales: number;
+}
+
+export interface SourceBreakdown {
+  utm_source: string | null;
   count: number;
   sales: number;
 }
@@ -621,15 +737,27 @@ export interface UtmOrderResponse {
   total: number;
   channel_counts: Record<UtmChannel, ChannelSummary>;
   tier_counts: Record<string, number>;
+  channel_sources: Record<UtmChannel, SourceBreakdown[]>;
 }
 
 export interface LastClickUtmParams {
   channel?: UtmChannel;
   tier?: string;
+  /** Comma-separated (multi-select popover in CTD). */
   utm_source?: string;
+  utm_medium?: string;
+  /** Comma-separated terms, prefix with "!" to exclude (CTD's IN/EX pill). */
   utm_campaign?: string;
+  utm_content?: string;
+  utm_term?: string;
+  /** Same IN/EX comma format; matches matched_ad_name. */
+  matched_value?: string;
+  only_matched?: boolean;
+  only_unmatched?: boolean;
   search?: string;
-  sort?: "created_at" | "total_price";
+  from_date?: string; // YYYY-MM-DD
+  to_date?: string;
+  sort?: "created_at" | "total_price" | "customer_num_orders";
   limit?: number;
   offset?: number;
 }
@@ -639,8 +767,16 @@ export function fetchLastClickUtm(params: LastClickUtmParams = {}): Promise<UtmO
   if (params.channel) qs.set("channel", params.channel);
   if (params.tier) qs.set("tier", params.tier);
   if (params.utm_source) qs.set("utm_source", params.utm_source);
+  if (params.utm_medium) qs.set("utm_medium", params.utm_medium);
   if (params.utm_campaign) qs.set("utm_campaign", params.utm_campaign);
+  if (params.utm_content) qs.set("utm_content", params.utm_content);
+  if (params.utm_term) qs.set("utm_term", params.utm_term);
+  if (params.matched_value) qs.set("matched_value", params.matched_value);
+  if (params.only_matched) qs.set("only_matched", "true");
+  if (params.only_unmatched) qs.set("only_unmatched", "true");
   if (params.search) qs.set("search", params.search);
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
@@ -918,10 +1054,15 @@ export interface CpisRow {
   ending_inventory_units: number | null;
   avg_sell_through_rate: number | null;
   matched_ad_count: number | null;
+  // Windowed metrics (computed from raw_dump_meta) — respect the picked window.
   ad_spend: number | null;
   ncp_count: number | null;
   cost_per_ncp: number | null;
   cost_per_unit_sold: number | null;
+  // Lifetime reference values (from cpis_by_sku direct storage) so the
+  // UI can show "windowed / lifetime" pairs.
+  ad_spend_lifetime: number | null;
+  ncp_count_lifetime: number | null;
 }
 
 export interface CpisResponse {
@@ -953,9 +1094,17 @@ export function fetchCpis(params: CpisParams = {}): Promise<CpisResponse> {
 export interface CpisMatchedAdRow {
   ad_id: string;
   ad_name: string | null;
+  ad_effective_status: string | null;
+  account_name: string | null;
+  category: string | null;
   spend: number | null;
   ncp_count: number | null;
-  category: string | null;
+  conv_value: number | null;
+  roas: number | null;
+  cost_per_ncp: number | null;
+  impressions: number | null;
+  clicks: number | null;
+  ctr: number | null;
 }
 
 export interface CpisMatchedAdsResponse {
@@ -965,6 +1114,254 @@ export interface CpisMatchedAdsResponse {
 
 export function fetchCpisMatchedAds(masterSku: string): Promise<CpisMatchedAdsResponse> {
   return request<CpisMatchedAdsResponse>(`/admin/analytics/cpis/${encodeURIComponent(masterSku)}/ads`);
+}
+
+// ---------------------------------------------------------------------
+// CPIS via UTM-attributed orders (order.utm_content -> ad_id,
+// order.line_items.sku -> master_sku). Real attribution, not correlation.
+// See app/services/gold/cpis_utm.py for the module-level rationale.
+// ---------------------------------------------------------------------
+
+export type CpisUtmWindow = "7d" | "30d" | "90d";
+
+export type CpisUtmSort =
+  | "ad_spend"
+  | "attributed_orders"
+  | "attributed_units"
+  | "attributed_revenue"
+  | "cost_per_order"
+  | "cost_per_unit_sold"
+  | "roas";
+
+export interface CpisUtmRow {
+  master_sku: string;
+  window_key: CpisUtmWindow;
+  window_from: string | null;
+  window_to: string | null;
+  // Product context (from raw_dump_shopify products with SKU-tag match)
+  product_name: string | null;
+  category: string | null;
+  product_type_count: number | null;
+  price_min: number | null;
+  price_max: number | null;
+  variant_count: number | null;
+  available_variant_count: number | null;
+  // Name-matched (primary attribution: SKU code in ad_name)
+  name_matched_ads: number | null;
+  name_matched_spend: number | null;
+  name_matched_ncp: number | null;
+  name_matched_roas_lifetime: number | null;
+  name_matched_nc_roas: number | null;
+  active_creative_count: number | null;
+  winning_creative_count: number | null;
+  active_spend_per_day: number | null;
+  lc_avg_order_value: number | null;
+  lc_avg_qty_per_order: number | null;
+  // Sparkline: daily spend series for the picked window + previous
+  // period total (same-length days before window_from) for a % change
+  // comparison. Nulls when no name-matched ads had any spend.
+  spend_trend_current: number[] | null;
+  spend_trend_prev_total: number | null;
+  // Inventory rollup on master_sku (latest per variant SKU)
+  units_in_stock: number | null;
+  // MapleMonk inventory-planning (variant-latest, aggregated per
+  // master_sku from bq_inventory_daily's 90-day pull)
+  mm_as_of_date: string | null;
+  mm_variant_ct: number | null;
+  mm_current_stock: number | null;
+  mm_total_inprogress: number | null;
+  mm_daily_quantity: number | null;
+  mm_t45_quantity: number | null;
+  mm_total_sales_45d: number | null;
+  // Every DoQ variant MapleMonk publishes, aggregated to master SKU
+  // (AVG across variants -- DoQ is a per-variant rate).
+  mm_doq_7: number | null;
+  mm_doq_15: number | null;
+  mm_doq_30: number | null;
+  mm_doq_45: number | null;
+  mm_doq_90: number | null;
+  mm_doq_365: number | null;
+  mm_doq_7_30: number | null;
+  mm_doq_30_45: number | null;
+  mm_weighted_doq_45: number | null;
+  mm_weightage_doq: number | null;
+  mm_monthly_doq: number | null;
+  mm_yearly_doq: number | null;
+  mm_v_doq: number | null;
+  mm_oos_days_30: number | null;
+  mm_oos_days_90: number | null;
+  mm_lead_time: number | null;
+  mm_buffer_days: number | null;
+  // UTM-attributed (secondary comparison signal) -- ad-name-weighted
+  // attribution (2026-09-01): primary = order lines whose SKU matches
+  // the ad's own name; halo = the rest of the same basket.
+  attributed_orders: number | null;
+  attributed_units: number | null;
+  attributed_revenue: number | null;
+  matched_ad_count: number | null;
+  ad_spend: number | null;
+  cost_per_order: number | null;
+  cost_per_unit_sold: number | null;
+  roas: number | null;
+  // Halo counterpart -- basket effect from the same ad-driven orders.
+  // Not counted in CPIS / ROAS (those use primary only).
+  halo_orders: number | null;
+  halo_units: number | null;
+  halo_revenue: number | null;
+  halo_spend: number | null;
+  primary_weight: number | null;
+  // Derived: attributed_revenue / attributed_units
+  avg_selling_price: number | null;
+}
+
+export interface CpisUtmResponse {
+  rows: CpisUtmRow[];
+  total: number;
+}
+
+export interface CpisUtmParams {
+  window?: CpisUtmWindow;
+  search?: string;
+  only_matched?: boolean;
+  sort?: CpisUtmSort;
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchCpisUtm(params: CpisUtmParams = {}): Promise<CpisUtmResponse> {
+  const qs = new URLSearchParams();
+  if (params.window) qs.set("window", params.window);
+  if (params.search) qs.set("search", params.search);
+  if (params.only_matched !== undefined) qs.set("only_matched", String(params.only_matched));
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<CpisUtmResponse>(`/admin/analytics/cpis-utm${s ? `?${s}` : ""}`);
+}
+
+export interface CpisSpendTrendResponse {
+  master_sku: string;
+  window_key: CpisUtmWindow;
+  window_from: string | null;
+  window_to: string | null;
+  spend_trend_current: number[];
+  spend_trend_prev_total: number | null;
+}
+
+export function fetchCpisSpendTrend(masterSku: string, window: CpisUtmWindow): Promise<CpisSpendTrendResponse> {
+  const qs = new URLSearchParams({ master_sku: masterSku, window });
+  return request<CpisSpendTrendResponse>(`/admin/analytics/cpis-utm/spend-trend?${qs.toString()}`);
+}
+
+// ---------------------------------------------------------------------
+// Instagram — per-post Silver read over public.insta_data
+// ---------------------------------------------------------------------
+
+export interface InstagramPostRow {
+  id: string;
+  source_id: string | null;
+  media_id: string | null;
+  ig_object_id: string | null;
+  username: string | null;
+  media_owner_username: string | null;
+  caption: string | null;
+  media_url: string | null;
+  thumbnail_url: string | null;
+  media_type: string | null;
+  media_product_type: string | null;
+  media_audio_type: string | null;
+  permalink: string | null;
+  shortcode: string | null;
+  posted_at: string | null;
+  is_comment_enabled: boolean | null;
+  is_shared_to_feed: boolean | null;
+  is_ai_generated: boolean | null;
+  like_count: number | null;
+  comments_count: number | null;
+  total_like_count: number | null;
+  total_comments_count: number | null;
+  total_views_count: number | null;
+  saved_count: number | null;
+  shares_count: number | null;
+  reposts_count: number | null;
+  insights_reach: number | null;
+  insights_views: number | null;
+  avg_watch_time_ms: number | null;
+  total_watch_time_ms: number | null;
+  reels_skip_rate_pct: number | null;
+  insights_follows: number | null;
+  insights_profile_visits: number | null;
+  insights_profile_activity: number | null;
+  insights_navigation: number | null;
+  insights_replies: number | null;
+  insights_total_interactions: number | null;
+  ingested_at: string | null;
+}
+
+export interface InstagramProfile {
+  username: string | null;
+  ig_user_id: string | null;
+  biography: string | null;
+  website: string | null;
+  profile_picture_url: string | null;
+  followers_count: number | null;
+  follows_count: number | null;
+  media_count: number | null;
+}
+
+export interface InstagramSummary {
+  total_posts: number;
+  total_reach: number;
+  total_views: number;
+  total_likes: number;
+  total_comments: number;
+  avg_engagement_rate_pct: number | null;
+  media_type_counts: Record<string, number>;
+  profiles: InstagramProfile[];
+  silver_last_ingested_at: string | null;
+}
+
+export interface InstagramPostsResponse {
+  rows: InstagramPostRow[];
+  total: number;
+  summary: InstagramSummary;
+}
+
+export type InstagramSort =
+  | "posted_at"
+  | "like_count"
+  | "comments_count"
+  | "insights_reach"
+  | "insights_views"
+  | "total_views_count"
+  | "insights_total_interactions";
+
+export interface InstagramParams {
+  username?: string;
+  media_type?: string;
+  media_product_type?: string;
+  search?: string;
+  from_date?: string;
+  to_date?: string;
+  sort?: InstagramSort;
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchInstagram(params: InstagramParams = {}): Promise<InstagramPostsResponse> {
+  const qs = new URLSearchParams();
+  if (params.username) qs.set("username", params.username);
+  if (params.media_type) qs.set("media_type", params.media_type);
+  if (params.media_product_type) qs.set("media_product_type", params.media_product_type);
+  if (params.search) qs.set("search", params.search);
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const s = qs.toString();
+  return request<InstagramPostsResponse>(`/admin/analytics/instagram${s ? `?${s}` : ""}`);
 }
 
 // ---------------------------------------------------------------------
@@ -1049,6 +1446,26 @@ export interface OverviewSummaryResponse {
 export function fetchOverviewSummary(): Promise<OverviewSummaryResponse> {
   return request<OverviewSummaryResponse>(`/admin/analytics/overview-summary`);
 }
+
+// Dashboard tab -- per-widget fetchers. Fire in parallel and render
+// each widget as its own data arrives (progressive loading).
+export interface DashboardKpis {
+  total_spend: number;
+  total_impressions: number;
+  total_shopify_revenue: number;
+  total_shopify_orders: number;
+}
+
+export const fetchDashboardKpis = () =>
+  request<DashboardKpis>(`/admin/analytics/dashboard/kpis`);
+export const fetchDashboardCategoryBreakdown = () =>
+  request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown`);
+export const fetchDashboardChannelBreakdown = () =>
+  request<BreakdownItem[]>(`/admin/analytics/dashboard/channel-breakdown`);
+export const fetchDashboardTopLandingPages = () =>
+  request<TopLandingPage[]>(`/admin/analytics/dashboard/top-landing-pages`);
+export const fetchDashboardTopCpisSkus = () =>
+  request<TopCpisSku[]>(`/admin/analytics/dashboard/top-cpis-skus`);
 
 export function retryFailedJobs(maxJobs = 100): Promise<RetryFailedJobsResponse> {
   return request<RetryFailedJobsResponse>(`/failed-jobs/retry?max_jobs=${maxJobs}`, {

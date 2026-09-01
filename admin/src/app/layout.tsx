@@ -28,8 +28,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="flex h-full bg-bg-base font-sans text-text-primary">
         <SelectionProvider>
           <AppNav />
-          <main className="min-w-0 flex-1 overflow-y-auto">
-            <div className="mx-auto w-full max-w-7xl px-8 py-8">{children}</div>
+          <main className="min-w-0 flex-1 overflow-y-auto bg-bg-base">
+            <div className="mx-auto w-full max-w-[1600px] px-8 py-8">{children}</div>
           </main>
         </SelectionProvider>
       </body>
