@@ -13,57 +13,73 @@
    a second mechanical rename pass across every file that references it --
    its value is the primary blue now, not yellow. */
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
+  /* Palette: kwikengage.ai. Screenshot-derived (2026-08-31). Sidebar is
+     a very dark blue-navy, main canvas is a neutral very-light gray, one
+     bright blue for CTAs, and pale muted greens/reds/ambers for status
+     pills. Token names are intentionally unchanged from the earlier
+     Snowflake/Databricks pass (accent-yellow, sb-*, etc.) so every
+     component wired to them picks up the new look with no per-component
+     rename churn. */
+  --background: #F4F6F9;
+  --foreground: #111827;
 
-  --bg-base: #f8fafc;
-  --bg-surface: #f1f5f9;
+  --bg-base: #F4F6F9;
+  --bg-surface: #EEF0F5;
   --bg-white: #ffffff;
-  --bg-muted: #eef2f6;
+  --bg-muted: #EEF0F5;
 
-  --text-primary: #0f172a;
-  --text-secondary: #64748b;
-  --text-tertiary: #94a3b8;
-  --text-link: #2563eb;
+  --text-primary: #111827;
+  --text-secondary: #6B7280;
+  --text-tertiary: #9CA3AF;
+  --text-link: #3B6BF5;
 
-  --border-primary: #e2e8f0;
-  --border-soft: #edf1f5;
-  --border-mid: #cbd5e1;
+  --border-primary: #E5E7EB;
+  --border-soft: #EEF0F3;
+  --border-mid: #D1D5DB;
 
   /* Primary accent -- CTAs, active states, links. Kept the historical
-     var name `accent-yellow` (see file docstring above). */
-  --accent-yellow: #2563eb;
-  --accent-yellow-hover: #1d4ed8;
-  --accent-yellow-bg: #eff6ff;
-  --accent-amber: #93c5fd;
+     var name `accent-yellow` (see file docstring above). Value is now
+     kwikengage's exact CTA blue. */
+  --accent-yellow: #3B6BF5;
+  --accent-yellow-hover: #2952DE;
+  --accent-yellow-bg: #EEF3FF;
+  --accent-amber: #A7BFF9;
 
-  --success-text: #15803d;
+  /* Status pills — pale bg + dark text pattern from kwikengage's table
+     "Completed" cell (2026-08-31 screenshot). */
+  --success-text: #2E7D32;
   --success-mid: #16a34a;
-  --success-bg: #f0fdf4;
-  --warning-text: #b45309;
-  --warning-mid: #d97706;
-  --warning-bg: #fffbeb;
-  --warning-border: #fde68a;
-  --error-text: #b91c1c;
-  --error-mid: #dc2626;
-  --error-bg: #fef2f2;
-  --info-text: #1d4ed8;
-  --info-mid: #2563eb;
-  --info-bg: #eff6ff;
+  --success-bg: #E6F7EA;
+  --warning-text: #B45309;
+  --warning-mid: #D97706;
+  --warning-bg: #FFF7ED;
+  --warning-border: #FED7AA;
+  --error-text: #B91C1C;
+  --error-mid: #DC2626;
+  --error-bg: #FEF2F2;
+  --info-text: #1D4ED8;
+  --info-mid: #3B6BF5;
+  --info-bg: #EEF3FF;
 
   --accent-purple: #7c3aed;
-  --accent-purple-bg: #f5f3ff;
-  --accent-pink: #db2777;
-  --accent-pink-bg: #fdf2f8;
-  --accent-indigo: #4f46e5;
-  --accent-indigo-bg: #eef2ff;
+  --accent-purple-bg: #F5F3FF;
+  --accent-pink: #DB2777;
+  --accent-pink-bg: #FDF2F8;
+  --accent-indigo: #4F46E5;
+  --accent-indigo-bg: #EEF2FF;
 
-  --sb-bg: #0f172a;
-  --sb-surface: #1e293b;
-  --sb-text: #cbd5e1;
-  --sb-text-muted: #64748b;
-  --sb-active: #2563eb;
-  --sb-border: #1e293b;
+  /* Sidebar -- KwikEngage dark navy. `sb-surface` is a slightly lighter
+     panel used for active-item highlight, and `sb-section` is the very
+     muted gray used for the small uppercase section labels
+     ("MARKETING & RETENTION", "AUDIENCE", ...). */
+  --sb-bg: #22263D;
+  --sb-surface: #2E3352;
+  --sb-text: #C8CCD4;
+  --sb-text-muted: #8B94A6;
+  --sb-section: #6B7290;
+  --sb-active: #3B6BF5;
+  --sb-active-bg: #2E3352;
+  --sb-border: #2A2F4A;
 }
 
 @theme inline {
@@ -116,7 +132,9 @@
   --color-sb-surface: var(--sb-surface);
   --color-sb-text: var(--sb-text);
   --color-sb-text-muted: var(--sb-text-muted);
+  --color-sb-section: var(--sb-section);
   --color-sb-active: var(--sb-active);
+  --color-sb-active-bg: var(--sb-active-bg);
   --color-sb-border: var(--sb-border);
 }
 
@@ -149,3 +167,194 @@ body {
 .animate-progress-indeterminate {
   animation: progress-indeterminate 1.1s ease-in-out infinite;
 }
+
+/* --------------------------------------------------------------------
+   Ads Analyse (Creative Testing) — port of CTD dashboard.js class names
+   so category / flag / status / landing-page badges render with the
+   same colors users are used to. Palette matches CTD's:
+     Incremental Winner / Winner  -> green
+     P0 analysis                  -> yellow
+     P1 / P2 analysis             -> blue
+     Result Awaited               -> gray
+     Discarded                    -> red
+   Ad status "ACTIVE" gets the green pill; every other status is neutral.
+   F1..F4 flag pass -> green, fail -> red.
+   Landing-page badges match CTD's URL-type coloring (collection / product /
+   page / homepage / blog / other).
+   -------------------------------------------------------------------- */
+
+.cat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+.cat-iw       { background: #d1fae5; color: #065f46; }
+.cat-winner   { background: #d1fae5; color: #065f46; }
+.cat-priority { background: #fef3c7; color: #92400e; }
+.cat-a1       { background: #dbeafe; color: #1e40af; }
+.cat-a2       { background: #dbeafe; color: #1e40af; }
+.cat-ra       { background: #e2e8f0; color: #475569; }
+.cat-disc     { background: #fee2e2; color: #991b1b; }
+
+.cat-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+  background: #fff;
+  text-align: left;
+}
+.cat-tile:hover { background: #f8fafc; }
+.cat-tile-selected {
+  border-color: #0f172a;
+  background: #f1f5f9;
+  box-shadow: 0 0 0 1px #0f172a inset;
+}
+.cat-tile-iw       { border-left: 3px solid #10b981; }
+.cat-tile-winner   { border-left: 3px solid #10b981; }
+.cat-tile-priority { border-left: 3px solid #f59e0b; }
+.cat-tile-a1       { border-left: 3px solid #3b82f6; }
+.cat-tile-a2       { border-left: 3px solid #3b82f6; }
+.cat-tile-ra       { border-left: 3px solid #94a3b8; }
+.cat-tile-disc     { border-left: 3px solid #ef4444; }
+
+.ae-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.ae-flag.y { background: #d1fae5; color: #065f46; }
+.ae-flag.n { background: #fee2e2; color: #991b1b; }
+.ae-flag.u { background: #f1f5f9; color: #94a3b8; }
+
+.ae-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.25rem;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+.ae-status.active { background: #d1fae5; color: #065f46; }
+
+.lp-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.4rem;
+  border-radius: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  margin-right: 0.35rem;
+}
+.lp-coll  { background: #f3e8ff; color: #6b21a8; }
+.lp-prod  { background: #f3e8ff; color: #6b21a8; }
+.lp-page  { background: #dbeafe; color: #1e40af; }
+.lp-home  { background: #d1fae5; color: #065f46; }
+.lp-blog  { background: #ffedd5; color: #9a3412; }
+.lp-other { background: #e2e8f0; color: #475569; }
+
+/* Sticky-header table for the wide Ads Analyse layout so the column
+   headers stay pinned as the user scrolls right through 68 columns. */
+.ae-table thead th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  z-index: 1;
+}
+.ae-table tbody td {
+  white-space: nowrap;
+}
+.ae-table .num {
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+/* --------------------------------------------------------------------
+   Ad Intelligence (Last Click UTM) — port of CTD's channel + tier +
+   status badge classes from dashboard.js:5351-5361 (channel colors) and
+   2061-2068 / 5012-5020 (tier classes t1..t4).
+   -------------------------------------------------------------------- */
+
+.ai-channel-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-left-width: 3px;
+  background: #fff;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  text-align: left;
+}
+.ai-channel-tile:hover { background: #f8fafc; }
+.ai-channel-tile.selected {
+  background: #f1f5f9;
+  box-shadow: 0 0 0 1px #0f172a inset;
+}
+.ai-ch-total     { border-left-color: #0f172a; }
+.ai-ch-meta      { border-left-color: #1877F2; }
+.ai-ch-google    { border-left-color: #34A853; }
+.ai-ch-ig        { border-left-color: #E1306C; }
+.ai-ch-retention { border-left-color: #8B5CF6; }
+.ai-ch-collab    { border-left-color: #F59E0B; }
+.ai-ch-ai        { border-left-color: #10B981; }
+.ai-ch-direct    { border-left-color: #14B8A6; }
+.ai-ch-loyalty   { border-left-color: #EF4444; }
+.ai-ch-other     { border-left-color: #9A9384; }
+
+/* Tier badges — Backend_Project's tier taxonomy styled with CTD's
+   color intent (ad-level → green, adset-scoped → blue, weaker → amber,
+   unmatched → gray). */
+.ai-tier {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.45rem;
+  border-radius: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ai-tier-ad_direct      { background: #E0F0E5; color: #2E7755; }
+.ai-tier-ad_name_match  { background: #d1fae5; color: #065f46; }
+.ai-tier-adset_scoped   { background: #dbeafe; color: #1e40af; }
+.ai-tier-adset_only     { background: #fef3c7; color: #92400e; }
+.ai-tier-campaign_only  { background: #ffedd5; color: #9a3412; }
+.ai-tier-unmatched      { background: #e2e8f0; color: #475569; }
+.ai-tier-none           { background: #f1f5f9; color: #94a3b8; }
+
+.ai-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.2rem;
+  font-size: 0.65rem;
+  background: #e2e8f0;
+  color: #475569;
+}
+.ai-status.active { background: #d1fae5; color: #065f46; }
+
+.ai-in-pill  { background: #dbeafe; color: #1e40af; }
+.ai-ex-pill  { background: #fee2e2; color: #991b1b; }

@@ -30,6 +30,17 @@ def configure_logging(*, level: str = "INFO", json_output: bool = False) -> None
         level=getattr(logging, level.upper(), logging.INFO),
     )
 
+    # Capture processor for the admin panel's live-log stream --
+    # mirrors every structlog line into the per-run ring buffer used by
+    # /admin/ingest/{run_id}/logs. Imported lazily inside the function
+    # so this module stays importable during unit tests that don't
+    # touch the API layer. See app/api/routers/admin.py for the buffer.
+    try:
+        from app.api.routers.admin import structlog_capture_processor
+        _capture = [structlog_capture_processor]
+    except Exception:
+        _capture = []
+
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
@@ -37,6 +48,7 @@ def configure_logging(*, level: str = "INFO", json_output: bool = False) -> None
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        *_capture,
     ]
 
     if json_output:

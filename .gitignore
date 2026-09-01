@@ -31,3 +31,18 @@ logs/
 
 # Alembic
 alembic/versions/__pycache__/
+
+# Ad-hoc scratch dumps (curl/probe outputs from local debugging).
+# Kept out of the repo -- these files churn every session and have
+# no long-term value. If a file needs to be preserved, rename it and
+# move it under docs/ or exports/.
+/*.json
+/*.html
+/scripts/_probe_*.py
+/scripts/_check_*.py
+
+# Frontend build artefacts (Next.js). node_modules is huge; .next/
+# regenerates on build. Keep source + package.json only.
+admin/node_modules/
+admin/.next/
+admin/out/

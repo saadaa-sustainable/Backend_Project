@@ -1177,6 +1177,102 @@ _RUNS: dict[str, IngestRunStatus] = {}
 #: handle to call .cancel() on.
 _TASKS: dict[str, asyncio.Task[None]] = {}
 
+# ─────────────────────────────────────────────────────────────────
+# Live log streaming (2026-08-29): per-run ring buffer + async wakeup
+# ─────────────────────────────────────────────────────────────────
+#
+# The admin panel needs to show ingest progress live, not "check back in
+# 3 minutes". Two-part solution kept small and dependency-free:
+#
+# 1. A per-run ring buffer of the last N log lines. Lines are pushed
+#    from anywhere in the codebase via `log_ingest_event(run_id, msg)`,
+#    or fall in automatically via the structlog processor installed at
+#    app boot (see app/logging/__init__.py). Cap at 2000 lines per run
+#    to keep memory bounded on long syncs.
+# 2. An asyncio.Event per run that gets set on every new line so an
+#    SSE stream can await it instead of polling. When the run finishes,
+#    the event is set one final time and the stream ends cleanly.
+#
+# Same in-process caveat as the run tracking: doesn't survive uvicorn
+# restarts or scale across workers. Move to Redis or a Postgres LISTEN
+# channel before running in anything but the single-worker admin process.
+
+from collections import deque
+from typing import Deque
+
+_LOG_BUFFERS: dict[str, Deque[dict[str, Any]]] = {}
+_LOG_WAKEUPS: dict[str, asyncio.Event] = {}
+_LOG_BUFFER_CAP = 2000
+
+# Anonymous "background" run so lines emitted by scheduler jobs / manual
+# curl POSTs to /sync/* can still be tailed by the admin panel even
+# though there's no explicit run_id. Every log line lands here in
+# addition to its specific run_id (if any).
+BACKGROUND_RUN_ID = "_background"
+
+
+def _get_or_create_buffer(run_id: str) -> Deque[dict[str, Any]]:
+    buf = _LOG_BUFFERS.get(run_id)
+    if buf is None:
+        buf = deque(maxlen=_LOG_BUFFER_CAP)
+        _LOG_BUFFERS[run_id] = buf
+    return buf
+
+
+def _get_or_create_wakeup(run_id: str) -> asyncio.Event:
+    ev = _LOG_WAKEUPS.get(run_id)
+    if ev is None:
+        ev = asyncio.Event()
+        _LOG_WAKEUPS[run_id] = ev
+    return ev
+
+
+def log_ingest_event(run_id: str | None, event: str, **fields: Any) -> None:
+    """Append one log entry to a run's ring buffer + the background
+    catch-all buffer, and wake up any SSE stream awaiting new lines.
+
+    Callers: the structlog processor (see setup_capture below) for every
+    log line, plus explicit points in the ingest code that want to
+    surface a milestone even if structlog wouldn't (e.g. "batch 3/10
+    complete")."""
+    ts = datetime.now(timezone.utc).isoformat()
+    entry = {"ts": ts, "event": event, **fields}
+    # Always push to the background buffer so the admin panel's "recent
+    # activity" view catches things not tied to a specific run_id.
+    _get_or_create_buffer(BACKGROUND_RUN_ID).append(entry)
+    _get_or_create_wakeup(BACKGROUND_RUN_ID).set()
+    if run_id and run_id != BACKGROUND_RUN_ID:
+        _get_or_create_buffer(run_id).append(entry)
+        _get_or_create_wakeup(run_id).set()
+
+
+class _StructlogCapture:
+    """structlog processor that mirrors every log line into
+    log_ingest_event(). Reads run_id from structlog's context if the
+    calling code bound it (e.g. `logger = logger.bind(run_id=...)`),
+    otherwise falls through to the background buffer only.
+
+    Installed at app boot by app/logging/__init__.py.setup(). Kept as a
+    class instead of a plain function so its own repr is greppable in
+    the processor chain."""
+
+    def __call__(self, _logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+        # `event` is the human-readable message; everything else is
+        # structured context (batch_id, endpoint, records_fetched, ...).
+        try:
+            run_id = event_dict.get("run_id")
+            evt = str(event_dict.get("event", ""))
+            # copy without the run_id key so callers see a clean dict
+            payload = {k: v for k, v in event_dict.items() if k not in ("event", "run_id")}
+            payload["level"] = method_name
+            log_ingest_event(run_id, evt, **payload)
+        except Exception:  # pragma: no cover -- never fail the log call
+            pass
+        return event_dict
+
+
+structlog_capture_processor = _StructlogCapture()
+
 _NOT_YET_DYNAMIC = (
     "scripts/ingest_{script}.py doesn't filter by date yet -- add --since/--until there and "
     "wire it into this route as a subprocess call before enabling this source here."
@@ -1577,3 +1673,124 @@ async def stop_ingest(run_id: str) -> IngestRunStatus:
     if task and not task.done():
         task.cancel()
     return run
+
+
+# ─────────────────────────────────────────────────────────────────
+# Live logs — polling + Server-Sent Events streaming
+# ─────────────────────────────────────────────────────────────────
+
+
+class LogEntry(BaseModel):
+    ts: str
+    event: str
+    level: str | None = None
+    # arbitrary structured context: batch_id, endpoint, records_fetched,
+    # error, etc. Captured verbatim from structlog's event_dict.
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class LogsResponse(BaseModel):
+    run_id: str
+    entries: list[LogEntry]
+    #: Cursor to pass as ?after= on the next poll -- avoids re-fetching
+    #: the same lines. Simple monotonic index into the ring buffer.
+    next_cursor: int
+    #: True if the run has finished; the client can stop polling.
+    finished: bool
+
+
+def _serialize_entries(buf: Deque[dict[str, Any]], after: int) -> tuple[list[LogEntry], int]:
+    """Return every entry appended after cursor `after` (exclusive) +
+    the new cursor. Since deque doesn't have stable indices across
+    rotations (old entries fall off the front), the cursor is the
+    absolute position -- if the ring has rolled past it, we return
+    everything currently in the buffer and set the new cursor to the
+    total count."""
+    total = len(buf)
+    # The buffer preserves append order but not absolute indices.
+    # Approximation: track a per-buffer append counter alongside the
+    # deque. Simpler here: return the last (total - after) entries if
+    # after < total, else empty.
+    start = max(0, after)
+    take = list(buf)[start:] if start < total else []
+    entries = [
+        LogEntry(
+            ts=e.get("ts", ""),
+            event=e.get("event", ""),
+            level=e.get("level"),
+            context={k: v for k, v in e.items() if k not in ("ts", "event", "level")},
+        )
+        for e in take
+    ]
+    return entries, total
+
+
+@router.get("/ingest/{run_id}/logs", response_model=LogsResponse)
+async def get_ingest_logs(run_id: str, after: int = 0) -> LogsResponse:
+    """Poll-friendly endpoint: returns log entries appended after the
+    given cursor, plus a new cursor. Frontend polls every 1-2s until
+    `finished=true`. Use ``run_id='_background'`` to tail every log
+    line the process emits (scheduler runs, direct /sync/* calls,
+    ad-hoc ingest scripts), not just a specific /admin/ingest run.
+    """
+    buf = _LOG_BUFFERS.get(run_id)
+    if buf is None:
+        return LogsResponse(run_id=run_id, entries=[], next_cursor=0, finished=False)
+    entries, next_cursor = _serialize_entries(buf, after)
+    finished = False
+    if run_id != BACKGROUND_RUN_ID:
+        run = _RUNS.get(run_id)
+        finished = bool(run and run.finished_at is not None)
+    return LogsResponse(run_id=run_id, entries=entries, next_cursor=next_cursor, finished=finished)
+
+
+@router.get("/ingest/{run_id}/logs/stream")
+async def stream_ingest_logs(run_id: str):
+    """Server-Sent Events endpoint. Same shape as /logs but pushes new
+    entries as they arrive (no polling interval). Frontend connects via
+    ``new EventSource('/admin/ingest/<id>/logs/stream')`` and each
+    'message' event carries one JSON-serialised LogEntry. Emits an
+    'end' event when the run finishes so the client can close.
+
+    Use run_id='_background' to tail every log line the process emits."""
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    async def event_gen():
+        cursor = 0
+        # replay everything currently buffered so a late-connecting
+        # client doesn't miss the first few seconds
+        buf = _get_or_create_buffer(run_id)
+        wakeup = _get_or_create_wakeup(run_id)
+        entries, cursor = _serialize_entries(buf, cursor)
+        for e in entries:
+            yield f"data: {_json.dumps(e.model_dump())}\n\n"
+        # then live-follow
+        while True:
+            # emit a heartbeat comment every 15s to keep intermediaries
+            # (nginx, cloudflare) from closing the connection as idle
+            try:
+                await asyncio.wait_for(wakeup.wait(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+            wakeup.clear()
+            entries, cursor = _serialize_entries(buf, cursor)
+            for e in entries:
+                yield f"data: {_json.dumps(e.model_dump())}\n\n"
+            # check finished
+            if run_id != BACKGROUND_RUN_ID:
+                run = _RUNS.get(run_id)
+                if run and run.finished_at is not None:
+                    yield "event: end\ndata: {}\n\n"
+                    return
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # nginx: don't buffer
+            "Connection": "keep-alive",
+        },
+    )

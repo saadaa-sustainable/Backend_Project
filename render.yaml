@@ -1,0 +1,100 @@
+# Render service definition for the Backend_Project FastAPI service.
+#
+# What this deploys: the async FastAPI app in app/main.py, running under
+# uvicorn on the port Render assigns via $PORT. NOT the Next.js admin
+# UI in admin/ -- that's a separate service (deploy separately or run
+# locally, whichever the workflow needs).
+#
+# What this does NOT do: run the APScheduler in-process (see
+# SCHEDULER_ENABLED=false below). Render web instances are stateless
+# and can be restarted / scaled anytime -- a scheduler running inside
+# the web dyno would fire duplicate jobs on every restart. Daily
+# syncs / retries / silver flattening should run on their own Render
+# cron jobs (add later) or a separate worker service.
+#
+# Env vars marked `sync: false` are populated in the Render dashboard
+# (not committed here). Any variable not listed here can still be set
+# in the dashboard -- Render merges dashboard-set vars with this file.
+#
+# Auto-deploy: connect the master branch of
+# github.com/saadaa-sustainable/Backend_Project.git in the Render UI.
+# Every push to master will build + deploy automatically.
+
+services:
+  - type: web
+    name: backend-project
+    runtime: python
+    # Free tier is fine for testing. Bump to `starter` ($7/mo) once
+    # real traffic hits -- free-tier dynos sleep after 15min of
+    # inactivity, which gives a cold-start hit on the first request
+    # after idle.
+    plan: free
+    region: singapore
+    branch: master
+    autoDeploy: true
+
+    buildCommand: pip install -r requirements.txt
+    # uvicorn binds to Render's assigned $PORT, not the local :8001.
+    # No --workers flag: uvloop + async endpoints saturate a single
+    # worker just fine on the free tier's 512 MB. Add --workers 2
+    # once the plan bumps up.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    # /health returns 200 + a JSON body once the DB pool + Meta
+    # client have both initialised. Render pings this before routing
+    # live traffic -- rolling deploys stay clean.
+    healthCheckPath: /health
+
+    envVars:
+      # --- REQUIRED (fill these in the Render dashboard) ---
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_SYNC
+        sync: false
+
+      # Numbered per-account creds. If only one account is deployed,
+      # remove the 2 / 3 pairs -- otherwise leave them blank in the
+      # dashboard and the account-discovery loop just skips them.
+      - key: META_ACCOUNT_1_ID
+        sync: false
+      - key: META_ACCOUNT_1_NAME
+        sync: false
+      - key: META_ACCOUNT_2_ID
+        sync: false
+      - key: META_ACCOUNT_2_NAME
+        sync: false
+      - key: META_ACCOUNT_3_ID
+        sync: false
+      - key: META_ACCOUNT_3_NAME
+        sync: false
+
+      # Silver-layer RPCs (flatten_silver_metrics.py) and content
+      # register mirror (fetch_content_asset_register.py). Optional --
+      # only needed if you plan to run those scripts against this
+      # deploy's env.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CONTENT_WORKFLOW_URL
+        sync: false
+      - key: CONTENT_SERVICE_KEY
+        sync: false
+
+      # --- OPTIONAL, values baked into the deploy ---
+      - key: APP_ENV
+        value: production
+      - key: META_API_VERSION
+        value: v21.0
+      # Turn OFF the in-process APScheduler on Render web dynos --
+      # web instances can be restarted / scaled; running a scheduler
+      # inside them causes duplicate jobs on every cold start. Move
+      # scheduled work to a separate Render cron / worker service.
+      - key: SCHEDULER_ENABLED
+        value: "false"
+      - key: DATABASE_POOL_SIZE
+        value: "10"
+      - key: DATABASE_MAX_OVERFLOW
+        value: "20"

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.gold.ad_performance import refresh_ad_performance_summary
 from app.services.gold.cpis import refresh_cpis_by_sku
+from app.services.gold.cpis_utm import refresh_cpis_by_sku_utm
 from app.services.gold.landing_page import refresh_landing_page_tables
 from app.services.meta.entity_flatten import refresh_entity_tables
 from app.services.silver.ad_lifecycle import refresh_ad_lifecycle
@@ -128,6 +129,13 @@ FLATTEN_REGISTRY: dict[str, FlattenJob] = {
         source_table="shopify_inventory",
         target_tables=("cpis_by_sku",),
         refresh=refresh_cpis_by_sku,
+    ),
+    "cpis_by_sku_utm": FlattenJob(
+        key="cpis_by_sku_utm",
+        label="Gold: CPIS by master SKU via UTM attribution (order.utm_content -> ad_id, line_items.sku, 7d/30d/90d)",
+        source_table="shopify_orders",
+        target_tables=("cpis_by_sku_utm",),
+        refresh=refresh_cpis_by_sku_utm,
     ),
 }
 

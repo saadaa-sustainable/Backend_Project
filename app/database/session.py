@@ -20,6 +20,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from sqlalchemy.pool import NullPool
+
 from app.config import get_settings
 
 _engine: AsyncEngine | None = None
@@ -27,18 +29,55 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def get_engine() -> AsyncEngine:
-    """Return the process-wide async engine, creating it on first use."""
+    """Return the process-wide async engine, creating it on first use.
+
+    ``connect_args={"statement_cache_size": 0}`` is essential when
+    DATABASE_URL points at Supabase's *transaction-mode* pooler (port
+    6543). In that mode pgbouncer swaps the actual Postgres backend
+    connection between transactions -- so any prepared statement
+    asyncpg cached against the previous connection is invalid on the
+    next one, producing errors like
+    ``prepared statement "__asyncpg_stmt_N__" does not exist``.
+    Disabling the client-side cache forces every SQL to be sent as a
+    fresh unprepared query, which is what pgbouncer expects.
+
+    Session-mode (port 5432) can safely leave the cache on but has a
+    much lower client cap; setting cache_size=0 there is a minor
+    perf loss (~sub-ms per query) but avoids branching on URL shape.
+    Keeping it off unconditionally is the safer default.
+    """
     global _engine
     if _engine is None:
         settings = get_settings()
+        # Under pgbouncer transaction mode + asyncpg, keeping a pool of
+        # SQLAlchemy-side connections means auto-named prepared statements
+        # (__asyncpg_stmt_N__) get cached per Python connection object but
+        # pgbouncer rotates the underlying Postgres backend between
+        # transactions -- the next borrow gets a backend that doesn't
+        # know that name and raises DuplicatePreparedStatementError. The
+        # fix is NullPool: don't pool at all on our side; every request
+        # gets a fresh asyncpg connection that dies at end of request.
+        # pgbouncer's own pool absorbs the churn, and its high client
+        # cap (transaction mode is hundreds of clients, not 15) means
+        # this doesn't exhaust anything.
+        # `prepared_statement_name_func` is critical under pgbouncer
+        # transaction mode: asyncpg's default statement names look like
+        # __asyncpg_stmt_N__ where N is a per-connection counter, so
+        # even with cache disabled (statement_cache_size=0) two queries
+        # in one request can collide with a stale name pgbouncer's
+        # backend still remembers from a prior request. UUID-suffixing
+        # them makes every name globally unique so no collision is
+        # possible. Requires SQLAlchemy 2.0.30+ + asyncpg 0.29+.
+        import uuid as _uuid
         _engine = create_async_engine(
             settings.database.database_url,
             echo=settings.database.echo,
-            pool_size=settings.database.pool_size,
-            max_overflow=settings.database.max_overflow,
-            pool_timeout=settings.database.pool_timeout_seconds,
-            pool_pre_ping=True,
+            poolclass=NullPool,
             future=True,
+            connect_args={
+                "statement_cache_size": 0,
+                "prepared_statement_name_func": lambda: f"__ctd_{_uuid.uuid4().hex[:12]}__",
+            },
         )
     return _engine
 
