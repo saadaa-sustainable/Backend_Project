@@ -40,10 +40,11 @@ services:
     # once the plan bumps up.
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
-    # /health returns 200 + a JSON body once the DB pool + Meta
-    # client have both initialised. Render pings this before routing
-    # live traffic -- rolling deploys stay clean.
-    healthCheckPath: /health
+    # /live is a cheap DB-only probe -- Render pings this every ~30s.
+    # Deliberately NOT /health, because /health calls Meta's /me on
+    # every hit and would burn ~2,880 API requests per day against the
+    # shared app-level rate-limit budget, blocking real daily syncs.
+    healthCheckPath: /live
 
     envVars:
       # --- Python runtime pin ---

@@ -33,11 +33,28 @@ def _to_batch_summary(b: SyncBatch) -> BatchSummary:
     )
 
 
+@router.get("/live")
+async def live(session: SessionDep) -> dict:
+    """Cheap liveness probe for the platform's health checker (Render
+    pings this every ~30s). DB reachability only -- deliberately does
+    NOT call Meta, because every ping there would burn ~2,880 requests/
+    day against the shared app-level rate-limit budget (confirmed live
+    2026-09-02). Use ``/health`` for the deeper connectivity check."""
+    settings = get_settings()
+    try:
+        await session.execute(text("SELECT 1"))
+        return {"status": "ok", "app_env": settings.app_env}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("live_check_database_failed", error=str(exc))
+        return {"status": "degraded", "app_env": settings.app_env, "database_ok": False}
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(session: SessionDep, client: MetaClientDep) -> HealthResponse:
-    """Liveness/readiness probe: verifies both the database and the Meta
-    API are reachable with the configured credentials (the first configured
-    ad account — this is a connectivity check, not a per-account one)."""
+    """Deep readiness probe: verifies both the database AND the Meta API
+    are reachable with the configured credentials. Costs one Meta
+    Graph-API call per invocation, so NOT wired to the platform's
+    health-check loop (use ``/live`` there instead)."""
     settings = get_settings()
 
     database_ok = True
