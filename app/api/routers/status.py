@@ -34,19 +34,44 @@ def _to_batch_summary(b: SyncBatch) -> BatchSummary:
 
 
 @router.get("/live")
-async def live(session: SessionDep) -> dict:
-    """Cheap liveness probe for the platform's health checker (Render
-    pings this every ~30s). DB reachability only -- deliberately does
-    NOT call Meta, because every ping there would burn ~2,880 requests/
-    day against the shared app-level rate-limit budget (confirmed live
-    2026-09-02). Use ``/health`` for the deeper connectivity check."""
+async def live() -> dict:
+    """Liveness probe -- 'is the process up?'. Deliberately touches
+    nothing external:
+
+      * NO DB hit: Supabase's pgbouncer drops idle connections between
+        pings, producing spurious "connection was closed" errors every
+        few minutes even when the app is perfectly healthy (confirmed
+        live 2026-09-02, Render logs).
+      * NO Meta hit: /health/deep already covers that, and pinging
+        Meta on every 30s health check burned ~2,880 rate-limit-
+        budget requests per day (also 2026-09-02).
+
+    Render's built-in health check is a liveness probe, not a readiness
+    probe -- it only needs to know whether to keep the dyno alive. This
+    endpoint returns 200 as long as the Python process is answering
+    HTTP. For DB reachability use ``/ready``; for Meta reachability
+    use ``/health``."""
     settings = get_settings()
+    return {"status": "ok", "app_env": settings.app_env}
+
+
+@router.get("/ready")
+async def ready(session: SessionDep) -> dict:
+    """Readiness probe -- 'is the app ready to serve real traffic?'.
+    Adds a DB round-trip on top of /live. Retries once on the
+    Supabase pgbouncer 'connection was closed' error, which is
+    transient and cleared by a fresh NullPool checkout."""
     try:
         await session.execute(text("SELECT 1"))
-        return {"status": "ok", "app_env": settings.app_env}
-    except Exception as exc:  # noqa: BLE001
-        logger.error("live_check_database_failed", error=str(exc))
-        return {"status": "degraded", "app_env": settings.app_env, "database_ok": False}
+        return {"status": "ok", "database_ok": True}
+    except Exception:  # noqa: BLE001
+        # One retry -- NullPool means the next call gets a fresh conn.
+        try:
+            await session.execute(text("SELECT 1"))
+            return {"status": "ok", "database_ok": True}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("ready_check_database_failed", error=str(exc))
+            return {"status": "degraded", "database_ok": False}
 
 
 @router.get("/health", response_model=HealthResponse)
