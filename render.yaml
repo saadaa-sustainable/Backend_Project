@@ -108,3 +108,50 @@ services:
         value: "10"
       - key: DATABASE_MAX_OVERFLOW
         value: "20"
+
+      # CORS origin -- filled AFTER the admin service is deployed. Set
+      # this in the Render dashboard to the frontend URL (e.g.
+      # https://backend-project-admin-xxxx.onrender.com) so the browser
+      # can hit /admin/analytics/* from a different origin.
+      - key: ADMIN_APP_ORIGIN
+        sync: false
+
+  # ------------------------------------------------------------------
+  # Admin panel (Next.js 15). Same repo, deployed from the `admin/`
+  # subdirectory. Talks to the FastAPI backend via NEXT_PUBLIC_API_BASE_URL.
+  #
+  # First time setup:
+  #   1. Let this service deploy (it will get a URL like
+  #      backend-project-admin-xxxx.onrender.com)
+  #   2. Copy that URL into the FastAPI service's ADMIN_APP_ORIGIN
+  #      env var so CORS accepts it
+  #   3. Copy the FastAPI service's URL into
+  #      NEXT_PUBLIC_API_BASE_URL below (or set it in the dashboard)
+  # ------------------------------------------------------------------
+  - type: web
+    name: backend-project-admin
+    runtime: node
+    plan: free
+    region: singapore
+    branch: master
+    autoDeploy: true
+
+    # rootDir = folder within the repo where package.json lives.
+    rootDir: admin
+    # Next.js production build. Render caches node_modules between
+    # deploys so subsequent builds are much faster than the first.
+    buildCommand: npm ci && npm run build
+    # `next start` binds to $PORT automatically -- no --port flag needed.
+    startCommand: npm start
+
+    envVars:
+      # Filled AFTER the FastAPI service is deployed. Point this at
+      # the backend URL (no trailing slash), e.g.
+      # https://backend-project-mlk9.onrender.com
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false
+      # Node 20 has full Next.js 15 support and pre-built binaries for
+      # every native module in package.json. Node 22 also works but
+      # 20 is Render's default LTS.
+      - key: NODE_VERSION
+        value: "20"
