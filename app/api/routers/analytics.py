@@ -191,7 +191,14 @@ _ADS_ANALYSE_SELECT = (
     "al.reach AS ltv_reach, "
     "al.frequency AS ltv_frequency, "
     # first_seen_date: earliest ad_insights.date_start per ad. Joined below.
-    "fs.first_seen_date"
+    "fs.first_seen_date, "
+    # Asset resolution -- see _ADS_ANALYSE_FROM_ROWS for the priority
+    # chain that populates these. asset_match_source tells the UI whether
+    # the mapping came from a direct workflow link, CTD's fuzzy match,
+    # or a regex parse of the ad_name (verified or synthetic).
+    "asset.asset_id           AS asset_id, "
+    "asset.media              AS asset_media, "
+    "asset.source             AS asset_match_source"
 )
 
 _ADS_ANALYSE_FROM = (
@@ -204,6 +211,79 @@ _ADS_ANALYSE_FROM = (
     "LEFT JOIN LATERAL ("
     "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
     ") fs ON true"
+)
+
+
+# Row-fetching FROM: extends the base with an asset-lookup LATERAL that
+# resolves each ad_id to an asset_id from one of the three mirrored
+# CTD tables (content_asset_register / content_graphic_register /
+# content_influencer_posts).
+#
+# Priority chain (first match wins):
+#   1  direct           -- content_*_register.ad_id = aps.ad_id
+#                          (workflow-optimiser wrote the link explicitly)
+#   2  ctd_matched      -- content_*_register.matched_ad_id = aps.ad_id
+#                          (CTD's substring matcher against primary_table.ad_name)
+#   3  name_parsed      -- regex-extracted from aps.ad_name AND the extracted
+#                          code exists in a register table
+#   4  name_synthetic   -- regex-extracted from aps.ad_name, code NOT in any
+#                          register table yet. Surfaced anyway so a merchant
+#                          can trace which asset the ad_name references.
+#
+# Regex patterns match the observed nomenclature conventions:
+#   Video      SDCSS_BST_CPL001-0026_20_03_2026   -> CPL001-0026   ({3 letters}{3 digits}-{4 digits})
+#   Graphic    SDCP_VRP_MH_SC_GAD-Dec-627         -> GAD-Dec-627   (GAD-<Mon>-<n>)
+#   Influencer SIF-11695-P1-username-VRP-...      -> SIF-11695-P1  (SIF-<n>-P<n>)
+#
+# The LATERAL is deliberately NOT in the base FROM used by COUNT/totals
+# queries -- it would add per-row cost without changing row cardinality
+# (LEFT JOIN + LIMIT 1). Row query only.
+_ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
+    " LEFT JOIN LATERAL ("
+    "  WITH parsed AS ("
+    "    SELECT "
+    "      substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})')       AS pv, "
+    "      substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)')          AS pg, "
+    "      substring(aps.ad_name from '(SIF-[0-9]+-P[0-9]+)')              AS pi "
+    "  ) "
+    "  SELECT asset_id, media, source FROM ( "
+    "    SELECT car.asset_id, 'video'::text AS media, 'direct'::text AS source, 1 AS pri "
+    "      FROM public.content_asset_register car "
+    "      WHERE car.ad_id = aps.ad_id "
+    "    UNION ALL "
+    "    SELECT cgr.requisition_id, 'graphic'::text, 'direct'::text, 2 "
+    "      FROM public.content_graphic_register cgr "
+    "      WHERE cgr.ad_id = aps.ad_id "
+    "    UNION ALL "
+    "    SELECT car.asset_id, 'video'::text, 'ctd_matched'::text, 3 "
+    "      FROM public.content_asset_register car "
+    "      WHERE car.matched_ad_id = aps.ad_id AND car.ad_id IS NULL "
+    "    UNION ALL "
+    "    SELECT cgr.requisition_id, 'graphic'::text, 'ctd_matched'::text, 4 "
+    "      FROM public.content_graphic_register cgr "
+    "      WHERE cgr.matched_ad_id = aps.ad_id AND cgr.ad_id IS NULL "
+    "    UNION ALL "
+    "    SELECT cip.id::text, 'influencer'::text, 'ctd_matched'::text, 5 "
+    "      FROM public.content_influencer_posts cip "
+    "      WHERE cip.matched_ad_id = aps.ad_id "
+    "    UNION ALL "
+    "    SELECT car.asset_id, 'video'::text, 'name_parsed'::text, 6 "
+    "      FROM parsed p JOIN public.content_asset_register car ON car.asset_id = p.pv "
+    "      WHERE p.pv IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT cgr.requisition_id, 'graphic'::text, 'name_parsed'::text, 7 "
+    "      FROM parsed p JOIN public.content_graphic_register cgr ON cgr.requisition_id = p.pg "
+    "      WHERE p.pg IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT p.pv, 'video'::text, 'name_synthetic'::text, 8 FROM parsed p WHERE p.pv IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT p.pg, 'graphic'::text, 'name_synthetic'::text, 9 FROM parsed p WHERE p.pg IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT p.pi, 'influencer'::text, 'name_synthetic'::text, 10 FROM parsed p WHERE p.pi IS NOT NULL "
+    "  ) u "
+    "  ORDER BY pri "
+    "  LIMIT 1"
+    " ) asset ON true"
 )
 
 
@@ -277,6 +357,15 @@ class AdsAnalyseRow(BaseModel):
     ltv_reach: float | None
     ltv_frequency: float | None
     first_seen_date: date | None
+    # Asset resolution from the three CTD content tables. Match source is
+    # one of: 'direct' (workflow ad_id link), 'ctd_matched' (CTD's fuzzy
+    # substring matcher), 'name_parsed' (regex-extracted from ad_name and
+    # verified against a register table), 'name_synthetic' (regex parse
+    # only, code not yet in a register table -- still surfaced so a
+    # merchant can trace which brief the ad_name references).
+    asset_id: str | None
+    asset_media: str | None
+    asset_match_source: str | None
 
 
 class AdsAnalyseTotals(BaseModel):
@@ -417,7 +506,7 @@ async def get_ads_analyse(
 
     rows_result = await session.execute(
         text(
-            f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM} {row_where_sql} "
+            f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} {row_where_sql} "
             f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
         ),
         {**params, "limit": limit, "offset": offset},

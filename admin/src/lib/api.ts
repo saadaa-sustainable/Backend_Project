@@ -593,6 +593,16 @@ export interface AdsAnalyseRow {
   ltv_reach: number | null;
   ltv_frequency: number | null;
   first_seen_date: string | null;
+  // Asset resolution from content_asset_register /
+  // content_graphic_register / content_influencer_posts. asset_match_source
+  // is one of:
+  //   'direct'           -- workflow-optimiser wrote a direct ad_id link
+  //   'ctd_matched'      -- CTD's substring matcher found the ad_name
+  //   'name_parsed'      -- regex-extracted from ad_name AND the code exists in a register table
+  //   'name_synthetic'   -- regex-extracted from ad_name, code not yet in a register table
+  asset_id: string | null;
+  asset_media: "video" | "graphic" | "influencer" | null;
+  asset_match_source: "direct" | "ctd_matched" | "name_parsed" | "name_synthetic" | null;
 }
 
 export interface AdsAnalyseTotals {
