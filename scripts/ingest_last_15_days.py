@@ -526,8 +526,30 @@ DDL_STATEMENTS = [
 
 
 def _ensure_schema(conn) -> None:
-    print("Ensuring schema exists (CREATE TABLE/INDEX IF NOT EXISTS — never drops or alters):")
+    # Bump the per-statement timeout for schema DDL. Supabase's pooler
+    # defaults to something like 120s for query timeouts; recreating the
+    # GIN index (`CREATE INDEX IF NOT EXISTS ... USING GIN`) on the
+    # existing 400k-row raw_dump_meta table takes ~3-4 min and blows
+    # past that. Session-scope SET is safe here -- we're on a fresh
+    # per-invocation psycopg2 conn, not a shared session.
+    #
+    # Also: skip the schema check entirely if raw_dump_meta already
+    # exists. Nothing in DDL_STATEMENTS ever mutates existing tables
+    # (all IF NOT EXISTS), so if the table is there, everything else is
+    # too from prior runs. Avoids ~7 seconds and any timeout risk on
+    # repeat invocations.
     with conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_regclass('public.raw_dump_meta') IS NOT NULL"
+        )
+        already_exists = bool(cur.fetchone()[0])
+    if already_exists:
+        print("Schema already provisioned (raw_dump_meta exists) -- skipping DDL.\n")
+        return
+
+    print("Ensuring schema exists (CREATE TABLE/INDEX IF NOT EXISTS -- never drops or alters):")
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = '600s'")
         for stmt in DDL_STATEMENTS:
             first_line = " ".join(stmt.split())[:90]
             print(f"  -> {first_line}...")
@@ -722,8 +744,16 @@ def main() -> int:
         write_wall_time = time.monotonic() - write_start
 
         with conn.cursor() as cur:
+            # batch_id is UUID in the DB but psycopg2 sends the parameter
+            # as text -- Postgres refuses `uuid = text` with a fresh
+            # "operator does not exist" error. Cast the array elements
+            # explicitly so the ANY() comparison works. Live-caught
+            # 2026-09-02 during a real ingest; without this the final
+            # summary query dies AFTER inserts already committed, so
+            # rows land but the exit code is nonzero.
             cur.execute(
-                "SELECT object_type, count(*) FROM raw_dump_meta WHERE batch_id = ANY(%s) GROUP BY object_type ORDER BY object_type",
+                "SELECT object_type, count(*) FROM raw_dump_meta "
+                "WHERE batch_id = ANY(%s::uuid[]) GROUP BY object_type ORDER BY object_type",
                 (batch_ids,),
             )
             verified_counts = cur.fetchall()
