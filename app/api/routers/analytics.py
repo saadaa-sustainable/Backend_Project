@@ -191,7 +191,14 @@ _ADS_ANALYSE_SELECT = (
     "al.reach AS ltv_reach, "
     "al.frequency AS ltv_frequency, "
     # first_seen_date: earliest ad_insights.date_start per ad. Joined below.
-    "fs.first_seen_date"
+    "fs.first_seen_date, "
+    # Asset resolution -- see _ADS_ANALYSE_FROM_ROWS for the priority
+    # chain that populates these. asset_match_source tells the UI whether
+    # the mapping came from a direct workflow link, CTD's fuzzy match,
+    # or a regex parse of the ad_name (verified or synthetic).
+    "asset.asset_id           AS asset_id, "
+    "asset.media              AS asset_media, "
+    "asset.source             AS asset_match_source"
 )
 
 _ADS_ANALYSE_FROM = (
@@ -204,6 +211,79 @@ _ADS_ANALYSE_FROM = (
     "LEFT JOIN LATERAL ("
     "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
     ") fs ON true"
+)
+
+
+# Row-fetching FROM: extends the base with an asset-lookup LATERAL that
+# resolves each ad_id to an asset_id from one of the three mirrored
+# CTD tables (content_asset_register / content_graphic_register /
+# content_influencer_posts).
+#
+# Priority chain (first match wins):
+#   1  direct           -- content_*_register.ad_id = aps.ad_id
+#                          (workflow-optimiser wrote the link explicitly)
+#   2  ctd_matched      -- content_*_register.matched_ad_id = aps.ad_id
+#                          (CTD's substring matcher against primary_table.ad_name)
+#   3  name_parsed      -- regex-extracted from aps.ad_name AND the extracted
+#                          code exists in a register table
+#   4  name_synthetic   -- regex-extracted from aps.ad_name, code NOT in any
+#                          register table yet. Surfaced anyway so a merchant
+#                          can trace which asset the ad_name references.
+#
+# Regex patterns match the observed nomenclature conventions:
+#   Video      SDCSS_BST_CPL001-0026_20_03_2026   -> CPL001-0026   ({3 letters}{3 digits}-{4 digits})
+#   Graphic    SDCP_VRP_MH_SC_GAD-Dec-627         -> GAD-Dec-627   (GAD-<Mon>-<n>)
+#   Influencer SIF-11695-P1-username-VRP-...      -> SIF-11695-P1  (SIF-<n>-P<n>)
+#
+# The LATERAL is deliberately NOT in the base FROM used by COUNT/totals
+# queries -- it would add per-row cost without changing row cardinality
+# (LEFT JOIN + LIMIT 1). Row query only.
+_ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
+    " LEFT JOIN LATERAL ("
+    "  WITH parsed AS ("
+    "    SELECT "
+    "      substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})')       AS pv, "
+    "      substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)')          AS pg, "
+    "      substring(aps.ad_name from '(SIF-[0-9]+-P[0-9]+)')              AS pi "
+    "  ) "
+    "  SELECT asset_id, media, source FROM ( "
+    "    SELECT car.asset_id, 'video'::text AS media, 'direct'::text AS source, 1 AS pri "
+    "      FROM public.content_asset_register car "
+    "      WHERE car.ad_id = aps.ad_id "
+    "    UNION ALL "
+    "    SELECT cgr.requisition_id, 'graphic'::text, 'direct'::text, 2 "
+    "      FROM public.content_graphic_register cgr "
+    "      WHERE cgr.ad_id = aps.ad_id "
+    "    UNION ALL "
+    "    SELECT car.asset_id, 'video'::text, 'ctd_matched'::text, 3 "
+    "      FROM public.content_asset_register car "
+    "      WHERE car.matched_ad_id = aps.ad_id AND car.ad_id IS NULL "
+    "    UNION ALL "
+    "    SELECT cgr.requisition_id, 'graphic'::text, 'ctd_matched'::text, 4 "
+    "      FROM public.content_graphic_register cgr "
+    "      WHERE cgr.matched_ad_id = aps.ad_id AND cgr.ad_id IS NULL "
+    "    UNION ALL "
+    "    SELECT cip.id::text, 'influencer'::text, 'ctd_matched'::text, 5 "
+    "      FROM public.content_influencer_posts cip "
+    "      WHERE cip.matched_ad_id = aps.ad_id "
+    "    UNION ALL "
+    "    SELECT car.asset_id, 'video'::text, 'name_parsed'::text, 6 "
+    "      FROM parsed p JOIN public.content_asset_register car ON car.asset_id = p.pv "
+    "      WHERE p.pv IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT cgr.requisition_id, 'graphic'::text, 'name_parsed'::text, 7 "
+    "      FROM parsed p JOIN public.content_graphic_register cgr ON cgr.requisition_id = p.pg "
+    "      WHERE p.pg IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT p.pv, 'video'::text, 'name_synthetic'::text, 8 FROM parsed p WHERE p.pv IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT p.pg, 'graphic'::text, 'name_synthetic'::text, 9 FROM parsed p WHERE p.pg IS NOT NULL "
+    "    UNION ALL "
+    "    SELECT p.pi, 'influencer'::text, 'name_synthetic'::text, 10 FROM parsed p WHERE p.pi IS NOT NULL "
+    "  ) u "
+    "  ORDER BY pri "
+    "  LIMIT 1"
+    " ) asset ON true"
 )
 
 
@@ -277,6 +357,15 @@ class AdsAnalyseRow(BaseModel):
     ltv_reach: float | None
     ltv_frequency: float | None
     first_seen_date: date | None
+    # Asset resolution from the three CTD content tables. Match source is
+    # one of: 'direct' (workflow ad_id link), 'ctd_matched' (CTD's fuzzy
+    # substring matcher), 'name_parsed' (regex-extracted from ad_name and
+    # verified against a register table), 'name_synthetic' (regex parse
+    # only, code not yet in a register table -- still surfaced so a
+    # merchant can trace which brief the ad_name references).
+    asset_id: str | None
+    asset_media: str | None
+    asset_match_source: str | None
 
 
 class AdsAnalyseTotals(BaseModel):
@@ -417,7 +506,7 @@ async def get_ads_analyse(
 
     rows_result = await session.execute(
         text(
-            f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM} {row_where_sql} "
+            f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} {row_where_sql} "
             f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
         ),
         {**params, "limit": limit, "offset": offset},
@@ -2049,6 +2138,18 @@ class CpisUtmRow(BaseModel):
     # 2026-08-31 direction: SKU code as base, matched against ad_name.
     name_matched_ads: int | None
     name_matched_spend: float | None
+    # NEW (2026-09-02): UTM-content-derived spend. For each SKU, we
+    # find the SET of ad_ids that appeared in this SKU's UTM-attributed
+    # orders during the picked window, then SUM those ads' windowed
+    # spend from insights_daily_by_ad. Answers "how much did I spend on
+    # ads that actually reached buyers of this SKU?" -- the metric the
+    # merchant asked for, replacing name-matched as the primary spend
+    # signal in the UI. Deliberately double-counts across SKUs
+    # (an ad selling SMCP+SDCP counts 100% of its spend for BOTH); use
+    # ad_spend (LC group) for the allocation-aware version.
+    utm_matched_ads: int | None
+    utm_matched_spend: float | None
+    utm_matched_ncp: float | None
     name_matched_ncp: float | None
     name_matched_roas_lifetime: float | None
     name_matched_nc_roas: float | None
@@ -2109,6 +2210,33 @@ class CpisUtmRow(BaseModel):
     mm_oos_days_90: int | None
     mm_lead_time: int | None
     mm_buffer_days: int | None
+    # In-stock breadth (2026-09-02, per MapleMonk variant-level snapshot).
+    # variant_in_stock_rate = % of the SKU's variants currently in stock;
+    # size_in_stock_rate = % of DISTINCT sizes still available at all.
+    # Both are 0-100 percentages.
+    mm_variant_in_stock_ct: int | None
+    mm_variant_in_stock_rate: float | None
+    mm_size_total_ct: int | None
+    mm_size_in_stock_ct: int | None
+    mm_size_in_stock_rate: float | None
+    # Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ..., "5XL":0}.
+    # Frontend renders as one column per canonical size (XS -> 5XL).
+    # None if no size-tagged variants exist for this SKU.
+    mm_stock_by_size: dict[str, int] | None
+    # Per-SKU untested-asset backlog counts (see untested_by_sku CTE).
+    # untested_influencer_ct is always 0 today -- influencer nomenclature
+    # doesn't carry a product code, so no SKU mapping exists. Column
+    # stays in the schema so if we route SKU derivation through a
+    # different signal later (e.g. matched_ad_id -> ad -> SKU), no
+    # breaking change is needed on the frontend.
+    untested_video_ct: int | None
+    untested_graphic_ct: int | None
+    untested_influencer_ct: int | None
+    # Creative-testing cadence: 1 test per week per 1L of weekly spend.
+    # weekly_ad_spend is name_matched_spend normalised to a 7-day rate;
+    # required_creatives_per_week is FLOOR(weekly_ad_spend / 100000).
+    weekly_ad_spend: float | None
+    required_creatives_per_week: int | None
     # UTM-attributed metrics (from cpis_by_sku_utm). Two spend allocations
     # populated in one refresh pass -- frontend picks which to display via
     # the "attribution mode" toggle:
@@ -2288,6 +2416,60 @@ async def get_cpis_utm(
           AND day <= (SELECT hi FROM bounds)
         GROUP BY ad_id
       ),
+      -- Ads that drove UTM-attributed orders for each master SKU inside
+      -- the picked window (2026-09-02). Same allocation logic as
+      -- refresh_cpis_utm.py, except we skip revenue-proportional
+      -- weighting -- we just want the SET of ad_ids that touched each
+      -- SKU, then SUM their windowed spend from insights_windowed.
+      -- This is the *real* answer to "how much did I spend on ads
+      -- that reached buyers of this SKU?" -- unlike name_matched_spend
+      -- which only catches ads NAMED after the SKU (~10% of spend).
+      -- Note: this deliberately double-counts across SKUs -- an ad
+      -- driving SMCP + SDCP orders counts 100% of its spend for BOTH
+      -- SKUs. That's the intent: this is an affinity metric, not a
+      -- portfolio-share allocation (ad_spend column below is the
+      -- allocation-aware one).
+      utm_sku_ads AS (
+        -- (day, master_sku, ad_id) tuples: which ads drove orders for
+        -- which SKUs on which days. The `day` dimension is crucial for
+        -- the day-scoped spend calc below -- an ad's Meta spend counts
+        -- for a SKU only on the days that ad actually drove SKU orders.
+        SELECT DISTINCT
+          so.processed_at::date AS day,
+          SUBSTRING(
+            split_part(edge->'node'->>'sku', '_', 1)
+            FROM 1
+            FOR GREATEST(1, char_length(split_part(edge->'node'->>'sku', '_', 1)) - 2)
+          ) AS master_sku,
+          so.utm_content AS ad_id
+        FROM shopify_orders so,
+             LATERAL jsonb_array_elements(so.line_items->'edges') edge
+        WHERE so.processed_at >= (SELECT lo FROM bounds)
+          AND so.processed_at <  (SELECT hi FROM bounds) + integer '1'
+          -- Regex with $/\Z trips SQLAlchemy text() + asyncpg param
+          -- scan; string ops are safer here.
+          AND char_length(so.utm_content) BETWEEN 10 AND 20
+          AND so.utm_content !~ '[^0-9]'
+          AND edge->'node'->>'sku' IS NOT NULL
+      ),
+      utm_ads AS (
+        -- Day-scoped spend rollup (2026-09-02): join each
+        -- (sku, day, ad_id) tuple to that ad's spend ON THAT
+        -- SPECIFIC DAY. Sum per SKU.
+        -- Effect: an ad's Meta spend on Wednesday counts for SMCP
+        -- ONLY IF Wednesday's SMCP orders had this ad in utm_content.
+        -- Days where the ad ran but drove no SKU orders -> excluded.
+        SELECT usa.master_sku,
+               COUNT(DISTINCT usa.ad_id)          AS utm_matched_ads,
+               COALESCE(SUM(idba.spend), 0)       AS utm_matched_spend,
+               COALESCE(SUM(idba.ncp_count), 0)   AS utm_matched_ncp,
+               COALESCE(SUM(idba.conv_value), 0)  AS utm_matched_conv_value
+        FROM utm_sku_ads usa
+        LEFT JOIN public.insights_daily_by_ad idba
+          ON idba.ad_id = usa.ad_id
+         AND idba.day   = usa.day
+        GROUP BY usa.master_sku
+      ),
       -- Ads whose ad_name contains this master_sku as a whole word (same
       -- \\y..\\y word-boundary regex the legacy CPIS drilldown uses --
       -- avoids "BR" matching every ad with "BR" anywhere).
@@ -2319,6 +2501,45 @@ async def get_cpis_utm(
         LEFT JOIN insights_windowed iw
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
+      ),
+      -- Per-SKU untested-asset counts across the three CTD content
+      -- registers. Merchant lens: "for SKU SDCP, how many briefed-but-
+      -- unused videos / graphics do I still have in the pipeline?"
+      --   * video    -- content_asset_register  ad_id IS NULL,
+      --                 SKU derived from split_part(planning_nomenclature)
+      --   * graphic  -- content_graphic_register  computed_is_tested = false,
+      --                 SKU from the pre-populated `product` column (falls
+      --                 back to split_part(nomenclature))
+      --   * inf.     -- content_influencer_posts  computed_is_tested = false,
+      --                 no SKU derivation available (SIF-<n>-P<n>
+      --                 nomenclature carries no product code) -- count
+      --                 is always 0 per SKU, but the UI shows the global
+      --                 total in a footer/tooltip so it isn't hidden.
+      untested_by_sku AS (
+        SELECT master_sku,
+               COUNT(*) FILTER (WHERE media = 'video')      AS untested_video_ct,
+               COUNT(*) FILTER (WHERE media = 'graphic')    AS untested_graphic_ct,
+               COUNT(*) FILTER (WHERE media = 'influencer') AS untested_influencer_ct
+        FROM (
+          SELECT
+            'video'::text AS media,
+            NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '') AS master_sku
+          FROM public.content_asset_register car
+          WHERE car.ad_id IS NULL
+          UNION ALL
+          SELECT
+            'graphic'::text,
+            COALESCE(
+              NULLIF(cgr.product, ''),
+              NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
+            )
+          FROM public.content_graphic_register cgr
+          WHERE COALESCE(cgr.computed_is_tested, false) = false
+          -- Influencer left out of the union: no per-SKU derivation.
+          -- Frontend surfaces the global total separately.
+        ) u
+        WHERE master_sku IS NOT NULL
+        GROUP BY master_sku
       ),
       -- Window length in days so the frontend doesn't have to know
       -- window_key -> length mapping. Same for every row.
@@ -2431,6 +2652,11 @@ async def get_cpis_utm(
              na.name_matched_ads,
              na.name_matched_spend,
              na.name_matched_ncp,
+             -- UTM-matched (2026-09-02): ad_ids seen in this SKU's
+             -- UTM-attributed orders, their windowed spend.
+             ua.utm_matched_ads::integer AS utm_matched_ads,
+             ua.utm_matched_spend        AS utm_matched_spend,
+             ua.utm_matched_ncp          AS utm_matched_ncp,
              CASE WHEN COALESCE(na.name_matched_spend, 0) > 0
                   THEN na.name_matched_conv_value / na.name_matched_spend
                   ELSE NULL END AS name_matched_roas_lifetime,
@@ -2488,6 +2714,32 @@ async def get_cpis_utm(
              mm.oos_days_90      AS mm_oos_days_90,
              mm.lead_time        AS mm_lead_time,
              mm.buffer_days      AS mm_buffer_days,
+             mm.variant_in_stock_ct   AS mm_variant_in_stock_ct,
+             mm.variant_in_stock_rate AS mm_variant_in_stock_rate,
+             mm.size_total_ct         AS mm_size_total_ct,
+             mm.size_in_stock_ct      AS mm_size_in_stock_ct,
+             mm.size_in_stock_rate    AS mm_size_in_stock_rate,
+             mm.stock_by_size         AS mm_stock_by_size,
+             -- Per-SKU untested-asset counts (see untested_by_sku CTE
+             -- for derivation). Influencer is 0 for every SKU because
+             -- its nomenclature carries no product code; frontend shows
+             -- a footer note with the global count so it isn't hidden.
+             COALESCE(ubs.untested_video_ct,      0)::integer AS untested_video_ct,
+             COALESCE(ubs.untested_graphic_ct,    0)::integer AS untested_graphic_ct,
+             COALESCE(ubs.untested_influencer_ct, 0)::integer AS untested_influencer_ct,
+             -- Creative-testing cadence rule (merchant-defined,
+             -- 2026-09-03): 1 fresh creative should be tested per week
+             -- per 1L (100,000) of weekly name-matched spend. So a SKU
+             -- burning 5L / week needs 5 tests to keep the funnel
+             -- healthy. Weekly rate normalises across window lengths
+             -- (7d / 30d / 90d / custom) so the requirement stays
+             -- comparable regardless of the picked date range.
+             CASE WHEN wd.n_days > 0 AND na.name_matched_spend IS NOT NULL
+                  THEN na.name_matched_spend * 7.0 / wd.n_days
+                  ELSE NULL END                              AS weekly_ad_spend,
+             CASE WHEN wd.n_days > 0 AND COALESCE(na.name_matched_spend, 0) > 0
+                  THEN FLOOR(na.name_matched_spend * 7.0 / wd.n_days / 100000.0)::integer
+                  ELSE 0 END                                 AS required_creatives_per_week,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
              p.matched_ad_count, p.ad_spend,
@@ -2500,6 +2752,8 @@ async def get_cpis_utm(
                   ELSE NULL END AS avg_selling_price
       FROM page p
       LEFT JOIN name_ads na    USING (master_sku)
+      LEFT JOIN utm_ads  ua    USING (master_sku)
+      LEFT JOIN untested_by_sku ubs USING (master_sku)
       LEFT JOIN inv_rolled ir  USING (master_sku)
       LEFT JOIN products_ctx pc USING (master_sku)
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
@@ -2676,6 +2930,184 @@ async def get_cpis_utm_spend_trend(
 # describes how conversions scale ACROSS this project's whole roster of
 # ads at different spend levels, not one ad's spend ramping over time.
 # ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Untested Assets -- backed by three mirror tables from the legacy CTD
+# dashboard, each surfacing a different asset media type:
+#
+#   * media=video       -> content_asset_register     (untested: ad_id IS NULL)
+#   * media=graphic     -> content_graphic_register   (untested: computed_is_tested = false)
+#   * media=influencer  -> content_influencer_posts   (untested: computed_is_tested = false)
+#
+# SKU derivation:
+#   * video    -> split_part(planning_nomenclature, '_', 1)
+#   * graphic  -> the pre-populated `product` column (fall back to
+#                 split_part(nomenclature, '_', 1) if `product` is null)
+#   * inf.     -> influencer nomenclature (SIF-<n>-...) doesn't carry a
+#                 SKU code -- candidate_master_sku is always null here.
+#
+# We LEFT JOIN cpis_by_sku_utm (30d) whenever a candidate SKU exists so
+# a merchant can prioritise concepts for SKUs already selling. The
+# response shape is normalized across the three media types -- the UI
+# has a single row renderer with a media-aware column set.
+# ----------------------------------------------------------------------
+
+
+UntestedMedia = Literal["video", "graphic", "influencer"]
+
+
+class UntestedAssetRow(BaseModel):
+    # Row identity + media source
+    id: str
+    media: UntestedMedia
+    # Presentation fields (normalized across the three tables)
+    title: str | None                # username (influencer) / product (graphic) / null (video)
+    nomenclature: str | None         # planning_nomenclature / nomenclature / nomenclature
+    kind: str | None                 # asset_type / graphic_type / content_type
+    sub_kind: str | None             # category / audience_type / deliverable_type
+    link: str | None                 # link_to_asset / link_1 or creative / post_link
+    thumbnail: str | None            # only influencer has one right now
+    date_produced: date | None       # date_of_production / asset_date / post_date
+    created_at: datetime | None
+    # SKU mapping + 30d CPIS window enrichment
+    candidate_master_sku: str | None
+    matched_master_sku: str | None
+    sku_attributed_orders: int | None
+    sku_ad_spend: float | None
+    sku_cost_per_order: float | None
+
+
+class UntestedAssetsResponse(BaseModel):
+    media: UntestedMedia
+    total_rows: int
+    with_sku_match: int
+    without_sku_match: int
+    rows: list[UntestedAssetRow]
+    computed_at: datetime
+
+
+# Per-media SQL fragments producing a common column set. Each SELECT
+# yields: id, title, nomenclature, kind, sub_kind, link, thumbnail,
+# date_produced, created_at, candidate_master_sku (already NULLIF'd).
+_UNTESTED_SQL: dict[str, str] = {
+    "video": """
+        SELECT
+          car.asset_id                                          AS id,
+          NULL::text                                            AS title,
+          car.planning_nomenclature                             AS nomenclature,
+          car.asset_type                                        AS kind,
+          car.category                                          AS sub_kind,
+          car.link_to_asset                                     AS link,
+          NULL::text                                            AS thumbnail,
+          car.date_of_production                                AS date_produced,
+          car.created_at                                        AS created_at,
+          NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '')
+                                                                AS candidate_master_sku
+        FROM public.content_asset_register car
+        WHERE car.ad_id IS NULL
+    """,
+    "graphic": """
+        SELECT
+          cgr.requisition_id                                    AS id,
+          cgr.product                                           AS title,
+          cgr.nomenclature                                      AS nomenclature,
+          cgr.graphic_type                                      AS kind,
+          cgr.audience_type                                     AS sub_kind,
+          COALESCE(cgr.link_1, cgr.link_2, cgr.link_3, cgr.creative)
+                                                                AS link,
+          NULL::text                                            AS thumbnail,
+          cgr.asset_date                                        AS date_produced,
+          NULL::timestamptz                                     AS created_at,
+          COALESCE(
+            NULLIF(cgr.product, ''),
+            NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
+          )                                                     AS candidate_master_sku
+        FROM public.content_graphic_register cgr
+        WHERE COALESCE(cgr.computed_is_tested, false) = false
+    """,
+    "influencer": """
+        SELECT
+          cip.id::text                                          AS id,
+          cip.username                                          AS title,
+          cip.nomenclature                                      AS nomenclature,
+          cip.content_type                                      AS kind,
+          cip.deliverable_type                                  AS sub_kind,
+          cip.post_link                                         AS link,
+          cip.post_thumbnail                                    AS thumbnail,
+          cip.post_date                                         AS date_produced,
+          cip.created_at                                        AS created_at,
+          NULL::text                                            AS candidate_master_sku
+        FROM public.content_influencer_posts cip
+        WHERE COALESCE(cip.computed_is_tested, false) = false
+    """,
+}
+
+
+@router.get("/untested", response_model=UntestedAssetsResponse)
+async def get_untested_assets(
+    session: SessionDep,
+    media: UntestedMedia = Query(default="video", description="Which asset media type -- video / graphic / influencer"),
+    has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows. Ignored for influencer (which has no SKU derivation)."),
+) -> UntestedAssetsResponse:
+    base_select = _UNTESTED_SQL[media]
+
+    outer_filters: list[str] = []
+    if has_sku is True and media != "influencer":
+        outer_filters.append("cpis.master_sku IS NOT NULL")
+    elif has_sku is False and media != "influencer":
+        outer_filters.append("cpis.master_sku IS NULL")
+    where_clause = ("WHERE " + " AND ".join(outer_filters)) if outer_filters else ""
+
+    sql = text(f"""
+        WITH base AS ({base_select})
+        SELECT
+          b.id, b.title, b.nomenclature, b.kind, b.sub_kind,
+          b.link, b.thumbnail, b.date_produced, b.created_at,
+          b.candidate_master_sku,
+          cpis.master_sku       AS matched_master_sku,
+          cpis.attributed_orders AS sku_attributed_orders,
+          cpis.ad_spend          AS sku_ad_spend,
+          cpis.cost_per_order    AS sku_cost_per_order
+        FROM base b
+        LEFT JOIN public.cpis_by_sku_utm cpis
+          ON cpis.master_sku = b.candidate_master_sku
+         AND cpis.window_key = '30d'
+        {where_clause}
+        ORDER BY COALESCE(b.date_produced, DATE '1900-01-01') DESC,
+                 b.created_at DESC NULLS LAST,
+                 b.id
+    """)
+    result = await session.execute(sql)
+    rows = [
+        UntestedAssetRow(
+            id=r.id,
+            media=media,
+            title=r.title,
+            nomenclature=r.nomenclature,
+            kind=r.kind,
+            sub_kind=r.sub_kind,
+            link=r.link,
+            thumbnail=r.thumbnail,
+            date_produced=r.date_produced,
+            created_at=r.created_at,
+            candidate_master_sku=r.candidate_master_sku,
+            matched_master_sku=r.matched_master_sku,
+            sku_attributed_orders=int(r.sku_attributed_orders) if r.sku_attributed_orders is not None else None,
+            sku_ad_spend=float(r.sku_ad_spend) if r.sku_ad_spend is not None else None,
+            sku_cost_per_order=float(r.sku_cost_per_order) if r.sku_cost_per_order is not None else None,
+        )
+        for r in result
+    ]
+    matched = sum(1 for r in rows if r.matched_master_sku)
+    return UntestedAssetsResponse(
+        media=media,
+        total_rows=len(rows),
+        with_sku_match=matched,
+        without_sku_match=len(rows) - matched,
+        rows=rows,
+        computed_at=datetime.now(timezone.utc),
+    )
+
 
 # ----------------------------------------------------------------------
 # Instagram -- per-post Silver read over public.insta_data (55 structured

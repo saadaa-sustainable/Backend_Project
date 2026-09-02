@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS public.master_sku_inventory_current (
     cost_max        numeric,
     shopify_sp_min  numeric,
     shopify_sp_max  numeric,
+    -- In-stock breadth (2026-09-02). Both are 0-100 percentages so
+    -- they render as-is in the UI without extra formatting:
+    --   variant_in_stock_rate: fraction of the SKU's variants a
+    --     customer can actually buy right now (variants with
+    --     current_stock > 0 / total variants).
+    --   size_in_stock_rate: fraction of DISTINCT sizes still
+    --     available at all -- e.g., pant sizes S/M/L/XL and S+M
+    --     out of stock -> 50%. Sensitive to size-run gaps that
+    --     variant_in_stock_rate can hide.
+    variant_in_stock_ct   integer,
+    variant_in_stock_rate numeric,
+    size_total_ct         integer,
+    size_in_stock_ct      integer,
+    size_in_stock_rate    numeric,
+    -- Per-size stock breakdown as {"XS":12, "S":65, ..., "5XL":0}.
+    -- JSONB keeps this flexible for products with non-standard size
+    -- vocabularies (numeric sizes, one-size, etc.) without a schema
+    -- change per format. NULL = no size-tagged variants at all.
+    stock_by_size   jsonb,
     refreshed_at    timestamptz DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_msi_as_of ON public.master_sku_inventory_current(as_of_date);
@@ -114,7 +133,8 @@ WITH latest_per_variant AS (
         "Lead_Time" AS lead_time,
         "Buffer_Days" AS buffer_days,
         "cost",
-        "shopify_sp"
+        "shopify_sp",
+        "Size" AS size
     FROM public.bq_inventory_daily
     WHERE sku IS NOT NULL
     ORDER BY sku, date_day DESC
@@ -148,7 +168,9 @@ INSERT INTO public.master_sku_inventory_current (
     oos_days_7, oos_days_15, oos_days_30,
     oos_days_45, oos_days_90, oos_days_365,
     lead_time, buffer_days,
-    cost_min, cost_max, shopify_sp_min, shopify_sp_max
+    cost_min, cost_max, shopify_sp_min, shopify_sp_max,
+    variant_in_stock_ct, variant_in_stock_rate,
+    size_total_ct, size_in_stock_ct, size_in_stock_rate
 )
 SELECT
     master_sku,
@@ -185,10 +207,70 @@ SELECT
     MIN(cost)                          AS cost_min,
     MAX(cost)                          AS cost_max,
     MIN(shopify_sp)                    AS shopify_sp_min,
-    MAX(shopify_sp)                    AS shopify_sp_max
+    MAX(shopify_sp)                    AS shopify_sp_max,
+    -- In-stock breadth. FILTER (WHERE current_stock > 0) is Postgres's
+    -- inline conditional aggregate -- more efficient than a subquery
+    -- and reads clearly. Rates are 0-100 percentages rounded to 1dp so
+    -- they render without extra frontend formatting.
+    COUNT(*) FILTER (WHERE current_stock > 0)::int         AS variant_in_stock_ct,
+    CASE WHEN COUNT(*) > 0
+         THEN ROUND(100.0 * (COUNT(*) FILTER (WHERE current_stock > 0))::numeric
+                    / COUNT(*)::numeric, 1)
+         END                                               AS variant_in_stock_rate,
+    COUNT(DISTINCT size)::int                              AS size_total_ct,
+    COUNT(DISTINCT size) FILTER (WHERE current_stock > 0)::int AS size_in_stock_ct,
+    CASE WHEN COUNT(DISTINCT size) > 0
+         THEN ROUND(100.0 * (COUNT(DISTINCT size) FILTER (WHERE current_stock > 0))::numeric
+                    / COUNT(DISTINCT size)::numeric, 1)
+         END                                               AS size_in_stock_rate
 FROM parsed
 WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$'
 GROUP BY master_sku
+"""
+
+
+# Second pass: build the per-size stock JSON per master_sku. Done as a
+# separate UPDATE because rolling up "per-size sum" is a nested
+# aggregation (SUM inside jsonb_object_agg) that fights the main
+# INSERT's GROUP BY master_sku. Keeping it a plain follow-up UPDATE
+# keeps the main SQL readable and costs nothing at 105 SKUs.
+STOCK_BY_SIZE_SQL = """
+WITH latest_per_variant AS (
+    SELECT DISTINCT ON (sku)
+        sku,
+        "current_stock" AS current_stock,
+        "Size" AS size
+    FROM public.bq_inventory_daily
+    WHERE sku IS NOT NULL
+    ORDER BY sku, date_day DESC
+),
+parsed AS (
+    SELECT
+        SUBSTRING(
+            regexp_replace(sku, '(6XL|5XL|4XL|3XL|2XL|XXL|XXS|XL|XS|S|M|L)$', '')
+            FROM 1
+            FOR GREATEST(1,
+                length(regexp_replace(sku, '(6XL|5XL|4XL|3XL|2XL|XXL|XXS|XL|XS|S|M|L)$', '')) - 2
+            )
+        ) AS master_sku,
+        current_stock, size
+    FROM latest_per_variant
+),
+size_stock AS (
+    SELECT master_sku, size, SUM(current_stock)::int AS stock
+    FROM parsed
+    WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$' AND size IS NOT NULL
+    GROUP BY master_sku, size
+),
+size_agg AS (
+    SELECT master_sku, jsonb_object_agg(size, stock) AS agg
+    FROM size_stock
+    GROUP BY master_sku
+)
+UPDATE public.master_sku_inventory_current m
+SET stock_by_size = sa.agg
+FROM size_agg sa
+WHERE m.master_sku = sa.master_sku
 """
 
 
@@ -208,6 +290,7 @@ def main() -> None:
                 cur.execute("DROP TABLE IF EXISTS public.master_sku_inventory_current")
                 cur.execute(DDL)
                 cur.execute(REBUILD_SQL)
+                cur.execute(STOCK_BY_SIZE_SQL)
                 cur.execute(
                     "SELECT COUNT(*), MIN(as_of_date), MAX(as_of_date), "
                     "SUM(variant_ct), SUM(current_stock) "

@@ -593,6 +593,16 @@ export interface AdsAnalyseRow {
   ltv_reach: number | null;
   ltv_frequency: number | null;
   first_seen_date: string | null;
+  // Asset resolution from content_asset_register /
+  // content_graphic_register / content_influencer_posts. asset_match_source
+  // is one of:
+  //   'direct'           -- workflow-optimiser wrote a direct ad_id link
+  //   'ctd_matched'      -- CTD's substring matcher found the ad_name
+  //   'name_parsed'      -- regex-extracted from ad_name AND the code exists in a register table
+  //   'name_synthetic'   -- regex-extracted from ad_name, code not yet in a register table
+  asset_id: string | null;
+  asset_media: "video" | "graphic" | "influencer" | null;
+  asset_match_source: "direct" | "ctd_matched" | "name_parsed" | "name_synthetic" | null;
 }
 
 export interface AdsAnalyseTotals {
@@ -1149,6 +1159,15 @@ export interface CpisUtmRow {
   // Name-matched (primary attribution: SKU code in ad_name)
   name_matched_ads: number | null;
   name_matched_spend: number | null;
+  // UTM-matched spend (2026-09-02). For each SKU, sum of windowed spend
+  // for the SET of ad_ids that appeared in this SKU's UTM-attributed
+  // orders. Answers "how much did I spend on ads that actually reached
+  // buyers of this SKU?" -- much broader than name_matched (which only
+  // catches ads NAMED after the SKU). Deliberately double-counts across
+  // SKUs -- an ad selling SMCP+SDCP counts 100% for both.
+  utm_matched_ads: number | null;
+  utm_matched_spend: number | null;
+  utm_matched_ncp: number | null;
   name_matched_ncp: number | null;
   name_matched_roas_lifetime: number | null;
   name_matched_nc_roas: number | null;
@@ -1192,6 +1211,30 @@ export interface CpisUtmRow {
   mm_oos_days_90: number | null;
   mm_lead_time: number | null;
   mm_buffer_days: number | null;
+  // In-stock breadth from MapleMonk variant snapshot (2026-09-02).
+  // Both rates are 0-100 percentages.
+  mm_variant_in_stock_ct: number | null;
+  mm_variant_in_stock_rate: number | null;
+  mm_size_total_ct: number | null;
+  mm_size_in_stock_ct: number | null;
+  mm_size_in_stock_rate: number | null;
+  // Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ...}.
+  // Frontend renders as one column per canonical size. null when no
+  // size-tagged variants exist.
+  mm_stock_by_size: Record<string, number> | null;
+  // Per-SKU untested-asset backlog counts. Rendered as three columns
+  // in the CPIS table so a merchant can see "how many videos / graphics
+  // / influencer posts I still have queued for this SKU."
+  // Influencer is 0 for every SKU today (SIF-<n>-P<n> nomenclature
+  // carries no product code); tooltip explains.
+  untested_video_ct: number | null;
+  untested_graphic_ct: number | null;
+  untested_influencer_ct: number | null;
+  // Creative-testing cadence: 1 test / week per 1L of weekly ad spend.
+  // Compare against untested_video_ct + untested_graphic_ct to see if
+  // the backlog covers next week's requirement.
+  weekly_ad_spend: number | null;
+  required_creatives_per_week: number | null;
   // UTM-attributed (secondary comparison signal). Two spend allocations
   // populated in one refresh pass -- attribution-mode toggle picks which
   // to render:
@@ -1493,6 +1536,52 @@ export interface CpisDataFreshness {
 
 export function fetchCpisDataFreshness(): Promise<CpisDataFreshness> {
   return request<CpisDataFreshness>(`/admin/analytics/cpis-utm/data-freshness`);
+}
+
+// Untested assets — three media types (video / graphic / influencer),
+// each backed by its own mirrored table from the legacy CTD dashboard.
+// The endpoint normalizes them to a common row shape so a single UI
+// component renders all three with media-aware column tweaks.
+export type UntestedMedia = "video" | "graphic" | "influencer";
+
+export interface UntestedAssetRow {
+  id: string;
+  media: UntestedMedia;
+  title: string | null;             // username (inf) / product (graphic) / null (video)
+  nomenclature: string | null;
+  kind: string | null;              // asset_type / graphic_type / content_type
+  sub_kind: string | null;          // category / audience_type / deliverable_type
+  link: string | null;
+  thumbnail: string | null;
+  date_produced: string | null;
+  created_at: string | null;
+  candidate_master_sku: string | null;
+  matched_master_sku: string | null;
+  sku_attributed_orders: number | null;
+  sku_ad_spend: number | null;
+  sku_cost_per_order: number | null;
+}
+
+export interface UntestedAssetsResponse {
+  media: UntestedMedia;
+  total_rows: number;
+  with_sku_match: number;
+  without_sku_match: number;
+  rows: UntestedAssetRow[];
+  computed_at: string;
+}
+
+export interface UntestedAssetsParams {
+  media?: UntestedMedia;
+  has_sku?: boolean;
+}
+
+export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<UntestedAssetsResponse> {
+  const q = new URLSearchParams();
+  if (params.media) q.set("media", params.media);
+  if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
+  const qs = q.toString();
+  return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
 }
 
 // Dashboard tab -- per-widget fetchers. Fire in parallel and render

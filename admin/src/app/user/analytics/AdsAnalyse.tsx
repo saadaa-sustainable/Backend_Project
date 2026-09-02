@@ -218,6 +218,51 @@ function StatusPill({ status }: { status: string | null }) {
   return <span className={`ae-status ${active ? "active" : ""}`}>{status}</span>;
 }
 
+// Asset ID cell — shows the mapped asset with a small badge indicating
+// how the mapping was resolved. Backend chain (highest confidence first):
+//   direct           workflow-optimiser explicit ad_id link
+//   ctd_matched      CTD's fuzzy substring matcher hit
+//   name_parsed      regex-extracted from ad_name AND verified in a register table
+//   name_synthetic   regex-extracted only — surfaced so a merchant can
+//                    trace which brief the ad_name refers to, even if
+//                    that brief isn't in the register yet
+const ASSET_SOURCE_META: Record<
+  NonNullable<AdsAnalyseRow["asset_match_source"]>,
+  { label: string; cls: string }
+> = {
+  direct: { label: "direct", cls: "bg-emerald-100 text-emerald-800 border-emerald-200" },
+  ctd_matched: { label: "match", cls: "bg-sky-100 text-sky-800 border-sky-200" },
+  name_parsed: { label: "parsed", cls: "bg-amber-100 text-amber-800 border-amber-200" },
+  name_synthetic: { label: "synth", cls: "bg-slate-100 text-slate-600 border-slate-200" },
+};
+
+const ASSET_MEDIA_ICON: Record<NonNullable<AdsAnalyseRow["asset_media"]>, string> = {
+  video: "🎬",
+  graphic: "🖼",
+  influencer: "👤",
+};
+
+function AssetIdCell({ row }: { row: AdsAnalyseRow }) {
+  if (!row.asset_id) return <span className="text-text-tertiary">—</span>;
+  const src = row.asset_match_source;
+  const media = row.asset_media;
+  const meta = src ? ASSET_SOURCE_META[src] : null;
+  return (
+    <span className="inline-flex items-center gap-1">
+      {media && <span title={media}>{ASSET_MEDIA_ICON[media]}</span>}
+      <span className="font-mono text-[11px]">{row.asset_id}</span>
+      {meta && (
+        <span
+          className={`rounded border px-1 text-[10px] font-medium ${meta.cls}`}
+          title={`Mapped via ${src?.replace("_", " ")}`}
+        >
+          {meta.label}
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Landing-page URL type from CTD dashboard.js:7600-7617. */
 function landingType(url: string | null): { badge: string; cls: string } {
   if (!url) return { badge: "?", cls: "lp-other" };
@@ -238,8 +283,8 @@ const COLUMNS: ColDef[] = [
     render: (r) => <span title={r.ad_name ?? ""}>{r.ad_name ?? "—"}</span> },
   { key: "ad_id", header: "Ad ID", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span className="num">{r.ad_id.slice(0, 12)}…</span> },
-  { key: "asset_id", header: "Asset ID", kind: "text", group: "Identity",
-    render: () => <Placeholder reason="asset_id mapping needs Bronze asset_feed_spec.images[].adlabels flatten — audit item D" /> },
+  { key: "asset_id", header: "Asset ID", kind: "text", group: "Identity", defaultVisible: true,
+    render: (r) => <AssetIdCell row={r} /> },
   { key: "campaign_name", header: "Campaign", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.campaign_name ?? ""}>{r.campaign_name ?? "—"}</span> },
   { key: "adset_id", header: "Ad Set ID", kind: "text", group: "Identity",
