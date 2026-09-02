@@ -755,7 +755,17 @@ async def run_for_admin(
     single-item fetch, so it just writes once, same as before."""
     import asyncpg  # imported lazily -- only needed on a real (non-dry-run) run
 
-    conn = await asyncpg.connect(_to_asyncpg_dsn(database_url))
+    # statement_cache_size=0 is REQUIRED when DATABASE_URL points at
+    # Supabase's pgbouncer (transaction mode). Without it, pgbouncer
+    # rotates the underlying Postgres backend between transactions and
+    # asyncpg's per-connection prepared-statement cache references a
+    # __asyncpg_stmt_N__ that the next backend has never seen ->
+    # "prepared statement does not exist" mid-write, dropping the
+    # whole batch. Live-caught 2026-09-02 mid-orders-insert.
+    conn = await asyncpg.connect(
+        _to_asyncpg_dsn(database_url),
+        statement_cache_size=0,
+    )
     any_error = False
     items_so_far = 0
     inserted_so_far = 0
@@ -1188,7 +1198,17 @@ async def _run_and_report(
 
     import asyncpg  # imported lazily -- only needed on a real (non-dry-run) run
 
-    conn = await asyncpg.connect(_to_asyncpg_dsn(database_url))
+    # statement_cache_size=0 is REQUIRED when DATABASE_URL points at
+    # Supabase's pgbouncer (transaction mode). Without it, pgbouncer
+    # rotates the underlying Postgres backend between transactions and
+    # asyncpg's per-connection prepared-statement cache references a
+    # __asyncpg_stmt_N__ that the next backend has never seen ->
+    # "prepared statement does not exist" mid-write, dropping the
+    # whole batch. Live-caught 2026-09-02 mid-orders-insert.
+    conn = await asyncpg.connect(
+        _to_asyncpg_dsn(database_url),
+        statement_cache_size=0,
+    )
     write_start = time.monotonic()
     total_written = 0
     write_any_error = False

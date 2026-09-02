@@ -96,6 +96,11 @@ CREATE TABLE IF NOT EXISTS public.master_sku_inventory_current (
     size_total_ct         integer,
     size_in_stock_ct      integer,
     size_in_stock_rate    numeric,
+    -- Per-size stock breakdown as {"XS":12, "S":65, ..., "5XL":0}.
+    -- JSONB keeps this flexible for products with non-standard size
+    -- vocabularies (numeric sizes, one-size, etc.) without a schema
+    -- change per format. NULL = no size-tagged variants at all.
+    stock_by_size   jsonb,
     refreshed_at    timestamptz DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_msi_as_of ON public.master_sku_inventory_current(as_of_date);
@@ -224,6 +229,51 @@ GROUP BY master_sku
 """
 
 
+# Second pass: build the per-size stock JSON per master_sku. Done as a
+# separate UPDATE because rolling up "per-size sum" is a nested
+# aggregation (SUM inside jsonb_object_agg) that fights the main
+# INSERT's GROUP BY master_sku. Keeping it a plain follow-up UPDATE
+# keeps the main SQL readable and costs nothing at 105 SKUs.
+STOCK_BY_SIZE_SQL = """
+WITH latest_per_variant AS (
+    SELECT DISTINCT ON (sku)
+        sku,
+        "current_stock" AS current_stock,
+        "Size" AS size
+    FROM public.bq_inventory_daily
+    WHERE sku IS NOT NULL
+    ORDER BY sku, date_day DESC
+),
+parsed AS (
+    SELECT
+        SUBSTRING(
+            regexp_replace(sku, '(6XL|5XL|4XL|3XL|2XL|XXL|XXS|XL|XS|S|M|L)$', '')
+            FROM 1
+            FOR GREATEST(1,
+                length(regexp_replace(sku, '(6XL|5XL|4XL|3XL|2XL|XXL|XXS|XL|XS|S|M|L)$', '')) - 2
+            )
+        ) AS master_sku,
+        current_stock, size
+    FROM latest_per_variant
+),
+size_stock AS (
+    SELECT master_sku, size, SUM(current_stock)::int AS stock
+    FROM parsed
+    WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$' AND size IS NOT NULL
+    GROUP BY master_sku, size
+),
+size_agg AS (
+    SELECT master_sku, jsonb_object_agg(size, stock) AS agg
+    FROM size_stock
+    GROUP BY master_sku
+)
+UPDATE public.master_sku_inventory_current m
+SET stock_by_size = sa.agg
+FROM size_agg sa
+WHERE m.master_sku = sa.master_sku
+"""
+
+
 def _pg_dsn() -> str:
     return os.environ["DATABASE_URL_SYNC"].replace("postgresql+psycopg2://", "postgresql://")
 
@@ -240,6 +290,7 @@ def main() -> None:
                 cur.execute("DROP TABLE IF EXISTS public.master_sku_inventory_current")
                 cur.execute(DDL)
                 cur.execute(REBUILD_SQL)
+                cur.execute(STOCK_BY_SIZE_SQL)
                 cur.execute(
                     "SELECT COUNT(*), MIN(as_of_date), MAX(as_of_date), "
                     "SUM(variant_ct), SUM(current_stock) "
