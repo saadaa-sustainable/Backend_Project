@@ -1230,6 +1230,11 @@ export interface CpisUtmRow {
   untested_video_ct: number | null;
   untested_graphic_ct: number | null;
   untested_influencer_ct: number | null;
+  // Creative-testing cadence: 1 test / week per 1L of weekly ad spend.
+  // Compare against untested_video_ct + untested_graphic_ct to see if
+  // the backlog covers next week's requirement.
+  weekly_ad_spend: number | null;
+  required_creatives_per_week: number | null;
   // UTM-attributed (secondary comparison signal). Two spend allocations
   // populated in one refresh pass -- attribution-mode toggle picks which
   // to render:

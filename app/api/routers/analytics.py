@@ -2232,6 +2232,11 @@ class CpisUtmRow(BaseModel):
     untested_video_ct: int | None
     untested_graphic_ct: int | None
     untested_influencer_ct: int | None
+    # Creative-testing cadence: 1 test per week per 1L of weekly spend.
+    # weekly_ad_spend is name_matched_spend normalised to a 7-day rate;
+    # required_creatives_per_week is FLOOR(weekly_ad_spend / 100000).
+    weekly_ad_spend: float | None
+    required_creatives_per_week: int | None
     # UTM-attributed metrics (from cpis_by_sku_utm). Two spend allocations
     # populated in one refresh pass -- frontend picks which to display via
     # the "attribution mode" toggle:
@@ -2722,6 +2727,19 @@ async def get_cpis_utm(
              COALESCE(ubs.untested_video_ct,      0)::integer AS untested_video_ct,
              COALESCE(ubs.untested_graphic_ct,    0)::integer AS untested_graphic_ct,
              COALESCE(ubs.untested_influencer_ct, 0)::integer AS untested_influencer_ct,
+             -- Creative-testing cadence rule (merchant-defined,
+             -- 2026-09-03): 1 fresh creative should be tested per week
+             -- per 1L (100,000) of weekly name-matched spend. So a SKU
+             -- burning 5L / week needs 5 tests to keep the funnel
+             -- healthy. Weekly rate normalises across window lengths
+             -- (7d / 30d / 90d / custom) so the requirement stays
+             -- comparable regardless of the picked date range.
+             CASE WHEN wd.n_days > 0 AND na.name_matched_spend IS NOT NULL
+                  THEN na.name_matched_spend * 7.0 / wd.n_days
+                  ELSE NULL END                              AS weekly_ad_spend,
+             CASE WHEN wd.n_days > 0 AND COALESCE(na.name_matched_spend, 0) > 0
+                  THEN FLOOR(na.name_matched_spend * 7.0 / wd.n_days / 100000.0)::integer
+                  ELSE 0 END                                 AS required_creatives_per_week,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
              p.matched_ad_count, p.ad_spend,
