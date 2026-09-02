@@ -1480,6 +1480,21 @@ export function triggerSilverRefresh(): Promise<RefreshSilverResponse> {
   return request<RefreshSilverResponse>(`/admin/refresh/silver-all`, { method: "POST" });
 }
 
+// CPIS data-freshness probe. Used to cap the date-range picker's
+// default to_date to the freshest day the underlying tables have --
+// avoids showing empty ranges when a merchant opens the page.
+export interface CpisDataFreshness {
+  max_meta_day: string | null;    // freshest Meta insight day (YYYY-MM-DD)
+  max_orders_day: string | null;  // freshest Shopify processed_at day
+  max_daily_day: string | null;   // freshest day in cpis_by_sku_daily
+  distinct_skus: number;
+  computed_at: string;
+}
+
+export function fetchCpisDataFreshness(): Promise<CpisDataFreshness> {
+  return request<CpisDataFreshness>(`/admin/analytics/cpis-utm/data-freshness`);
+}
+
 // Dashboard tab -- per-widget fetchers. Fire in parallel and render
 // each widget as its own data arrives (progressive loading).
 export interface DashboardKpis {

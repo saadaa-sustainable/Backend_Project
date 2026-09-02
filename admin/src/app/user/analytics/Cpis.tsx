@@ -9,10 +9,12 @@ import {
   CpisUtmWindow,
   SaturationCurveResponse,
   SaturationYMetric,
+  fetchCpisDataFreshness,
   fetchCpisMatchedAds,
   fetchCpisSpendTrend,
   fetchCpisUtm,
   fetchSaturationCurve,
+  type CpisDataFreshness,
 } from "@/lib/api";
 import { SaturationCurveChart } from "./charts/SaturationCurveChart";
 import { KwikTile } from "./KwikTile";
@@ -478,6 +480,35 @@ function CpisView() {
     return d.toISOString().slice(0, 10);
   });
   const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  // Data-freshness probe -- fetched once on mount from
+  // /cpis-utm/data-freshness. Used to (a) cap the picker's `to_date`
+  // default to whichever underlying table is stalest (Meta insights
+  // and Shopify orders drift at different rates), and (b) show a
+  // "Data through <date>" indicator so the merchant sees the freshness
+  // at a glance instead of picking a range that ends in empty days.
+  const [freshness, setFreshness] = useState<CpisDataFreshness | null>(null);
+  useEffect(() => {
+    fetchCpisDataFreshness()
+      .then((f) => {
+        setFreshness(f);
+        // Use max_daily_day (the freshest day for which BOTH Meta spend
+        // AND Shopify orders exist -- it's min(max_meta, max_orders)).
+        // Fall back to max_meta_day if daily table hasn't been
+        // populated. Only auto-fill when the user hasn't touched the
+        // picker yet (fromDate/toDate still equal their initial values).
+        const cap = f.max_daily_day || f.max_meta_day;
+        if (!cap) return;
+        setToDate(cap);
+        // Slide fromDate back 29 days from cap for a stable "last 30d"
+        // default anchored on data reality, not wall-clock today.
+        const capDate = new Date(cap);
+        capDate.setDate(capDate.getDate() - 29);
+        setFromDate(capDate.toISOString().slice(0, 10));
+      })
+      .catch(() => {
+        /* silent: leave the naive today-based defaults if probe fails */
+      });
+  }, []);
   // Collapse toggles for each of the three analytics blocks (KPI strip,
   // saturation curve, main table). Default: everything open. Merchant
   // can fold anything they don't need so the section stops eating scroll.
@@ -652,6 +683,18 @@ function CpisView() {
             title="Daily-sum path (cpis_by_sku_daily) for this exact date range"
           >
             windowed
+          </span>
+        )}
+        {freshness && (
+          <span
+            className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800"
+            title={
+              `Meta insights through ${freshness.max_meta_day ?? "-"}` +
+              ` · Shopify orders through ${freshness.max_orders_day ?? "-"}` +
+              ` · cpis_by_sku_daily through ${freshness.max_daily_day ?? "-"}`
+            }
+          >
+            Data through {freshness.max_daily_day ?? freshness.max_meta_day ?? "?"}
           </span>
         )}
         <input

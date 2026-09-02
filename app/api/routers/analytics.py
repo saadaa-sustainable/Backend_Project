@@ -16,7 +16,7 @@ import os
 import re as _re
 import statistics
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -2546,6 +2546,37 @@ class CpisSpendTrendResponse(BaseModel):
     window_to: date | None
     spend_trend_current: list[float]
     spend_trend_prev_total: float | None
+
+
+class CpisDataFreshnessResponse(BaseModel):
+    """Latest date available in each of the underlying tables the CPIS
+    endpoint consumes. Frontend uses `max_day` (the newer of the two)
+    to cap the date-range picker so the merchant can't pick a "to"
+    date that has no data yet."""
+    max_meta_day: date | None      # freshest Meta insight day
+    max_orders_day: date | None    # freshest Shopify processed_at day
+    max_daily_day: date | None     # freshest day in cpis_by_sku_daily
+    distinct_skus: int
+    computed_at: datetime
+
+
+@router.get("/cpis-utm/data-freshness", response_model=CpisDataFreshnessResponse)
+async def get_cpis_utm_data_freshness(session: SessionDep) -> CpisDataFreshnessResponse:
+    """Cheap freshness probe -- 3 MAX() queries, no scans of large
+    tables. Frontend calls this once on mount to set the default
+    to_date on the date-range picker to whatever's actually available,
+    not "today" (which may have no data yet)."""
+    max_meta   = (await session.execute(text("SELECT MAX(day) FROM insights_daily_by_ad"))).scalar_one_or_none()
+    max_orders = (await session.execute(text("SELECT MAX(processed_at::date) FROM shopify_orders"))).scalar_one_or_none()
+    max_daily  = (await session.execute(text("SELECT MAX(day) FROM cpis_by_sku_daily"))).scalar_one_or_none()
+    n_sku      = (await session.execute(text("SELECT COUNT(DISTINCT master_sku) FROM cpis_by_sku_daily"))).scalar_one_or_none()
+    return CpisDataFreshnessResponse(
+        max_meta_day=max_meta,
+        max_orders_day=max_orders,
+        max_daily_day=max_daily,
+        distinct_skus=int(n_sku or 0),
+        computed_at=datetime.now(timezone.utc),
+    )
 
 
 @router.get("/cpis-utm/spend-trend", response_model=CpisSpendTrendResponse)
