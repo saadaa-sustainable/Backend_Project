@@ -1149,6 +1149,15 @@ export interface CpisUtmRow {
   // Name-matched (primary attribution: SKU code in ad_name)
   name_matched_ads: number | null;
   name_matched_spend: number | null;
+  // UTM-matched spend (2026-09-02). For each SKU, sum of windowed spend
+  // for the SET of ad_ids that appeared in this SKU's UTM-attributed
+  // orders. Answers "how much did I spend on ads that actually reached
+  // buyers of this SKU?" -- much broader than name_matched (which only
+  // catches ads NAMED after the SKU). Deliberately double-counts across
+  // SKUs -- an ad selling SMCP+SDCP counts 100% for both.
+  utm_matched_ads: number | null;
+  utm_matched_spend: number | null;
+  utm_matched_ncp: number | null;
   name_matched_ncp: number | null;
   name_matched_roas_lifetime: number | null;
   name_matched_nc_roas: number | null;
@@ -1199,6 +1208,10 @@ export interface CpisUtmRow {
   mm_size_total_ct: number | null;
   mm_size_in_stock_ct: number | null;
   mm_size_in_stock_rate: number | null;
+  // Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ...}.
+  // Frontend renders as one column per canonical size. null when no
+  // size-tagged variants exist.
+  mm_stock_by_size: Record<string, number> | null;
   // UTM-attributed (secondary comparison signal). Two spend allocations
   // populated in one refresh pass -- attribution-mode toggle picks which
   // to render:
@@ -1500,6 +1513,50 @@ export interface CpisDataFreshness {
 
 export function fetchCpisDataFreshness(): Promise<CpisDataFreshness> {
   return request<CpisDataFreshness>(`/admin/analytics/cpis-utm/data-freshness`);
+}
+
+// Untested assets (content_asset_register mirrored from legacy CTD).
+// Each row is an asset briefed/produced but never run in a Meta ad.
+// candidate_master_sku is the split_part(planning_nomenclature, '_', 1)
+// prefix; matched_master_sku is populated only when that prefix exists
+// in cpis_by_sku_utm (i.e. it's a real catalog SKU with recent sales).
+export interface UntestedAssetRow {
+  asset_id: string;
+  source_parent: string | null;
+  asset_type: string | null;
+  category: string | null;
+  planning_nomenclature: string | null;
+  link_to_asset: string | null;
+  brief_shoot_required: string | null;
+  brief_aspect_ratio: string | null;
+  date_of_production: string | null;
+  created_at: string | null;
+  candidate_master_sku: string | null;
+  matched_master_sku: string | null;
+  sku_attributed_orders: number | null;
+  sku_ad_spend: number | null;
+  sku_cost_per_order: number | null;
+}
+
+export interface UntestedAssetsResponse {
+  total_rows: number;
+  with_sku_match: number;
+  without_sku_match: number;
+  rows: UntestedAssetRow[];
+  computed_at: string;
+}
+
+export interface UntestedAssetsParams {
+  asset_type?: string;
+  has_sku?: boolean;
+}
+
+export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<UntestedAssetsResponse> {
+  const q = new URLSearchParams();
+  if (params.asset_type) q.set("asset_type", params.asset_type);
+  if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
+  const qs = q.toString();
+  return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
 }
 
 // Dashboard tab -- per-widget fetchers. Fire in parallel and render

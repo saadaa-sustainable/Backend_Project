@@ -11,6 +11,7 @@ import { ShopifyExplorer } from "./ShopifyExplorer";
 import { MetaExplorer } from "./MetaExplorer";
 import { Cpis } from "./Cpis";
 import { Instagram } from "./Instagram";
+import { UntestedAssets } from "./UntestedAssets";
 
 type Tab =
   | "dashboard"
@@ -20,6 +21,7 @@ type Tab =
   | "customer-journey"
   | "landing-page"
   | "cpis"
+  | "untested-assets"
   | "instagram"
   | "shopify-explorer"
   | "meta-explorer";
@@ -39,6 +41,7 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "customer-journey": { label: "Customer Journey", render: () => <CustomerJourney /> },
   "landing-page": { label: "Landing Page Analysis", render: () => <LandingPageAnalysis /> },
   cpis: { label: "CPIS", render: () => <Cpis /> },
+  "untested-assets": { label: "Untested Assets", render: () => <UntestedAssets /> },
   instagram: { label: "Instagram", render: () => <Instagram /> },
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },
   "meta-explorer": { label: "Meta Explorer", render: () => <MetaExplorer /> },
@@ -52,6 +55,7 @@ const DEFAULT_TAB_ORDER: Tab[] = [
   "customer-journey",
   "landing-page",
   "cpis",
+  "untested-assets",
   "instagram",
   "shopify-explorer",
   "meta-explorer",

@@ -2769,6 +2769,136 @@ async def get_cpis_utm_spend_trend(
 # ----------------------------------------------------------------------
 
 # ----------------------------------------------------------------------
+# Untested Assets -- backed by public.content_asset_register (mirrored
+# from the legacy CTD dashboard, which mirrors from content_workflow_
+# optimiser). "Untested" == ad_id IS NULL, i.e. the asset was briefed
+# and produced but no Meta ad has ever run its file.
+#
+# SKU derivation: master_sku = split_part(planning_nomenclature, '_', 1)
+# -- the planning nomenclature convention is <SKU>_<CAMPAIGN>_<...>, e.g.
+# "SDCSS_BST_CPL001-0026_20_03_2026" -> "SDCSS". We LEFT JOIN
+# cpis_by_sku_utm (30d) to (a) validate the SKU is a real catalog SKU
+# and (b) surface its recent NCP/CPO/spend so a merchant browsing untested
+# assets can prioritise: "which of these belong to SKUs that are already
+# selling hard vs. which are new-SKU concepts."
+# ----------------------------------------------------------------------
+
+
+class UntestedAssetRow(BaseModel):
+    asset_id: str
+    source_parent: str | None
+    asset_type: str | None
+    category: str | None
+    planning_nomenclature: str | None
+    link_to_asset: str | None
+    brief_shoot_required: str | None
+    brief_aspect_ratio: str | None
+    date_of_production: date | None
+    created_at: datetime | None
+    # SKU-mapping columns (may be null when the asset's nomenclature
+    # doesn't start with a valid catalog SKU -- new concepts, generic
+    # BST-only assets, etc.)
+    candidate_master_sku: str | None
+    matched_master_sku: str | None
+    # 30-day CPIS window on the mapped SKU: how much this SKU is
+    # selling right now, so a merchant browsing untested assets can
+    # prioritise concepts for SKUs already generating orders.
+    sku_attributed_orders: int | None
+    sku_ad_spend: float | None
+    sku_cost_per_order: float | None
+
+
+class UntestedAssetsResponse(BaseModel):
+    total_rows: int
+    with_sku_match: int
+    without_sku_match: int
+    rows: list[UntestedAssetRow]
+    computed_at: datetime
+
+
+@router.get("/untested", response_model=UntestedAssetsResponse)
+async def get_untested_assets(
+    session: SessionDep,
+    asset_type: str | None = Query(default=None, description="Filter by asset_type (Campaign, Standalone Brief, ...)"),
+    has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows."),
+) -> UntestedAssetsResponse:
+    params: dict[str, Any] = {}
+    outer_filters: list[str] = []
+    if asset_type:
+        outer_filters.append("b.asset_type = :asset_type")
+        params["asset_type"] = asset_type
+    if has_sku is True:
+        outer_filters.append("cpis.master_sku IS NOT NULL")
+    elif has_sku is False:
+        outer_filters.append("cpis.master_sku IS NULL")
+
+    where_clause = ("WHERE " + " AND ".join(outer_filters)) if outer_filters else ""
+    sql = text(f"""
+        WITH base AS (
+          SELECT
+            car.asset_id,
+            car.source_parent,
+            car.asset_type,
+            car.category,
+            car.planning_nomenclature,
+            car.link_to_asset,
+            car.brief_shoot_required,
+            car.brief_aspect_ratio,
+            car.date_of_production,
+            car.created_at,
+            split_part(COALESCE(car.planning_nomenclature, ''), '_', 1) AS candidate_master_sku
+          FROM public.content_asset_register car
+          WHERE car.ad_id IS NULL
+        )
+        SELECT
+          b.asset_id, b.source_parent, b.asset_type, b.category,
+          b.planning_nomenclature, b.link_to_asset,
+          b.brief_shoot_required, b.brief_aspect_ratio,
+          b.date_of_production, b.created_at,
+          NULLIF(b.candidate_master_sku, '') AS candidate_master_sku,
+          cpis.master_sku       AS matched_master_sku,
+          cpis.attributed_orders AS sku_attributed_orders,
+          cpis.ad_spend          AS sku_ad_spend,
+          cpis.cost_per_order    AS sku_cost_per_order
+        FROM base b
+        LEFT JOIN public.cpis_by_sku_utm cpis
+          ON cpis.master_sku = b.candidate_master_sku
+         AND cpis.window_key = '30d'
+        {where_clause}
+        ORDER BY b.created_at DESC NULLS LAST, b.asset_id
+    """)
+    result = await session.execute(sql, params)
+    rows = [
+        UntestedAssetRow(
+            asset_id=r.asset_id,
+            source_parent=r.source_parent,
+            asset_type=r.asset_type,
+            category=r.category,
+            planning_nomenclature=r.planning_nomenclature,
+            link_to_asset=r.link_to_asset,
+            brief_shoot_required=r.brief_shoot_required,
+            brief_aspect_ratio=r.brief_aspect_ratio,
+            date_of_production=r.date_of_production,
+            created_at=r.created_at,
+            candidate_master_sku=r.candidate_master_sku,
+            matched_master_sku=r.matched_master_sku,
+            sku_attributed_orders=int(r.sku_attributed_orders) if r.sku_attributed_orders is not None else None,
+            sku_ad_spend=float(r.sku_ad_spend) if r.sku_ad_spend is not None else None,
+            sku_cost_per_order=float(r.sku_cost_per_order) if r.sku_cost_per_order is not None else None,
+        )
+        for r in result
+    ]
+    matched = sum(1 for r in rows if r.matched_master_sku)
+    return UntestedAssetsResponse(
+        total_rows=len(rows),
+        with_sku_match=matched,
+        without_sku_match=len(rows) - matched,
+        rows=rows,
+        computed_at=datetime.now(timezone.utc),
+    )
+
+
+# ----------------------------------------------------------------------
 # Instagram -- per-post Silver read over public.insta_data (55 structured
 # columns: post metadata + engagement counts + insights + owner profile).
 # The Silver table is populated by the older ingest_instagram.py path;
