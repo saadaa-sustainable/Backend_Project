@@ -1222,6 +1222,14 @@ export interface CpisUtmRow {
   // Frontend renders as one column per canonical size. null when no
   // size-tagged variants exist.
   mm_stock_by_size: Record<string, number> | null;
+  // Per-SKU untested-asset backlog counts. Rendered as three columns
+  // in the CPIS table so a merchant can see "how many videos / graphics
+  // / influencer posts I still have queued for this SKU."
+  // Influencer is 0 for every SKU today (SIF-<n>-P<n> nomenclature
+  // carries no product code); tooltip explains.
+  untested_video_ct: number | null;
+  untested_graphic_ct: number | null;
+  untested_influencer_ct: number | null;
   // UTM-attributed (secondary comparison signal). Two spend allocations
   // populated in one refresh pass -- attribution-mode toggle picks which
   // to render:

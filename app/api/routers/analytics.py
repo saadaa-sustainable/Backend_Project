@@ -2223,6 +2223,15 @@ class CpisUtmRow(BaseModel):
     # Frontend renders as one column per canonical size (XS -> 5XL).
     # None if no size-tagged variants exist for this SKU.
     mm_stock_by_size: dict[str, int] | None
+    # Per-SKU untested-asset backlog counts (see untested_by_sku CTE).
+    # untested_influencer_ct is always 0 today -- influencer nomenclature
+    # doesn't carry a product code, so no SKU mapping exists. Column
+    # stays in the schema so if we route SKU derivation through a
+    # different signal later (e.g. matched_ad_id -> ad -> SKU), no
+    # breaking change is needed on the frontend.
+    untested_video_ct: int | None
+    untested_graphic_ct: int | None
+    untested_influencer_ct: int | None
     # UTM-attributed metrics (from cpis_by_sku_utm). Two spend allocations
     # populated in one refresh pass -- frontend picks which to display via
     # the "attribution mode" toggle:
@@ -2488,6 +2497,45 @@ async def get_cpis_utm(
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
       ),
+      -- Per-SKU untested-asset counts across the three CTD content
+      -- registers. Merchant lens: "for SKU SDCP, how many briefed-but-
+      -- unused videos / graphics do I still have in the pipeline?"
+      --   * video    -- content_asset_register  ad_id IS NULL,
+      --                 SKU derived from split_part(planning_nomenclature)
+      --   * graphic  -- content_graphic_register  computed_is_tested = false,
+      --                 SKU from the pre-populated `product` column (falls
+      --                 back to split_part(nomenclature))
+      --   * inf.     -- content_influencer_posts  computed_is_tested = false,
+      --                 no SKU derivation available (SIF-<n>-P<n>
+      --                 nomenclature carries no product code) -- count
+      --                 is always 0 per SKU, but the UI shows the global
+      --                 total in a footer/tooltip so it isn't hidden.
+      untested_by_sku AS (
+        SELECT master_sku,
+               COUNT(*) FILTER (WHERE media = 'video')      AS untested_video_ct,
+               COUNT(*) FILTER (WHERE media = 'graphic')    AS untested_graphic_ct,
+               COUNT(*) FILTER (WHERE media = 'influencer') AS untested_influencer_ct
+        FROM (
+          SELECT
+            'video'::text AS media,
+            NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '') AS master_sku
+          FROM public.content_asset_register car
+          WHERE car.ad_id IS NULL
+          UNION ALL
+          SELECT
+            'graphic'::text,
+            COALESCE(
+              NULLIF(cgr.product, ''),
+              NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
+            )
+          FROM public.content_graphic_register cgr
+          WHERE COALESCE(cgr.computed_is_tested, false) = false
+          -- Influencer left out of the union: no per-SKU derivation.
+          -- Frontend surfaces the global total separately.
+        ) u
+        WHERE master_sku IS NOT NULL
+        GROUP BY master_sku
+      ),
       -- Window length in days so the frontend doesn't have to know
       -- window_key -> length mapping. Same for every row.
       window_days AS (
@@ -2667,6 +2715,13 @@ async def get_cpis_utm(
              mm.size_in_stock_ct      AS mm_size_in_stock_ct,
              mm.size_in_stock_rate    AS mm_size_in_stock_rate,
              mm.stock_by_size         AS mm_stock_by_size,
+             -- Per-SKU untested-asset counts (see untested_by_sku CTE
+             -- for derivation). Influencer is 0 for every SKU because
+             -- its nomenclature carries no product code; frontend shows
+             -- a footer note with the global count so it isn't hidden.
+             COALESCE(ubs.untested_video_ct,      0)::integer AS untested_video_ct,
+             COALESCE(ubs.untested_graphic_ct,    0)::integer AS untested_graphic_ct,
+             COALESCE(ubs.untested_influencer_ct, 0)::integer AS untested_influencer_ct,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
              p.matched_ad_count, p.ad_spend,
@@ -2680,6 +2735,7 @@ async def get_cpis_utm(
       FROM page p
       LEFT JOIN name_ads na    USING (master_sku)
       LEFT JOIN utm_ads  ua    USING (master_sku)
+      LEFT JOIN untested_by_sku ubs USING (master_sku)
       LEFT JOIN inv_rolled ir  USING (master_sku)
       LEFT JOIN products_ctx pc USING (master_sku)
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
