@@ -2109,6 +2109,15 @@ class CpisUtmRow(BaseModel):
     mm_oos_days_90: int | None
     mm_lead_time: int | None
     mm_buffer_days: int | None
+    # In-stock breadth (2026-09-02, per MapleMonk variant-level snapshot).
+    # variant_in_stock_rate = % of the SKU's variants currently in stock;
+    # size_in_stock_rate = % of DISTINCT sizes still available at all.
+    # Both are 0-100 percentages.
+    mm_variant_in_stock_ct: int | None
+    mm_variant_in_stock_rate: float | None
+    mm_size_total_ct: int | None
+    mm_size_in_stock_ct: int | None
+    mm_size_in_stock_rate: float | None
     # UTM-attributed metrics (from cpis_by_sku_utm). Two spend allocations
     # populated in one refresh pass -- frontend picks which to display via
     # the "attribution mode" toggle:
@@ -2488,6 +2497,11 @@ async def get_cpis_utm(
              mm.oos_days_90      AS mm_oos_days_90,
              mm.lead_time        AS mm_lead_time,
              mm.buffer_days      AS mm_buffer_days,
+             mm.variant_in_stock_ct   AS mm_variant_in_stock_ct,
+             mm.variant_in_stock_rate AS mm_variant_in_stock_rate,
+             mm.size_total_ct         AS mm_size_total_ct,
+             mm.size_in_stock_ct      AS mm_size_in_stock_ct,
+             mm.size_in_stock_rate    AS mm_size_in_stock_rate,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
              p.matched_ad_count, p.ad_spend,

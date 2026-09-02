@@ -1192,6 +1192,13 @@ export interface CpisUtmRow {
   mm_oos_days_90: number | null;
   mm_lead_time: number | null;
   mm_buffer_days: number | null;
+  // In-stock breadth from MapleMonk variant snapshot (2026-09-02).
+  // Both rates are 0-100 percentages.
+  mm_variant_in_stock_ct: number | null;
+  mm_variant_in_stock_rate: number | null;
+  mm_size_total_ct: number | null;
+  mm_size_in_stock_ct: number | null;
+  mm_size_in_stock_rate: number | null;
   // UTM-attributed (secondary comparison signal). Two spend allocations
   // populated in one refresh pass -- attribution-mode toggle picks which
   // to render:

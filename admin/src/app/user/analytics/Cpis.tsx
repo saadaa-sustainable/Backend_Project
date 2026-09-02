@@ -845,6 +845,9 @@ function CpisView() {
                 <th className="px-3 py-3 text-right" title="Days-of-Quantity at 30-day sales rate, averaged across every variant of this master SKU. 30d is the most accurate horizon for advertising decisions -- reactive enough to catch imminent stockouts, smooth enough not to whipsaw on a single big/small day.">DoQ 30</th>
                 <th className="px-3 py-3 text-right" title="Worst-case OOS days in the last 30 days (max across variants)">OOS 30d</th>
                 <th className="px-3 py-3 text-right" title="Lead time (days) from MapleMonk — max across variants for conservative planning">Lead Time</th>
+                {/* In-stock breadth (2026-09-02, MapleMonk variant snapshot) */}
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — MapleMonk current_stock>0 count / total variants">Var In-Stock %</th>
+                <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU (any color). Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
               </tr>
             </thead>
             <tbody>
@@ -1005,11 +1008,48 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {row.mm_lead_time !== null ? `${row.mm_lead_time}d` : "—"}
                   </td>
+                  {/* In-stock breadth: red < 50%, amber 50-79%, green >= 80% */}
+                  <td
+                    className={`border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                      row.mm_variant_in_stock_rate === null
+                        ? "text-text-tertiary"
+                        : row.mm_variant_in_stock_rate >= 80
+                          ? "text-success-text"
+                          : row.mm_variant_in_stock_rate >= 50
+                            ? "text-warning-text"
+                            : "text-error-text"
+                    }`}
+                    title={
+                      row.mm_variant_in_stock_ct !== null && row.mm_variant_ct !== null
+                        ? `${row.mm_variant_in_stock_ct} of ${row.mm_variant_ct} variants in stock`
+                        : undefined
+                    }
+                  >
+                    {row.mm_variant_in_stock_rate !== null ? `${row.mm_variant_in_stock_rate.toFixed(0)}%` : "—"}
+                  </td>
+                  <td
+                    className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                      row.mm_size_in_stock_rate === null
+                        ? "text-text-tertiary"
+                        : row.mm_size_in_stock_rate >= 80
+                          ? "text-success-text"
+                          : row.mm_size_in_stock_rate >= 50
+                            ? "text-warning-text"
+                            : "text-error-text"
+                    }`}
+                    title={
+                      row.mm_size_in_stock_ct !== null && row.mm_size_total_ct !== null
+                        ? `${row.mm_size_in_stock_ct} of ${row.mm_size_total_ct} distinct sizes still available`
+                        : undefined
+                    }
+                  >
+                    {row.mm_size_in_stock_rate !== null ? `${row.mm_size_in_stock_rate.toFixed(0)}%` : "—"}
+                  </td>
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={29} className="px-4 py-6 text-center text-text-secondary">
+                  <td colSpan={31} className="px-4 py-6 text-center text-text-secondary">
                     No SKUs match these filters.
                   </td>
                 </tr>
