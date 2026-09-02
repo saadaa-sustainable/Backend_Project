@@ -2769,46 +2769,53 @@ async def get_cpis_utm_spend_trend(
 # ----------------------------------------------------------------------
 
 # ----------------------------------------------------------------------
-# Untested Assets -- backed by public.content_asset_register (mirrored
-# from the legacy CTD dashboard, which mirrors from content_workflow_
-# optimiser). "Untested" == ad_id IS NULL, i.e. the asset was briefed
-# and produced but no Meta ad has ever run its file.
+# Untested Assets -- backed by three mirror tables from the legacy CTD
+# dashboard, each surfacing a different asset media type:
 #
-# SKU derivation: master_sku = split_part(planning_nomenclature, '_', 1)
-# -- the planning nomenclature convention is <SKU>_<CAMPAIGN>_<...>, e.g.
-# "SDCSS_BST_CPL001-0026_20_03_2026" -> "SDCSS". We LEFT JOIN
-# cpis_by_sku_utm (30d) to (a) validate the SKU is a real catalog SKU
-# and (b) surface its recent NCP/CPO/spend so a merchant browsing untested
-# assets can prioritise: "which of these belong to SKUs that are already
-# selling hard vs. which are new-SKU concepts."
+#   * media=video       -> content_asset_register     (untested: ad_id IS NULL)
+#   * media=graphic     -> content_graphic_register   (untested: computed_is_tested = false)
+#   * media=influencer  -> content_influencer_posts   (untested: computed_is_tested = false)
+#
+# SKU derivation:
+#   * video    -> split_part(planning_nomenclature, '_', 1)
+#   * graphic  -> the pre-populated `product` column (fall back to
+#                 split_part(nomenclature, '_', 1) if `product` is null)
+#   * inf.     -> influencer nomenclature (SIF-<n>-...) doesn't carry a
+#                 SKU code -- candidate_master_sku is always null here.
+#
+# We LEFT JOIN cpis_by_sku_utm (30d) whenever a candidate SKU exists so
+# a merchant can prioritise concepts for SKUs already selling. The
+# response shape is normalized across the three media types -- the UI
+# has a single row renderer with a media-aware column set.
 # ----------------------------------------------------------------------
 
 
+UntestedMedia = Literal["video", "graphic", "influencer"]
+
+
 class UntestedAssetRow(BaseModel):
-    asset_id: str
-    source_parent: str | None
-    asset_type: str | None
-    category: str | None
-    planning_nomenclature: str | None
-    link_to_asset: str | None
-    brief_shoot_required: str | None
-    brief_aspect_ratio: str | None
-    date_of_production: date | None
+    # Row identity + media source
+    id: str
+    media: UntestedMedia
+    # Presentation fields (normalized across the three tables)
+    title: str | None                # username (influencer) / product (graphic) / null (video)
+    nomenclature: str | None         # planning_nomenclature / nomenclature / nomenclature
+    kind: str | None                 # asset_type / graphic_type / content_type
+    sub_kind: str | None             # category / audience_type / deliverable_type
+    link: str | None                 # link_to_asset / link_1 or creative / post_link
+    thumbnail: str | None            # only influencer has one right now
+    date_produced: date | None       # date_of_production / asset_date / post_date
     created_at: datetime | None
-    # SKU-mapping columns (may be null when the asset's nomenclature
-    # doesn't start with a valid catalog SKU -- new concepts, generic
-    # BST-only assets, etc.)
+    # SKU mapping + 30d CPIS window enrichment
     candidate_master_sku: str | None
     matched_master_sku: str | None
-    # 30-day CPIS window on the mapped SKU: how much this SKU is
-    # selling right now, so a merchant browsing untested assets can
-    # prioritise concepts for SKUs already generating orders.
     sku_attributed_orders: int | None
     sku_ad_spend: float | None
     sku_cost_per_order: float | None
 
 
 class UntestedAssetsResponse(BaseModel):
+    media: UntestedMedia
     total_rows: int
     with_sku_match: int
     without_sku_match: int
@@ -2816,46 +2823,84 @@ class UntestedAssetsResponse(BaseModel):
     computed_at: datetime
 
 
+# Per-media SQL fragments producing a common column set. Each SELECT
+# yields: id, title, nomenclature, kind, sub_kind, link, thumbnail,
+# date_produced, created_at, candidate_master_sku (already NULLIF'd).
+_UNTESTED_SQL: dict[str, str] = {
+    "video": """
+        SELECT
+          car.asset_id                                          AS id,
+          NULL::text                                            AS title,
+          car.planning_nomenclature                             AS nomenclature,
+          car.asset_type                                        AS kind,
+          car.category                                          AS sub_kind,
+          car.link_to_asset                                     AS link,
+          NULL::text                                            AS thumbnail,
+          car.date_of_production                                AS date_produced,
+          car.created_at                                        AS created_at,
+          NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '')
+                                                                AS candidate_master_sku
+        FROM public.content_asset_register car
+        WHERE car.ad_id IS NULL
+    """,
+    "graphic": """
+        SELECT
+          cgr.requisition_id                                    AS id,
+          cgr.product                                           AS title,
+          cgr.nomenclature                                      AS nomenclature,
+          cgr.graphic_type                                      AS kind,
+          cgr.audience_type                                     AS sub_kind,
+          COALESCE(cgr.link_1, cgr.link_2, cgr.link_3, cgr.creative)
+                                                                AS link,
+          NULL::text                                            AS thumbnail,
+          cgr.asset_date                                        AS date_produced,
+          NULL::timestamptz                                     AS created_at,
+          COALESCE(
+            NULLIF(cgr.product, ''),
+            NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
+          )                                                     AS candidate_master_sku
+        FROM public.content_graphic_register cgr
+        WHERE COALESCE(cgr.computed_is_tested, false) = false
+    """,
+    "influencer": """
+        SELECT
+          cip.id::text                                          AS id,
+          cip.username                                          AS title,
+          cip.nomenclature                                      AS nomenclature,
+          cip.content_type                                      AS kind,
+          cip.deliverable_type                                  AS sub_kind,
+          cip.post_link                                         AS link,
+          cip.post_thumbnail                                    AS thumbnail,
+          cip.post_date                                         AS date_produced,
+          cip.created_at                                        AS created_at,
+          NULL::text                                            AS candidate_master_sku
+        FROM public.content_influencer_posts cip
+        WHERE COALESCE(cip.computed_is_tested, false) = false
+    """,
+}
+
+
 @router.get("/untested", response_model=UntestedAssetsResponse)
 async def get_untested_assets(
     session: SessionDep,
-    asset_type: str | None = Query(default=None, description="Filter by asset_type (Campaign, Standalone Brief, ...)"),
-    has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows."),
+    media: UntestedMedia = Query(default="video", description="Which asset media type -- video / graphic / influencer"),
+    has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows. Ignored for influencer (which has no SKU derivation)."),
 ) -> UntestedAssetsResponse:
-    params: dict[str, Any] = {}
-    outer_filters: list[str] = []
-    if asset_type:
-        outer_filters.append("b.asset_type = :asset_type")
-        params["asset_type"] = asset_type
-    if has_sku is True:
-        outer_filters.append("cpis.master_sku IS NOT NULL")
-    elif has_sku is False:
-        outer_filters.append("cpis.master_sku IS NULL")
+    base_select = _UNTESTED_SQL[media]
 
+    outer_filters: list[str] = []
+    if has_sku is True and media != "influencer":
+        outer_filters.append("cpis.master_sku IS NOT NULL")
+    elif has_sku is False and media != "influencer":
+        outer_filters.append("cpis.master_sku IS NULL")
     where_clause = ("WHERE " + " AND ".join(outer_filters)) if outer_filters else ""
+
     sql = text(f"""
-        WITH base AS (
-          SELECT
-            car.asset_id,
-            car.source_parent,
-            car.asset_type,
-            car.category,
-            car.planning_nomenclature,
-            car.link_to_asset,
-            car.brief_shoot_required,
-            car.brief_aspect_ratio,
-            car.date_of_production,
-            car.created_at,
-            split_part(COALESCE(car.planning_nomenclature, ''), '_', 1) AS candidate_master_sku
-          FROM public.content_asset_register car
-          WHERE car.ad_id IS NULL
-        )
+        WITH base AS ({base_select})
         SELECT
-          b.asset_id, b.source_parent, b.asset_type, b.category,
-          b.planning_nomenclature, b.link_to_asset,
-          b.brief_shoot_required, b.brief_aspect_ratio,
-          b.date_of_production, b.created_at,
-          NULLIF(b.candidate_master_sku, '') AS candidate_master_sku,
+          b.id, b.title, b.nomenclature, b.kind, b.sub_kind,
+          b.link, b.thumbnail, b.date_produced, b.created_at,
+          b.candidate_master_sku,
           cpis.master_sku       AS matched_master_sku,
           cpis.attributed_orders AS sku_attributed_orders,
           cpis.ad_spend          AS sku_ad_spend,
@@ -2865,20 +2910,22 @@ async def get_untested_assets(
           ON cpis.master_sku = b.candidate_master_sku
          AND cpis.window_key = '30d'
         {where_clause}
-        ORDER BY b.created_at DESC NULLS LAST, b.asset_id
+        ORDER BY COALESCE(b.date_produced, DATE '1900-01-01') DESC,
+                 b.created_at DESC NULLS LAST,
+                 b.id
     """)
-    result = await session.execute(sql, params)
+    result = await session.execute(sql)
     rows = [
         UntestedAssetRow(
-            asset_id=r.asset_id,
-            source_parent=r.source_parent,
-            asset_type=r.asset_type,
-            category=r.category,
-            planning_nomenclature=r.planning_nomenclature,
-            link_to_asset=r.link_to_asset,
-            brief_shoot_required=r.brief_shoot_required,
-            brief_aspect_ratio=r.brief_aspect_ratio,
-            date_of_production=r.date_of_production,
+            id=r.id,
+            media=media,
+            title=r.title,
+            nomenclature=r.nomenclature,
+            kind=r.kind,
+            sub_kind=r.sub_kind,
+            link=r.link,
+            thumbnail=r.thumbnail,
+            date_produced=r.date_produced,
             created_at=r.created_at,
             candidate_master_sku=r.candidate_master_sku,
             matched_master_sku=r.matched_master_sku,
@@ -2890,6 +2937,7 @@ async def get_untested_assets(
     ]
     matched = sum(1 for r in rows if r.matched_master_sku)
     return UntestedAssetsResponse(
+        media=media,
         total_rows=len(rows),
         with_sku_match=matched,
         without_sku_match=len(rows) - matched,

@@ -1515,21 +1515,22 @@ export function fetchCpisDataFreshness(): Promise<CpisDataFreshness> {
   return request<CpisDataFreshness>(`/admin/analytics/cpis-utm/data-freshness`);
 }
 
-// Untested assets (content_asset_register mirrored from legacy CTD).
-// Each row is an asset briefed/produced but never run in a Meta ad.
-// candidate_master_sku is the split_part(planning_nomenclature, '_', 1)
-// prefix; matched_master_sku is populated only when that prefix exists
-// in cpis_by_sku_utm (i.e. it's a real catalog SKU with recent sales).
+// Untested assets — three media types (video / graphic / influencer),
+// each backed by its own mirrored table from the legacy CTD dashboard.
+// The endpoint normalizes them to a common row shape so a single UI
+// component renders all three with media-aware column tweaks.
+export type UntestedMedia = "video" | "graphic" | "influencer";
+
 export interface UntestedAssetRow {
-  asset_id: string;
-  source_parent: string | null;
-  asset_type: string | null;
-  category: string | null;
-  planning_nomenclature: string | null;
-  link_to_asset: string | null;
-  brief_shoot_required: string | null;
-  brief_aspect_ratio: string | null;
-  date_of_production: string | null;
+  id: string;
+  media: UntestedMedia;
+  title: string | null;             // username (inf) / product (graphic) / null (video)
+  nomenclature: string | null;
+  kind: string | null;              // asset_type / graphic_type / content_type
+  sub_kind: string | null;          // category / audience_type / deliverable_type
+  link: string | null;
+  thumbnail: string | null;
+  date_produced: string | null;
   created_at: string | null;
   candidate_master_sku: string | null;
   matched_master_sku: string | null;
@@ -1539,6 +1540,7 @@ export interface UntestedAssetRow {
 }
 
 export interface UntestedAssetsResponse {
+  media: UntestedMedia;
   total_rows: number;
   with_sku_match: number;
   without_sku_match: number;
@@ -1547,13 +1549,13 @@ export interface UntestedAssetsResponse {
 }
 
 export interface UntestedAssetsParams {
-  asset_type?: string;
+  media?: UntestedMedia;
   has_sku?: boolean;
 }
 
 export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<UntestedAssetsResponse> {
   const q = new URLSearchParams();
-  if (params.asset_type) q.set("asset_type", params.asset_type);
+  if (params.media) q.set("media", params.media);
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
   const qs = q.toString();
   return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
