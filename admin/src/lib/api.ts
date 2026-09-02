@@ -1467,6 +1467,19 @@ export function fetchOverviewSummary(): Promise<OverviewSummaryResponse> {
   return request<OverviewSummaryResponse>(`/admin/analytics/overview-summary`);
 }
 
+// Silver-table refresh cascade -- fires the 3 CPIS refresh scripts in
+// sequence as a background asyncio task. Returns a run_id that can be
+// used to tail progress via /logs?run_id=<id>.
+export interface RefreshSilverResponse {
+  run_id: string;
+  started_at: string;
+  scripts: string[];
+}
+
+export function triggerSilverRefresh(): Promise<RefreshSilverResponse> {
+  return request<RefreshSilverResponse>(`/admin/refresh/silver-all`, { method: "POST" });
+}
+
 // Dashboard tab -- per-widget fetchers. Fire in parallel and render
 // each widget as its own data arrives (progressive loading).
 export interface DashboardKpis {

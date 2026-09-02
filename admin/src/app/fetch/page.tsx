@@ -1,6 +1,7 @@
 import { InstagramFetchPanel } from "./InstagramFetchPanel";
 import { MetaFetchPanel } from "./MetaFetchPanel";
 import { ShopifyFetchPanel } from "./ShopifyFetchPanel";
+import { SilverRefreshPanel } from "./SilverRefreshPanel";
 
 export default function FetchPage() {
   return (
@@ -17,6 +18,7 @@ export default function FetchPage() {
       <MetaFetchPanel />
       <InstagramFetchPanel />
       <ShopifyFetchPanel />
+      <SilverRefreshPanel />
     </div>
   );
 }
