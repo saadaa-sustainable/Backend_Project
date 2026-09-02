@@ -24,6 +24,22 @@ import { KwikTile } from "./KwikTile";
 // Total distinct SKUs across every window stays <100, so a single-page
 // fetch is still fast.
 const PAGE_SIZE = 500;
+
+// Canonical size order (2026-09-02). Fixed 9-column render so rows
+// line up even for SKUs missing a size. XXS + XXL folded into XS +
+// 2XL respectively via SIZE_ALIASES so alternate spellings don't
+// produce phantom empty columns.
+const SIZE_COLUMNS = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "4XL", "5XL"] as const;
+const SIZE_ALIASES: Record<string, string> = { XXS: "XS", XXL: "2XL" };
+function stockForSize(map: Record<string, number> | null, sz: string): number | null {
+  if (!map) return null;
+  // Look up the canonical key AND every alias that folds into it.
+  if (map[sz] !== undefined) return map[sz];
+  for (const [alt, canonical] of Object.entries(SIZE_ALIASES)) {
+    if (canonical === sz && map[alt] !== undefined) return map[alt];
+  }
+  return null;
+}
 const SATURATION_Y_METRICS: { value: SaturationYMetric; label: string }[] = [
   { value: "ncp_count", label: "NCP" },
   { value: "purchases", label: "Purchases" },
@@ -400,6 +416,21 @@ function CategoryChip({ category }: { category: string }) {
  *  <15d = critical (red), 15-45d = healthy (green), 45-90d = comfortable
  *  (blue), >90d = overstocked (amber). Zero rows would signal the
  *  master SKU has no matching MapleMonk data. */
+/** Untested-count cell -- muted dash for 0/null, amber emphasis for
+ *  backlog >= 5 so a merchant can spot SKUs with plenty of unused
+ *  creative ready to test. */
+function UntestedCell({ n }: { n: number | null | undefined }) {
+  if (n === null || n === undefined || n === 0) {
+    return <span className="text-text-tertiary">—</span>;
+  }
+  const emphasized = n >= 5;
+  return (
+    <span className={emphasized ? "font-semibold text-warning-text" : "text-text-primary"}>
+      {n}
+    </span>
+  );
+}
+
 function DoqCell({ value }: { value: number | null | undefined }) {
   if (value === null || value === undefined) return <span className="text-text-tertiary">—</span>;
   const cls =
@@ -468,6 +499,14 @@ function CpisView() {
   // Both columns come from the same /cpis-utm response -- no refetch on toggle.
   const [attributionMode, setAttributionMode] =
     useState<"equal" | "value_weighted">("equal");
+  // Spend-source toggle (2026-09-02):
+  //   ad_name  - name_matched_spend / name_matched_ads (strict; only
+  //              ads whose ad_name contains the SKU code)
+  //   utm_id   - utm_matched_spend / utm_matched_ads (broad; any ad
+  //              whose id appeared in this SKU's UTM-attributed orders)
+  // Both columns come from the same /cpis-utm response -- no refetch.
+  const [spendMatchMode, setSpendMatchMode] =
+    useState<"ad_name" | "utm_id">("utm_id");
   // Date range picker -- same pattern as Ads Analyse (2026-09-01):
   // a preset <select> plus two <input type="date"> fields always
   // visible. When both dates are filled, the /cpis-utm endpoint hits
@@ -638,25 +677,34 @@ function CpisView() {
           onChange={(e) => {
             const v = e.target.value;
             setDatePreset(v);
-            const today = new Date().toISOString().slice(0, 10);
+            // Anchor presets to the FRESHEST DAY that has data, not the
+            // wall-clock "today". Data lags 1-6 days behind today in
+            // normal ops (Meta insights, Shopify orders), so using today
+            // as the anchor makes "Last 7 days" actually cover only 1
+            // day of populated data -- looks broken to the merchant.
+            // Fall back to today when freshness hasn't loaded yet.
+            const anchor = freshness?.max_daily_day
+              ? new Date(freshness.max_daily_day)
+              : new Date();
+            const anchorIso = anchor.toISOString().slice(0, 10);
             const daysAgo = (n: number) => {
-              const d = new Date();
+              const d = new Date(anchor);
               d.setDate(d.getDate() - n);
               return d.toISOString().slice(0, 10);
             };
             if (v === "all")       { setFromDate(""); setToDate(""); }
-            else if (v === "today") { setFromDate(today); setToDate(today); }
-            else if (v === "7d")   { setFromDate(daysAgo(6));  setToDate(today); }
-            else if (v === "14d")  { setFromDate(daysAgo(13)); setToDate(today); }
-            else if (v === "30d")  { setFromDate(daysAgo(29)); setToDate(today); }
-            else if (v === "90d")  { setFromDate(daysAgo(89)); setToDate(today); }
+            else if (v === "today") { setFromDate(anchorIso); setToDate(anchorIso); }
+            else if (v === "7d")   { setFromDate(daysAgo(6));  setToDate(anchorIso); }
+            else if (v === "14d")  { setFromDate(daysAgo(13)); setToDate(anchorIso); }
+            else if (v === "30d")  { setFromDate(daysAgo(29)); setToDate(anchorIso); }
+            else if (v === "90d")  { setFromDate(daysAgo(89)); setToDate(anchorIso); }
           }}
           className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Date-range window applied to CPIS metrics"
+          title="Date-range window applied to CPIS metrics. Anchored to the freshest available day, not today (data lags a few days behind)."
         >
           <option value="all">All time (uses pre-computed rollup)</option>
-          <option value="today">Today</option>
-          <option value="7d">Last 7 days</option>
+          <option value="today">Latest day</option>
+          <option value="7d">Last 7 days (anchored on latest data)</option>
           <option value="14d">Last 14 days</option>
           <option value="30d">Last 30 days</option>
           <option value="90d">Last 90 days</option>
@@ -741,6 +789,30 @@ function CpisView() {
             </button>
           ))}
         </div>
+        {/* Spend-source toggle (2026-09-02). Swaps the "Spend" + "NCP" +
+            "ROAS" columns between name-matched (strict, ad_name regex)
+            and utm-matched (broad, ad_id from Shopify order utm_content).
+            Both values come from the same response -- no refetch. */}
+        <div className="flex overflow-hidden rounded-md border border-border-primary">
+          {(["ad_name", "utm_id"] as const).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setSpendMatchMode(mode)}
+              title={
+                mode === "ad_name"
+                  ? "STRICT: only ads whose ad_name contains this SKU code as a whole word (regex \\y<sku>\\y). Typically 5-15% of the SKU's converting spend."
+                  : "BROAD: every ad whose id appeared in this SKU's UTM-attributed orders (order.utm_content -> ad_id). Captures brand / category / retargeting ads that don't name the SKU."
+              }
+              className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                spendMatchMode === mode
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
+              }`}
+            >
+              {mode === "ad_name" ? "Match: ad_name" : "Match: ad_id"}
+            </button>
+          ))}
+        </div>
         <span className="ml-auto text-[11px] text-text-secondary">{total.toLocaleString()} SKUs</span>
       </div>
 
@@ -787,13 +859,68 @@ function CpisView() {
                     lifetime from ad_lifecycle). NCP is a proportional
                     approximation since ad_lifecycle only stores lifetime
                     NCP per ad. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Ads whose name contains this SKU code (word-boundary regex)">Match Ads</th>
+                <th
+                  className="border-l border-border-soft px-3 py-3 text-right"
+                  title={
+                    spendMatchMode === "ad_name"
+                      ? "Ads whose ad_name contains this SKU code (word-boundary regex). Strict."
+                      : "Ads whose id appeared in this SKU's UTM-attributed orders (order.utm_content -> ad_id). Broad."
+                  }
+                >
+                  Match Ads
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({spendMatchMode === "ad_name" ? "name" : "id"})
+                  </span>
+                </th>
                 <th className="px-3 py-3 text-right" title="Active name-matched ads (ad_effective_status = ACTIVE). Signals how much creative is currently spending on this SKU family.">Active</th>
                 <th className="px-3 py-3 text-right" title="Active ads categorised as Winner or Incremental Winner. Direct signal for 'creative worth scaling right now'.">Winners</th>
+                {/* Untested-asset backlog per media -- lets a merchant see
+                    which SKUs have inventory ready to test. Bulk source:
+                    the three CTD content register tables. Influencer is
+                    always 0 per SKU (SIF nomenclature carries no product
+                    code) -- kept as a column so the schema stays stable
+                    if we route influencer -> SKU via a different signal
+                    later. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right"
+                    title="Videos briefed and produced but never run in a Meta ad. Grouped to this SKU via the planning-nomenclature prefix.">
+                  Untested<br />Video
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Graphics with computed_is_tested = false. Grouped to this SKU via the pre-populated product column (falls back to nomenclature prefix).">
+                  Untested<br />Graphic
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Influencer posts pending test. Always 0 per SKU today -- SIF-<n>-P<n> nomenclature carries no product code, so no SKU derivation exists yet. See the Untested Assets → Influencer tab for the flat list.">
+                  Untested<br />Influencer
+                </th>
                 <th className="px-3 py-3 text-right" title="Active-ad spend in the picked window, divided by window length in days. Average daily burn on ads still running.">Spend/Day</th>
                 <th className="px-3 py-3 text-right" title="Daily spend sparkline for the picked window + % change vs. the previous same-length period. Green ≥ +5%, amber ±5%, red ≤ -5%.">Spend Trend</th>
-                <th className="px-3 py-3 text-right" title="SUM of windowed spend for name-matched ads (from raw_dump_meta insights, in the picked date range)">Spend</th>
-                <th className="px-3 py-3 text-right" title="Approximate windowed NCP: lifetime_ncp × (windowed_spend / lifetime_spend). Accurate when NCP scales linearly with spend within the window.">NCP</th>
+                <th
+                  className="px-3 py-3 text-right"
+                  title={
+                    spendMatchMode === "ad_name"
+                      ? "SUM of windowed spend for name-matched ads (from insights_daily_by_ad, in the picked date range). Only ads whose ad_name contains this SKU."
+                      : "SUM of windowed spend for UTM-matched ads -- every ad_id that appeared in this SKU's UTM-attributed orders during the picked range. Much broader than name-matched."
+                  }
+                >
+                  Spend
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({spendMatchMode === "ad_name" ? "name" : "id"})
+                  </span>
+                </th>
+                <th
+                  className="px-3 py-3 text-right"
+                  title={
+                    spendMatchMode === "ad_name"
+                      ? "SUM of windowed NCP for name-matched ads."
+                      : "SUM of windowed NCP for UTM-matched ads."
+                  }
+                >
+                  NCP
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({spendMatchMode === "ad_name" ? "name" : "id"})
+                  </span>
+                </th>
                 <th className="px-3 py-3 text-right" title="Windowed ROAS: conv_value / spend for name-matched ads within the picked date range">ROAS</th>
                 <th className="px-3 py-3 text-right" title="New-customer ROAS approximation: (windowed NCP × AOV of last-click orders) / windowed spend. Meta's actions[first_time_customer_purchase] would be more accurate but isn't exposed as a flat column.">NC ROAS</th>
                 {/* LAST-CLICK group -- pulled straight from
@@ -848,6 +975,18 @@ function CpisView() {
                 {/* In-stock breadth (2026-09-02, MapleMonk variant snapshot) */}
                 <th className="border-l border-border-soft px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — MapleMonk current_stock>0 count / total variants">Var In-Stock %</th>
                 <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU (any color). Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
+                {/* Per-size stock counts. Fixed canonical order XS -> 5XL
+                    even for SKUs missing a size (renders "—") so the
+                    columns line up across rows. */}
+                {SIZE_COLUMNS.map((sz) => (
+                  <th
+                    key={sz}
+                    className={sz === "XS" ? "border-l border-border-soft px-2 py-3 text-right" : "px-2 py-3 text-right"}
+                    title={`Stock in ${sz} across every color variant of this SKU`}
+                  >
+                    {sz}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -905,9 +1044,10 @@ function CpisView() {
                       "—"
                     )}
                   </td>
-                  {/* NAME-MATCHED group */}
+                  {/* NAME-MATCHED group -- "Match Ads" swaps between
+                      name-matched and utm-matched based on toggle. */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
-                    {row.name_matched_ads ?? "—"}
+                    {(spendMatchMode === "ad_name" ? row.name_matched_ads : row.utm_matched_ads) ?? "—"}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {row.active_creative_count ?? "—"}
@@ -927,6 +1067,18 @@ function CpisView() {
                       "—"
                     )}
                   </td>
+                  {/* Untested-asset counts. Zero rendered as a muted dash
+                      so backlog SKUs stand out visually. */}
+                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
+                    <UntestedCell n={row.untested_video_ct} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px]">
+                    <UntestedCell n={row.untested_graphic_ct} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-tertiary"
+                      title="No per-SKU mapping available for influencer posts today.">
+                    —
+                  </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtINRFull(row.active_spend_per_day)}
                   </td>
@@ -934,10 +1086,10 @@ function CpisView() {
                     <LazySpendTrendCell masterSku={row.master_sku} window={window_} />
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.name_matched_spend)}
+                    {fmtINRFull(spendMatchMode === "ad_name" ? row.name_matched_spend : row.utm_matched_spend)}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtNumFull(row.name_matched_ncp)}
+                    {fmtNumFull(spendMatchMode === "ad_name" ? row.name_matched_ncp : row.utm_matched_ncp)}
                   </td>
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={row.name_matched_roas_lifetime} />
@@ -1045,11 +1197,39 @@ function CpisView() {
                   >
                     {row.mm_size_in_stock_rate !== null ? `${row.mm_size_in_stock_rate.toFixed(0)}%` : "—"}
                   </td>
+                  {/* Per-size stock cells. Colour rules match the
+                      screenshot the merchant approved:
+                        0            -> red (out of stock at this size)
+                        1..10        -> amber (critical, restock soon)
+                        11+          -> green
+                        null/missing -> grey em-dash */}
+                  {SIZE_COLUMNS.map((sz, i) => {
+                    const stock = stockForSize(row.mm_stock_by_size, sz);
+                    return (
+                      <td
+                        key={sz}
+                        className={`px-2 py-2.5 text-right font-mono text-[12px] font-medium ${
+                          i === 0 ? "border-l border-border-soft" : ""
+                        } ${
+                          stock === null
+                            ? "text-text-tertiary"
+                            : stock === 0
+                              ? "text-error-text"
+                              : stock <= 10
+                                ? "text-warning-text"
+                                : "text-success-text"
+                        }`}
+                        title={stock === null ? undefined : `${stock} units in size ${sz}`}
+                      >
+                        {stock === null ? "—" : stock.toLocaleString()}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={31} className="px-4 py-6 text-center text-text-secondary">
+                  <td colSpan={40} className="px-4 py-6 text-center text-text-secondary">
                     No SKUs match these filters.
                   </td>
                 </tr>
@@ -1353,7 +1533,6 @@ function CategoryFlagPill({ category }: { category: string }) {
  *  contains the master SKU) and the product/inventory context, since UTM
  *  attribution is deferred to the per-color-variant view. */
 function CpisKpiStrip({ rows, windowLabel }: { rows: CpisUtmRow[]; windowLabel: string }) {
-  const totalSkus = rows.length;
   // Distinct-ad de-dupe isn't possible client-side (ad_ids aren't in the
   // row payload), so surface the raw sum labeled "matches" -- clear
   // it's (ad × SKU) pairs, not distinct ads.
@@ -1366,14 +1545,7 @@ function CpisKpiStrip({ rows, windowLabel }: { rows: CpisUtmRow[]; windowLabel: 
   const blendedCostPerNcp = totalNcp > 0 ? totalSpend / totalNcp : null;
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-      <KwikTile
-        icon={<span>◱</span>}
-        iconColor="sky"
-        label="Master SKUs"
-        value={fmtNumCompact(totalSkus)}
-        subLine="in current view"
-      />
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <KwikTile
         icon={<span>✦</span>}
         iconColor="purple"
