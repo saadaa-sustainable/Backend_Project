@@ -1794,3 +1794,115 @@ async def stream_ingest_logs(run_id: str):
             "Connection": "keep-alive",
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Silver-table refresh cascade (2026-09-02)
+# ─────────────────────────────────────────────────────────────────
+#
+# Once raw_dump_meta is fresh, the derived (silver) tables that the
+# analytics endpoints read from need to be rebuilt. Instead of asking
+# a merchant to SSH into a box and run three scripts, expose a single
+# "refresh silver" endpoint that runs them in sequence as a
+# cancellable asyncio task and streams progress to the same live-log
+# ring buffer /logs already tails.
+#
+# The scripts themselves are unchanged -- shelled out via
+# asyncio.subprocess so the SQL / psycopg2 paths stay identical to
+# what runs from the CLI (no risk of divergence between CLI and API).
+
+_SILVER_REFRESH_SCRIPTS: list[tuple[str, str]] = [
+    # (label, script filename under scripts/) -- order matters:
+    # insights_daily_by_ad is a materialised prerequisite of the CPIS
+    # rollups, so it must run first. The CPIS scripts don't depend on
+    # each other and could run in parallel, but sequential keeps the
+    # log output easy to read and doesn't measurably slow the chain.
+    ("insights_daily_by_ad", "refresh_insights_daily_by_ad.py"),
+    ("cpis_by_sku_utm",      "refresh_cpis_utm.py"),
+    ("cpis_by_sku_daily",    "refresh_cpis_by_sku_daily.py"),
+]
+
+
+class RefreshSilverResponse(BaseModel):
+    run_id: str
+    started_at: datetime
+    scripts: list[str]
+
+
+async def _run_silver_refresh(run_id: str) -> None:
+    """Shell out to each refresh script in sequence, streaming stdout
+    lines into the /logs ring buffer keyed on `run_id`."""
+    logger_ = logger.bind(run_id=run_id)
+    logger_.info("silver_refresh_started", scripts=[s for _, s in _SILVER_REFRESH_SCRIPTS])
+
+    project_root = Path(__file__).resolve().parents[3]  # backend/app/api/routers/admin.py -> backend/
+    scripts_dir = project_root / "scripts"
+    python_exe = sys.executable
+
+    overall_ok = True
+    for label, script_name in _SILVER_REFRESH_SCRIPTS:
+        script_path = scripts_dir / script_name
+        if not script_path.exists():
+            logger_.error("silver_refresh_missing_script", label=label, path=str(script_path))
+            overall_ok = False
+            continue
+
+        logger_.info("silver_refresh_step_start", label=label, script=script_name)
+        # datetime-based clock (not time.time()) because the top-level
+        # imports pull `time` from datetime as a CLASS, shadowing the
+        # stdlib time module. Avoids a needless import gymnastics.
+        t0 = datetime.now(timezone.utc)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                python_exe, str(script_path),
+                cwd=str(project_root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            # Stream stdout line-by-line so the /logs stream ticks in
+            # real time -- otherwise we'd wait for the whole script
+            # before emitting anything.
+            assert proc.stdout is not None
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    logger_.info("silver_refresh_stdout", label=label, line=text)
+            rc = await proc.wait()
+            dt = (datetime.now(timezone.utc) - t0).total_seconds()
+            if rc == 0:
+                logger_.info("silver_refresh_step_ok", label=label, duration_seconds=round(dt, 1))
+            else:
+                logger_.error("silver_refresh_step_fail", label=label, exit_code=rc, duration_seconds=round(dt, 1))
+                overall_ok = False
+        except Exception as exc:  # noqa: BLE001
+            logger_.error("silver_refresh_step_error", label=label, error=str(exc))
+            overall_ok = False
+
+    logger_.info("silver_refresh_completed", overall_ok=overall_ok)
+
+
+@router.post("/refresh/silver-all", response_model=RefreshSilverResponse)
+async def trigger_silver_refresh() -> RefreshSilverResponse:
+    """Kick off the CPIS silver-table refresh cascade in the background.
+
+    Runs three scripts in sequence:
+      1. refresh_insights_daily_by_ad.py  (~1 min)
+      2. refresh_cpis_utm.py              (~1 min)
+      3. refresh_cpis_by_sku_daily.py     (~30 sec)
+
+    Total wall time: ~2-3 minutes. Returns immediately with a run_id;
+    tail progress at /logs?run_id=<returned_id> or via the live-stream
+    SSE endpoint /admin/ingest/{run_id}/logs.
+    """
+    run_id = f"silver_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    task = asyncio.create_task(_run_silver_refresh(run_id))
+    _TASKS[run_id] = task
+    task.add_done_callback(lambda _t: _TASKS.pop(run_id, None))
+    return RefreshSilverResponse(
+        run_id=run_id,
+        started_at=datetime.now(timezone.utc),
+        scripts=[s for _, s in _SILVER_REFRESH_SCRIPTS],
+    )
