@@ -2049,6 +2049,18 @@ class CpisUtmRow(BaseModel):
     # 2026-08-31 direction: SKU code as base, matched against ad_name.
     name_matched_ads: int | None
     name_matched_spend: float | None
+    # NEW (2026-09-02): UTM-content-derived spend. For each SKU, we
+    # find the SET of ad_ids that appeared in this SKU's UTM-attributed
+    # orders during the picked window, then SUM those ads' windowed
+    # spend from insights_daily_by_ad. Answers "how much did I spend on
+    # ads that actually reached buyers of this SKU?" -- the metric the
+    # merchant asked for, replacing name-matched as the primary spend
+    # signal in the UI. Deliberately double-counts across SKUs
+    # (an ad selling SMCP+SDCP counts 100% of its spend for BOTH); use
+    # ad_spend (LC group) for the allocation-aware version.
+    utm_matched_ads: int | None
+    utm_matched_spend: float | None
+    utm_matched_ncp: float | None
     name_matched_ncp: float | None
     name_matched_roas_lifetime: float | None
     name_matched_nc_roas: float | None
@@ -2118,6 +2130,10 @@ class CpisUtmRow(BaseModel):
     mm_size_total_ct: int | None
     mm_size_in_stock_ct: int | None
     mm_size_in_stock_rate: float | None
+    # Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ..., "5XL":0}.
+    # Frontend renders as one column per canonical size (XS -> 5XL).
+    # None if no size-tagged variants exist for this SKU.
+    mm_stock_by_size: dict[str, int] | None
     # UTM-attributed metrics (from cpis_by_sku_utm). Two spend allocations
     # populated in one refresh pass -- frontend picks which to display via
     # the "attribution mode" toggle:
@@ -2297,6 +2313,60 @@ async def get_cpis_utm(
           AND day <= (SELECT hi FROM bounds)
         GROUP BY ad_id
       ),
+      -- Ads that drove UTM-attributed orders for each master SKU inside
+      -- the picked window (2026-09-02). Same allocation logic as
+      -- refresh_cpis_utm.py, except we skip revenue-proportional
+      -- weighting -- we just want the SET of ad_ids that touched each
+      -- SKU, then SUM their windowed spend from insights_windowed.
+      -- This is the *real* answer to "how much did I spend on ads
+      -- that reached buyers of this SKU?" -- unlike name_matched_spend
+      -- which only catches ads NAMED after the SKU (~10% of spend).
+      -- Note: this deliberately double-counts across SKUs -- an ad
+      -- driving SMCP + SDCP orders counts 100% of its spend for BOTH
+      -- SKUs. That's the intent: this is an affinity metric, not a
+      -- portfolio-share allocation (ad_spend column below is the
+      -- allocation-aware one).
+      utm_sku_ads AS (
+        -- (day, master_sku, ad_id) tuples: which ads drove orders for
+        -- which SKUs on which days. The `day` dimension is crucial for
+        -- the day-scoped spend calc below -- an ad's Meta spend counts
+        -- for a SKU only on the days that ad actually drove SKU orders.
+        SELECT DISTINCT
+          so.processed_at::date AS day,
+          SUBSTRING(
+            split_part(edge->'node'->>'sku', '_', 1)
+            FROM 1
+            FOR GREATEST(1, char_length(split_part(edge->'node'->>'sku', '_', 1)) - 2)
+          ) AS master_sku,
+          so.utm_content AS ad_id
+        FROM shopify_orders so,
+             LATERAL jsonb_array_elements(so.line_items->'edges') edge
+        WHERE so.processed_at >= (SELECT lo FROM bounds)
+          AND so.processed_at <  (SELECT hi FROM bounds) + integer '1'
+          -- Regex with $/\Z trips SQLAlchemy text() + asyncpg param
+          -- scan; string ops are safer here.
+          AND char_length(so.utm_content) BETWEEN 10 AND 20
+          AND so.utm_content !~ '[^0-9]'
+          AND edge->'node'->>'sku' IS NOT NULL
+      ),
+      utm_ads AS (
+        -- Day-scoped spend rollup (2026-09-02): join each
+        -- (sku, day, ad_id) tuple to that ad's spend ON THAT
+        -- SPECIFIC DAY. Sum per SKU.
+        -- Effect: an ad's Meta spend on Wednesday counts for SMCP
+        -- ONLY IF Wednesday's SMCP orders had this ad in utm_content.
+        -- Days where the ad ran but drove no SKU orders -> excluded.
+        SELECT usa.master_sku,
+               COUNT(DISTINCT usa.ad_id)          AS utm_matched_ads,
+               COALESCE(SUM(idba.spend), 0)       AS utm_matched_spend,
+               COALESCE(SUM(idba.ncp_count), 0)   AS utm_matched_ncp,
+               COALESCE(SUM(idba.conv_value), 0)  AS utm_matched_conv_value
+        FROM utm_sku_ads usa
+        LEFT JOIN public.insights_daily_by_ad idba
+          ON idba.ad_id = usa.ad_id
+         AND idba.day   = usa.day
+        GROUP BY usa.master_sku
+      ),
       -- Ads whose ad_name contains this master_sku as a whole word (same
       -- \\y..\\y word-boundary regex the legacy CPIS drilldown uses --
       -- avoids "BR" matching every ad with "BR" anywhere).
@@ -2440,6 +2510,11 @@ async def get_cpis_utm(
              na.name_matched_ads,
              na.name_matched_spend,
              na.name_matched_ncp,
+             -- UTM-matched (2026-09-02): ad_ids seen in this SKU's
+             -- UTM-attributed orders, their windowed spend.
+             ua.utm_matched_ads::integer AS utm_matched_ads,
+             ua.utm_matched_spend        AS utm_matched_spend,
+             ua.utm_matched_ncp          AS utm_matched_ncp,
              CASE WHEN COALESCE(na.name_matched_spend, 0) > 0
                   THEN na.name_matched_conv_value / na.name_matched_spend
                   ELSE NULL END AS name_matched_roas_lifetime,
@@ -2502,6 +2577,7 @@ async def get_cpis_utm(
              mm.size_total_ct         AS mm_size_total_ct,
              mm.size_in_stock_ct      AS mm_size_in_stock_ct,
              mm.size_in_stock_rate    AS mm_size_in_stock_rate,
+             mm.stock_by_size         AS mm_stock_by_size,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
              p.matched_ad_count, p.ad_spend,
@@ -2514,6 +2590,7 @@ async def get_cpis_utm(
                   ELSE NULL END AS avg_selling_price
       FROM page p
       LEFT JOIN name_ads na    USING (master_sku)
+      LEFT JOIN utm_ads  ua    USING (master_sku)
       LEFT JOIN inv_rolled ir  USING (master_sku)
       LEFT JOIN products_ctx pc USING (master_sku)
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
