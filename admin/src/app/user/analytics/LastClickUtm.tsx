@@ -40,6 +40,7 @@ import {
   fetchLastClickUtm,
 } from "@/lib/api";
 import { KwikTile } from "./KwikTile";
+import { TableSkeleton } from "./TableSkeleton";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -806,7 +807,7 @@ export function LastClickUtm() {
           15-column order table
          ═══════════════════════════════════════════════════════════════ */}
       {loading ? (
-        <p className="text-sm text-text-secondary">Loading…</p>
+        <TableSkeleton rows={12} columns={10} showKpis />
       ) : (
         <div className="max-h-[70vh] overflow-auto rounded-lg border border-border-primary bg-white shadow-sm">
           <table className="ae-table w-full text-left text-xs">
