@@ -129,16 +129,18 @@ GROUP BY t.ad_id, t.order_day, t.order_id, t.master_sku,
 
 
 # Per-day-per-ad Meta spend, since --since. Anchor for day-scoped allocation.
+#
+# 2026-09-03 rewrite: reads from public.insights_daily_by_ad (the
+# canonical (ad_id, day) silver) instead of re-implementing the
+# raw-dedup + range-expansion logic against raw_dump_meta. Single
+# source of truth -- when the underlying silver refresh gets fixed,
+# this and refresh_cpis_utm.py both pick it up on the next run.
 SQL_SPEND_DAILY = """
-SELECT
-  r.raw_payload->>'ad_id'                            AS ad_id,
-  (r.raw_payload->>'date_start')::date               AS day,
-  SUM(NULLIF(r.raw_payload->>'spend', '')::numeric)  AS spend
-FROM raw_dump_meta r
-WHERE r.object_type = 'insights'
-  AND (r.raw_payload->>'date_start')::date >= %(since)s
-  AND r.raw_payload->>'ad_id' IS NOT NULL
-GROUP BY r.raw_payload->>'ad_id', (r.raw_payload->>'date_start')::date
+SELECT ad_id, day, spend
+FROM public.insights_daily_by_ad
+WHERE day >= %(since)s
+  AND ad_id IS NOT NULL
+  AND spend > 0
 """
 
 
