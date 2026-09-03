@@ -197,6 +197,17 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
     sku_agg: dict[str, dict] = defaultdict(lambda: {
         "orders": set(), "units": 0, "revenue": 0.0,
         "ad_spend": 0.0, "ad_spend_vw": 0.0, "ad_ids": set(),
+        # 2026-09-04 halo columns (basket co-occurrence). For each SKU
+        # in a MIXED basket (2+ distinct master SKUs), halo_units and
+        # halo_revenue are the units/revenue of the OTHER SKUs in the
+        # same order:
+        #     halo_units_this_order = order_total_qty - this_sku_qty
+        #     halo_rev_this_order   = order_total_revenue - this_sku_line_rev
+        # halo_orders counts distinct orders that contributed halo.
+        # halo_spend intentionally stays 0 -- spend is already
+        # fractionally distributed across the basket by ad_spend /
+        # ad_spend_vw, so charging halo_spend on top would double-count.
+        "halo_orders": set(), "halo_units": 0, "halo_revenue": 0.0,
     })
     for ad_id, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
         qty      = int(qty or 0)
@@ -208,6 +219,16 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         agg["units"]   += qty
         agg["revenue"] += line_rev
         agg["ad_ids"].add(ad_id)
+
+        # --- Halo accumulation: everything in the basket that isn't
+        # this SKU counts as "halo" for this SKU. Zero for single-SKU
+        # baskets (order_total == line, so both deltas evaluate to 0).
+        halo_rev_here   = order_total_rev - line_rev
+        halo_units_here = order_total_qty - qty
+        if halo_rev_here > 0 or halo_units_here > 0:
+            agg["halo_orders"].add(order_id)
+            agg["halo_units"]   += halo_units_here
+            agg["halo_revenue"] += halo_rev_here
 
         ad_total_spend  = spend_map.get(ad_id, 0.0)
 
@@ -245,13 +266,18 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         cost_per_order_vw     = (ad_spend_vw / orders) if orders else None
         cost_per_unit_sold_vw = (ad_spend_vw / units)  if units  else None
         roas_vw               = (revenue     / ad_spend_vw) if ad_spend_vw else None
+        halo_orders  = len(agg["halo_orders"])
+        halo_units   = int(agg["halo_units"])
+        halo_revenue = float(agg["halo_revenue"])
         rows.append((
             master_sku, window_key, window_from, window_to,
             orders, units, revenue,
             len(agg["ad_ids"]), ad_spend,
             cost_per_order, cost_per_unit_sold, roas,
-            # halo_* remain 0 pending a better halo-mapping approach.
-            0, 0, 0.0, 0.0,
+            # halo_spend intentionally 0 -- ad_spend is already fully
+            # distributed across every SKU in the basket, so a positive
+            # halo_spend would double-count the same rupees.
+            halo_orders, halo_units, halo_revenue, 0.0,
             None,  # primary_weight NULL under Option A (deterministic revenue split, not weighted)
             ad_spend_vw, cost_per_order_vw, cost_per_unit_sold_vw, roas_vw,
         ))
