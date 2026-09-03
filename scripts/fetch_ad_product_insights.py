@@ -355,6 +355,12 @@ def main() -> int:
     if not raw_dsn:
         print("DATABASE_URL_SYNC missing", file=sys.stderr); return 1
     dsn = _to_psycopg2_dsn(raw_dsn)
+    # 2026-09-04: DPA adset discovery scans raw_dump_meta with a
+    # spend-filter EXISTS subquery -- 2+ min on a warm cache, well past
+    # pgbouncer's transaction-mode 8s statement timeout. Swap to the
+    # session-mode pooler port so we get the (much longer) session-role
+    # statement_timeout instead. Same DB, different pool.
+    dsn = dsn.replace(":6543/", ":5432/")
 
     dpa = _dpa_adsets_by_account(dsn, spending_only=not args.all_dpa)
     print("== DPA adsets available per account ==")

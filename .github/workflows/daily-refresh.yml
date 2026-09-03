@@ -79,24 +79,48 @@ jobs:
       - name: Run daily refresh
         env:
           # --- Supabase Postgres (required) ---
-          DATABASE_URL_SYNC:        ${{ secrets.DATABASE_URL_SYNC }}
-          DATABASE_URL:             ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC:                ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:                     ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_KEY:             ${{ secrets.DATABASE_SERVICE_KEY }}
 
-          # --- Meta ads + Instagram (required for Phase 1) ---
-          META_ACCESS_TOKEN:        ${{ secrets.META_ACCESS_TOKEN }}
-          META_API_VERSION:         ${{ secrets.META_API_VERSION }}
+          # --- Meta ads (required for Phase 1 Meta ingest) ---
+          META_ACCESS_TOKEN:                ${{ secrets.META_ACCESS_TOKEN }}
+          META_API_VERSION:                 ${{ secrets.META_API_VERSION }}
+          META_APP_ID:                      ${{ secrets.META_APP_ID }}
+          META_APP_SECRET:                  ${{ secrets.META_APP_SECRET }}
+          META_GRAPH_API_BASE_URL:          ${{ secrets.META_GRAPH_API_BASE_URL }}
+          META_ACCOUNT_1_ID:                ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME:              ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID:                ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME:              ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID:                ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME:              ${{ secrets.META_ACCOUNT_3_NAME }}
+          META_HTTP_TIMEOUT_SECONDS:        ${{ secrets.META_HTTP_TIMEOUT_SECONDS }}
+          META_HTTP_CONNECT_TIMEOUT_SECONDS: ${{ secrets.META_HTTP_CONNECT_TIMEOUT_SECONDS }}
+          META_MAX_CONCURRENT_REQUESTS:     ${{ secrets.META_MAX_CONCURRENT_REQUESTS }}
+          META_MAX_RETRIES:                 ${{ secrets.META_MAX_RETRIES }}
+          META_PAGE_SIZE:                   ${{ secrets.META_PAGE_SIZE }}
+          META_RATE_LIMIT_SLEEP_BUFFER_SECONDS: ${{ secrets.META_RATE_LIMIT_SLEEP_BUFFER_SECONDS }}
+          META_RETRY_BACKOFF_BASE_SECONDS:  ${{ secrets.META_RETRY_BACKOFF_BASE_SECONDS }}
+          META_RETRY_BACKOFF_MAX_SECONDS:   ${{ secrets.META_RETRY_BACKOFF_MAX_SECONDS }}
 
-          # --- Shopify (required for ingest_shopify) ---
-          SHOP_DOMAIN:              ${{ secrets.SHOP_DOMAIN }}
-          ADMIN_ACCESS_TOKEN:       ${{ secrets.ADMIN_ACCESS_TOKEN }}
-          SHOP_NAME:                ${{ secrets.SHOP_NAME }}
-          SHOPIFY_API_VERSION:      ${{ secrets.SHOPIFY_API_VERSION }}
-          # Multi-store: uncomment when you have >1 Shopify shop.
-          # SHOP_DOMAIN_2:          ${{ secrets.SHOP_DOMAIN_2 }}
-          # ADMIN_ACCESS_TOKEN_2:   ${{ secrets.ADMIN_ACCESS_TOKEN_2 }}
+          # --- Instagram (Phase 1 IG ingest) ---
+          IG_USER_ID_1:                     ${{ secrets.IG_USER_ID_1 }}
+          IG_USER_ID_2:                     ${{ secrets.IG_USER_ID_2 }}
+          IG_USER_ID_3:                     ${{ secrets.IG_USER_ID_3 }}
+          IG_USERNAME:                      ${{ secrets.IG_USERNAME }}
+          IG_USERNAME_1:                    ${{ secrets.IG_USERNAME_1 }}
+          IG_USERNAME_2:                    ${{ secrets.IG_USERNAME_2 }}
 
-          # --- BigQuery (optional; empty means skip fetch_bq_inventory) ---
-          BQ_INVENTORY_TABLE:       ${{ secrets.BQ_INVENTORY_TABLE }}
+          # --- Shopify (Phase 1 Shopify ingest; scripts also honor
+          # SHOP_DOMAIN_2/ADMIN_ACCESS_TOKEN_2 for multi-store) ---
+          SHOP_DOMAIN:                      ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN:               ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOP_NAME:                        ${{ secrets.SHOP_NAME }}
+          SHOPIFY_API_VERSION:              ${{ secrets.SHOPIFY_API_VERSION }}
+
+          # --- BigQuery (optional; empty skips fetch_bq_inventory) ---
+          BQ_INVENTORY_TABLE:               ${{ secrets.BQ_INVENTORY_TABLE }}
 
         run: |
           FLAGS=""
