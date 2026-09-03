@@ -198,7 +198,19 @@ _ADS_ANALYSE_SELECT = (
     # or a regex parse of the ad_name (verified or synthetic).
     "COALESCE(asset_direct.asset_id, asset_name.asset_id) AS asset_id, "
     "COALESCE(asset_direct.media, asset_name.media)       AS asset_media, "
-    "COALESCE(asset_direct.source, asset_name.source)     AS asset_match_source"
+    "COALESCE(asset_direct.source, asset_name.source)     AS asset_match_source, "
+    # Per-ad media (from ad_media silver, populated by
+    # scripts/refresh_ad_media.py from raw_dump_meta joins).
+    "am.thumbnail_url, am.video_url, am.video_id, "
+    "am.landing_page_url, am.link_display_url, am.is_video, "
+    "am.effective_object_story_id, "
+    # ad_thumbnails from the legacy CTD project (mirrored via
+    # scripts/_copy_ad_thumbnails.py). Provides IG permalinks for 89%
+    # of ads -- the Instagram /embed/captioned/ iframe is what the
+    # frontend uses for high-fidelity previews since it works for
+    # dark-post ads (FB plugin doesn't). Also carries the signed video
+    # source URL for a small subset of ads.
+    "at.instagram_permalink, at.video_source_url"
 )
 
 _ADS_ANALYSE_FROM = (
@@ -288,6 +300,12 @@ _ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
     "       WHERE aps.ad_name ~ 'SIF-[0-9]+-P[0-9]+'"
     "   ) u ORDER BY pri LIMIT 1"
     " ) asset_name ON asset_direct.ad_id IS NULL"
+    # ad_media silver -- per-ad thumbnail / video / landing-URL flatten
+    # from raw_dump_meta (via scripts/refresh_ad_media.py). Coverage is
+    # 19% today: only ads with an asset_feed_spec resolve. Adding a
+    # separate /adcreatives fetcher for the remaining 81% is a follow-up.
+    " LEFT JOIN public.ad_media am ON am.ad_id = aps.ad_id"
+    " LEFT JOIN public.ad_thumbnails at ON at.ad_id = aps.ad_id"
 )
 
 
@@ -370,6 +388,25 @@ class AdsAnalyseRow(BaseModel):
     asset_id: str | None
     asset_media: str | None
     asset_match_source: str | None
+    # Per-ad media flatten (from ad_media silver -- built by
+    # scripts/refresh_ad_media.py from raw_dump_meta). Coverage ~19% of
+    # ads today (only those whose creative has an asset_feed_spec in
+    # bronze). All null for ads without a resolvable creative fetch.
+    thumbnail_url: str | None
+    video_url: str | None
+    video_id: str | None
+    landing_page_url: str | None
+    link_display_url: str | None
+    is_video: bool | None
+    # <page_id>_<post_id> for FB post iframe embed (78% coverage)
+    effective_object_story_id: str | None
+    # IG permalink from ad_thumbnails mirror (89% coverage). Feeds the
+    # https://www.instagram.com/{p|reel}/{shortcode}/embed/captioned/
+    # iframe which works for dark-post ads. Higher-fidelity than the FB
+    # plugin path -- prefer this in the ThumbnailCell modal.
+    instagram_permalink: str | None
+    # Signed video source URL from ad_thumbnails mirror (~9 rows today).
+    video_source_url: str | None
 
 
 class AdsAnalyseTotals(BaseModel):
@@ -2259,6 +2296,17 @@ class CpisUtmRow(BaseModel):
     untested_video_ct: int | None
     untested_graphic_ct: int | None
     untested_influencer_ct: int | None
+    # Return metrics from MapleMonk (BigQuery -> master_sku_returns
+    # silver, refreshed nightly by scripts/refresh_master_sku_returns.py).
+    # Joined per-window so 30d CPIS row gets 30d returns.
+    return_rate_pct: float | None
+    return_units: int | None
+    refund_value: float | None
+    # Net ROAS: gross ROAS discounted by return rate. Rough model --
+    #   net_revenue    = attributed_revenue * (1 - return_rate_pct/100)
+    #   net_roas       = net_revenue / ad_spend
+    # If BQ returns aren't populated for the SKU, this equals gross roas.
+    net_roas: float | None
     # Creative-testing cadence: 1 test per week per 1L of weekly spend.
     # weekly_ad_spend is name_matched_spend normalised to a 7-day rate;
     # required_creatives_per_week is FLOOR(weekly_ad_spend / 100000).
@@ -2359,7 +2407,9 @@ async def get_cpis_utm(
     #      cpis_by_sku_daily on the fly, derived metrics recomputed at
     #      the summed grain.
     #   2. Otherwise -> use the pre-computed cpis_by_sku_utm (7d/30d/90d).
-    params: dict[str, object] = {"limit": limit, "offset": offset}
+    # Always bind window (the master_sku_returns LEFT JOIN uses it,
+    # regardless of custom-range vs pre-computed path).
+    params: dict[str, object] = {"limit": limit, "offset": offset, "window": window}
     if from_date and to_date:
         params["from_date"] = from_date
         params["to_date"]   = to_date
@@ -2805,6 +2855,21 @@ async def get_cpis_utm(
              -- (influencer excluded -- no per-SKU derivation).
              (COALESCE(ubs.untested_video_ct, 0)
               + COALESCE(ubs.untested_graphic_ct, 0))::integer AS pipeline_avail_to_test,
+             -- Return metrics (from master_sku_returns silver, joined
+             -- below by (master_sku, window_key)).
+             ret.return_rate_pct                        AS return_rate_pct,
+             ret.units_returned::integer                AS return_units,
+             ret.refund_value                           AS refund_value,
+             -- Net ROAS = gross ROAS * (1 - return_rate/100). Rough
+             -- model: assumes returned units get their revenue fully
+             -- refunded and ad spend is fully sunk.
+             CASE
+               WHEN p.ad_spend > 0 AND ret.return_rate_pct IS NOT NULL
+               THEN p.attributed_revenue * (1 - ret.return_rate_pct / 100.0) / p.ad_spend
+               WHEN p.ad_spend > 0
+               THEN p.attributed_revenue / p.ad_spend
+               ELSE NULL
+             END                                        AS net_roas,
              -- Per-SKU untested-asset counts (see untested_by_sku CTE
              -- for derivation). Influencer is 0 for every SKU because
              -- its nomenclature carries no product code; frontend shows
@@ -2839,6 +2904,15 @@ async def get_cpis_utm(
       LEFT JOIN name_ads na    USING (master_sku)
       LEFT JOIN utm_ads  ua    USING (master_sku)
       LEFT JOIN untested_by_sku ubs USING (master_sku)
+      -- Return metrics from BQ. Pre-filter to a single window inside
+      -- the subquery so USING(master_sku) works without ambiguity
+      -- against the other joins. Custom date ranges fall back to 30d
+      -- as an approximation -- return rate is fairly stable per SKU.
+      LEFT JOIN (
+        SELECT master_sku, return_rate_pct, units_returned, refund_value
+        FROM public.master_sku_returns
+        WHERE window_key = COALESCE(NULLIF(:window, ''), '30d')
+      ) ret USING (master_sku)
       LEFT JOIN inv_rolled ir  USING (master_sku)
       LEFT JOIN products_ctx pc USING (master_sku)
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
