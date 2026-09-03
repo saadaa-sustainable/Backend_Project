@@ -145,6 +145,78 @@ GROUP BY t.ad_id, t.order_id, t.master_sku,
 """
 
 
+# Step 1b (2026-09-04): Meta-family lines for halo_* only.
+# Halo is *independent of ad_spend* -- it captures basket co-occurrence
+# whenever an order came from Meta/Meta-family traffic (paid ad OR
+# organic IG/FB), regardless of whether we can attribute the click to
+# a specific ad_id. This is broader than SQL_STEP1 (which requires
+# utm_content -> ad_id in lifecycle).
+#
+# Included utm_source values (case-insensitive, trimmed):
+#     meta, facebook, ig, instagram, fb, igshopping
+# In current 30d these cover ~19.5k of 27k orders vs SQL_STEP1's ~20k
+# ad-attributed subset.
+SQL_STEP1_HALO = """
+WITH orders_in_window AS (
+  SELECT so.order_id, so.line_items
+  FROM shopify_orders so
+  WHERE so.processed_at >= %(window_from)s::date
+    AND so.processed_at <  (%(window_to)s::date + integer '1')
+    AND LOWER(TRIM(so.utm_source)) IN (
+      'meta','facebook','ig','instagram','fb','igshopping'
+    )
+    AND jsonb_typeof(so.line_items->'edges') = 'array'
+),
+line_items AS (
+  SELECT
+    ow.order_id,
+    (edge->'node'->>'sku')                                          AS variant_sku,
+    COALESCE((edge->'node'->>'quantity')::int, 0)                   AS qty,
+    COALESCE(
+      (edge->'node'->'originalUnitPriceSet'->'shopMoney'->>'amount')::numeric,
+      0
+    )                                                               AS unit_price
+  FROM orders_in_window ow,
+       LATERAL jsonb_array_elements(ow.line_items->'edges') edge
+  WHERE edge->'node'->>'sku' IS NOT NULL
+),
+parsed AS (
+  SELECT
+    order_id, variant_sku, qty, unit_price,
+    (qty * unit_price)                                                AS line_revenue,
+    SUBSTRING(
+      regexp_replace(variant_sku, '_[A-Za-z0-9]+$', '')
+      FROM 1
+      FOR GREATEST(1,
+        length(regexp_replace(variant_sku, '_[A-Za-z0-9]+$', '')) - 2
+      )
+    ) AS master_sku
+  FROM line_items
+),
+tagged AS (
+  SELECT * FROM parsed
+  WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$'
+),
+order_totals AS (
+  SELECT order_id,
+         SUM(line_revenue) AS order_total_revenue,
+         SUM(qty)          AS order_total_qty
+  FROM tagged
+  GROUP BY order_id
+)
+SELECT
+  t.order_id, t.master_sku,
+  SUM(t.qty)::int          AS qty,
+  SUM(t.line_revenue)      AS line_revenue,
+  ot.order_total_revenue,
+  ot.order_total_qty
+FROM tagged t
+JOIN order_totals ot USING (order_id)
+GROUP BY t.order_id, t.master_sku,
+         ot.order_total_revenue, ot.order_total_qty
+"""
+
+
 # Step 2: total spend per ad_id in the window.
 #
 # 2026-09-03 rewrite: reads from public.insights_daily_by_ad (the
@@ -220,15 +292,12 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         agg["revenue"] += line_rev
         agg["ad_ids"].add(ad_id)
 
-        # --- Halo accumulation: everything in the basket that isn't
-        # this SKU counts as "halo" for this SKU. Zero for single-SKU
-        # baskets (order_total == line, so both deltas evaluate to 0).
-        halo_rev_here   = order_total_rev - line_rev
-        halo_units_here = order_total_qty - qty
-        if halo_rev_here > 0 or halo_units_here > 0:
-            agg["halo_orders"].add(order_id)
-            agg["halo_units"]   += halo_units_here
-            agg["halo_revenue"] += halo_rev_here
+        # --- Halo was previously computed HERE using ad-attributed
+        # orders only. Moved out to a second pass over SQL_STEP1_HALO
+        # below so halo counts basket co-occurrence across ALL
+        # Meta-family traffic, not just orders we can attribute to
+        # a specific ad_id. Keeps halo independent of ad_spend, per
+        # the 2026-09-04 spec revision.
 
         ad_total_spend  = spend_map.get(ad_id, 0.0)
 
@@ -252,6 +321,32 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             # slice so the two columns stay consistent when there's no
             # signal to weight by.
             agg["ad_spend_vw"] += per_order_share * within_order_share
+
+    # ─── Halo pass over Meta-family orders (broader than ad-attributed) ───
+    print(f"[{window_key}] step1b: Meta-family basket lines for halo ...",
+          flush=True)
+    cur.execute(SQL_STEP1_HALO, {"window_from": window_from, "window_to": window_to})
+    halo_lines = cur.fetchall()
+    print(f"[{window_key}]   -> {len(halo_lines)} (order, sku) rows from "
+          f"Meta-family traffic", flush=True)
+
+    for order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in halo_lines:
+        qty      = int(qty or 0)
+        line_rev = float(line_rev or 0)
+        order_total_rev = float(order_total_rev or 0)
+        order_total_qty = int(order_total_qty or 0)
+        # halo = the *other* SKUs in the same basket. Zero for single-SKU
+        # baskets (order_total == line).
+        halo_rev_here   = order_total_rev - line_rev
+        halo_units_here = order_total_qty - qty
+        if halo_rev_here > 0 or halo_units_here > 0:
+            # sku_agg defaultdict auto-creates the entry so SKUs that
+            # got no ad-attributed activity still appear with halo-only
+            # metrics -- useful for rider SKUs the ads never named.
+            agg = sku_agg[master_sku]
+            agg["halo_orders"].add(order_id)
+            agg["halo_units"]   += halo_units_here
+            agg["halo_revenue"] += halo_rev_here
 
     rows: list[tuple] = []
     for master_sku, agg in sku_agg.items():

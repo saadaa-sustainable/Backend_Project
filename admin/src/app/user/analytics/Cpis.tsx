@@ -1017,15 +1017,17 @@ function CpisView() {
                 <th className="px-3 py-3 text-right" title="Average order value of last-click orders containing this SKU">LC AOV</th>
                 <th className="px-3 py-3 text-right" title="Average units of THIS SKU per attributed order (some orders will have multiple units of the same SKU)">Qty/Order</th>
                 <th className="px-3 py-3 text-right" title="Average selling price NET (attributed_revenue / attributed_units)">ASP Net</th>
-                {/* HALO group (2026-09-04) -- basket co-occurrence.
-                    For every SKU in a mixed basket, halo_units +
+                {/* HALO group (2026-09-04) -- basket co-occurrence
+                    over Meta-family traffic. For every SKU in a mixed
+                    basket that came from utm_source in {meta, facebook,
+                    ig, instagram, fb, igshopping}, halo_units +
                     halo_revenue count the OTHER SKUs bought alongside
-                    it in the same order. Symmetric across the basket
-                    -- each SKU claims its siblings as halo. Excluded
-                    from CPIS/ROAS above. See refresh_cpis_utm.py. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Halo revenue: revenue from OTHER SKUs in the same ad-driven basket, credited to this SKU. Basket {A ₹700 + B ₹300} gives A a halo_revenue of ₹300 and B a halo_revenue of ₹700.">Halo Rev</th>
-                <th className="px-3 py-3 text-right" title="Halo units: unit count of OTHER SKUs in the same ad-driven basket. Symmetric across the basket.">Halo Units</th>
-                <th className="px-3 py-3 text-right" title="Halo orders: number of ad-driven orders that also contained at least one other master SKU alongside this one.">Halo Orders</th>
+                    it in the same order. Independent of ad_spend --
+                    includes both paid ads and organic Meta traffic.
+                    Symmetric across the basket. See refresh_cpis_utm.py. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Halo revenue: revenue from OTHER SKUs in the same Meta/IG-sourced basket, credited to this SKU. Basket {A ₹700 + B ₹300} gives A halo_revenue=₹300 and B halo_revenue=₹700. Includes paid + organic Meta traffic.">Halo Rev</th>
+                <th className="px-3 py-3 text-right" title="Halo units: unit count of OTHER SKUs in the same Meta/IG-sourced basket. Symmetric across the basket.">Halo Units</th>
+                <th className="px-3 py-3 text-right" title="Halo orders: number of Meta/IG-sourced orders that also contained at least one other master SKU alongside this one.">Halo Orders</th>
                 <th className="px-3 py-3 text-right" title="Halo Spend intentionally 0. Ad spend is already fully distributed across every SKU in the basket via ad_spend/ad_spend_vw -- charging halo_spend on top would double-count.">Halo Spend</th>
                 <th className="px-3 py-3 text-right"
                     title="Halo Sale % = halo_orders / (attributed_orders + halo_orders). High = this SKU rides along in baskets rather than being the reason for the sale.">
