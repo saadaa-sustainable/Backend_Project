@@ -1,0 +1,123 @@
+# Backend_Project daily refresh via GitHub Actions.
+#
+# Runs scripts/refresh_all_daily.py once a day. Each step writes its
+# per-script status to public.cron_run_log in Supabase; a helper in
+# scripts/check_cron_status.py can be run from any dev machine (or by
+# Claude in a future session) to inspect recent runs.
+#
+# ---------------------------------------------------------------------
+# Schedule (both dashboards use Meta -- 4h gap between projects):
+#   CTD refresh   19:30 UTC = 01:00 IST  (~90-150 min)
+#   BP  refresh   23:30 UTC = 05:00 IST  (~35-60 min)   <-- this file
+#
+# Manual trigger: Actions tab -> "Backend_Project daily refresh" -> Run.
+# The schedule block below is COMMENTED OUT for the first push -- enable
+# it after you've run the workflow manually once and confirmed the run
+# writes a row to cron_run_log.
+# ---------------------------------------------------------------------
+
+name: Backend_Project daily refresh
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_meta:
+        description: "Skip Phase 1 (Meta ingest)?"
+        required: false
+        default: "false"
+      only_silver:
+        description: "Only run Phase 2 (silver rebuild)?"
+        required: false
+        default: "false"
+
+  # Uncomment after first manual dispatch works.
+  # schedule:
+  #   - cron: "30 23 * * *"  # 23:30 UTC = 05:00 IST
+
+concurrency:
+  # Never let two refreshes race against the same Supabase tables.
+  group: bp-daily-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Hard cap: refresh should take ~45 min. 90 min is a safety net
+    # for Meta throttle days -- past that, kill it and try again.
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # requirements.txt drives the whole scripts/ suite. Keep it
+          # up to date in the repo so this workflow doesn't drift.
+          pip install -r requirements.txt
+
+      - name: Restore BigQuery service account
+        # GH secret GOOGLE_CREDS_JSON holds the raw JSON (paste the whole
+        # file content into the secret). We write it to disk, then point
+        # GOOGLE_APPLICATION_CREDENTIALS at the path so the BQ client
+        # picks it up transparently.
+        env:
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+        run: |
+          if [ -n "$GOOGLE_CREDS_JSON" ]; then
+            echo "$GOOGLE_CREDS_JSON" > "$RUNNER_TEMP/gcp.json"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run daily refresh
+        env:
+          # --- Supabase Postgres (required) ---
+          DATABASE_URL_SYNC:        ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:             ${{ secrets.DATABASE_URL }}
+
+          # --- Meta ads + Instagram (required for Phase 1) ---
+          META_ACCESS_TOKEN:        ${{ secrets.META_ACCESS_TOKEN }}
+          META_API_VERSION:         ${{ secrets.META_API_VERSION }}
+
+          # --- Shopify (required for ingest_shopify) ---
+          SHOP_DOMAIN:              ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN:       ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOP_NAME:                ${{ secrets.SHOP_NAME }}
+          SHOPIFY_API_VERSION:      ${{ secrets.SHOPIFY_API_VERSION }}
+          # Multi-store: uncomment when you have >1 Shopify shop.
+          # SHOP_DOMAIN_2:          ${{ secrets.SHOP_DOMAIN_2 }}
+          # ADMIN_ACCESS_TOKEN_2:   ${{ secrets.ADMIN_ACCESS_TOKEN_2 }}
+
+          # --- BigQuery (optional; empty means skip fetch_bq_inventory) ---
+          BQ_INVENTORY_TABLE:       ${{ secrets.BQ_INVENTORY_TABLE }}
+
+        run: |
+          FLAGS=""
+          if [ "${{ github.event.inputs.skip_meta }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-meta"
+          fi
+          if [ "${{ github.event.inputs.only_silver }}" = "true" ]; then
+            FLAGS="$FLAGS --only-silver"
+          fi
+          python scripts/refresh_all_daily.py $FLAGS
+
+      - name: Upload full log
+        # Keep the raw GH Actions log accessible for 14 days even after
+        # the workflow_run rotates -- helps when a step's tail in
+        # cron_run_log isn't enough to diagnose.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-log-${{ github.run_id }}
+          path: |
+            logs/**/*.log
+            *.log
+          if-no-files-found: ignore
+          retention-days: 14
