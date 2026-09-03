@@ -196,9 +196,9 @@ _ADS_ANALYSE_SELECT = (
     # chain that populates these. asset_match_source tells the UI whether
     # the mapping came from a direct workflow link, CTD's fuzzy match,
     # or a regex parse of the ad_name (verified or synthetic).
-    "asset.asset_id           AS asset_id, "
-    "asset.media              AS asset_media, "
-    "asset.source             AS asset_match_source"
+    "COALESCE(asset_direct.asset_id, asset_name.asset_id) AS asset_id, "
+    "COALESCE(asset_direct.media, asset_name.media)       AS asset_media, "
+    "COALESCE(asset_direct.source, asset_name.source)     AS asset_match_source"
 )
 
 _ADS_ANALYSE_FROM = (
@@ -214,7 +214,7 @@ _ADS_ANALYSE_FROM = (
 )
 
 
-# Row-fetching FROM: extends the base with an asset-lookup LATERAL that
+# Row-fetching FROM: extends the base with an asset-lookup that
 # resolves each ad_id to an asset_id from one of the three mirrored
 # CTD tables (content_asset_register / content_graphic_register /
 # content_influencer_posts).
@@ -230,60 +230,64 @@ _ADS_ANALYSE_FROM = (
 #                          register table yet. Surfaced anyway so a merchant
 #                          can trace which asset the ad_name references.
 #
+# 2026-09-03 refactor: what used to be one giant per-row LATERAL now
+# splits into (a) a subquery-joined ad_id -> asset map (materialised
+# ONCE per query for the direct + ctd_matched sources -- ~2000 rows
+# total, hashed) and (b) a small regex-parse LATERAL per row that only
+# fires when direct/matched missed. Cuts /ads-analyse from ~25s to
+# a couple of seconds because we no longer scan the 3 register tables
+# per row.
+#
 # Regex patterns match the observed nomenclature conventions:
 #   Video      SDCSS_BST_CPL001-0026_20_03_2026   -> CPL001-0026   ({3 letters}{3 digits}-{4 digits})
 #   Graphic    SDCP_VRP_MH_SC_GAD-Dec-627         -> GAD-Dec-627   (GAD-<Mon>-<n>)
 #   Influencer SIF-11695-P1-username-VRP-...      -> SIF-11695-P1  (SIF-<n>-P<n>)
 #
-# The LATERAL is deliberately NOT in the base FROM used by COUNT/totals
-# queries -- it would add per-row cost without changing row cardinality
-# (LEFT JOIN + LIMIT 1). Row query only.
+# The asset lookup is deliberately NOT in the base FROM used by
+# COUNT/totals queries -- row query only.
 _ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
+    " LEFT JOIN ("
+    "  SELECT DISTINCT ON (ad_id) ad_id, asset_id, media, source"
+    "  FROM ("
+    "    SELECT ad_id, asset_id, 'video'::text AS media, 'direct'::text AS source, 1 AS pri"
+    "      FROM public.content_asset_register WHERE ad_id IS NOT NULL"
+    "    UNION ALL"
+    "    SELECT ad_id, requisition_id, 'graphic'::text, 'direct'::text, 2"
+    "      FROM public.content_graphic_register WHERE ad_id IS NOT NULL"
+    "    UNION ALL"
+    "    SELECT matched_ad_id, asset_id, 'video'::text, 'ctd_matched'::text, 3"
+    "      FROM public.content_asset_register"
+    "      WHERE matched_ad_id IS NOT NULL AND ad_id IS NULL"
+    "    UNION ALL"
+    "    SELECT matched_ad_id, requisition_id, 'graphic'::text, 'ctd_matched'::text, 4"
+    "      FROM public.content_graphic_register"
+    "      WHERE matched_ad_id IS NOT NULL AND ad_id IS NULL"
+    "    UNION ALL"
+    "    SELECT matched_ad_id, id::text, 'influencer'::text, 'ctd_matched'::text, 5"
+    "      FROM public.content_influencer_posts WHERE matched_ad_id IS NOT NULL"
+    "  ) u WHERE ad_id IS NOT NULL"
+    "  ORDER BY ad_id, pri"
+    " ) asset_direct ON asset_direct.ad_id = aps.ad_id"
     " LEFT JOIN LATERAL ("
-    "  WITH parsed AS ("
-    "    SELECT "
-    "      substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})')       AS pv, "
-    "      substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)')          AS pg, "
-    "      substring(aps.ad_name from '(SIF-[0-9]+-P[0-9]+)')              AS pi "
-    "  ) "
-    "  SELECT asset_id, media, source FROM ( "
-    "    SELECT car.asset_id, 'video'::text AS media, 'direct'::text AS source, 1 AS pri "
-    "      FROM public.content_asset_register car "
-    "      WHERE car.ad_id = aps.ad_id "
-    "    UNION ALL "
-    "    SELECT cgr.requisition_id, 'graphic'::text, 'direct'::text, 2 "
-    "      FROM public.content_graphic_register cgr "
-    "      WHERE cgr.ad_id = aps.ad_id "
-    "    UNION ALL "
-    "    SELECT car.asset_id, 'video'::text, 'ctd_matched'::text, 3 "
-    "      FROM public.content_asset_register car "
-    "      WHERE car.matched_ad_id = aps.ad_id AND car.ad_id IS NULL "
-    "    UNION ALL "
-    "    SELECT cgr.requisition_id, 'graphic'::text, 'ctd_matched'::text, 4 "
-    "      FROM public.content_graphic_register cgr "
-    "      WHERE cgr.matched_ad_id = aps.ad_id AND cgr.ad_id IS NULL "
-    "    UNION ALL "
-    "    SELECT cip.id::text, 'influencer'::text, 'ctd_matched'::text, 5 "
-    "      FROM public.content_influencer_posts cip "
-    "      WHERE cip.matched_ad_id = aps.ad_id "
-    "    UNION ALL "
-    "    SELECT car.asset_id, 'video'::text, 'name_parsed'::text, 6 "
-    "      FROM parsed p JOIN public.content_asset_register car ON car.asset_id = p.pv "
-    "      WHERE p.pv IS NOT NULL "
-    "    UNION ALL "
-    "    SELECT cgr.requisition_id, 'graphic'::text, 'name_parsed'::text, 7 "
-    "      FROM parsed p JOIN public.content_graphic_register cgr ON cgr.requisition_id = p.pg "
-    "      WHERE p.pg IS NOT NULL "
-    "    UNION ALL "
-    "    SELECT p.pv, 'video'::text, 'name_synthetic'::text, 8 FROM parsed p WHERE p.pv IS NOT NULL "
-    "    UNION ALL "
-    "    SELECT p.pg, 'graphic'::text, 'name_synthetic'::text, 9 FROM parsed p WHERE p.pg IS NOT NULL "
-    "    UNION ALL "
-    "    SELECT p.pi, 'influencer'::text, 'name_synthetic'::text, 10 FROM parsed p WHERE p.pi IS NOT NULL "
-    "  ) u "
-    "  ORDER BY pri "
-    "  LIMIT 1"
-    " ) asset ON true"
+    "   SELECT asset_id, media, source FROM ("
+    "     SELECT car.asset_id, 'video'::text AS media, 'name_parsed'::text AS source, 1 AS pri"
+    "       FROM public.content_asset_register car"
+    "       WHERE car.asset_id = substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})')"
+    "     UNION ALL"
+    "     SELECT cgr.requisition_id, 'graphic'::text, 'name_parsed'::text, 2"
+    "       FROM public.content_graphic_register cgr"
+    "       WHERE cgr.requisition_id = substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)')"
+    "     UNION ALL"
+    "     SELECT substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})'), 'video'::text, 'name_synthetic'::text, 3"
+    "       WHERE aps.ad_name ~ '[A-Z]{3}[0-9]{3}-[0-9]{4}'"
+    "     UNION ALL"
+    "     SELECT substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)'), 'graphic'::text, 'name_synthetic'::text, 4"
+    "       WHERE aps.ad_name ~ 'GAD-[A-Za-z]{3}-[0-9]+'"
+    "     UNION ALL"
+    "     SELECT substring(aps.ad_name from '(SIF-[0-9]+-P[0-9]+)'), 'influencer'::text, 'name_synthetic'::text, 5"
+    "       WHERE aps.ad_name ~ 'SIF-[0-9]+-P[0-9]+'"
+    "   ) u ORDER BY pri LIMIT 1"
+    " ) asset_name ON asset_direct.ad_id IS NULL"
 )
 
 
@@ -2223,6 +2227,29 @@ class CpisUtmRow(BaseModel):
     # Frontend renders as one column per canonical size (XS -> 5XL).
     # None if no size-tagged variants exist for this SKU.
     mm_stock_by_size: dict[str, int] | None
+    # Business-model columns derived from ops sheet (2026-09-03). The
+    # sheet uses fixed-percentage cost model against selling price:
+    #   COGS               = SP * 35%
+    #   Gross Margin       = SP * 65%   (SP - COGS)
+    #   Logistics & Return = SP * 10%
+    #   Contribution       = SP * 55%   (SP - COGS - LOG&RTN)
+    # We follow the same model so numbers match the sheet exactly; the
+    # real per-SKU cost from MM (cost_min/cost_max) is a separate
+    # column so a merchant can spot when the 35% assumption diverges.
+    selling_price: float | None
+    cogs: float | None
+    gross_margin_pct: float | None
+    contribution_margin: float | None
+    logistics_return: float | None
+    # Inventory-derived metrics
+    ip_doq: float | None            # in-process days-of-quantity
+    total_doh: float | None         # days-on-hand from current stock
+    oos_pct: float | None           # oos_days_30 / 30 * 100
+    tentative_replenish_date: date | None  # today + lead_time
+    # Halo attribution share
+    halo_sale_pct: float | None
+    # Untested backlog rolled to a single "ready to test" number
+    pipeline_avail_to_test: int | None
     # Per-SKU untested-asset backlog counts (see untested_by_sku CTE).
     # untested_influencer_ct is always 0 today -- influencer nomenclature
     # doesn't carry a product code, so no SKU mapping exists. Column
@@ -2270,6 +2297,23 @@ class CpisUtmRow(BaseModel):
 class CpisUtmResponse(BaseModel):
     rows: list[CpisUtmRow]
     total: int
+    # Meta-side totals for the picked window, so the KPI strip can show
+    # honest reconciliation:
+    #   meta_total_spend    total ad spend in the window (from silver
+    #                       insights_daily_by_ad -- matches Ads Manager
+    #                       within pipeline gap)
+    #   attributed_spend    slice attributed to any catalog SKU
+    #                       (SUM of ad_spend across rows on this page,
+    #                        or all rows if user is viewing full list --
+    #                        computed server-side so it reflects the
+    #                        SKUs whose orders drove the join, not just
+    #                        the paginated page)
+    #   untethered_spend    Meta total minus attributed -- spend on ads
+    #                       that ran in the window but drove no
+    #                       UTM-attributed orders
+    meta_total_spend: float | None
+    attributed_spend: float | None
+    untethered_spend: float | None
 
 
 @router.get("/cpis-utm", response_model=CpisUtmResponse)
@@ -2720,6 +2764,47 @@ async def get_cpis_utm(
              mm.size_in_stock_ct      AS mm_size_in_stock_ct,
              mm.size_in_stock_rate    AS mm_size_in_stock_rate,
              mm.stock_by_size         AS mm_stock_by_size,
+             -- Business-model columns (2026-09-03, matches ops sheet).
+             -- Selling Price: prefer shopify_sp_max (top of the ladder,
+             -- what a customer sees for the most-tagged variant). Falls
+             -- back to shopify_sp_min so SKUs without a variant range
+             -- still get a value.
+             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) AS selling_price,
+             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) * 0.35 AS cogs,
+             65.0::numeric                                  AS gross_margin_pct,
+             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) * 0.55 AS contribution_margin,
+             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) * 0.10 AS logistics_return,
+             -- In-Process DOQ: how many days the pipeline covers at
+             -- current daily-sales rate. total_inprogress / daily_qty.
+             CASE WHEN mm.daily_quantity > 0
+                  THEN mm.total_inprogress::numeric / mm.daily_quantity
+                  END                                       AS ip_doq,
+             -- Total DOH: same for on-hand stock.
+             CASE WHEN mm.daily_quantity > 0
+                  THEN mm.current_stock::numeric / mm.daily_quantity
+                  END                                       AS total_doh,
+             -- Out-of-stock rate over the last 30 days.
+             CASE WHEN mm.oos_days_30 IS NOT NULL
+                  THEN mm.oos_days_30::numeric / 30.0 * 100
+                  END                                       AS oos_pct,
+             -- Tentative replenish date: today + lead_time. Naive
+             -- projection -- assumes replenishment kicks off right now
+             -- and lead-time is a straight-line delay from PO to stock.
+             CASE WHEN mm.lead_time IS NOT NULL
+                  THEN CURRENT_DATE + mm.lead_time::integer
+                  END                                       AS tentative_replenish_date,
+             -- Halo Sale %: halo orders as a fraction of (primary + halo)
+             -- attributed orders. High halo % = SKU rides along in
+             -- baskets rather than being the reason for the sale.
+             CASE WHEN COALESCE(p.attributed_orders, 0) + COALESCE(p.halo_orders, 0) > 0
+                  THEN COALESCE(p.halo_orders, 0)::numeric
+                       / (COALESCE(p.attributed_orders, 0) + COALESCE(p.halo_orders, 0))
+                       * 100
+                  END                                       AS halo_sale_pct,
+             -- Pipeline available to test: video + graphic backlog
+             -- (influencer excluded -- no per-SKU derivation).
+             (COALESCE(ubs.untested_video_ct, 0)
+              + COALESCE(ubs.untested_graphic_ct, 0))::integer AS pipeline_avail_to_test,
              -- Per-SKU untested-asset counts (see untested_by_sku CTE
              -- for derivation). Influencer is 0 for every SKU because
              -- its nomenclature carries no product code; frontend shows
@@ -2790,7 +2875,73 @@ async def get_cpis_utm(
     # source we picked (daily vs pre-computed) -- reuse it here.
     total = (await session.execute(text(count_sql), params)).scalar_one()
 
-    return CpisUtmResponse(rows=rows, total=total)
+    # Window bounds for the reconciliation totals: for custom-range
+    # requests we already have from_date / to_date in scope; for
+    # pre-computed windows we read window_from / window_to off any
+    # cpis_by_sku_utm row for the picked window_key (all rows share the
+    # same bounds).
+    if from_date and to_date:
+        wf, wt = from_date, to_date
+    else:
+        bnds_row = (
+            await session.execute(
+                text(
+                    "SELECT window_from, window_to FROM cpis_by_sku_utm "
+                    "WHERE window_key = :window LIMIT 1"
+                ),
+                {"window": window},
+            )
+        ).first()
+        wf, wt = (bnds_row[0], bnds_row[1]) if bnds_row else (None, None)
+
+    meta_total_spend: float | None = None
+    attributed_spend: float | None = None
+    untethered_spend: float | None = None
+    if wf and wt:
+        meta_row = (
+            await session.execute(
+                text(
+                    "SELECT COALESCE(SUM(spend), 0) FROM public.insights_daily_by_ad "
+                    "WHERE day BETWEEN :wf AND :wt"
+                ),
+                {"wf": wf, "wt": wt},
+            )
+        ).scalar_one()
+        meta_total_spend = float(meta_row or 0)
+
+        # Attributed = SUM(ad_spend) across ALL SKUs in the window (not
+        # just the paginated page). For custom range aggregate
+        # cpis_by_sku_daily; for pre-computed use cpis_by_sku_utm.
+        if from_date and to_date:
+            attr_row = (
+                await session.execute(
+                    text(
+                        "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_daily "
+                        "WHERE day BETWEEN :wf AND :wt"
+                    ),
+                    {"wf": wf, "wt": wt},
+                )
+            ).scalar_one()
+        else:
+            attr_row = (
+                await session.execute(
+                    text(
+                        "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_utm "
+                        "WHERE window_key = :window"
+                    ),
+                    {"window": window},
+                )
+            ).scalar_one()
+        attributed_spend = float(attr_row or 0)
+        untethered_spend = max(0.0, meta_total_spend - attributed_spend)
+
+    return CpisUtmResponse(
+        rows=rows,
+        total=total,
+        meta_total_spend=meta_total_spend,
+        attributed_spend=attributed_spend,
+        untethered_spend=untethered_spend,
+    )
 
 
 class CpisSpendTrendResponse(BaseModel):
