@@ -145,40 +145,19 @@ GROUP BY t.ad_id, t.order_id, t.master_sku,
 """
 
 
-# Step 2: total spend per ad_id from raw_dump_meta insights, in the window.
+# Step 2: total spend per ad_id in the window.
 #
-# 2026-09-03 fix: raw_dump_meta contains N repeat copies of the same
-# insights row every time we re-fetch (we ingest as fresh rows, not
-# upserts). SUM() across all of them multiplies the true spend by N.
-# The dedup CTE keeps ONE canonical copy per (ad_id, date_start,
-# date_stop), preferring the most-recently ingested (so late Meta
-# corrections win). Same fix that's now in refresh_insights_daily_by_ad.py
-# -- kept independent here because this script is sometimes run against
-# a stale silver.
+# 2026-09-03 rewrite: reads from public.insights_daily_by_ad (the
+# canonical (ad_id, day) silver) instead of re-implementing the
+# dedup + range-expansion logic against raw_dump_meta. Single source
+# of truth -- whatever fix lands in refresh_insights_daily_by_ad.py
+# automatically flows through here on the next refresh cadence.
 SQL_STEP2 = """
-WITH raw_dedup AS (
-  SELECT DISTINCT ON (
-    raw_payload->>'ad_id',
-    raw_payload->>'date_start',
-    raw_payload->>'date_stop'
-  )
-    raw_payload
-  FROM raw_dump_meta
-  WHERE object_type = 'insights'
-    AND raw_payload->>'ad_id' IS NOT NULL
-    AND (raw_payload->>'date_start')::date >= %(window_from)s
-    AND (raw_payload->>'date_start')::date <= %(window_to)s
-  ORDER BY
-    raw_payload->>'ad_id',
-    raw_payload->>'date_start',
-    raw_payload->>'date_stop',
-    ingested_at DESC
-)
-SELECT
-  raw_payload->>'ad_id' AS ad_id,
-  SUM(NULLIF(raw_payload->>'spend','')::numeric) AS spend
-FROM raw_dedup
-GROUP BY raw_payload->>'ad_id'
+SELECT ad_id, SUM(spend) AS spend
+FROM public.insights_daily_by_ad
+WHERE day BETWEEN %(window_from)s AND %(window_to)s
+  AND ad_id IS NOT NULL
+GROUP BY ad_id
 """
 
 
