@@ -35,6 +35,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/lib/api";
 import { KwikTile } from "./KwikTile";
 import { AdsAnalyseCharts } from "./AdsAnalyseCharts";
+import { TableSkeleton } from "./TableSkeleton";
 
 // ─────────────────────────────────────────────────────────────────────
 // Category definitions — mirrors CTD dashboard.js:5874-5896 (aeCategorise)
@@ -1227,7 +1228,7 @@ export function AdsAnalyse() {
           Main table
          ═══════════════════════════════════════════════════════════ */}
       {loading ? (
-        <p className="text-sm text-text-secondary">Loading…</p>
+        <TableSkeleton rows={12} columns={14} />
       ) : (
         <div className="max-h-[70vh] overflow-auto rounded-lg border border-border-primary bg-white shadow-sm">
           <table className="ae-table w-full text-left text-xs">

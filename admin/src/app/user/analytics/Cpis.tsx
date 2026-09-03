@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import { SaturationCurveChart } from "./charts/SaturationCurveChart";
 import { KwikTile } from "./KwikTile";
+import { TableSkeleton } from "./TableSkeleton";
 
 // Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
 // sums represent the entire matched SKU set, not just the first page.
@@ -853,7 +854,7 @@ function CpisView() {
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
       {loading ? (
-        <p className="text-sm text-text-secondary">Loading…</p>
+        <TableSkeleton rows={12} columns={16} showKpis />
       ) : (
         <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
           {/* min-w on the table forces the 23-column layout to overflow

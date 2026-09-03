@@ -966,9 +966,22 @@ async def get_last_click_utm(
         tile_params["to_date"] = to_date
     tile_where_sql = f"WHERE {' AND '.join(tile_where)}" if tile_where else ""
 
+    # 2026-09-04 perf fix: was loading every row of the window into
+    # Python (~300k rows in a 30d slice) and bucketing on the client
+    # side. That was the biggest chunk of the 30s prod time. Now the
+    # bucketing happens in SQL: one row per (utm_source, tier) with the
+    # already-summed counts + sales. Cuts the summary query from ~20s
+    # to ~1-2s, and the Python loop below shrinks proportionally.
     summary_rows = (
         await session.execute(
-            text(f"SELECT utm_source, total_price, tier FROM shopify_order_attribution {tile_where_sql}"),
+            text(
+                "SELECT COALESCE(utm_source, '') AS utm_source, "
+                "       COALESCE(tier, 'unmatched') AS tier, "
+                "       COUNT(*) AS n, "
+                "       COALESCE(SUM(total_price), 0) AS sales "
+                f"FROM shopify_order_attribution {tile_where_sql} "
+                "GROUP BY 1, 2"
+            ),
             tile_params,
         )
     ).all()
@@ -979,15 +992,16 @@ async def get_last_click_utm(
     tier_counts: dict[str, int] = {}
     # channel -> utm_source -> (count, sales) for the drill-down
     channel_source_buckets: dict[str, dict[str, tuple[int, float]]] = {c: {} for c in _CHANNEL_ORDER}
-    for row_utm_source, row_total_price, row_tier in summary_rows:
-        ch = _classify_channel(row_utm_source)
-        channel_counts[ch].count += 1
-        channel_counts[ch].sales += float(row_total_price or 0)
-        tier_key = row_tier or "unmatched"
-        tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
+    for row_utm_source, row_tier, row_n, row_sales in summary_rows:
+        n = int(row_n or 0)
+        sales = float(row_sales or 0)
+        ch = _classify_channel(row_utm_source or None)
+        channel_counts[ch].count += n
+        channel_counts[ch].sales += sales
+        tier_counts[row_tier or "unmatched"] = tier_counts.get(row_tier or "unmatched", 0) + n
         src_key = (row_utm_source or "").strip() or "(none)"
         prev = channel_source_buckets[ch].get(src_key, (0, 0.0))
-        channel_source_buckets[ch][src_key] = (prev[0] + 1, prev[1] + float(row_total_price or 0))
+        channel_source_buckets[ch][src_key] = (prev[0] + n, prev[1] + sales)
 
     channel_sources: dict[str, list[SourceBreakdown]] = {}
     for ch, sources in channel_source_buckets.items():
@@ -2263,7 +2277,10 @@ class CpisUtmRow(BaseModel):
     # Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ..., "5XL":0}.
     # Frontend renders as one column per canonical size (XS -> 5XL).
     # None if no size-tagged variants exist for this SKU.
-    mm_stock_by_size: dict[str, int] | None
+    # Values may be None for sizes with no stored count (rare but real
+    # in production).  Widen the union so the response mapping doesn't
+    # 500 when Postgres hands us {"XS": null, "S": 12, ...}.
+    mm_stock_by_size: dict[str, int | None] | None
     # Business-model columns derived from ops sheet (2026-09-03). The
     # sheet uses fixed-percentage cost model against selling price:
     #   COGS               = SP * 35%
@@ -2401,6 +2418,24 @@ async def get_cpis_utm(
     row missing).
     """
     sort_column = _CPIS_UTM_SORT_COLUMNS[sort]
+
+    # 2026-09-04 perf fix: on custom date ranges we short-circuit the
+    # two heavy CTEs (utm_sku_ads scans shopify_orders + jsonb_array_
+    # elements over the range; name_ads regexes ad_lifecycle per SKU).
+    # Custom-range users are usually looking at core spend / orders /
+    # roas from cpis_by_sku_daily (already aggregated), not the
+    # name-matched or day-scoped affinity numbers -- returning NULL
+    # for those columns is a fair trade for cutting the query from
+    # 30-40s to a few seconds. Pre-computed windows (7d/30d/90d)
+    # keep the full CTE chain since their totals live in cpis_by_sku_utm
+    # and don't rescan bronze.
+    _skip_heavy_ctes = bool(from_date and to_date)
+    utm_sku_ads_guard = "AND FALSE" if _skip_heavy_ctes else ""
+    name_ads_join = (
+        "ON FALSE"
+        if _skip_heavy_ctes
+        else "ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')"
+    )
 
     # Two data paths:
     #   1. Custom date range given (from_date + to_date) -> sum from
@@ -2545,6 +2580,7 @@ async def get_cpis_utm(
           AND char_length(so.utm_content) BETWEEN 10 AND 20
           AND so.utm_content !~ '[^0-9]'
           AND edge->'node'->>'sku' IS NOT NULL
+          {utm_sku_ads_guard}
       ),
       utm_ads AS (
         -- Day-scoped spend rollup (2026-09-02): join each
@@ -2590,8 +2626,7 @@ async def get_cpis_utm(
                  WHERE al.ad_effective_status = 'ACTIVE'
                ), 0)                                             AS active_windowed_spend
         FROM page p
-        LEFT JOIN ad_lifecycle al
-          ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+        LEFT JOIN ad_lifecycle al {name_ads_join}
         LEFT JOIN insights_windowed iw
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
@@ -3041,19 +3076,38 @@ class CpisDataFreshnessResponse(BaseModel):
 
 @router.get("/cpis-utm/data-freshness", response_model=CpisDataFreshnessResponse)
 async def get_cpis_utm_data_freshness(session: SessionDep) -> CpisDataFreshnessResponse:
-    """Cheap freshness probe -- 3 MAX() queries, no scans of large
-    tables. Frontend calls this once on mount to set the default
-    to_date on the date-range picker to whatever's actually available,
-    not "today" (which may have no data yet)."""
-    max_meta   = (await session.execute(text("SELECT MAX(day) FROM insights_daily_by_ad"))).scalar_one_or_none()
-    max_orders = (await session.execute(text("SELECT MAX(processed_at::date) FROM shopify_orders"))).scalar_one_or_none()
-    max_daily  = (await session.execute(text("SELECT MAX(day) FROM cpis_by_sku_daily"))).scalar_one_or_none()
-    n_sku      = (await session.execute(text("SELECT COUNT(DISTINCT master_sku) FROM cpis_by_sku_daily"))).scalar_one_or_none()
+    """Cheap freshness probe. Frontend calls this once on mount to set
+    the default to_date on the date-range picker to whatever's actually
+    available (not "today", which may have no data yet).
+
+    2026-09-04 perf fix: was 9s on prod because MAX(processed_at::date)
+    couldn't use the (processed_at) index and forced a full scan of
+    shopify_orders. Now we take the raw timestamp MAX (index-friendly)
+    and cast in Python, and put every single-row query into a single
+    SQL statement so we pay one round-trip instead of four across the
+    ~50ms Render->Supabase link.
+    """
+    row = (
+        await session.execute(
+            text("""
+                SELECT
+                  (SELECT MAX(day) FROM insights_daily_by_ad)              AS max_meta,
+                  -- MAX(created_at) has a full btree index (0.15s);
+                  -- MAX(processed_at) would force a seq scan since its
+                  -- index is partial (WHERE utm_content IS NOT NULL).
+                  -- created_at is Shopify's original timestamp so
+                  -- max_orders_day matches "latest order" as expected.
+                  (SELECT MAX(created_at)::date FROM shopify_orders)       AS max_orders,
+                  (SELECT MAX(day) FROM cpis_by_sku_daily)                 AS max_daily,
+                  (SELECT COUNT(DISTINCT master_sku) FROM cpis_by_sku_daily) AS n_sku
+            """)
+        )
+    ).one()
     return CpisDataFreshnessResponse(
-        max_meta_day=max_meta,
-        max_orders_day=max_orders,
-        max_daily_day=max_daily,
-        distinct_skus=int(n_sku or 0),
+        max_meta_day=row.max_meta,
+        max_orders_day=row.max_orders,
+        max_daily_day=row.max_daily,
+        distinct_skus=int(row.n_sku or 0),
         computed_at=datetime.now(timezone.utc),
     )
 
