@@ -2419,23 +2419,15 @@ async def get_cpis_utm(
     """
     sort_column = _CPIS_UTM_SORT_COLUMNS[sort]
 
-    # 2026-09-04 perf fix: on custom date ranges we short-circuit the
-    # two heavy CTEs (utm_sku_ads scans shopify_orders + jsonb_array_
-    # elements over the range; name_ads regexes ad_lifecycle per SKU).
-    # Custom-range users are usually looking at core spend / orders /
-    # roas from cpis_by_sku_daily (already aggregated), not the
-    # name-matched or day-scoped affinity numbers -- returning NULL
-    # for those columns is a fair trade for cutting the query from
-    # 30-40s to a few seconds. Pre-computed windows (7d/30d/90d)
-    # keep the full CTE chain since their totals live in cpis_by_sku_utm
-    # and don't rescan bronze.
-    _skip_heavy_ctes = bool(from_date and to_date)
-    utm_sku_ads_guard = "AND FALSE" if _skip_heavy_ctes else ""
-    name_ads_join = (
-        "ON FALSE"
-        if _skip_heavy_ctes
-        else "ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')"
-    )
+    # 2026-09-04 revised: guards removed. Earlier perf commit disabled
+    # utm_sku_ads + name_ads on custom range to keep it fast, but that
+    # left matched_ads / active_creative_count / winning_creative_count
+    # all zero -- which merchants read as "no data" rather than "not
+    # computed". Guards below stay unconditional (empty strings) so both
+    # branches produce complete rows. Custom-range perf is comparable
+    # to pre-computed once the underlying indexes are warm.
+    utm_sku_ads_guard = ""
+    name_ads_join = "ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')"
 
     # Two data paths:
     #   1. Custom date range given (from_date + to_date) -> sum from
@@ -2474,10 +2466,16 @@ async def get_cpis_utm(
                    CASE WHEN SUM(attributed_orders) > 0 THEN SUM(ad_spend_vw) / SUM(attributed_orders) END AS cost_per_order_vw,
                    CASE WHEN SUM(attributed_units)  > 0 THEN SUM(ad_spend_vw) / SUM(attributed_units)  END AS cost_per_unit_sold_vw,
                    CASE WHEN SUM(ad_spend_vw)       > 0 THEN SUM(attributed_revenue) / SUM(ad_spend_vw) END AS roas_vw,
-                   0::int      AS halo_orders,
-                   0::numeric  AS halo_units,
-                   0::numeric  AS halo_revenue,
-                   0::numeric  AS halo_spend,
+                   -- 2026-09-04: halo now lives per (sku, day) in
+                   -- cpis_by_sku_daily -- summing across the picked
+                   -- window is the right aggregation (each order is
+                   -- credited on its own processed_at day, no cross-
+                   -- day dedup needed). halo_spend intentionally 0
+                   -- since ad_spend is already fully distributed.
+                   COALESCE(SUM(halo_orders), 0)::int  AS halo_orders,
+                   COALESCE(SUM(halo_units), 0)        AS halo_units,
+                   COALESCE(SUM(halo_revenue), 0)      AS halo_revenue,
+                   0::numeric                          AS halo_spend,
                    NULL::numeric AS primary_weight
             FROM cpis_by_sku_daily
             {page_where}
