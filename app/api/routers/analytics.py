@@ -2277,7 +2277,10 @@ class CpisUtmRow(BaseModel):
     # Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ..., "5XL":0}.
     # Frontend renders as one column per canonical size (XS -> 5XL).
     # None if no size-tagged variants exist for this SKU.
-    mm_stock_by_size: dict[str, int] | None
+    # Values may be None for sizes with no stored count (rare but real
+    # in production).  Widen the union so the response mapping doesn't
+    # 500 when Postgres hands us {"XS": null, "S": 12, ...}.
+    mm_stock_by_size: dict[str, int | None] | None
     # Business-model columns derived from ops sheet (2026-09-03). The
     # sheet uses fixed-percentage cost model against selling price:
     #   COGS               = SP * 35%
@@ -2415,6 +2418,24 @@ async def get_cpis_utm(
     row missing).
     """
     sort_column = _CPIS_UTM_SORT_COLUMNS[sort]
+
+    # 2026-09-04 perf fix: on custom date ranges we short-circuit the
+    # two heavy CTEs (utm_sku_ads scans shopify_orders + jsonb_array_
+    # elements over the range; name_ads regexes ad_lifecycle per SKU).
+    # Custom-range users are usually looking at core spend / orders /
+    # roas from cpis_by_sku_daily (already aggregated), not the
+    # name-matched or day-scoped affinity numbers -- returning NULL
+    # for those columns is a fair trade for cutting the query from
+    # 30-40s to a few seconds. Pre-computed windows (7d/30d/90d)
+    # keep the full CTE chain since their totals live in cpis_by_sku_utm
+    # and don't rescan bronze.
+    _skip_heavy_ctes = bool(from_date and to_date)
+    utm_sku_ads_guard = "AND FALSE" if _skip_heavy_ctes else ""
+    name_ads_join = (
+        "ON FALSE"
+        if _skip_heavy_ctes
+        else "ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')"
+    )
 
     # Two data paths:
     #   1. Custom date range given (from_date + to_date) -> sum from
@@ -2559,6 +2580,7 @@ async def get_cpis_utm(
           AND char_length(so.utm_content) BETWEEN 10 AND 20
           AND so.utm_content !~ '[^0-9]'
           AND edge->'node'->>'sku' IS NOT NULL
+          {utm_sku_ads_guard}
       ),
       utm_ads AS (
         -- Day-scoped spend rollup (2026-09-02): join each
@@ -2604,8 +2626,7 @@ async def get_cpis_utm(
                  WHERE al.ad_effective_status = 'ACTIVE'
                ), 0)                                             AS active_windowed_spend
         FROM page p
-        LEFT JOIN ad_lifecycle al
-          ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+        LEFT JOIN ad_lifecycle al {name_ads_join}
         LEFT JOIN insights_windowed iw
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
