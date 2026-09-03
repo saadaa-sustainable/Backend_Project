@@ -603,6 +603,24 @@ export interface AdsAnalyseRow {
   asset_id: string | null;
   asset_media: "video" | "graphic" | "influencer" | null;
   asset_match_source: "direct" | "ctd_matched" | "name_parsed" | "name_synthetic" | null;
+  // Per-ad media (ad_media silver, built from raw_dump_meta joins).
+  // Coverage ~19% today (ads whose creative has an asset_feed_spec).
+  // All null for the other 81% -- follow-up: /adcreatives fetcher.
+  thumbnail_url: string | null;
+  video_url: string | null;
+  video_id: string | null;
+  landing_page_url: string | null;
+  link_display_url: string | null;
+  is_video: boolean | null;
+  // <page_id>_<post_id>. When present, the frontend builds a Facebook
+  // post iframe embed to show the post exactly as it appears in
+  // Ads Manager Preview -- 78% coverage today.
+  effective_object_story_id: string | null;
+  // Instagram permalink from CTD's ad_thumbnails mirror (89% coverage).
+  // Feeds https://www.instagram.com/{p|reel}/{shortcode}/embed/captioned/
+  // -- works for dark-post ads, unlike the FB plugin path.
+  instagram_permalink: string | null;
+  video_source_url: string | null;
 }
 
 export interface AdsAnalyseTotals {
@@ -1222,6 +1240,19 @@ export interface CpisUtmRow {
   // Frontend renders as one column per canonical size. null when no
   // size-tagged variants exist.
   mm_stock_by_size: Record<string, number> | null;
+  // Business-model columns (2026-09-03, matches ops sheet formulas):
+  //   COGS = SP*35%, Gross Margin % = 65%, LOG&RTN = SP*10%, Contribution = SP*55%
+  selling_price: number | null;
+  cogs: number | null;
+  gross_margin_pct: number | null;
+  contribution_margin: number | null;
+  logistics_return: number | null;
+  ip_doq: number | null;
+  total_doh: number | null;
+  oos_pct: number | null;
+  tentative_replenish_date: string | null;
+  halo_sale_pct: number | null;
+  pipeline_avail_to_test: number | null;
   // Per-SKU untested-asset backlog counts. Rendered as three columns
   // in the CPIS table so a merchant can see "how many videos / graphics
   // / influencer posts I still have queued for this SKU."
@@ -1230,6 +1261,14 @@ export interface CpisUtmRow {
   untested_video_ct: number | null;
   untested_graphic_ct: number | null;
   untested_influencer_ct: number | null;
+  // Return metrics from BQ (MapleMonk consolidated returns, joined
+  // per-window). null when the SKU has no rows in master_sku_returns
+  // (small / new SKU with no return history yet).
+  return_rate_pct: number | null;
+  return_units: number | null;
+  refund_value: number | null;
+  // gross ROAS * (1 - return_rate/100). Same nulling behaviour.
+  net_roas: number | null;
   // Creative-testing cadence: 1 test / week per 1L of weekly ad spend.
   // Compare against untested_video_ct + untested_graphic_ct to see if
   // the backlog covers next week's requirement.
@@ -1271,6 +1310,15 @@ export type CpisAttributionMode = "equal" | "value_weighted";
 export interface CpisUtmResponse {
   rows: CpisUtmRow[];
   total: number;
+  // Reconciliation totals for the picked window (added 2026-09-03).
+  // The KPI strip surfaces these so the "Ad spend" tile reflects the
+  // true Meta window total, not just the paginated-row sum:
+  //   meta_total_spend   Meta actual spend in the window (from silver)
+  //   attributed_spend   slice attributed to a catalog SKU (across ALL SKUs)
+  //   untethered_spend   meta_total_spend - attributed_spend
+  meta_total_spend: number | null;
+  attributed_spend: number | null;
+  untethered_spend: number | null;
 }
 
 export interface CpisUtmParams {

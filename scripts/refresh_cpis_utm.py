@@ -145,17 +145,19 @@ GROUP BY t.ad_id, t.order_id, t.master_sku,
 """
 
 
-# Step 2 unchanged: total spend per ad_id from raw_dump_meta insights.
+# Step 2: total spend per ad_id in the window.
+#
+# 2026-09-03 rewrite: reads from public.insights_daily_by_ad (the
+# canonical (ad_id, day) silver) instead of re-implementing the
+# dedup + range-expansion logic against raw_dump_meta. Single source
+# of truth -- whatever fix lands in refresh_insights_daily_by_ad.py
+# automatically flows through here on the next refresh cadence.
 SQL_STEP2 = """
-SELECT
-  r.raw_payload->>'ad_id' AS ad_id,
-  SUM(NULLIF(r.raw_payload->>'spend','')::numeric) AS spend
-FROM raw_dump_meta r
-WHERE r.object_type = 'insights'
-  AND (r.raw_payload->>'date_start')::date >= %(window_from)s
-  AND (r.raw_payload->>'date_start')::date <= %(window_to)s
-  AND r.raw_payload->>'ad_id' IS NOT NULL
-GROUP BY r.raw_payload->>'ad_id'
+SELECT ad_id, SUM(spend) AS spend
+FROM public.insights_daily_by_ad
+WHERE day BETWEEN %(window_from)s AND %(window_to)s
+  AND ad_id IS NOT NULL
+GROUP BY ad_id
 """
 
 

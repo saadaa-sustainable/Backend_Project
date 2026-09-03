@@ -264,7 +264,50 @@ CREATE INDEX IF NOT EXISTS idx_cip_username
 )
 
 
-SPECS: list[TableSpec] = [ASSET_REGISTER, GRAPHIC_REGISTER, INFLUENCER_POSTS]
+AD_THUMBNAILS = TableSpec(
+    name="ad_thumbnails",
+    pk="ad_id",
+    columns=[
+        "ad_id", "thumbnail_url", "image_url", "creative_id", "object_type",
+        "video_id", "fetched_at", "last_error", "instagram_permalink",
+        "fb_permalink", "video_source_url", "video_source_fetched_at",
+        "destination_url", "linked_urls", "destination_fetched_at",
+        "destination_error",
+    ],
+    ddl="""
+CREATE TABLE IF NOT EXISTS public.ad_thumbnails (
+    ad_id                     text PRIMARY KEY,
+    thumbnail_url             text,
+    image_url                 text,
+    creative_id               text,
+    object_type               text,
+    video_id                  text,
+    fetched_at                timestamptz,
+    last_error                text,
+    -- IG permalink is the highest-value field here -- 89% coverage
+    -- across all ads today. Feeds the /embed/captioned/ iframe URL in
+    -- the Ads Analyse preview (works for dark posts, unlike FB's
+    -- plugins/post.php which requires a public page post).
+    instagram_permalink       text,
+    fb_permalink              text,
+    -- Video source .mp4 URL from Meta CDN. Signed, expires ~48-72h.
+    -- Cached by CTD's fetch_ad_thumbnails.py so we don't hit Meta at
+    -- render time.
+    video_source_url          text,
+    video_source_fetched_at   timestamptz,
+    destination_url           text,
+    linked_urls               text[],
+    destination_fetched_at    timestamptz,
+    destination_error         text,
+    ingested_from_ctd_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ad_thumbnails_ig
+    ON public.ad_thumbnails (ad_id) WHERE instagram_permalink IS NOT NULL;
+""",
+)
+
+
+SPECS: list[TableSpec] = [ASSET_REGISTER, GRAPHIC_REGISTER, INFLUENCER_POSTS, AD_THUMBNAILS]
 
 
 def upsert_sql(spec: TableSpec) -> str:

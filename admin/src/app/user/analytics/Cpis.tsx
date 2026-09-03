@@ -587,6 +587,12 @@ function CpisView() {
 
   const [rows, setRows] = useState<CpisUtmRow[]>([]);
   const [total, setTotal] = useState(0);
+  // Reconciliation totals for the picked window -- fed into the KPI
+  // strip so the fractional "Ad spend" tile can show the honest Meta
+  // total (not just the paginated row sum).
+  const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
+  const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
+  const [untetheredSpend, setUntetheredSpend] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -608,6 +614,9 @@ function CpisView() {
         if (cancelled) return;
         setRows(res.rows);
         setTotal(res.total);
+        setMetaTotalSpend(res.meta_total_spend);
+        setAttributedSpend(res.attributed_spend);
+        setUntetheredSpend(res.untethered_spend);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -655,6 +664,10 @@ function CpisView() {
         {rows.length > 0 && (
           <CpisKpiStrip
             rows={rows}
+            spendMatchMode={spendMatchMode}
+            metaTotalSpend={metaTotalSpend}
+            attributedSpend={attributedSpend}
+            untetheredSpend={untetheredSpend}
             windowLabel={
               fromDate && toDate
                 ? `${fromDate} → ${toDate}`
@@ -823,7 +836,7 @@ function CpisView() {
               title={
                 mode === "ad_name"
                   ? "STRICT: only ads whose ad_name contains this SKU code as a whole word (regex \\y<sku>\\y). Typically 5-15% of the SKU's converting spend."
-                  : "BROAD: every ad whose id appeared in this SKU's UTM-attributed orders (order.utm_content -> ad_id). Captures brand / category / retargeting ads that don't name the SKU."
+                  : "FRACTIONAL: every ad whose id appeared in this SKU's UTM-attributed orders, with spend split per-order and then within-order by line-item revenue share. Sums back to Meta total across SKUs -- no double-count."
               }
               className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                 spendMatchMode === mode
@@ -831,7 +844,7 @@ function CpisView() {
                   : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
               }`}
             >
-              {mode === "ad_name" ? "Match: ad_name" : "Match: ad_id"}
+              {mode === "ad_name" ? "Match: ad_name" : "Match: fractional"}
             </button>
           ))}
         </div>
@@ -874,6 +887,19 @@ function CpisView() {
                 <th className="sticky left-[110px] z-10 bg-white px-3 py-3" title="Shopify productType (with 'price test' / combo / bedsheet variants excluded)">Product</th>
                 <th className="px-3 py-3">Category</th>
                 <th className="px-3 py-3 text-right" title="Product list price (from variants[0].price)">Price</th>
+                {/* Cost model from ops sheet (2026-09-03): fixed-%
+                    against Selling Price. COGS = SP×35%, Gross Margin
+                    = 65%, LOG&RTN = SP×10%, Contribution = SP×55%. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right"
+                    title="Selling Price. From MM inventory (shopify_sp_max).">Selling Price</th>
+                <th className="px-3 py-3 text-right"
+                    title="COGS = SP × 35% (ops-sheet cost-model assumption)">COGS</th>
+                <th className="px-3 py-3 text-right"
+                    title="Gross Margin = SP - COGS = 65% of SP under the sheet's fixed-rate model">Gross Margin %</th>
+                <th className="px-3 py-3 text-right"
+                    title="Contribution Margin = SP - COGS - LOG&RTN = 55% of SP">Contribution</th>
+                <th className="px-3 py-3 text-right"
+                    title="Logistics & Return = SP × 10%">LOG & RTN</th>
                 <th className="px-3 py-3 text-right" title="Distinct variant SKUs (size × color permutations)">Variants</th>
                 <th className="px-3 py-3 text-right" title="Variant SKUs with inventoryQuantity > 0">In-Stock</th>
                 {/* NAME-MATCHED group -- 2026-08-31: values are now
@@ -926,12 +952,12 @@ function CpisView() {
                   title={
                     spendMatchMode === "ad_name"
                       ? "SUM of windowed spend for name-matched ads (from insights_daily_by_ad, in the picked date range). Only ads whose ad_name contains this SKU."
-                      : "SUM of windowed spend for UTM-matched ads -- every ad_id that appeared in this SKU's UTM-attributed orders during the picked range. Much broader than name-matched."
+                      : "Fractional per-line-item allocation from cpis_by_sku_utm.ad_spend: for each ad, per_order_share = ad_spend / n_orders_ad_drove, then split within-order by line-item revenue share (line_rev / order_total_rev). Example: ad spent 1000 on 10 orders => 100 / order; order value 600 with SDCET 300 (50%) => SDCET share = 100 x 50% = 50. Sums back to Meta total across all SKUs -- no double-count."
                   }
                 >
                   Spend
                   <span className="ml-1 text-[10px] text-text-tertiary">
-                    ({spendMatchMode === "ad_name" ? "name" : "id"})
+                    ({spendMatchMode === "ad_name" ? "name" : "frac"})
                   </span>
                 </th>
                 <th
@@ -948,6 +974,14 @@ function CpisView() {
                   </span>
                 </th>
                 <th className="px-3 py-3 text-right" title="Windowed ROAS: conv_value / spend for name-matched ads within the picked date range">ROAS</th>
+                <th className="px-3 py-3 text-right"
+                    title="Return % from MapleMonk's consolidated returns table (BQ). units_returned / units_ordered for orders placed in the picked window. Amber >= 20%, red >= 30%.">
+                  Return %
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Net ROAS: gross ROAS discounted by return rate. attributed_revenue × (1 − return_rate/100) ÷ ad_spend. Amber <= 2×, red <= 1.5×.">
+                  Net ROAS
+                </th>
                 <th className="px-3 py-3 text-right" title="New-customer ROAS approximation: (windowed NCP × AOV of last-click orders) / windowed spend. Meta's actions[first_time_customer_purchase] would be more accurate but isn't exposed as a flat column.">NC ROAS</th>
                 {/* LAST-CLICK group -- pulled straight from
                     cpis_by_sku_utm which does order.utm_content → ad_id
@@ -990,6 +1024,14 @@ function CpisView() {
                 <th className="px-3 py-3 text-right" title="Halo units: weighted-count of THIS SKU appearing as a secondary basket item in ad-driven orders">Halo Units</th>
                 <th className="px-3 py-3 text-right" title="Halo orders: number of ad-driven orders that included this SKU as a secondary basket item">Halo Orders</th>
                 <th className="px-3 py-3 text-right" title="Halo ad-spend allocation: share of ad spend proportional to halo units. Adds to primary Spend for total spend that touched this SKU.">Halo Spend</th>
+                <th className="px-3 py-3 text-right"
+                    title="Halo Sale % = halo_orders / (attributed_orders + halo_orders). High = this SKU rides along in baskets rather than being the reason for the sale.">
+                  Halo Sale %
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Pipeline available to test = untested video + untested graphic backlog. Rolled together since the merchant thinks of them as one pool.">
+                  Pipeline<br/>Avail
+                </th>
                 {/* INVENTORY (Shopify + MapleMonk in-stock breadth)
                     2026-09-03: dropped MM Stock, Sales 45d, Lead Time --
                     Units in Stock + the two in-stock-rate columns cover
@@ -999,6 +1041,22 @@ function CpisView() {
                 <th className="border-l border-border-soft px-3 py-3 text-right" title="Current ending inventory rolled to master SKU (latest per variant, all variants including any price-test variations)">Units in Stock</th>
                 <th className="px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — MapleMonk current_stock>0 count / total variants">Var In-Stock %</th>
                 <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU (any color). Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
+                <th className="px-3 py-3 text-right"
+                    title="In-Process Days-of-Quantity: total_inprogress / daily_quantity. How many days the pipeline covers at current sales rate.">
+                  IP DOQ
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Total Days-on-Hand: current_stock / daily_quantity. Days of cover from what's on the shelf right now.">
+                  Total DOH
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Out-of-stock rate = oos_days_30 / 30. 100% means the master SKU registered as OOS every day in the window.">
+                  OOS %
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Tentative replenish date = today + lead_time. Naive projection assuming the PO fires now.">
+                  Replenish
+                </th>
                 {/* MapleMonk sell-through planning (retained: DoQ + OOS) */}
                 <th className="border-l border-border-soft px-3 py-3 text-right" title="Days-of-Quantity at 30-day sales rate, averaged across every variant of this master SKU. 30d is the most accurate horizon for advertising decisions -- reactive enough to catch imminent stockouts, smooth enough not to whipsaw on a single big/small day.">DoQ 30</th>
                 <th className="px-3 py-3 text-right" title="Worst-case OOS days in the last 30 days (max across variants)">OOS 30d</th>
@@ -1040,6 +1098,22 @@ function CpisView() {
                         ? fmtINRCompact(row.price_min)
                         : `${fmtINRCompact(row.price_min)}–${fmtINRCompact(row.price_max)}`
                       : "—"}
+                  </td>
+                  {/* Cost model cluster (ops-sheet fixed-% assumption). */}
+                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {row.selling_price !== null ? fmtINRFull(row.selling_price) : "—"}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
+                    {row.cogs !== null ? fmtINRFull(row.cogs) : "—"}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {row.gross_margin_pct !== null ? `${row.gross_margin_pct.toFixed(0)}%` : "—"}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {row.contribution_margin !== null ? fmtINRFull(row.contribution_margin) : "—"}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
+                    {row.logistics_return !== null ? fmtINRFull(row.logistics_return) : "—"}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {row.variant_count ?? "—"}
@@ -1113,13 +1187,38 @@ function CpisView() {
                     <LazySpendTrendCell masterSku={row.master_sku} window={window_} />
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(spendMatchMode === "ad_name" ? row.name_matched_spend : row.utm_matched_spend)}
+                    {/* utm mode renders `ad_spend` (fractional / equal-per-order
+                        + within-order value-weighted allocation from
+                        cpis_by_sku_utm) rather than `utm_matched_spend`
+                        (naive over-counted affinity). The fractional version
+                        sums back to Meta total across SKUs -- no double-count. */}
+                    {fmtINRFull(spendMatchMode === "ad_name" ? row.name_matched_spend : row.ad_spend)}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(spendMatchMode === "ad_name" ? row.name_matched_ncp : row.utm_matched_ncp)}
                   </td>
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={row.name_matched_roas_lifetime} />
+                  </td>
+                  {/* Return % from BQ. Red at 30%+, amber at 20-30%. */}
+                  <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                    row.return_rate_pct === null
+                      ? "text-text-tertiary"
+                      : row.return_rate_pct >= 30
+                        ? "text-error-text"
+                        : row.return_rate_pct >= 20
+                          ? "text-warning-text"
+                          : "text-text-primary"
+                  }`}
+                  title={row.refund_value !== null && row.return_units !== null
+                    ? `${row.return_units} units, ₹${Math.round(row.refund_value/1e5)}L refunded`
+                    : undefined}>
+                    {row.return_rate_pct !== null ? `${row.return_rate_pct.toFixed(1)}%` : "—"}
+                  </td>
+                  {/* Net ROAS: same chip styling as ROAS but with the
+                      return-adjusted number. */}
+                  <td className="px-3 py-2.5 text-right">
+                    <RoasChip roas={row.net_roas} />
                   </td>
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={row.name_matched_nc_roas} />
@@ -1167,6 +1266,27 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
                     {fmtINRFull(row.halo_spend)}
                   </td>
+                  {/* Halo Sale % + Pipeline. Halo % is red-highlighted when
+                      the SKU rides too heavily on baskets (>50%) rather
+                      than driving its own sales. */}
+                  <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                    row.halo_sale_pct === null
+                      ? "text-text-tertiary"
+                      : row.halo_sale_pct >= 50
+                        ? "text-warning-text"
+                        : "text-text-primary"
+                  }`}>
+                    {row.halo_sale_pct !== null ? `${row.halo_sale_pct.toFixed(0)}%` : "—"}
+                  </td>
+                  <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                    (row.pipeline_avail_to_test ?? 0) >= 5
+                      ? "text-success-text"
+                      : (row.pipeline_avail_to_test ?? 0) > 0
+                        ? "text-text-primary"
+                        : "text-text-tertiary"
+                  }`}>
+                    {row.pipeline_avail_to_test ?? "—"}
+                  </td>
                   {/* INVENTORY: Units in Stock + in-stock-rate breadth.
                       MM Stock / Sales 45d / Lead Time removed 2026-09-03. */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
@@ -1208,6 +1328,27 @@ function CpisView() {
                     }
                   >
                     {row.mm_size_in_stock_rate !== null ? `${row.mm_size_in_stock_rate.toFixed(0)}%` : "—"}
+                  </td>
+                  {/* IP DOQ / Total DOH / OOS % / Tentative Replenish */}
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {row.ip_doq !== null ? `${row.ip_doq.toFixed(0)}d` : "—"}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {row.total_doh !== null ? `${row.total_doh.toFixed(0)}d` : "—"}
+                  </td>
+                  <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                    row.oos_pct === null
+                      ? "text-text-tertiary"
+                      : row.oos_pct >= 50
+                        ? "text-error-text"
+                        : row.oos_pct >= 20
+                          ? "text-warning-text"
+                          : "text-success-text"
+                  }`}>
+                    {row.oos_pct !== null ? `${row.oos_pct.toFixed(0)}%` : "—"}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
+                    {row.tentative_replenish_date ?? "—"}
                   </td>
                   {/* MapleMonk sell-through planning */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
@@ -1523,33 +1664,75 @@ function CategoryFlagPill({ category }: { category: string }) {
  *  All numbers come from the name-matched columns (ads whose ad_name
  *  contains the master SKU) and the product/inventory context, since UTM
  *  attribution is deferred to the per-color-variant view. */
-function CpisKpiStrip({ rows, windowLabel }: { rows: CpisUtmRow[]; windowLabel: string }) {
-  // Distinct-ad de-dupe isn't possible client-side (ad_ids aren't in the
-  // row payload), so surface the raw sum labeled "matches" -- clear
-  // it's (ad × SKU) pairs, not distinct ads.
-  const totalMatches = rows.reduce((s, r) => s + (r.name_matched_ads ?? 0), 0);
-  const totalSpend = rows.reduce((s, r) => s + (r.name_matched_spend ?? 0), 0);
-  const totalNcp = rows.reduce((s, r) => s + (r.name_matched_ncp ?? 0), 0);
+function CpisKpiStrip({
+  rows,
+  windowLabel,
+  spendMatchMode,
+  metaTotalSpend,
+  attributedSpend,
+  untetheredSpend,
+}: {
+  rows: CpisUtmRow[];
+  windowLabel: string;
+  spendMatchMode: "ad_name" | "utm_id";
+  metaTotalSpend: number | null;
+  attributedSpend: number | null;
+  untetheredSpend: number | null;
+}) {
+  // KPI tiles follow the same toggle the table uses so they always
+  // reconcile with what's rendered below:
+  //   ad_name mode   -> name_matched_* fields (strict, regex on ad_name).
+  //                     Spend sums the paginated rows -- there's no
+  //                     window-total analog for name-matched.
+  //   utm_id mode    -> Ad spend tile uses meta_total_spend (window
+  //                     total from silver, matches Ads Manager) with
+  //                     an attribution-rate hint. This is what the
+  //                     merchant asked for: the tile should show the
+  //                     TRUE Meta total, not just the attributed slice.
+  const isFractional = spendMatchMode === "utm_id";
+
+  const totalCount = isFractional
+    ? rows.reduce((s, r) => s + (r.attributed_orders ?? 0), 0)
+    : rows.reduce((s, r) => s + (r.name_matched_ads ?? 0), 0);
+  const totalNcp = isFractional
+    ? rows.reduce((s, r) => s + (r.utm_matched_ncp ?? 0), 0)
+    : rows.reduce((s, r) => s + (r.name_matched_ncp ?? 0), 0);
+
+  // Ad-spend tile: full Meta window total in fractional mode; sum of
+  // name-matched slices for the paginated rows in ad_name mode.
+  const totalSpend = isFractional
+    ? (metaTotalSpend ?? 0)
+    : rows.reduce((s, r) => s + (r.name_matched_spend ?? 0), 0);
+
+  const attrRate =
+    isFractional && metaTotalSpend && metaTotalSpend > 0 && attributedSpend !== null
+      ? (attributedSpend / metaTotalSpend) * 100
+      : null;
+
   const totalStock = rows.reduce((s, r) => s + (r.units_in_stock ?? 0), 0);
   const totalVariants = rows.reduce((s, r) => s + (r.variant_count ?? 0), 0);
   const totalAvailable = rows.reduce((s, r) => s + (r.available_variant_count ?? 0), 0);
-  const blendedCostPerNcp = totalNcp > 0 ? totalSpend / totalNcp : null;
+  const blendedCostPerNcp = totalNcp > 0 && totalSpend > 0 ? totalSpend / totalNcp : null;
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <KwikTile
         icon={<span>✦</span>}
         iconColor="purple"
-        label="Name matches"
-        value={fmtNumCompact(totalMatches)}
-        subLine="ads × SKU pairs"
+        label={isFractional ? "Attributed orders" : "Name matches"}
+        value={fmtNumCompact(totalCount)}
+        subLine={isFractional ? "orders driven (LC UTM)" : "ads × SKU pairs"}
       />
       <KwikTile
         icon={<span>₹</span>}
         iconColor="amber"
-        label="Ad spend"
+        label={isFractional ? "Meta ad spend" : "Ad spend (name-matched)"}
         value={fmtINRCompact(totalSpend)}
-        subLine={windowLabel}
+        subLine={
+          isFractional && attrRate !== null && untetheredSpend !== null
+            ? `${attrRate.toFixed(0)}% attributed · ${fmtINRCompact(untetheredSpend)} untethered`
+            : windowLabel
+        }
       />
       <KwikTile
         icon={<span>🛒</span>}

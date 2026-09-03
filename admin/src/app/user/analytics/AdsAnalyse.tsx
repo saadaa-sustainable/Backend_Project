@@ -263,6 +263,215 @@ function AssetIdCell({ row }: { row: AdsAnalyseRow }) {
   );
 }
 
+// Preview cell. Renders a 40x40 thumbnail when available (Meta CDN URL
+// from ad_media silver, ~19% coverage). If we don't have the raw
+// thumbnail but DO have the FB post story_id (78% coverage), show a
+// small Facebook-logo tile so the user still gets access to the
+// iframe-embedded preview.
+//
+// Click -> lightbox with a fidelity ladder:
+//   1. FB post iframe embed if effective_object_story_id is set
+//      (this is what CTD dashboard.js does at _iframeUrlForFb -- shows
+//      the ACTUAL post with caption, CTA, likes, media, etc.)
+//   2. Video <video controls autoplay> if is_video + video_url set
+//   3. Full-size image
+//   4. Grey placeholder (no data at all)
+function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
+  const [open, setOpen] = useState(false);
+  const hasThumb = !!row.thumbnail_url;
+  const hasIg = !!row.instagram_permalink;
+  const hasStory = !!row.effective_object_story_id;
+  const hasVideo = !!row.video_source_url || (row.is_video && !!row.video_url);
+  const hasAnyPreview = hasThumb || hasIg || hasStory;
+
+  // Preview priority (matches CTD dashboard.js:1536-1541):
+  //   1. Instagram /embed/captioned/ -- 89% coverage, works for dark posts
+  //   2. Native <video> playback if we have a signed source URL
+  //   3. Facebook plugin/post.php -- 78% coverage but often fails on dark posts
+  //   4. Static image
+  const igEmbedUrl = row.instagram_permalink
+    ? (() => {
+        const m = row.instagram_permalink.match(/instagram\.com\/(p|reel|tv)\/([^/?#]+)/i);
+        if (!m) return null;
+        return `https://www.instagram.com/${m[1]}/${m[2]}/embed/captioned/`;
+      })()
+    : null;
+  const fbIframeUrl = row.effective_object_story_id
+    ? (() => {
+        const [pageId, postId] = row.effective_object_story_id.split("_");
+        if (!pageId || !postId) return null;
+        const href = `https://www.facebook.com/${pageId}/posts/${postId}`;
+        return `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(href)}&show_text=true&width=500`;
+      })()
+    : null;
+
+  if (!hasAnyPreview) {
+    return (
+      <div
+        className="flex h-10 w-10 items-center justify-center rounded bg-slate-100 text-[9px] text-slate-400"
+        title="No preview available — ad has no IG permalink, no FB story_id, and no cached thumbnail"
+      >
+        —
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+        className="group relative h-10 w-10 overflow-hidden rounded ring-1 ring-slate-200 hover:ring-slate-400"
+        title={
+          igEmbedUrl
+            ? "Instagram post — click for iframe preview"
+            : fbIframeUrl
+              ? "Click to preview Facebook post"
+              : hasVideo
+                ? "Video ad — click to play"
+                : "Click to enlarge"
+        }
+      >
+        {hasThumb ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={row.thumbnail_url!}
+              alt=""
+              loading="lazy"
+              className="h-full w-full object-cover"
+            />
+            {(row.is_video || hasVideo) && (
+              <span className="absolute inset-0 flex items-center justify-center bg-black/25 text-white text-[10px] font-bold">
+                ▶
+              </span>
+            )}
+          </>
+        ) : igEmbedUrl ? (
+          // Instagram gradient tile as the fallback when we have the IG
+          // permalink but no cached thumbnail image.
+          <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#833AB4] via-[#FD1D1D] to-[#FCB045] text-[13px] font-bold text-white">
+            IG
+          </div>
+        ) : (
+          <div className="flex h-full w-full items-center justify-center bg-[#1877F2] text-[11px] font-bold text-white">
+            f
+          </div>
+        )}
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-8"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="relative flex max-h-[90vh] max-w-[90vw] flex-col rounded-lg bg-white p-2 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setOpen(false)}
+              className="absolute -right-3 -top-3 z-10 h-8 w-8 rounded-full bg-white text-lg font-bold shadow-lg"
+              aria-label="Close"
+            >
+              ×
+            </button>
+            {igEmbedUrl ? (
+              // Instagram post iframe embed -- Meta serves the correct
+              // X-Frame-Options for this endpoint so it works for
+              // dark-post ads too. Height 640 accommodates typical
+              // reels/feed posts; the modal shell handles scroll.
+              <iframe
+                src={igEmbedUrl}
+                width={400}
+                height={640}
+                className="rounded border-0"
+                title={row.ad_name ?? "Instagram post preview"}
+                allow="encrypted-media"
+                allowFullScreen
+                scrolling="no"
+              />
+            ) : row.video_source_url || (row.is_video && row.video_url) ? (
+              // eslint-disable-next-line jsx-a11y/media-has-caption
+              <video
+                src={row.video_source_url ?? row.video_url!}
+                controls
+                autoPlay
+                className="max-h-[85vh] max-w-[85vw] rounded"
+              />
+            ) : fbIframeUrl ? (
+              <iframe
+                src={fbIframeUrl}
+                width={500}
+                height={640}
+                className="rounded border-0"
+                title={row.ad_name ?? "Facebook post preview"}
+                allow="encrypted-media"
+                allowFullScreen
+              />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={row.thumbnail_url!}
+                alt={row.ad_name ?? ""}
+                className="max-h-[85vh] max-w-[85vw] rounded object-contain"
+              />
+            )}
+            <div className="mt-2 max-w-[500px] px-2 text-center text-xs text-text-secondary">
+              {row.ad_name}
+              {igEmbedUrl ? (
+                <div className="mt-1 text-[10px] text-text-tertiary">
+                  Instagram post embed ·{" "}
+                  <a
+                    href={row.instagram_permalink!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline"
+                  >
+                    open on IG ↗
+                  </a>
+                </div>
+              ) : fbIframeUrl ? (
+                <div className="mt-1 text-[10px] text-text-tertiary">
+                  Facebook post embed · story_id {row.effective_object_story_id}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// Landing-page cell. Priority: real URL from ad_media silver
+// (link_urls[0].website_url) > fall back to the "?" badge. Renders the
+// URL type badge (Prod/Coll/Home/etc from landingType) + a clickable
+// truncated URL that opens in a new tab. Hover shows the full URL.
+function LandingPageCell({ row }: { row: AdsAnalyseRow }) {
+  const url = row.landing_page_url;
+  if (!url) {
+    return (
+      <span className="text-text-tertiary" title="Landing URL not in ad_media silver">—</span>
+    );
+  }
+  const t = landingType(url);
+  const pretty = url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 40);
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${t.cls}`}>{t.badge}</span>
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="text-[12px] text-accent-blue underline hover:text-accent-blue-dark"
+        title={url}
+      >
+        {pretty}
+      </a>
+    </span>
+  );
+}
+
 /** Landing-page URL type from CTD dashboard.js:7600-7617. */
 function landingType(url: string | null): { badge: string; cls: string } {
   if (!url) return { badge: "?", cls: "lp-other" };
@@ -278,7 +487,7 @@ function landingType(url: string | null): { badge: string; cls: string } {
 const COLUMNS: ColDef[] = [
   // Identity
   { key: "preview_thumb", header: "Preview", kind: "link", group: "Identity", defaultVisible: true,
-    render: () => <Placeholder reason="Thumbnail flatten (Bronze image.url_128 → per-ad creative) not yet in Silver — see Phase 3 audit item D" /> },
+    render: (r) => <ThumbnailCell row={r} /> },
   { key: "ad_name", header: "Ad Name", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.ad_name ?? ""}>{r.ad_name ?? "—"}</span> },
   { key: "ad_id", header: "Ad ID", kind: "text", group: "Identity", defaultVisible: true,
@@ -442,8 +651,8 @@ const COLUMNS: ColDef[] = [
         ▸ Open
       </a>
     ) },
-  { key: "landing_page", header: "Landing page", kind: "link", group: "Links",
-    render: () => <Placeholder reason="Landing page needs asset_feed_spec.link_urls flatten — audit item D" /> },
+  { key: "landing_page", header: "Landing page", kind: "link", group: "Links", defaultVisible: true,
+    render: (r) => <LandingPageCell row={r} /> },
 ];
 
 const ALL_KEYS = COLUMNS.map((c) => c.key);
