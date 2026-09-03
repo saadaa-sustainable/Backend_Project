@@ -52,11 +52,37 @@ CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
 # way ad_lifecycle.py does the lifetime rollup. conv_value comes from
 # action_values[omni_purchase] (falling back to plain purchase) --
 # matches Meta Ads Manager's own "Purchases conversion value".
+#
+# 2026-09-03 fix: raw_dump_meta accumulates duplicate insight rows every
+# time we re-fetch (Meta returns the same weekly/daily summary again;
+# we ingest it as a fresh row rather than upserting). Before this fix
+# the SUM below multiplied by the number of copies -- for one ad we
+# observed 13 duplicate copies of the Aug 13-20 weekly row summed to
+# Rs 1.59L when the truth was Rs 122k. The dedup CTE keeps ONE canonical
+# copy per (ad_id, date_start, date_stop) -- the most-recently-ingested
+# one, so a late correction wins over the earlier estimate.
 REBUILD_SQL = """
 WITH ncp_ids AS (
     SELECT DISTINCT raw_payload ->> 'id' AS id
     FROM raw_dump_meta
     WHERE object_type = 'custom_conversion' AND raw_payload ->> 'name' = 'NCP'
+),
+raw_dedup AS (
+    SELECT DISTINCT ON (
+      raw_payload->>'ad_id',
+      raw_payload->>'date_start',
+      raw_payload->>'date_stop'
+    )
+      raw_payload
+    FROM raw_dump_meta
+    WHERE object_type = 'insights'
+      AND raw_payload->>'ad_id' IS NOT NULL
+      AND raw_payload->>'date_start' IS NOT NULL
+    ORDER BY
+      raw_payload->>'ad_id',
+      raw_payload->>'date_start',
+      raw_payload->>'date_stop',
+      ingested_at DESC
 )
 INSERT INTO public.insights_daily_by_ad (
     ad_id, day, spend, conv_value, ncp_count, impressions, clicks
@@ -97,10 +123,12 @@ SELECT
     )) AS ncp_count,
     SUM(NULLIF(r.raw_payload->>'impressions', '')::numeric) AS impressions,
     SUM(NULLIF(r.raw_payload->>'inline_link_clicks', '')::numeric) AS clicks
-FROM raw_dump_meta r
-WHERE r.object_type = 'insights'
-  AND r.raw_payload->>'ad_id' IS NOT NULL
-  AND r.raw_payload->>'date_start' IS NOT NULL
+FROM raw_dedup r
+-- GROUP BY on the same (ad_id, date_start) key -- deliberately kept so
+-- weekly summary rows (date_start != date_stop) still collapse under
+-- their start-date bucket. Follow-up work: prefer daily rows (start=stop)
+-- over weekly for the same ad, and pro-rate weekly-only spans across
+-- their date range instead of assigning the whole total to the start day.
 GROUP BY r.raw_payload->>'ad_id', (r.raw_payload->>'date_start')::date
 """
 
