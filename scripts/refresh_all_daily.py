@@ -125,6 +125,15 @@ PHASE_SILVER = [
     # failure.
     ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],        3600),
     ("silver_inventory",      ["scripts/refresh_master_sku_inventory.py"],   600),
+    # Must run AFTER silver_shopify: it reads raw_dump_shopify products
+    # and the shopify_inventory silver table, and precomputes the
+    # per-SKU stock/price/velocity context the CPIS endpoint used to
+    # rebuild inline on every request (~11s of the page load). If this
+    # step is skipped the dashboard does not break -- it serves the
+    # PREVIOUS snapshot -- but Units in Stock and the in-stock rates
+    # stop moving, which looks exactly like a failed ingest. 600s is
+    # ~50x the measured 12s.
+    ("cpis_sku_context",      ["scripts/refresh_cpis_sku_context.py"],       600),
     ("silver_returns",        ["scripts/refresh_master_sku_returns.py"],     900),
     ("silver_cpis_daily",     ["scripts/refresh_cpis_by_sku_daily.py"],      900),
     ("silver_cpis_utm",       ["scripts/refresh_cpis_utm.py"],              1200),
@@ -142,10 +151,14 @@ PHASE_SILVER = [
 #: columns read the PRE-COMPUTED cpis_by_sku_utm / cpis_by_sku_daily
 #: tables. (The inventory columns -- units in stock, in-stock rates, DoQ,
 #: DOH, OOS -- read raw_dump_shopify and shopify_inventory live at query
-#: time, so those are current the moment silver_shopify finishes.) Pass
-#: --skip-cpis to stop after silver when you only care about inventory.
+#: time via public.cpis_sku_context, so those are current the moment
+#: cpis_sku_context finishes -- which is why that step is part of the
+#: SILVER group here, not the CPIS group: --skip-cpis must NOT skip it,
+#: or a manual refresh would pull fresh stock into bronze and leave the
+#: dashboard showing the previous snapshot.) Pass --skip-cpis to stop
+#: after silver when you only care about inventory.
 SHOPIFY_INGEST_STEPS = ["shopify_daily"]
-SHOPIFY_SILVER_STEPS = ["silver_shopify"]
+SHOPIFY_SILVER_STEPS = ["silver_shopify", "cpis_sku_context"]
 SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm"]
 
 

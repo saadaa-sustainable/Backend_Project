@@ -516,7 +516,12 @@ function RoasChip({ roas }: { roas: number | null | undefined }) {
 function CpisView() {
   const [window_, setWindow] = useState<CpisUtmWindow>("30d");
   const [search, setSearch] = useState("");
-  const [onlyMatched, setOnlyMatched] = useState(true);
+  // Default false (was true). The row set is now the whole live
+  // catalogue, not just SKUs an ad happened to drive -- a SKU with 412
+  // units and no ad spend was previously ABSENT, which reads as "we
+  // don't sell that" rather than "nothing ran". 74 -> 86 rows on 30d.
+  const [onlyMatched, setOnlyMatched] = useState(false);
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [sort, setSort] = useState<CpisUtmSort>("attributed_units");
   // Attribution mode toggle:
   //   equal          - ad_spend / cost_per_order / cost_per_unit_sold / roas
@@ -603,9 +608,9 @@ function CpisView() {
   const filters = useMemo(
     () =>
       fromDate && toDate
-        ? { from_date: fromDate, to_date: toDate, search: search || undefined, only_matched: onlyMatched, sort }
-        : { window: window_, search: search || undefined, only_matched: onlyMatched, sort },
-    [fromDate, toDate, window_, search, onlyMatched, sort],
+        ? { from_date: fromDate, to_date: toDate, search: search || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort }
+        : { window: window_, search: search || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort },
+    [fromDate, toDate, window_, search, onlyMatched, includeArchived, sort],
   );
 
   useEffect(() => {
@@ -789,9 +794,19 @@ function CpisView() {
           placeholder="Search master SKU…"
           className="w-48 rounded-md border border-border-primary bg-white px-3 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
         />
-        <label className="flex items-center gap-1.5 text-[13px] text-text-primary">
+        <label
+          className="flex items-center gap-1.5 text-[13px] text-text-primary"
+          title="Off by default: every SKU you actually sell is listed, and one no ad drove simply shows zero spend and zero attributed orders. Tick this to narrow to SKUs with at least one attributed order in the window."
+        >
           <input type="checkbox" checked={onlyMatched} onChange={(e) => setOnlyMatched(e.target.checked)} />
           Only SKUs with attributed orders
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-[13px] text-text-primary"
+          title="Archived SKUs: zero stock, no active listing, and nothing sold in the last 30 days. Around 11 of the 97 master SKUs. Hidden by default because they are dead rows, not gaps."
+        >
+          <input type="checkbox" checked={includeArchived} onChange={(e) => setIncludeArchived(e.target.checked)} />
+          Include archived
         </label>
         <select
           value={sort}

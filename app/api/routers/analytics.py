@@ -2450,7 +2450,8 @@ async def get_cpis_utm(
     from_date: date | None = Query(default=None, description="Custom date range start. When provided together with to_date, overrides `window` and pulls a summed row set from cpis_by_sku_daily instead of the pre-computed cpis_by_sku_utm."),
     to_date:   date | None = Query(default=None, description="Custom date range end (inclusive). Requires from_date."),
     search: str | None = Query(default=None, description="Matches master_sku, case-insensitive substring."),
-    only_matched: bool = Query(default=True, description="Only SKUs with at least one attributed order."),
+    only_matched: bool = Query(default=False, description="Only SKUs with at least one attributed order in the window. Default False: the table shows the whole live catalogue, with attribution columns at zero for SKUs no ad drove."),
+    include_archived: bool = Query(default=False, description="Also include archived SKUs -- zero stock, no active listing, nothing sold in 30 days. Off by default: ~11 of the 97 are dead rows."),
     sort: Literal["ad_spend", "attributed_orders", "attributed_units", "attributed_revenue", "cost_per_order", "cost_per_unit_sold", "roas"] = Query(default="attributed_units"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -2513,16 +2514,26 @@ async def get_cpis_utm(
         if search:
             page_where += " AND master_sku ILIKE :search"
             params["search"] = f"%{search}%"
-        having_clause = "HAVING SUM(attributed_orders) > 0" if only_matched else ""
+        # Same catalogue-driven universe as the pre-computed branch --
+        # otherwise picking a custom date range would silently drop the
+        # table back to attributed-only and the row count would jump
+        # around as the user changed filters. The daily aggregate is
+        # LEFT JOINed onto the catalogue rather than driving it.
+        ctx_where = ["(ctx.is_live OR agg.master_sku IS NOT NULL)"]
+        if include_archived:
+            ctx_where = ["true"]
+        if search:
+            ctx_where.append("ctx.master_sku ILIKE :search")
+        if only_matched:
+            ctx_where.append("COALESCE(agg.attributed_orders, 0) > 0")
+        ctx_where_sql = "WHERE " + " AND ".join(ctx_where)
         # Aggregate cpis_by_sku_daily. SUM the raw metrics; derive the
         # cost/ROAS columns from the sums so ratios stay honest at the
         # summed grain (SUM(cost_per_order) would be nonsense).
         page_cte = f"""
           page AS (
+            WITH agg AS (
             SELECT master_sku,
-                   NULL::text  AS window_key,
-                   CAST(:from_date AS date) AS window_from,
-                   CAST(:to_date AS date)   AS window_to,
                    SUM(attributed_orders)::int  AS attributed_orders,
                    SUM(attributed_units)::int   AS attributed_units,
                    SUM(attributed_revenue)      AS attributed_revenue,
@@ -2543,57 +2554,119 @@ async def get_cpis_utm(
                    -- since ad_spend is already fully distributed.
                    COALESCE(SUM(halo_orders), 0)::int  AS halo_orders,
                    COALESCE(SUM(halo_units), 0)        AS halo_units,
-                   COALESCE(SUM(halo_revenue), 0)      AS halo_revenue,
-                   0::numeric                          AS halo_spend,
-                   NULL::numeric AS primary_weight
+                   COALESCE(SUM(halo_revenue), 0)      AS halo_revenue
             FROM cpis_by_sku_daily
             {page_where}
             GROUP BY master_sku
-            {having_clause}
-            ORDER BY {sort_column} DESC NULLS LAST
-            LIMIT :limit OFFSET :offset
+          )
+          SELECT ctx.master_sku,
+                 NULL::text  AS window_key,
+                 CAST(:from_date AS date) AS window_from,
+                 CAST(:to_date AS date)   AS window_to,
+                 COALESCE(agg.attributed_orders, 0)  AS attributed_orders,
+                 COALESCE(agg.attributed_units, 0)   AS attributed_units,
+                 COALESCE(agg.attributed_revenue, 0) AS attributed_revenue,
+                 COALESCE(agg.matched_ad_count, 0)   AS matched_ad_count,
+                 COALESCE(agg.ad_spend, 0)           AS ad_spend,
+                 COALESCE(agg.ad_spend_vw, 0)        AS ad_spend_vw,
+                 agg.cost_per_order, agg.cost_per_unit_sold, agg.roas,
+                 agg.cost_per_order_vw, agg.cost_per_unit_sold_vw, agg.roas_vw,
+                 COALESCE(agg.halo_orders, 0)  AS halo_orders,
+                 COALESCE(agg.halo_units, 0)   AS halo_units,
+                 COALESCE(agg.halo_revenue, 0) AS halo_revenue,
+                 0::numeric                    AS halo_spend,
+                 NULL::numeric                 AS primary_weight
+          FROM public.cpis_sku_context ctx
+          LEFT JOIN agg ON agg.master_sku = ctx.master_sku
+          {ctx_where_sql}
+          ORDER BY agg.{sort_column} DESC NULLS LAST, ctx.master_sku
+          LIMIT :limit OFFSET :offset
           ),
           bounds AS (
             SELECT CAST(:from_date AS date) AS lo, CAST(:to_date AS date) AS hi
           ),
         """
         count_sql = (
-            "SELECT COUNT(*) FROM ("
-            "  SELECT master_sku FROM cpis_by_sku_daily "
-            f" {page_where} GROUP BY master_sku "
-            f" {having_clause}"
-            ") x"
+            "WITH agg AS ("
+            "  SELECT master_sku, SUM(attributed_orders) AS attributed_orders "
+            f" FROM cpis_by_sku_daily {page_where} GROUP BY master_sku"
+            ")"
+            " SELECT COUNT(*) FROM public.cpis_sku_context ctx"
+            " LEFT JOIN agg ON agg.master_sku = ctx.master_sku "
+            f" {ctx_where_sql}"
         )
     else:
         params["window"] = window
-        where_clauses = ["c.window_key = :window"]
+        # The SKU UNIVERSE is the catalogue, not the attribution table.
+        #
+        # This used to read FROM cpis_by_sku_utm, which by construction
+        # only holds SKUs with at least one UTM-attributed order -- 74 of
+        # the catalogue's 97 in the 30d window (59 in 7d, 81 in 90d). A
+        # SKU with 412 units on the shelf that no ad happened to drive
+        # was not "zero spend" on the dashboard, it was ABSENT, which
+        # reads as "we don't sell that" rather than "nothing ran".
+        #
+        # Driving from cpis_sku_context and LEFT JOINing the attribution
+        # inverts that: every live SKU gets a row, and the attribution
+        # columns fall through as 0/NULL when no ad drove it -- the same
+        # treatment the ad and inventory columns already got.
+        # Verified live 2026-09-04: every master_sku in cpis_by_sku_daily
+        # exists in the catalogue, so nothing is lost by the swap.
+        where_clauses = ["(ctx.is_live OR c.master_sku IS NOT NULL)"]
+        if include_archived:
+            # Archived SKUs are still real rows; is_live just hides the
+            # dead ones by default.
+            where_clauses = ["true"]
         if search:
-            where_clauses.append("c.master_sku ILIKE :search")
+            where_clauses.append("ctx.master_sku ILIKE :search")
             params["search"] = f"%{search}%"
         if only_matched:
-            where_clauses.append("c.attributed_orders > 0")
+            where_clauses.append("COALESCE(c.attributed_orders, 0) > 0")
         where_sql_page = "WHERE " + " AND ".join(where_clauses)
-        page_cte = f"""
-          page AS (
-            SELECT master_sku, window_key, window_from, window_to,
-                   attributed_orders, attributed_units, attributed_revenue,
-                   matched_ad_count, ad_spend,
-                   cost_per_order, cost_per_unit_sold, roas,
-                   halo_orders, halo_units, halo_revenue, halo_spend,
-                   primary_weight,
-                   ad_spend_vw, cost_per_order_vw, cost_per_unit_sold_vw, roas_vw
-            FROM cpis_by_sku_utm c
+        universe_sql = f"""
+            FROM public.cpis_sku_context ctx
+            LEFT JOIN cpis_by_sku_utm c
+                   ON c.master_sku = ctx.master_sku
+                  AND c.window_key = :window
             {where_sql_page}
-            ORDER BY c.{sort_column} DESC NULLS LAST
-            LIMIT :limit OFFSET :offset
-          ),
+        """
+        page_cte = f"""
           bounds AS (
             SELECT MIN(window_from) AS lo, MAX(window_to) AS hi
             FROM cpis_by_sku_utm
             WHERE window_key = :window
           ),
+          page AS (
+            SELECT ctx.master_sku,
+                   CAST(:window AS text)     AS window_key,
+                   -- An unattributed SKU has no cpis_by_sku_utm row and
+                   -- so no window bounds of its own; fall back to the
+                   -- window's, or the row would render a blank date
+                   -- range next to populated ones.
+                   COALESCE(c.window_from, (SELECT lo FROM bounds)) AS window_from,
+                   COALESCE(c.window_to,   (SELECT hi FROM bounds)) AS window_to,
+                   -- Counts read as 0, ratios stay NULL. A SKU no ad
+                   -- drove genuinely had zero orders, but its
+                   -- cost_per_order is undefined, not free.
+                   COALESCE(c.attributed_orders, 0)  AS attributed_orders,
+                   COALESCE(c.attributed_units, 0)   AS attributed_units,
+                   COALESCE(c.attributed_revenue, 0) AS attributed_revenue,
+                   COALESCE(c.matched_ad_count, 0)   AS matched_ad_count,
+                   COALESCE(c.ad_spend, 0)           AS ad_spend,
+                   c.cost_per_order, c.cost_per_unit_sold, c.roas,
+                   COALESCE(c.halo_orders, 0)  AS halo_orders,
+                   COALESCE(c.halo_units, 0)   AS halo_units,
+                   COALESCE(c.halo_revenue, 0) AS halo_revenue,
+                   COALESCE(c.halo_spend, 0)   AS halo_spend,
+                   c.primary_weight,
+                   COALESCE(c.ad_spend_vw, 0)  AS ad_spend_vw,
+                   c.cost_per_order_vw, c.cost_per_unit_sold_vw, c.roas_vw
+            {universe_sql}
+            ORDER BY c.{sort_column} DESC NULLS LAST, ctx.master_sku
+            LIMIT :limit OFFSET :offset
+          ),
         """
-        count_sql = f"SELECT COUNT(*) FROM cpis_by_sku_utm c {where_sql_page}"
+        count_sql = f"SELECT COUNT(*) {universe_sql}"
 
     sql = f"""
       WITH {page_cte}
@@ -2753,281 +2826,62 @@ async def get_cpis_utm(
           NULL::numeric AS spend_trend_prev_total
         FROM page
       ),
-      -- 2026-09-04: inventory moved OFF the ShopifyQL daily grain
-      -- (shopify_inventory) and OFF MapleMonk/BigQuery
-      -- (master_sku_inventory_current) onto ONE Shopify source --
-      -- raw_dump_shopify products.variants[].inventoryQuantity, the
-      -- same payload products_ctx below already unnests. Units in Stock,
-      -- Var In-Stock % and Size In-Stock % now all derive from that one
-      -- set of variant rows, so they reconcile exactly with each other
-      -- and with the product-context columns (variant_count etc.).
-      -- See products_ctx for the rollup; there is no separate inventory
-      -- CTE any more.
-      -- Product context from raw_dump_shopify: productType / variant
-      -- SKUs / prices / inventoryQuantity, excluding "price test" and
-      -- combo/set-style productTypes per the Apps Script exclusion list.
+      -- ---------------------------------------------------------------
+      -- SKU context: precomputed, not derived per request.
       --
-      -- 2026-09-04 -- master_sku is NO LONGER the product's SKU-shaped
-      -- tag. That was an undercount bug, not a style preference. The tag
-      -- regex ^S[DMU][A-Z]{{2,6}}$ accepts 2 to 6 trailing letters, so a
-      -- COLOUR-level code (SMCPBL) matched exactly as happily as the
-      -- master code (SMCP). Every other master_sku in CPIS is PARSED
-      -- from the variant SKU and validated against ^(SD|SM|SU)[A-Z]{{1,4}}$
-      -- (cpis.py, cpis_utm.py, cpis_by_sku_daily). So a product tagged
-      -- at colour level filed its stock under a key -- "SMCPBL" -- that
-      -- no CPIS row ever joins to, and those units silently vanished
-      -- from the SMCP row. Same for a product tagged with some other
-      -- SKU-shaped string, or carrying several SKU tags (the subquery
-      -- took an arbitrary one via LIMIT 1 with no ORDER BY), or not
-      -- tagged at all.
+      -- These five CTEs used to be TEN, and they did real work on every
+      -- single call: a JSONB unnest of the whole Shopify products dump
+      -- (product_sku_map -> product_variants -> variant_stock ->
+      -- stock_ctx / stock_by_size_ctx / products_ctx) plus a 30-day
+      -- slice of shopify_inventory (inv_window -> inv_daily ->
+      -- velocity_ctx). None of it depends on window, search, sort,
+      -- pagination or date range -- every filter change recomputed the
+      -- identical 97 rows. Measured live 2026-09-04:
       --
-      -- Parsing from the variant SKU instead makes the stock rollup use
-      -- the same key as every other CPIS metric, and makes it immune to
-      -- how any given product happens to be tagged. The tag is no longer
-      -- consulted; a product qualifies if its variant SKUs parse to a
-      -- valid master SKU. The productType exclusions still apply.
-      product_sku_map AS (
-        SELECT
-          r.raw_payload->>'productType' AS product_type,
-          -- 2026-09-04: a "price test" listing is a DUPLICATE of the same
-          -- product at a different price -- it carries the SAME variant
-          -- SKUs, pointing at the SAME physical stock. It is therefore
-          -- flagged, not excluded: excluding it threw away real
-          -- inventory. Measured on live data, SMCP had 8,641 units under
-          -- "Men Cotton Pant Price Test" (77 variants) against 1,152
-          -- under "Men Cotton Pant" (21 variants, all of them a SUBSET
-          -- of the 77) -- so the dashboard showed 1,152 for a SKU
-          -- holding 8,641. variant_stock below dedupes per variant SKU
-          -- with MAX, so counting both listings cannot double-count the
-          -- overlap.
-          --
-          -- The other exclusions stay hard filters: combo / set /
-          -- "buy any 3" listings are BUNDLES of different products, so
-          -- their inventory count is a bundle count, not this SKU's
-          -- units -- including those would genuinely inflate. Same for
-          -- the bedsheet/comforter/co-ord categories.
-          lower(coalesce(r.raw_payload->>'productType','')) LIKE '%price test%'
-            AS is_price_test,
-          r.raw_payload AS p
-        FROM raw_dump_shopify r
-        WHERE r.object_type = 'products'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%combo%'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%bedsheet%'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%co-ord%'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%comforter%'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%buy any 3%'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '% set%'
-      ),
-      product_variants AS (
-        SELECT
-          -- Master SKU parsed from the variant SKU: strip the trailing
-          -- _<size>, then strip the 2-char colour code. Byte-for-byte
-          -- the same derivation cpis_utm.py uses on order line items,
-          -- so a SKU rolls up identically on both sides of the join.
-          -- Validated below against ^(SD|SM|SU)[A-Z]{{1,4}}$.
-          SUBSTRING(
-            regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')
-            FROM 1
-            FOR GREATEST(1,
-              length(regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')) - 2
-            )
-          )                                                     AS master_sku,
-          psm.product_type,
-          psm.is_price_test,
-          edge->'node'->>'sku'                                  AS variant_sku,
-          (edge->'node'->>'price')::numeric                     AS price,
-          coalesce((edge->'node'->>'inventoryQuantity')::int, 0) AS inv,
-          -- Size for the Size In-Stock % denominator. Shopify variant
-          -- SKUs in this catalog are underscore-delimited
-          -- (SDCPBL_L, SDCPBL_2XL), so the size is simply the segment
-          -- after the last underscore -- no size-vocabulary regex
-          -- needed (the BigQuery path needed one only because MM's SKUs
-          -- are unseparated). Upper-cased so S/s don't split into two
-          -- distinct sizes. NULL when the SKU carries no _<size> suffix
-          -- (one-size products) so those don't inflate size_total_ct.
-          NULLIF(
-            upper(
-              (regexp_match(edge->'node'->>'sku', '_([A-Za-z0-9]+)$'))[1]
-            ),
-            ''
-          ) AS size
-        FROM product_sku_map psm,
-             LATERAL jsonb_array_elements(psm.p->'variants'->'edges') edge
-        WHERE edge->'node'->>'sku' IS NOT NULL
-          -- Same validation as everywhere else in CPIS. Applied to the
-          -- PARSED value, so a colour-level or missing tag can no longer
-          -- misfile a variant's stock.
-          AND SUBSTRING(
-                regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')
-                FROM 1
-                FOR GREATEST(1,
-                  length(regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')) - 2
-                )
-              ) ~ '^(SD|SM|SU)[A-Z]{{1,4}}$'
-      ),
+      --     30d shopify_inventory slice   264,613 rows   10,815 ms warm
+      --     products JSONB unnest           7,642 rows      553 ms
+      --     the page itself                    74 rows        6 ms
+      --
+      -- Eleven seconds per keystroke to rebuild a 97-row answer that
+      -- only moves when the silver layer refreshes. It now lives in
+      -- public.cpis_sku_context, rebuilt by
+      -- scripts/refresh_cpis_sku_context.py in the same pipeline as the
+      -- silver tables it reads.
+      --
+      -- Kept as CTEs with their original names and columns so the big
+      -- SELECT below is untouched -- Postgres inlines these to plain
+      -- lookups on a 97-row table. Verified live: all 97 SKUs match the
+      -- old inline computation on units_in_stock, both in-stock rates,
+      -- price ladder, variant_count, units_sold_30d, oos_pct and
+      -- stock_by_size, with zero differences.
+      --
+      -- If you change a formula here, change it in
+      -- refresh_cpis_sku_context.py -- that script is now the only place
+      -- these numbers are computed.
+      -- ---------------------------------------------------------------
       products_ctx AS (
-        SELECT
-          master_sku,
-          -- Pick the shortest productType as the "canonical" name --
-          -- shorter names are the base product (e.g. "Cotton Pant"),
-          -- longer ones tend to be variations we already excluded via
-          -- the price-test filter above.
-          (ARRAY_AGG(product_type ORDER BY length(product_type)))[1] AS product_name,
-          COUNT(DISTINCT product_type)                              AS product_type_count,
-          COUNT(DISTINCT variant_sku)                               AS variant_count,
-          COUNT(DISTINCT variant_sku) FILTER (WHERE inv > 0)        AS available_variant_count,
-          MIN(price)                                                AS price_min,
-          MAX(price)                                                AS price_max
-        FROM product_variants
-        -- Price-test listings excluded HERE only. They exist to carry a
-        -- different price, so letting them into the ladder would move
-        -- Selling Price -- and with it COGS, Contribution and LOG&RTN --
-        -- onto an experimental price. Stock below deliberately does
-        -- include them; these two answer different questions.
-        WHERE NOT is_price_test
-        GROUP BY master_sku
-      ),
-      -- One row per (master_sku, variant_sku). A variant SKU can appear
-      -- under more than one product entry (a re-listed colorway, a
-      -- seasonal duplicate), and the stock columns must agree with each
-      -- other: SUM over the raw rows would double-count the same
-      -- physical units while COUNT(DISTINCT variant_sku) would not, so
-      -- Units in Stock and Var In-Stock % would contradict each other
-      -- on exactly the SKUs where it matters. Collapsing to one row per
-      -- variant SKU first makes every stock column share one
-      -- denominator. MAX takes the live listing's count when entries
-      -- disagree. GREATEST(inv, 0) floors oversold variants (Shopify
-      -- reports a negative inventoryQuantity when overselling is
-      -- allowed) -- that's demand, not stock on a shelf.
-      variant_stock AS (
-        SELECT master_sku,
-               variant_sku,
-               MAX(GREATEST(inv, 0)) AS units,
-               -- size is a pure function of variant_sku, so MAX just
-               -- picks the one value the group has.
-               MAX(size)             AS size
-        FROM product_variants
-        GROUP BY master_sku, variant_sku
+        SELECT master_sku, product_name, product_type_count, variant_count,
+               available_variant_count, price_min, price_max
+        FROM public.cpis_sku_context
       ),
       stock_ctx AS (
-        SELECT
-          master_sku,
-          SUM(units)                                        AS units_in_stock,
-          -- Var In-Stock %: share of this family's variants a customer
-          -- can actually buy right now.
-          -- Stock-side variant total. products_ctx.variant_count counts
-          -- only non-price-test listings, so it is a DIFFERENT
-          -- denominator -- pairing that one with this numerator would
-          -- render nonsense like "63 of 21 variants in stock".
-          COUNT(*)                                          AS variant_total_ct,
-          COUNT(*) FILTER (WHERE units > 0)                 AS variant_in_stock_ct,
-          CASE WHEN COUNT(*) > 0
-               THEN ROUND(100.0 * (COUNT(*) FILTER (WHERE units > 0))::numeric
-                          / COUNT(*)::numeric, 1)
-               END                                          AS variant_in_stock_rate,
-          -- Size In-Stock %: share of DISTINCT sizes still available in
-          -- ANY color. Catches size-run gaps (M and L gone across every
-          -- colorway) that the variant rate hides when the remaining
-          -- colors are deep-stocked. NULL -- not 0% or 100% -- when the
-          -- family has no _<size>-suffixed variants at all.
-          COUNT(DISTINCT size)                              AS size_total_ct,
-          COUNT(DISTINCT size) FILTER (WHERE units > 0)     AS size_in_stock_ct,
-          CASE WHEN COUNT(DISTINCT size) > 0
-               THEN ROUND(100.0 * (COUNT(DISTINCT size) FILTER (WHERE units > 0))::numeric
-                          / COUNT(DISTINCT size)::numeric, 1)
-               END                                          AS size_in_stock_rate
-        FROM variant_stock
-        GROUP BY master_sku
+        SELECT master_sku, units_in_stock, variant_total_ct, variant_in_stock_ct,
+               variant_in_stock_rate, size_total_ct, size_in_stock_ct, size_in_stock_rate
+        FROM public.cpis_sku_context
       ),
-      -- Per-size stock breakdown -- one JSON key per size, value = units
-      -- across every color in that size. Replaces the MapleMonk
-      -- stock_by_size. Not rendered in the main table today (the two
-      -- rates cover it) but kept for CSV export and the drilldown.
-      -- Aggregated in two steps because building it in stock_ctx would
-      -- need a nested aggregate (SUM inside jsonb_object_agg).
       stock_by_size_ctx AS (
-        SELECT master_sku, jsonb_object_agg(size, units) AS stock_by_size
-        FROM (
-          SELECT master_sku, size, SUM(units)::int AS units
-          FROM variant_stock
-          WHERE size IS NOT NULL
-          GROUP BY master_sku, size
-        ) t
-        GROUP BY master_sku
-      ),
-      -- Sales velocity + out-of-stock rate, from Shopify's own daily
-      -- inventory grain (shopify_inventory: one row per variant SKU per
-      -- day carrying that day's units sold and closing stock).
-      --
-      -- Why this exists (2026-09-04): IP DOQ and Total DOH divided by
-      -- MapleMonk's `daily_quantity`, which is "today's ordered qty" --
-      -- a SINGLE day's count, not a rate. That is MapleMonk's own
-      -- schema meaning, documented in CTD's refresh_product_doq.py.
-      -- Dividing stock by it produced a days-of-cover number that swung
-      -- with one day's orders and went NULL entirely whenever a SKU
-      -- happened not to sell that day. A trailing 30-day mean is the
-      -- rate those formulas always assumed they were dividing by.
-      --
-      -- Anchored on MAX(day) present in the table rather than
-      -- CURRENT_DATE: the ShopifyQL pull can lag a day, and CURRENT_DATE
-      -- would silently shorten the window and dilute the average
-      -- whenever it does.
-      inv_window AS (
-        SELECT MAX(day) AS anchor_day FROM shopify_inventory
-      ),
-      -- When the Shopify products snapshot behind Units in Stock and the
-      -- price ladder was last pulled. Surfaced on every row so a stale
-      -- ingest is VISIBLE in the UI instead of being mistaken for a
-      -- stock movement -- these columns are only ever as fresh as the
-      -- last products ingest (daily cron, 05:00 IST).
-      products_as_of AS (
-        SELECT MAX(extracted_at) AS inventory_as_of
-        FROM raw_dump_shopify WHERE object_type = 'products'
-      ),
-      -- Joined to variant_stock rather than re-parsing SKUs, which ties
-      -- velocity and OOS to EXACTLY the variant universe behind Units in
-      -- Stock, the in-stock rates and the price ladder -- same
-      -- price-test/combo exclusions, same master-SKU mapping, no second
-      -- regex to drift. A variant that still sells but is no longer
-      -- listed drops out, which is correct for a forward-looking
-      -- days-of-cover figure.
-      inv_daily AS (
-        SELECT vs.master_sku,
-               si.product_variant_sku,
-               si.day,
-               COALESCE(si.inventory_units_sold, 0)   AS units_sold,
-               COALESCE(si.ending_inventory_units, 0) AS ending_units
-        FROM shopify_inventory si
-        JOIN variant_stock vs ON vs.variant_sku = si.product_variant_sku
-        CROSS JOIN inv_window w
-        WHERE si.day >= w.anchor_day - 29
-          AND si.day <= w.anchor_day
+        SELECT master_sku, stock_by_size FROM public.cpis_sku_context
       ),
       velocity_ctx AS (
-        SELECT
-          master_sku,
-          SUM(units_sold)                  AS units_sold_30d,
-          -- Mean daily units over the fixed 30-day window. Divided by a
-          -- literal 30, not by the number of days actually observed: a
-          -- day with no row is a day with no sales, and dividing by the
-          -- observed count would overstate velocity for SKUs that only
-          -- appear in the feed when they move.
-          SUM(units_sold)::numeric / 30.0  AS avg_daily_units,
-          -- Out-of-stock rate = share of observed variant-days that
-          -- closed with no sellable stock. This is the family-level rate
-          -- the OOS % column always claimed to show. It previously read
-          -- MapleMonk's oos_days_30 / 30, but that column is stored as
-          -- MAX across variants -- deliberately worst-case -- so a
-          -- single chronically-out size pinned the whole family near
-          -- 100% while most of its sizes were in stock all month.
-          COUNT(*)                                          AS variant_days,
-          COUNT(*) FILTER (WHERE ending_units <= 0)         AS oos_variant_days,
-          CASE WHEN COUNT(*) > 0
-               THEN ROUND(100.0 * (COUNT(*) FILTER (WHERE ending_units <= 0))::numeric
-                          / COUNT(*)::numeric, 1)
-               END                                          AS oos_pct
-        FROM inv_daily
-        GROUP BY master_sku
+        SELECT master_sku, units_sold_30d, avg_daily_units, variant_days,
+               oos_variant_days, oos_pct
+        FROM public.cpis_sku_context
+      ),
+      products_as_of AS (
+        -- One value for the whole table (the products snapshot stamp),
+        -- stored per row. MAX collapses it back to the single scalar the
+        -- old CTE produced.
+        SELECT MAX(inventory_as_of) AS inventory_as_of FROM public.cpis_sku_context
       )
       SELECT p.master_sku, p.window_key, p.window_from, p.window_to,
              -- Product-context group (SKU-primary attribution basis)
