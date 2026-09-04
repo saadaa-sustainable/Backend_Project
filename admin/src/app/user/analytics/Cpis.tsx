@@ -399,10 +399,6 @@ function CategoryChip({ category }: { category: string }) {
   );
 }
 
-/** DoQ (Days of Quantity) cell — colored by supply health.
- *  <15d = critical (red), 15-45d = healthy (green), 45-90d = comfortable
- *  (blue), >90d = overstocked (amber). Zero rows would signal the
- *  master SKU has no matching MapleMonk data. */
 /** Required-creatives-per-week cell. Rule: 1 fresh creative per 1L
  *  of weekly ad spend. Colour compares against the backlog (untested
  *  video + graphic) so a merchant sees at a glance whether next
@@ -455,7 +451,12 @@ function UntestedCell({ n }: { n: number | null | undefined }) {
   );
 }
 
-function DoqCell({ value }: { value: number | null | undefined }) {
+/** Days-of-cover cell — coloured by supply health.
+ *  <15d = critical (red), 15-45d = healthy (green), 45-90d = comfortable
+ *  (blue), >90d = overstocked (amber).
+ *  2026-09-04: these bands are in DAYS, so they moved off the DoQ column
+ *  (now a units/day rate) onto Total DOH, which is the days figure. */
+function DaysOfCoverCell({ value }: { value: number | null | undefined }) {
   if (value === null || value === undefined) return <span className="text-text-tertiary">—</span>;
   const cls =
     value < 15
@@ -465,7 +466,7 @@ function DoqCell({ value }: { value: number | null | undefined }) {
         : value <= 90
           ? "text-info-text"
           : "text-warning-text";
-  return <span className={cls}>{value.toFixed(1)}d</span>;
+  return <span className={cls}>{value.toFixed(0)}d</span>;
 }
 
 /** OOS-days cell — pale red pill if there's any stockout in the window,
@@ -1064,7 +1065,7 @@ function CpisView() {
                   IP DOQ
                 </th>
                 <th className="px-3 py-3 text-right"
-                    title="Total Days on Hand: the Units in Stock figure to the left divided by the trailing 30-day average daily units sold from Shopify. Days of cover from what is on the shelf right now.">
+                    title="Total Days on Hand = Units in Stock ÷ DoQ. Days of cover from what is on the shelf right now, at the trailing 30-day Shopify sales rate. Blank when the SKU sold nothing in 30 days (no rate to divide by).">
                   Total DOH
                 </th>
                 <th className="px-3 py-3 text-right"
@@ -1076,7 +1077,7 @@ function CpisView() {
                   Replenish
                 </th>
                 {/* MapleMonk sell-through planning (retained: DoQ + OOS) */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Days-of-Quantity at 30-day sales rate, averaged across every variant of this master SKU. 30d is the most accurate horizon for advertising decisions -- reactive enough to catch imminent stockouts, smooth enough not to whipsaw on a single big/small day.">DoQ 30</th>
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="DoQ (Daily Order Quantity) — average units of this SKU sold per day over the trailing 30 days, from Shopify. This is the rate Total DOH divides by: DOH = Units in Stock ÷ DoQ.">DoQ</th>
                 <th className="px-3 py-3 text-right" title="Worst-case OOS days in the last 30 days (max across variants)">OOS 30d</th>
                 {/* 2026-09-03: per-size stock columns (XS -> 5XL) removed
                     from the main table. Var In-Stock % + Size In-Stock %
@@ -1348,7 +1349,7 @@ function CpisView() {
                     {row.ip_doq !== null ? `${row.ip_doq.toFixed(0)}d` : "—"}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {row.total_doh !== null ? `${row.total_doh.toFixed(0)}d` : "—"}
+                    <DaysOfCoverCell value={row.total_doh} />
                   </td>
                   <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
                     row.oos_pct === null
@@ -1366,7 +1367,9 @@ function CpisView() {
                   </td>
                   {/* MapleMonk sell-through planning */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
-                    <DoqCell value={row.mm_doq_30} />
+                    <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {row.daily_order_qty !== null ? row.daily_order_qty.toFixed(1) : "—"}
+                  </td>
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px]">
                     <OosCell value={row.mm_oos_days_30} outOf={30} />
@@ -1726,6 +1729,18 @@ function CpisKpiStrip({
   const totalStock = rows.reduce((s, r) => s + (r.units_in_stock ?? 0), 0);
   const totalVariants = rows.reduce((s, r) => s + (r.variant_count ?? 0), 0);
   const totalAvailable = rows.reduce((s, r) => s + (r.available_variant_count ?? 0), 0);
+  // Every row carries the same snapshot stamp (it comes from a CROSS
+  // JOIN), so the first non-null is the value for the whole table.
+  // Rendered as a plain local date -- the hour is noise at a daily
+  // ingest cadence.
+  const inventoryAsOf = (() => {
+    const raw = rows.find((r) => r.inventory_as_of)?.inventory_as_of;
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime())
+      ? null
+      : d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
+  })();
   const blendedCostPerNcp = totalNcp > 0 && totalSpend > 0 ? totalSpend / totalNcp : null;
 
   return (
@@ -1767,7 +1782,14 @@ function CpisKpiStrip({
         iconColor="teal"
         label="Units in stock"
         value={fmtNumCompact(totalStock)}
-        subLine={`${totalAvailable}/${totalVariants} variants available`}
+        /* Stock is only ever as fresh as the last Shopify products
+           ingest (daily cron). Showing the as-of stamp stops a stale
+           ingest from reading as a real stock movement. */
+        subLine={
+          inventoryAsOf
+            ? `${totalAvailable}/${totalVariants} variants · as of ${inventoryAsOf}`
+            : `${totalAvailable}/${totalVariants} variants available`
+        }
       />
     </div>
   );
