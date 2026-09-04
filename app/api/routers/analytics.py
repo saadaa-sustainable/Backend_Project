@@ -2292,14 +2292,28 @@ class CpisUtmRow(BaseModel):
     mm_lead_time: int | None
     mm_buffer_days: int | None
     # Business-model columns derived from ops sheet (2026-09-03). The
-    # sheet uses fixed-percentage cost model against selling price:
+    # sheet uses a fixed-percentage cost model against selling price:
     #   COGS               = SP * 35%
     #   Gross Margin       = SP * 65%   (SP - COGS)
     #   Logistics & Return = SP * 10%
     #   Contribution       = SP * 55%   (SP - COGS - LOG&RTN)
-    # We follow the same model so numbers match the sheet exactly; the
-    # real per-SKU cost from MM (cost_min/cost_max) is a separate
-    # column so a merchant can spot when the 35% assumption diverges.
+    # We follow the same model so numbers match the sheet exactly.
+    #
+    # selling_price (2026-09-04) is Shopify's own
+    # products.variants[].price -- the TOP of the family's variant price
+    # ladder, the same rows the price_min/price_max range column above
+    # comes from. It previously read MapleMonk's shopify_sp_max, which
+    # was that same Shopify number mirrored through BigQuery, so it
+    # lagged the store and could contradict the Price column beside it.
+    # Every column below is SP * a fixed rate, so the whole cost model
+    # is now Shopify-sourced.
+    #
+    # Caveat unchanged by the source move: these are the sheet's
+    # ASSUMED rates, not measured per-SKU costs. MapleMonk does carry a
+    # real per-SKU cost (cost_min/cost_max in
+    # master_sku_inventory_current) that would let a merchant see where
+    # the 35% assumption diverges -- it is not surfaced on this endpoint
+    # today, and would be a genuine addition rather than a source swap.
     selling_price: float | None
     cogs: float | None
     gross_margin_pct: float | None
@@ -2930,15 +2944,32 @@ async def get_cpis_utm(
              mm.lead_time        AS mm_lead_time,
              mm.buffer_days      AS mm_buffer_days,
              -- Business-model columns (2026-09-03, matches ops sheet).
-             -- Selling Price: prefer shopify_sp_max (top of the ladder,
-             -- what a customer sees for the most-tagged variant). Falls
-             -- back to shopify_sp_min so SKUs without a variant range
-             -- still get a value.
-             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) AS selling_price,
-             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) * 0.35 AS cogs,
-             65.0::numeric                                  AS gross_margin_pct,
-             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) * 0.55 AS contribution_margin,
-             COALESCE(mm.shopify_sp_max, mm.shopify_sp_min) * 0.10 AS logistics_return,
+             -- 2026-09-04: Selling Price moved OFF MapleMonk/BigQuery
+             -- (mm.shopify_sp_max) ONTO Shopify -- products.variants[].price,
+             -- the same variant rows the Price range column comes from.
+             -- MapleMonk's shopify_sp_* was a mirror of this number
+             -- taken through BigQuery, so it lagged the store and could
+             -- disagree with the Price column sitting right beside it.
+             -- Reading Shopify directly removes both problems.
+             --
+             -- Rule preserved from the MM version: prefer the TOP of the
+             -- variant price ladder (what a customer sees for the
+             -- most-tagged variant), falling back to the bottom so a SKU
+             -- with a single price still gets a value. price_max is only
+             -- NULL when price_min is too, but the COALESCE keeps the
+             -- intent explicit.
+             --
+             -- Every column below derives from that one Shopify number,
+             -- so the whole cost model is Shopify-sourced. Percentages
+             -- are the ops sheet's fixed-rate assumptions, not measured
+             -- per-SKU costs -- see the class docstring.
+             COALESCE(pc.price_max, pc.price_min) AS selling_price,
+             COALESCE(pc.price_max, pc.price_min) * 0.35 AS cogs,
+             -- Model constant (100% - 35% COGS), not derived from any
+             -- source column -- stays fixed whatever the price source.
+             65.0::numeric                        AS gross_margin_pct,
+             COALESCE(pc.price_max, pc.price_min) * 0.55 AS contribution_margin,
+             COALESCE(pc.price_max, pc.price_min) * 0.10 AS logistics_return,
              -- In-Process DOQ: how many days the pipeline covers at
              -- current daily-sales rate. total_inprogress / daily_qty.
              CASE WHEN mm.daily_quantity > 0
