@@ -41,6 +41,7 @@ import {
 } from "@/lib/api";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
+import { ExportButton } from "@/components/ExportButton";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -575,6 +576,12 @@ export function LastClickUtm() {
           >
             Export CSV
           </button>
+          <ExportButton
+            rows={sorted as unknown as Record<string, unknown>[]}
+            filename="last_click_utm"
+            window={preset}
+            disabled={loading || !sorted.length}
+          />
         </div>
       </div>
 

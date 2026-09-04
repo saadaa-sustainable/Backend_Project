@@ -28,6 +28,7 @@ import {
   fetchAdsAnalyse,
 } from "@/lib/api";
 import { KwikTile } from "./KwikTile";
+import { ExportButton } from "@/components/ExportButton";
 
 const PAGE_SIZE = 100;
 
@@ -315,6 +316,12 @@ export function CreativeTesting() {
         <span className="ml-auto text-xs text-text-secondary">
           {loading ? "loading…" : `${rows.length.toLocaleString()} of ${total.toLocaleString()} ads`}
         </span>
+        <ExportButton
+          rows={rows as unknown as Record<string, unknown>[]}
+          filename="creative_testing"
+          window={preset}
+          disabled={loading || !rows.length}
+        />
       </div>
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">{error}</div>}

@@ -19,6 +19,7 @@ import {
 import { SaturationCurveChart } from "./charts/SaturationCurveChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
+import { ExportButton } from "@/components/ExportButton";
 
 // Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
 // sums represent the entire matched SKU set, not just the first page.
@@ -850,6 +851,12 @@ function CpisView() {
           ))}
         </div>
         <span className="ml-auto text-[11px] text-text-secondary">{total.toLocaleString()} SKUs</span>
+        <ExportButton
+          rows={rows as unknown as Record<string, unknown>[]}
+          filename="cpis"
+          window={fromDate && toDate ? `${fromDate}_${toDate}` : window_}
+          disabled={loading || !rows.length}
+        />
       </div>
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}

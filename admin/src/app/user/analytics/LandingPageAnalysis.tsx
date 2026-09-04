@@ -8,6 +8,7 @@ import {
   fetchLandingPageAdBreakdown,
   fetchLandingPages,
 } from "@/lib/api";
+import { ExportButton } from "@/components/ExportButton";
 
 const PAGE_SIZE = 50;
 
@@ -172,6 +173,11 @@ export function LandingPageAnalysis() {
           ))}
         </select>
         <span className="ml-auto text-xs text-text-secondary">{total.toLocaleString()} pages</span>
+        <ExportButton
+          rows={rows as unknown as Record<string, unknown>[]}
+          filename="landing_page_analysis"
+          disabled={loading || !rows.length}
+        />
       </div>
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
