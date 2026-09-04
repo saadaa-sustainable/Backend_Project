@@ -894,20 +894,23 @@ function CpisView() {
                 <th className="sticky left-0 z-10 w-[110px] min-w-[110px] bg-white px-4 py-3">SKU Code</th>
                 <th className="sticky left-[110px] z-10 bg-white px-3 py-3" title="Shopify productType (with 'price test' / combo / bedsheet variants excluded)">Product</th>
                 <th className="px-3 py-3">Category</th>
-                <th className="px-3 py-3 text-right" title="Product list price (from variants[0].price)">Price</th>
+                <th className="px-3 py-3 text-right" title="Shopify price range across this SKU's variants (lowest–highest of products.variants[].price). Shows a single value when every variant is priced the same.">Price</th>
                 {/* Cost model from ops sheet (2026-09-03): fixed-%
                     against Selling Price. COGS = SP×35%, Gross Margin
-                    = 65%, LOG&RTN = SP×10%, Contribution = SP×55%. */}
+                    = 65%, LOG&RTN = SP×10%, Contribution = SP×55%.
+                    2026-09-04: Selling Price moved off MapleMonk/BigQuery
+                    onto Shopify, so every column in this cluster is now
+                    Shopify-sourced and agrees with the Price range. */}
                 <th className="border-l border-border-soft px-3 py-3 text-right"
-                    title="Selling Price. From MM inventory (shopify_sp_max).">Selling Price</th>
+                    title="Selling Price — top of the Shopify variant price ladder (max of products.variants[].price), i.e. the upper end of the Price range to the left. Drives COGS, Gross Margin, Contribution and LOG&RTN.">Selling Price</th>
                 <th className="px-3 py-3 text-right"
-                    title="COGS = SP × 35% (ops-sheet cost-model assumption)">COGS</th>
+                    title="COGS = Selling Price × 35%. An ops-sheet assumption applied to every SKU, not a measured per-SKU cost.">COGS</th>
                 <th className="px-3 py-3 text-right"
-                    title="Gross Margin = SP - COGS = 65% of SP under the sheet's fixed-rate model">Gross Margin %</th>
+                    title="Gross Margin = Selling Price − COGS = 65% under the sheet's fixed-rate model. A model constant, so it reads 65% on every SKU.">Gross Margin %</th>
                 <th className="px-3 py-3 text-right"
-                    title="Contribution Margin = SP - COGS - LOG&RTN = 55% of SP">Contribution</th>
+                    title="Contribution Margin = Selling Price − COGS − LOG&amp;RTN = 55% of Selling Price.">Contribution</th>
                 <th className="px-3 py-3 text-right"
-                    title="Logistics & Return = SP × 10%">LOG & RTN</th>
+                    title="Logistics &amp; Return = Selling Price × 10% (ops-sheet assumption).">LOG &amp; RTN</th>
                 <th className="px-3 py-3 text-right" title="Distinct variant SKUs (size × color permutations)">Variants</th>
                 <th className="px-3 py-3 text-right" title="Variant SKUs with inventoryQuantity > 0">In-Stock</th>
                 {/* NAME-MATCHED group -- 2026-08-31: values are now
