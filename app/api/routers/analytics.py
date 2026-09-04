@@ -2228,8 +2228,34 @@ class CpisUtmRow(BaseModel):
     # for zero-spend days). Length may be < 30 if the window is <30d.
     spend_trend_current: list[float] | None
     spend_trend_prev_total: float | None
-    # Inventory context (from shopify_inventory rolled up on master_sku).
+    # Inventory context -- ONE Shopify source (2026-09-04). All of
+    # units_in_stock / variant_in_stock_rate / size_in_stock_rate derive
+    # from raw_dump_shopify products.variants[].inventoryQuantity, the
+    # same variant rows product_name/variant_count come from, so the
+    # whole inventory group reconciles internally. Previously
+    # units_in_stock came off the ShopifyQL daily grain
+    # (shopify_inventory) and the two rates off MapleMonk/BigQuery
+    # (master_sku_inventory_current) -- three columns, two grains, two
+    # vendors, numbers that never quite tied out.
+    #
+    # units_in_stock       SUM(GREATEST(inventoryQuantity, 0)) across the
+    #                      family's variants (negative = oversold, floored)
+    # variant_in_stock_rate % of variants buyable right now, 0-100
+    # size_in_stock_rate    % of DISTINCT sizes still available in ANY
+    #                       color, 0-100 -- catches size-run gaps the
+    #                       variant rate hides. NULL when the family has
+    #                       no _<size>-suffixed variants at all.
     units_in_stock: int | None
+    variant_in_stock_ct: int | None
+    variant_in_stock_rate: float | None
+    size_total_ct: int | None
+    size_in_stock_ct: int | None
+    size_in_stock_rate: float | None
+    # Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ..., "5XL":0}.
+    # Not rendered in the main table (dropped 2026-09-03) but kept for
+    # CSV export and drilldown. Values may be None for sizes with no
+    # stored count, so the union stays widened.
+    stock_by_size: dict[str, int | None] | None
     # MapleMonk inventory-planning enrichment (2026-08-31, from
     # master_sku_inventory_current -- variant-latest rollup of the
     # bq_inventory_daily 90-day pull). Gives the merchant days-of-quantity,
@@ -2265,22 +2291,6 @@ class CpisUtmRow(BaseModel):
     mm_oos_days_90: int | None
     mm_lead_time: int | None
     mm_buffer_days: int | None
-    # In-stock breadth (2026-09-02, per MapleMonk variant-level snapshot).
-    # variant_in_stock_rate = % of the SKU's variants currently in stock;
-    # size_in_stock_rate = % of DISTINCT sizes still available at all.
-    # Both are 0-100 percentages.
-    mm_variant_in_stock_ct: int | None
-    mm_variant_in_stock_rate: float | None
-    mm_size_total_ct: int | None
-    mm_size_in_stock_ct: int | None
-    mm_size_in_stock_rate: float | None
-    # Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ..., "5XL":0}.
-    # Frontend renders as one column per canonical size (XS -> 5XL).
-    # None if no size-tagged variants exist for this SKU.
-    # Values may be None for sizes with no stored count (rare but real
-    # in production).  Widen the union so the response mapping doesn't
-    # 500 when Postgres hands us {"XS": null, "S": 12, ...}.
-    mm_stock_by_size: dict[str, int | None] | None
     # Business-model columns derived from ops sheet (2026-09-03). The
     # sheet uses fixed-percentage cost model against selling price:
     #   COGS               = SP * 35%
@@ -2408,8 +2418,15 @@ async def get_cpis_utm(
         (lifetime_ncp * (windowed_spend / lifetime_spend)) since
         ad_lifecycle only stores lifetime NCP per ad.
 
-      * Inventory -- current units_in_stock rolled up on master_sku,
-        via shopify_inventory's most recent day per variant SKU.
+      * Inventory (2026-09-04: single Shopify source) -- units_in_stock,
+        variant_in_stock_rate and size_in_stock_rate all roll up from
+        raw_dump_shopify products.variants[].inventoryQuantity on
+        master_sku. Previously units came off the ShopifyQL daily grain
+        and the two rates off MapleMonk/BigQuery; the three now share
+        one grain and one vendor, so they reconcile with each other and
+        with variant_count / available_variant_count. MapleMonk is still
+        the source for the planning signals only it has (DoQ, OOS
+        history, lead time, in-process stock).
 
       * Derived avg_selling_price -- attributed_revenue / attributed_units.
 
@@ -2684,30 +2701,16 @@ async def get_cpis_utm(
           NULL::numeric AS spend_trend_prev_total
         FROM page
       ),
-      -- Inventory rollup per master_sku, using the most-recent day per
-      -- variant SKU so we don't sum stale duplicates across the daily
-      -- inventory series.
-      inv_latest AS (
-        SELECT product_variant_sku,
-               MAX(day) AS max_day
-        FROM shopify_inventory
-        GROUP BY product_variant_sku
-      ),
-      inv_rolled AS (
-        SELECT SUBSTRING(
-                 regexp_replace(si.product_variant_sku, '_[A-Za-z0-9]+$', '')
-                 FROM 1
-                 FOR GREATEST(1,
-                   length(regexp_replace(si.product_variant_sku, '_[A-Za-z0-9]+$', '')) - 2
-                 )
-               ) AS master_sku,
-               SUM(si.ending_inventory_units) AS units_in_stock
-        FROM shopify_inventory si
-        JOIN inv_latest il
-          ON il.product_variant_sku = si.product_variant_sku
-         AND il.max_day = si.day
-        GROUP BY 1
-      ),
+      -- 2026-09-04: inventory moved OFF the ShopifyQL daily grain
+      -- (shopify_inventory) and OFF MapleMonk/BigQuery
+      -- (master_sku_inventory_current) onto ONE Shopify source --
+      -- raw_dump_shopify products.variants[].inventoryQuantity, the
+      -- same payload products_ctx below already unnests. Units in Stock,
+      -- Var In-Stock % and Size In-Stock % now all derive from that one
+      -- set of variant rows, so they reconcile exactly with each other
+      -- and with the product-context columns (variant_count etc.).
+      -- See products_ctx for the rollup; there is no separate inventory
+      -- CTE any more.
       -- Product context from raw_dump_shopify: matches products whose
       -- tags contain a token matching ^S[DMU][A-Z]{{2,6}}$ (the same
       -- Apps Script regex the user's Product-Listing sheet uses), pulls
@@ -2740,10 +2743,25 @@ async def get_cpis_utm(
           psm.product_type,
           edge->'node'->>'sku'                                  AS variant_sku,
           (edge->'node'->>'price')::numeric                     AS price,
-          coalesce((edge->'node'->>'inventoryQuantity')::int, 0) AS inv
+          coalesce((edge->'node'->>'inventoryQuantity')::int, 0) AS inv,
+          -- Size for the Size In-Stock % denominator. Shopify variant
+          -- SKUs in this catalog are underscore-delimited
+          -- (SDCPBL_L, SDCPBL_2XL), so the size is simply the segment
+          -- after the last underscore -- no size-vocabulary regex
+          -- needed (the BigQuery path needed one only because MM's SKUs
+          -- are unseparated). Upper-cased so S/s don't split into two
+          -- distinct sizes. NULL when the SKU carries no _<size> suffix
+          -- (one-size products) so those don't inflate size_total_ct.
+          NULLIF(
+            upper(
+              (regexp_match(edge->'node'->>'sku', '_([A-Za-z0-9]+)$'))[1]
+            ),
+            ''
+          ) AS size
         FROM product_sku_map psm,
              LATERAL jsonb_array_elements(psm.p->'variants'->'edges') edge
         WHERE psm.master_sku IS NOT NULL
+          AND edge->'node'->>'sku' IS NOT NULL
       ),
       products_ctx AS (
         SELECT
@@ -2759,6 +2777,69 @@ async def get_cpis_utm(
           MIN(price)                                                AS price_min,
           MAX(price)                                                AS price_max
         FROM product_variants
+        GROUP BY master_sku
+      ),
+      -- One row per (master_sku, variant_sku). A variant SKU can appear
+      -- under more than one product entry (a re-listed colorway, a
+      -- seasonal duplicate), and the stock columns must agree with each
+      -- other: SUM over the raw rows would double-count the same
+      -- physical units while COUNT(DISTINCT variant_sku) would not, so
+      -- Units in Stock and Var In-Stock % would contradict each other
+      -- on exactly the SKUs where it matters. Collapsing to one row per
+      -- variant SKU first makes every stock column share one
+      -- denominator. MAX takes the live listing's count when entries
+      -- disagree. GREATEST(inv, 0) floors oversold variants (Shopify
+      -- reports a negative inventoryQuantity when overselling is
+      -- allowed) -- that's demand, not stock on a shelf.
+      variant_stock AS (
+        SELECT master_sku,
+               variant_sku,
+               MAX(GREATEST(inv, 0)) AS units,
+               -- size is a pure function of variant_sku, so MAX just
+               -- picks the one value the group has.
+               MAX(size)             AS size
+        FROM product_variants
+        GROUP BY master_sku, variant_sku
+      ),
+      stock_ctx AS (
+        SELECT
+          master_sku,
+          SUM(units)                                        AS units_in_stock,
+          -- Var In-Stock %: share of this family's variants a customer
+          -- can actually buy right now.
+          COUNT(*) FILTER (WHERE units > 0)                 AS variant_in_stock_ct,
+          CASE WHEN COUNT(*) > 0
+               THEN ROUND(100.0 * (COUNT(*) FILTER (WHERE units > 0))::numeric
+                          / COUNT(*)::numeric, 1)
+               END                                          AS variant_in_stock_rate,
+          -- Size In-Stock %: share of DISTINCT sizes still available in
+          -- ANY color. Catches size-run gaps (M and L gone across every
+          -- colorway) that the variant rate hides when the remaining
+          -- colors are deep-stocked. NULL -- not 0% or 100% -- when the
+          -- family has no _<size>-suffixed variants at all.
+          COUNT(DISTINCT size)                              AS size_total_ct,
+          COUNT(DISTINCT size) FILTER (WHERE units > 0)     AS size_in_stock_ct,
+          CASE WHEN COUNT(DISTINCT size) > 0
+               THEN ROUND(100.0 * (COUNT(DISTINCT size) FILTER (WHERE units > 0))::numeric
+                          / COUNT(DISTINCT size)::numeric, 1)
+               END                                          AS size_in_stock_rate
+        FROM variant_stock
+        GROUP BY master_sku
+      ),
+      -- Per-size stock breakdown -- one JSON key per size, value = units
+      -- across every color in that size. Replaces the MapleMonk
+      -- stock_by_size. Not rendered in the main table today (the two
+      -- rates cover it) but kept for CSV export and the drilldown.
+      -- Aggregated in two steps because building it in stock_ctx would
+      -- need a nested aggregate (SUM inside jsonb_object_agg).
+      stock_by_size_ctx AS (
+        SELECT master_sku, jsonb_object_agg(size, units) AS stock_by_size
+        FROM (
+          SELECT master_sku, size, SUM(units)::int AS units
+          FROM variant_stock
+          WHERE size IS NOT NULL
+          GROUP BY master_sku, size
+        ) t
         GROUP BY master_sku
       )
       SELECT p.master_sku, p.window_key, p.window_from, p.window_to,
@@ -2815,7 +2896,14 @@ async def get_cpis_utm(
                   ELSE NULL END           AS lc_avg_qty_per_order,
              st.spend_trend_current::text AS spend_trend_current_json,
              st.spend_trend_prev_total    AS spend_trend_prev_total,
-             ir.units_in_stock::integer,
+             -- Inventory (Shopify products.variants.inventoryQuantity)
+             sc.units_in_stock::integer,
+             sc.variant_in_stock_ct::integer,
+             sc.variant_in_stock_rate,
+             sc.size_total_ct::integer,
+             sc.size_in_stock_ct::integer,
+             sc.size_in_stock_rate,
+             sbs.stock_by_size,
              -- MapleMonk inventory-planning (variant-latest per master)
              mm.as_of_date       AS mm_as_of_date,
              mm.variant_ct       AS mm_variant_ct,
@@ -2841,12 +2929,6 @@ async def get_cpis_utm(
              mm.oos_days_90      AS mm_oos_days_90,
              mm.lead_time        AS mm_lead_time,
              mm.buffer_days      AS mm_buffer_days,
-             mm.variant_in_stock_ct   AS mm_variant_in_stock_ct,
-             mm.variant_in_stock_rate AS mm_variant_in_stock_rate,
-             mm.size_total_ct         AS mm_size_total_ct,
-             mm.size_in_stock_ct      AS mm_size_in_stock_ct,
-             mm.size_in_stock_rate    AS mm_size_in_stock_rate,
-             mm.stock_by_size         AS mm_stock_by_size,
              -- Business-model columns (2026-09-03, matches ops sheet).
              -- Selling Price: prefer shopify_sp_max (top of the ladder,
              -- what a customer sees for the most-tagged variant). Falls
@@ -2946,8 +3028,9 @@ async def get_cpis_utm(
         FROM public.master_sku_returns
         WHERE window_key = COALESCE(NULLIF(:window, ''), '30d')
       ) ret USING (master_sku)
-      LEFT JOIN inv_rolled ir  USING (master_sku)
       LEFT JOIN products_ctx pc USING (master_sku)
+      LEFT JOIN stock_ctx sc  USING (master_sku)
+      LEFT JOIN stock_by_size_ctx sbs USING (master_sku)
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
       LEFT JOIN spend_trend st USING (master_sku)
       CROSS JOIN window_days wd

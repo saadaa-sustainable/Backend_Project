@@ -1044,15 +1044,15 @@ function CpisView() {
                     title="Pipeline available to test = untested video + untested graphic backlog. Rolled together since the merchant thinks of them as one pool.">
                   Pipeline<br/>Avail
                 </th>
-                {/* INVENTORY (Shopify + MapleMonk in-stock breadth)
-                    2026-09-03: dropped MM Stock, Sales 45d, Lead Time --
-                    Units in Stock + the two in-stock-rate columns cover
-                    the same "can I keep advertising this?" question with
-                    less noise. In-stock rates promoted up here since the
-                    space is now free. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Current ending inventory rolled to master SKU (latest per variant, all variants including any price-test variations)">Units in Stock</th>
-                <th className="px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — MapleMonk current_stock>0 count / total variants">Var In-Stock %</th>
-                <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU (any color). Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
+                {/* INVENTORY — all three columns from ONE Shopify source
+                    (2026-09-04): products.variants[].inventoryQuantity.
+                    Previously Units came off the ShopifyQL daily grain
+                    and the two rates off MapleMonk/BigQuery, so they
+                    never quite tied out; now they share a grain.
+                    2026-09-03: dropped MM Stock, Sales 45d, Lead Time. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Live Shopify inventory summed across every variant of this master SKU. Oversold variants (negative quantity) count as 0. Excludes price-test and combo/set products.">Units in Stock</th>
+                <th className="px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — Shopify variants with inventoryQuantity > 0 / total variants">Var In-Stock %</th>
+                <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU in any color, from the _<size> suffix on the Shopify variant SKU. Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
                 <th className="px-3 py-3 text-right"
                     title="In-Process Days-of-Quantity: total_inprogress / daily_quantity. How many days the pipeline covers at current sales rate.">
                   IP DOQ
@@ -1299,7 +1299,8 @@ function CpisView() {
                   }`}>
                     {row.pipeline_avail_to_test ?? "—"}
                   </td>
-                  {/* INVENTORY: Units in Stock + in-stock-rate breadth.
+                  {/* INVENTORY: Units in Stock + in-stock-rate breadth,
+                      all from Shopify variant inventoryQuantity.
                       MM Stock / Sales 45d / Lead Time removed 2026-09-03. */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(row.units_in_stock)}
@@ -1307,39 +1308,39 @@ function CpisView() {
                   {/* Variant in-stock rate: red < 50%, amber 50-79%, green >= 80% */}
                   <td
                     className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
-                      row.mm_variant_in_stock_rate === null
+                      row.variant_in_stock_rate === null
                         ? "text-text-tertiary"
-                        : row.mm_variant_in_stock_rate >= 80
+                        : row.variant_in_stock_rate >= 80
                           ? "text-success-text"
-                          : row.mm_variant_in_stock_rate >= 50
+                          : row.variant_in_stock_rate >= 50
                             ? "text-warning-text"
                             : "text-error-text"
                     }`}
                     title={
-                      row.mm_variant_in_stock_ct !== null && row.mm_variant_ct !== null
-                        ? `${row.mm_variant_in_stock_ct} of ${row.mm_variant_ct} variants in stock`
+                      row.variant_in_stock_ct !== null && row.variant_count !== null
+                        ? `${row.variant_in_stock_ct} of ${row.variant_count} Shopify variants in stock`
                         : undefined
                     }
                   >
-                    {row.mm_variant_in_stock_rate !== null ? `${row.mm_variant_in_stock_rate.toFixed(0)}%` : "—"}
+                    {row.variant_in_stock_rate !== null ? `${row.variant_in_stock_rate.toFixed(0)}%` : "—"}
                   </td>
                   <td
                     className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
-                      row.mm_size_in_stock_rate === null
+                      row.size_in_stock_rate === null
                         ? "text-text-tertiary"
-                        : row.mm_size_in_stock_rate >= 80
+                        : row.size_in_stock_rate >= 80
                           ? "text-success-text"
-                          : row.mm_size_in_stock_rate >= 50
+                          : row.size_in_stock_rate >= 50
                             ? "text-warning-text"
                             : "text-error-text"
                     }`}
                     title={
-                      row.mm_size_in_stock_ct !== null && row.mm_size_total_ct !== null
-                        ? `${row.mm_size_in_stock_ct} of ${row.mm_size_total_ct} distinct sizes still available`
+                      row.size_in_stock_ct !== null && row.size_total_ct !== null
+                        ? `${row.size_in_stock_ct} of ${row.size_total_ct} distinct sizes still available`
                         : undefined
                     }
                   >
-                    {row.mm_size_in_stock_rate !== null ? `${row.mm_size_in_stock_rate.toFixed(0)}%` : "—"}
+                    {row.size_in_stock_rate !== null ? `${row.size_in_stock_rate.toFixed(0)}%` : "—"}
                   </td>
                   {/* IP DOQ / Total DOH / OOS % / Tentative Replenish */}
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
