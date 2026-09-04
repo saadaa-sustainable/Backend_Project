@@ -894,15 +894,18 @@ function CpisView() {
                 <th className="sticky left-0 z-10 w-[110px] min-w-[110px] bg-white px-4 py-3">SKU Code</th>
                 <th className="sticky left-[110px] z-10 bg-white px-3 py-3" title="Shopify productType (with 'price test' / combo / bedsheet variants excluded)">Product</th>
                 <th className="px-3 py-3">Category</th>
-                <th className="px-3 py-3 text-right" title="Shopify price range across this SKU's variants (lowest–highest of products.variants[].price). Shows a single value when every variant is priced the same.">Price</th>
                 {/* Cost model from ops sheet (2026-09-03): fixed-%
                     against Selling Price. COGS = SP×35%, Gross Margin
                     = 65%, LOG&RTN = SP×10%, Contribution = SP×55%.
                     2026-09-04: Selling Price moved off MapleMonk/BigQuery
-                    onto Shopify, so every column in this cluster is now
-                    Shopify-sourced and agrees with the Price range. */}
+                    onto Shopify. The separate "Price" range column that
+                    used to sit here was dropped in the same pass -- once
+                    both read products.variants[].price it was showing
+                    the same number twice. price_min/price_max are still
+                    on the API row, so the full ladder is in the CSV
+                    export for anyone who needs the spread. */}
                 <th className="border-l border-border-soft px-3 py-3 text-right"
-                    title="Selling Price — top of the Shopify variant price ladder (max of products.variants[].price), i.e. the upper end of the Price range to the left. Drives COGS, Gross Margin, Contribution and LOG&RTN.">Selling Price</th>
+                    title="Selling Price — top of the Shopify variant price ladder (max of products.variants[].price). Drives COGS, Gross Margin, Contribution and LOG&RTN.">Selling Price</th>
                 <th className="px-3 py-3 text-right"
                     title="COGS = Selling Price × 35%. An ops-sheet assumption applied to every SKU, not a measured per-SKU cost.">COGS</th>
                 <th className="px-3 py-3 text-right"
@@ -1057,15 +1060,15 @@ function CpisView() {
                 <th className="px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — Shopify variants with inventoryQuantity > 0 / total variants">Var In-Stock %</th>
                 <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU in any color, from the _<size> suffix on the Shopify variant SKU. Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
                 <th className="px-3 py-3 text-right"
-                    title="In-Process Days-of-Quantity: total_inprogress / daily_quantity. How many days the pipeline covers at current sales rate.">
+                    title="In-Process Days of Cover: stock already on purchase orders (MapleMonk total_inprogress — Shopify has no equivalent) divided by the trailing 30-day average daily units sold from Shopify. How long the incoming pipeline lasts at the current rate.">
                   IP DOQ
                 </th>
                 <th className="px-3 py-3 text-right"
-                    title="Total Days-on-Hand: current_stock / daily_quantity. Days of cover from what's on the shelf right now.">
+                    title="Total Days on Hand: the Units in Stock figure to the left divided by the trailing 30-day average daily units sold from Shopify. Days of cover from what is on the shelf right now.">
                   Total DOH
                 </th>
                 <th className="px-3 py-3 text-right"
-                    title="Out-of-stock rate = oos_days_30 / 30. 100% means the master SKU registered as OOS every day in the window.">
+                    title="Out-of-stock rate over the trailing 30 days: the share of variant-days that closed with no sellable stock. 50% means half of this SKU's variant-days were out of stock — e.g. half the sizes out all month, or every size out half the month.">
                   OOS %
                 </th>
                 <th className="px-3 py-3 text-right"
@@ -1107,14 +1110,9 @@ function CpisView() {
                       <span className="text-text-tertiary">—</span>
                     )}
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {row.price_min !== null && row.price_max !== null
-                      ? row.price_min === row.price_max
-                        ? fmtINRCompact(row.price_min)
-                        : `${fmtINRCompact(row.price_min)}–${fmtINRCompact(row.price_max)}`
-                      : "—"}
-                  </td>
-                  {/* Cost model cluster (ops-sheet fixed-% assumption). */}
+                  {/* Cost model cluster (ops-sheet fixed-% assumption).
+                      The Price range cell that preceded this was removed
+                      2026-09-04 -- Selling Price is the same ladder. */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {row.selling_price !== null ? fmtINRFull(row.selling_price) : "—"}
                   </td>
@@ -1377,7 +1375,7 @@ function CpisView() {
               ))}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={40} className="px-4 py-6 text-center text-text-secondary">
+                  <td colSpan={48} className="px-4 py-6 text-center text-text-secondary">
                     No SKUs match these filters.
                   </td>
                 </tr>
