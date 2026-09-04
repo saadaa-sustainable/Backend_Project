@@ -902,33 +902,47 @@ async def run_for_admin(
                             "items_so_far": items_so_far, "inserted_so_far": inserted_so_far,
                         })
 
+                # Built in the CALLER'S object_types order, and run
+                # sequentially below. It used to be grouped by kind --
+                # shop, then every ShopifyQL table, then the GraphQL
+                # connections -- which silently ignored the order asked
+                # for. `--object-types products,inventory,orders` ran
+                # INVENTORY first (a ShopifyQL table, ~1.28M rows)
+                # because of the grouping, so `products` -- 635 rows,
+                # seconds of work, and the source of Units in Stock and
+                # Selling Price -- sat behind the heaviest fetch in the
+                # set and never landed when the step hit its timeout.
+                #
+                # Honouring the given order lets the caller put the
+                # cheap, high-value object types first, so a run that
+                # is later killed has still committed the things that
+                # matter. Writes are per page/chunk, so partial
+                # progress is real progress.
                 units: list[tuple[str, Callable[[], Any], bool]] = []
-                if "shop" in object_types:
-                    units.append(("shop", lambda: _fetch_shop(client, store), False))
-                for object_type in _SHOPIFYQL_TABLE_CONFIG:
-                    if object_type not in object_types:
-                        continue
-                    ql_start = date_start or (datetime.now(timezone.utc).date() - timedelta(days=30))
-                    ql_end = date_end or datetime.now(timezone.utc).date()
-                    units.append((
-                        object_type,
-                        lambda ot=object_type, s=ql_start, e=ql_end: _fetch_shopifyql_table(
-                            client, store, ot, s, e, on_chunk=lambda rows, ot=ot: _write_batch(ot, rows),
-                        ),
-                        True,
-                    ))
                 for object_type in object_types:
-                    if object_type == "shop" or object_type in _SHOPIFYQL_TABLE_CONFIG:
-                        continue
-                    units.append((
-                        object_type,
-                        lambda ot=object_type: _fetch_object_type(
-                            client, store, ot, page_size=page_size, max_pages=max_pages,
-                            date_start=date_start, date_end=date_end,
-                            on_page=lambda rows, ot=ot: _write_batch(ot, rows),
-                        ),
-                        True,
-                    ))
+                    if object_type == "shop":
+                        units.append(("shop", lambda: _fetch_shop(client, store), False))
+                    elif object_type in _SHOPIFYQL_TABLE_CONFIG:
+                        ql_start = date_start or (datetime.now(timezone.utc).date() - timedelta(days=30))
+                        ql_end = date_end or datetime.now(timezone.utc).date()
+                        units.append((
+                            object_type,
+                            lambda ot=object_type, s=ql_start, e=ql_end: _fetch_shopifyql_table(
+                                client, store, ot, s, e, on_chunk=lambda rows, ot=ot: _write_batch(ot, rows),
+                            ),
+                            True,
+                        ))
+                    else:
+                        units.append((
+                            object_type,
+                            lambda ot=object_type: _fetch_object_type(
+                                client, store, ot, page_size=page_size, max_pages=max_pages,
+                                date_start=date_start, date_end=date_end,
+                                on_page=lambda rows, ot=ot: _write_batch(ot, rows),
+                            ),
+                            True,
+                        ))
+                print("    [order] " + " -> ".join(ot for ot, _, _ in units))
 
                 for object_type, fetch_fn, batched in units:
                     result = await fetch_fn()

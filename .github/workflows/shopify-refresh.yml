@@ -39,7 +39,7 @@ on:
         required: false
         default: false
       object_types:
-        description: "Shopify object types to fetch. Default covers every dashboard column; 'all' fetches everything (slow)."
+        description: "Shopify object types, fetched IN THIS ORDER (cheapest first, so a timeout still lands the important ones). Default covers every dashboard column; 'all' fetches everything (slow)."
         type: string
         required: false
         default: "products,inventory,orders"
