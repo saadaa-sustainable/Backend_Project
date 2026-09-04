@@ -10,15 +10,19 @@ It compares two numbers:
                  at all. This is "what is in the store".
 
   CPIS TOTAL     what the CPIS query's Units in Stock column computes,
-                 reproducing its exact pipeline: productType exclusions
-                 -> variant SKU -> master-SKU parse -> validate against
-                 ^(SD|SM|SU)[A-Z]{1,4}$ -> dedupe per variant -> sum.
+                 reproducing its exact pipeline: bundle productType
+                 exclusions -> variant SKU -> master-SKU parse ->
+                 validate against ^(SD|SM|SU)[A-Z]{1,4}$ -> dedupe per
+                 variant SKU with MAX -> sum. Price-test listings ARE
+                 counted (same SKUs, same stock); the dedupe stops the
+                 overlap being counted twice.
 
 Any gap between them is itemised by CAUSE, with example SKUs, so the
 fix is obvious rather than guessed at. The causes it can find:
 
-  excluded_product_type  the product's productType hit an exclusion
-                         (price test / combo / set / co-ord / ...)
+  excluded_product_type  the product is a BUNDLE (combo / set /
+                         "buy any 3") or another category, so its
+                         inventory count is not this SKU's units
   unparseable_sku        the SKU doesn't yield a valid master SKU
                          (no colour code, lowercase, extra segment)
   misfiled_other_master  the SKU parses, but to a DIFFERENT master --
@@ -63,9 +67,17 @@ import psycopg2.extras  # noqa: E402
 #: Kept byte-for-byte in step with the CPIS query's product_sku_map CTE
 #: (app/api/routers/analytics.py). If you change one, change the other --
 #: the whole point of this script is that it mirrors production exactly.
+#:
+#: NOTE "price test" is deliberately NOT here. A price-test listing is a
+#: duplicate of the same product at a different price -- same variant
+#: SKUs, same physical stock -- so as of 2026-09-04 it is counted for
+#: stock and only excluded from the price ladder. Measured live: SMCP
+#: holds 8,641 units under "Men Cotton Pant Price Test" whose 77 SKUs
+#: are a superset of the 21 under "Men Cotton Pant"; excluding it was
+#: what made the dashboard read 1,152. The per-SKU MAX dedupe below is
+#: what makes counting both listings safe.
 EXCLUDED_PRODUCT_TYPE_PATTERNS = [
-    "price test", "combo", "bedsheet", "co-ord", "comforter",
-    "buy any 3", " set",
+    "combo", "bedsheet", "co-ord", "comforter", "buy any 3", " set",
 ]
 
 MASTER_SKU_RE = re.compile(r"^(SD|SM|SU)[A-Z]{1,4}$")
