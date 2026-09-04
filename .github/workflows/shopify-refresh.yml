@@ -1,0 +1,143 @@
+# Backend_Project -- MANUAL Shopify refresh.
+#
+# Pulls fresh Shopify data and rebuilds the tables the dashboard reads,
+# without waiting for the 01:30 UTC daily run and without touching Meta
+# or BigQuery. Use it after a stock movement, a price change, or a new
+# product goes live and you want the CPIS table to reflect it now.
+#
+#   Actions tab -> "Shopify refresh (manual)" -> Run workflow.
+#
+# What it runs (scripts/refresh_all_daily.py --only-shopify):
+#   1. ingest_shopify.py            Shopify -> raw_dump_shopify (bronze)
+#   2. refresh_shopify_silver.py    bronze -> shopify_orders / _inventory /
+#                                   _customers / _sessions / _sales /
+#                                   _discounts / _fulfillments /
+#                                   _customer_analytics + attribution
+#   3. refresh_cpis_by_sku_daily.py \ CPIS pre-computed aggregates
+#      refresh_cpis_utm.py          / (skip with the input below)
+#
+# Which dashboard columns need which step:
+#   * Units in Stock, Var/Size In-Stock %, DoQ, Total DOH, OOS %,
+#     Selling Price and the cost model read raw_dump_shopify and
+#     shopify_inventory LIVE at query time -- they are current as soon
+#     as step 2 finishes. Step 3 is not needed for them.
+#   * The attribution columns (orders/units/revenue/ROAS/CPIS) read the
+#     pre-computed cpis_by_sku_utm and cpis_by_sku_daily -- they need
+#     step 3.
+#
+# Status for every step lands in public.cron_run_log (same as the daily
+# run), readable with scripts/check_cron_status.py.
+
+name: Shopify refresh (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_cpis:
+        description: "Skip the CPIS aggregates? (faster; inventory/price columns still update)"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  # Deliberately the SAME group as daily-refresh.yml. Both write the same
+  # Supabase tables, and refresh_cpis_*.py in particular hold long
+  # transactions on shared bronze -- two of them at once means
+  # statement_timeout kills one. cancel-in-progress:false makes a manual
+  # run QUEUE behind an in-flight daily refresh instead of racing it.
+  group: bp-daily-refresh
+  cancel-in-progress: false
+
+jobs:
+  shopify-refresh:
+    runs-on: ubuntu-latest
+    # The Shopify chain is the fast part of the daily run (~10-20 min).
+    # 45 is a safety net for a slow full-history products/orders walk.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Shopify refresh
+        env:
+          # --- Supabase Postgres (required) ---
+          DATABASE_URL_SYNC:     ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_KEY:  ${{ secrets.DATABASE_SERVICE_KEY }}
+
+          # --- Shopify (required). ingest_shopify.py also honours
+          # SHOP_DOMAIN_2 / ADMIN_ACCESS_TOKEN_2 for a second store. ---
+          SHOP_DOMAIN:           ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN:    ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOP_NAME:             ${{ secrets.SHOP_NAME }}
+          SHOPIFY_API_VERSION:   ${{ secrets.SHOPIFY_API_VERSION }}
+
+          # No Meta or BigQuery credentials here on purpose -- this path
+          # never calls them, and leaving them out means a throttled Meta
+          # token or an expired GCP key can't fail a Shopify refresh.
+        run: |
+          FLAGS="--only-shopify"
+          if [ "${{ inputs.skip_cpis }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-cpis"
+          fi
+          echo "Running: scripts/refresh_all_daily.py $FLAGS"
+          python scripts/refresh_all_daily.py $FLAGS
+
+      - name: Report inventory freshness
+        # The dashboard shows this same stamp on the Units in Stock KPI
+        # tile. Printing it here means the run's own log says whether the
+        # products snapshot actually advanced -- the quickest way to tell
+        # a successful refresh from one that ran but fetched nothing.
+        if: always()
+        env:
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          dsn = (os.environ.get("DATABASE_URL_SYNC") or "").replace(
+              "postgresql+psycopg2://", "postgresql://")
+          if not dsn:
+              print("DATABASE_URL_SYNC not set -- skipping freshness check")
+              sys.exit(0)
+          try:
+              import psycopg2
+              with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+                  cur.execute("""
+                      SELECT object_type, COUNT(*), MAX(extracted_at)
+                      FROM raw_dump_shopify
+                      WHERE object_type IN ('products','inventory','orders')
+                      GROUP BY object_type ORDER BY object_type
+                  """)
+                  rows = cur.fetchall()
+              if not rows:
+                  print("No Shopify bronze rows found.")
+              for object_type, n, newest in rows:
+                  print(f"  {object_type:10s} rows={n:<8} newest extracted_at={newest}")
+          except Exception as exc:
+              # Never fail the job on the report itself -- the refresh
+              # result is what matters.
+              print(f"Freshness check skipped: {type(exc).__name__}: {exc}")
+          PY
+
+      - name: Upload full log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shopify-refresh-log-${{ github.run_id }}
+          path: |
+            logs/**/*.log
+            *.log
+          if-no-files-found: ignore
+          retention-days: 14

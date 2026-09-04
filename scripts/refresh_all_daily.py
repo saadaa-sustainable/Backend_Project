@@ -10,6 +10,7 @@ Also runnable manually:
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --skip-meta
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --only-silver
+    ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --only-shopify
 
 Phase layout mirrors CTD's _refresh_all_dashboard_data.py:
 
@@ -78,18 +79,74 @@ PHASE_SILVER = [
 ]
 
 
+#: The Shopify-only path (--only-shopify), in dependency order. Listed
+#: BY LABEL and resolved against PHASE_INGEST/PHASE_SILVER above rather
+#: than redefined here, so a script path or timeout can never diverge
+#: between the daily run and the manual Shopify refresh.
+#:
+#: The two CPIS steps are included because the dashboard's attribution
+#: columns read the PRE-COMPUTED cpis_by_sku_utm / cpis_by_sku_daily
+#: tables. (The inventory columns -- units in stock, in-stock rates, DoQ,
+#: DOH, OOS -- read raw_dump_shopify and shopify_inventory live at query
+#: time, so those are current the moment silver_shopify finishes.) Pass
+#: --skip-cpis to stop after silver when you only care about inventory.
+SHOPIFY_INGEST_STEPS = ["shopify_daily"]
+SHOPIFY_SILVER_STEPS = ["silver_shopify"]
+SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm"]
+
+
+def _steps_by_label(labels: list[str]) -> list[tuple[str, list[str], int]]:
+    """Resolve step labels against the canonical phase lists.
+
+    Raises on an unknown label rather than skipping it: a rename in
+    PHASE_INGEST/PHASE_SILVER should break loudly here, not quietly
+    produce a refresh that silently missed a step.
+    """
+    catalog = {label: (label, cmd, timeout)
+               for label, cmd, timeout in PHASE_INGEST + PHASE_SILVER}
+    missing = [label for label in labels if label not in catalog]
+    if missing:
+        raise SystemExit(
+            f"Unknown step label(s) {missing}. Valid: {sorted(catalog)}. "
+            "A step was probably renamed in PHASE_INGEST/PHASE_SILVER "
+            "without updating the SHOPIFY_*_STEPS lists."
+        )
+    return [catalog[label] for label in labels]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-meta", action="store_true",
                     help="skip Phase 1 (use when Meta token is throttled)")
     ap.add_argument("--only-silver", action="store_true",
                     help="only Phase 2 (silver rebuild from existing bronze)")
+    ap.add_argument("--only-shopify", action="store_true",
+                    help="only the Shopify chain: ingest -> silver -> CPIS "
+                         "aggregates. For refreshing store data (inventory, "
+                         "prices, orders) without waiting on Meta.")
+    ap.add_argument("--skip-cpis", action="store_true",
+                    help="with --only-shopify, stop after the silver rebuild "
+                         "and skip the CPIS aggregates.")
     args = ap.parse_args()
 
+    if args.only_shopify and (args.skip_meta or args.only_silver):
+        raise SystemExit(
+            "--only-shopify cannot be combined with --skip-meta/--only-silver: "
+            "they select different, overlapping step sets. Pick one."
+        )
+    if args.skip_cpis and not args.only_shopify:
+        raise SystemExit("--skip-cpis only applies together with --only-shopify.")
+
     steps: list[tuple[str, list[str], int]] = []
-    if not (args.skip_meta or args.only_silver):
-        steps += PHASE_INGEST
-    steps += PHASE_SILVER
+    if args.only_shopify:
+        labels = SHOPIFY_INGEST_STEPS + SHOPIFY_SILVER_STEPS
+        if not args.skip_cpis:
+            labels += SHOPIFY_CPIS_STEPS
+        steps = _steps_by_label(labels)
+    else:
+        if not (args.skip_meta or args.only_silver):
+            steps += PHASE_INGEST
+        steps += PHASE_SILVER
 
     with CronRun(project="backend_project") as run:
         for name, cmd, timeout in steps:
