@@ -90,8 +90,16 @@ SHOPIFY_INGEST_TIMEOUT_S = 5400
 #: --shopify-object-types (or 'all') to widen it.
 DEFAULT_SHOPIFY_OBJECT_TYPES = "products,inventory,orders"
 
+#: --incremental makes orders/customers/products resume from the newest
+#: row already in bronze (minus a 1-day overlap) on updated_at, instead
+#: of re-walking full history every run. Without it, run #7 (2026-09-04)
+#: spent 1079s on a ~347k-order full walk and returned ZERO rows before
+#: failing. Falls back to a full walk automatically when bronze is empty
+#: or the watermark can't be read, so a fresh database still backfills.
 SHOPIFY_INGEST_CMD = [
-    "scripts/ingest_shopify.py", "--object-types", DEFAULT_SHOPIFY_OBJECT_TYPES,
+    "scripts/ingest_shopify.py",
+    "--object-types", DEFAULT_SHOPIFY_OBJECT_TYPES,
+    "--incremental",
 ]
 
 # (label, [script + args], timeout_seconds). Ordered by dependency.
@@ -200,7 +208,8 @@ def main() -> int:
                   else ["--object-types", args.shopify_object_types])
         steps = [
             (label,
-             [SHOPIFY_INGEST_CMD[0], *scoped] if label in SHOPIFY_INGEST_STEPS else cmd,
+             [SHOPIFY_INGEST_CMD[0], *scoped, "--incremental"]
+             if label in SHOPIFY_INGEST_STEPS else cmd,
              timeout)
             for label, cmd, timeout in steps
         ]

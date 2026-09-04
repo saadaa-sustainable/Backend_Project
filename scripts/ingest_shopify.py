@@ -115,7 +115,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DDL_PATH = REPO_ROOT / "scripts" / "sql" / "raw_dump_shopify.sql"
 ERROR_LOG_PATH = REPO_ROOT / "logs" / "shopify_ingest_errors.log"
 
-DEFAULT_PAGE_SIZE = 50
+#: 250 is Shopify's per-connection maximum. At the old value of 50, a
+#: full-history orders walk was ~7,000 sequential requests (347k orders),
+#: each a chance to be throttled -- run #7 (2026-09-04) spent 1079s on
+#: orders and returned ZERO rows before failing. Five times fewer
+#: requests is five times less throttle exposure for identical data.
+DEFAULT_PAGE_SIZE = 250
 DEFAULT_OBJECT_TYPES = [
     "shop", "products", "orders", "customers", "sessions", "fulfillments",
     "customer_analytics", "sales", "discounts", "inventory",
@@ -585,18 +590,79 @@ def _date_chunks(start: date, end: date, chunk_days: int) -> list[tuple[date, da
     return chunks
 
 
-def _build_search_filter(date_start: date | None, date_end: date | None) -> str | None:
+def _build_search_filter(
+    date_start: date | None, date_end: date | None, *, field: str = "updated_at"
+) -> str | None:
     """Shopify's connection `query` search syntax -- confirmed live that
     unquoted date values 500 with an internal server error; single-quoted
-    ISO date strings work."""
+    ISO date strings work.
+
+    Filters on `updated_at` by default, NOT `created_at`. Filtering on
+    creation date silently misses edits to older records: an order
+    refunded, cancelled or re-fulfilled today was created months ago, so
+    a created_at window would never re-fetch it and bronze would keep
+    serving the stale version forever. updated_at is what Shopify
+    recommends for sync, and is what makes the incremental watermark
+    below correct rather than merely fast.
+    """
     if not date_start and not date_end:
         return None
     parts = []
     if date_start:
-        parts.append(f"created_at:>='{date_start.isoformat()}'")
+        parts.append(f"{field}:>='{date_start.isoformat()}'")
     if date_end:
-        parts.append(f"created_at:<='{date_end.isoformat()}'")
+        parts.append(f"{field}:<='{date_end.isoformat()}'")
     return " AND ".join(parts)
+
+
+#: Object types whose fetch can be resumed from a watermark. ShopifyQL
+#: tables are excluded: they already take an explicit date range and are
+#: re-derived per day, so there is nothing to resume.
+_INCREMENTAL_OBJECT_TYPES = {"orders", "customers", "products"}
+
+#: Days of overlap re-fetched either side of the watermark. Absorbs clock
+#: skew between Shopify and this database, and records edited during the
+#: previous run's own walk. Re-fetching a day costs nothing: the write is
+#: an upsert on (object_type, source_id), so an unchanged record is
+#: updated in place rather than duplicated.
+INCREMENTAL_OVERLAP_DAYS = 1
+
+
+async def _resolve_incremental_start(
+    database_url: str | None, table: str, object_type: str
+) -> date | None:
+    """Newest extracted_at already in bronze for this object type, minus
+    the overlap, or None to mean "fetch everything".
+
+    Returns None -- i.e. falls back to a full walk -- when bronze is
+    empty for this type, when there is no database to ask, or on any
+    error reading it. Fetching too much is slow; fetching too little is
+    silent data loss, so every failure mode here errs toward the full
+    walk.
+    """
+    if not database_url:
+        return None
+    try:
+        import asyncpg
+        conn = await asyncpg.connect(_to_asyncpg_dsn(database_url), statement_cache_size=0)
+        try:
+            newest = await conn.fetchval(
+                f'SELECT MAX(extracted_at) FROM "{table}" WHERE object_type = $1',
+                object_type,
+            )
+        finally:
+            await conn.close()
+    except Exception as exc:
+        print(f"    [incremental] {object_type}: could not read watermark "
+              f"({type(exc).__name__}: {exc}) -- falling back to full history")
+        return None
+    if newest is None:
+        print(f"    [incremental] {object_type}: bronze empty -- full history")
+        return None
+    start = newest.date() - timedelta(days=INCREMENTAL_OVERLAP_DAYS)
+    print(f"    [incremental] {object_type}: newest bronze row {newest:%Y-%m-%d %H:%M} "
+          f"-> fetching updated_at >= {start} ({INCREMENTAL_OVERLAP_DAYS}d overlap)")
+    return start
 
 
 # ----------------------------------------------------------------------
@@ -802,29 +868,61 @@ async def _run(
     max_pages: int | None,
     date_start: date | None,
     date_end: date | None,
+    incremental: bool = False,
+    database_url: str | None = None,
+    table: str = "raw_dump_shopify",
 ) -> list[FetchResult]:
+    # SEQUENTIAL, in the caller's object_types order -- deliberately not
+    # asyncio.gather any more.
+    #
+    # Shopify rate-limits per SHOP, not per connection, so running the
+    # object types concurrently just makes them fight over one bucket.
+    # Run #7 (2026-09-04) fetched products, inventory and orders in
+    # parallel and spent its time like this:
+    #
+    #     inventory  OK      227,475 rows   588.92s
+    #     products   OK        1,054 rows    10.45s
+    #     orders     FAILED        0 rows  1079.11s
+    #     wall time (all 3 in parallel): 1079.15s
+    #     ... with 10x "throttled (attempt 1/4), sleeping ~55s"
+    #
+    # Serialising costs nothing in throughput when the limiter is the
+    # bottleneck -- and it buys two things worth more: the throttle
+    # storm goes away, and the caller's cheapest-first ordering finally
+    # means something, so a run killed part-way has still fetched the
+    # cheap, high-value types (products lands in ~10s) instead of
+    # spreading its failure across all three.
     limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+    results: list[FetchResult] = []
     async with httpx.AsyncClient(limits=limits) as client:
-        tasks = []
         for store in stores:
-            if "shop" in object_types:
-                tasks.append(_fetch_shop(client, store))
-            for object_type in _SHOPIFYQL_TABLE_CONFIG:
-                if object_type not in object_types:
-                    continue
-                ql_start = date_start or (datetime.now(timezone.utc).date() - timedelta(days=30))
-                ql_end = date_end or datetime.now(timezone.utc).date()
-                tasks.append(_fetch_shopifyql_table(client, store, object_type, ql_start, ql_end))
             for object_type in object_types:
-                if object_type == "shop" or object_type in _SHOPIFYQL_TABLE_CONFIG:
-                    continue
-                tasks.append(
-                    _fetch_object_type(
-                        client, store, object_type, page_size=page_size, max_pages=max_pages,
-                        date_start=date_start, date_end=date_end,
+                if object_type == "shop":
+                    results.append(await _fetch_shop(client, store))
+                elif object_type in _SHOPIFYQL_TABLE_CONFIG:
+                    ql_start = date_start or (datetime.now(timezone.utc).date() - timedelta(days=30))
+                    ql_end = date_end or datetime.now(timezone.utc).date()
+                    results.append(
+                        await _fetch_shopifyql_table(client, store, object_type, ql_start, ql_end)
                     )
-                )
-        return await asyncio.gather(*tasks)
+                else:
+                    # An explicit --date-start always wins; the watermark
+                    # only fills in when the caller didn't pin a range.
+                    effective_start = date_start
+                    if incremental and date_start is None and object_type in _INCREMENTAL_OBJECT_TYPES:
+                        effective_start = await _resolve_incremental_start(
+                            database_url, table, object_type
+                        )
+                    results.append(
+                        await _fetch_object_type(
+                            client, store, object_type, page_size=page_size,
+                            max_pages=max_pages, date_start=effective_start, date_end=date_end,
+                        )
+                    )
+                print(f"    [done] {object_type}: {len(results[-1].items)} rows "
+                      f"in {results[-1].duration_seconds:.1f}s"
+                      + (f" -- FAILED: {results[-1].error}" if results[-1].error else ""))
+    return results
 
 
 async def run_for_admin(
@@ -1237,6 +1335,13 @@ def main() -> int:
     )
     parser.add_argument("--date-start", type=date.fromisoformat, default=None, help="ISO date, e.g. 2026-01-01. Omit to fetch full history (orders/products/customers) or the last 30 days (sessions).")
     parser.add_argument("--date-end", type=date.fromisoformat, default=None, help="ISO date, defaults to today.")
+    parser.add_argument(
+        "--incremental", action="store_true",
+        help="For orders/customers/products, fetch only records whose updated_at is "
+             "at or after the newest row already in the target table (minus "
+             f"{INCREMENTAL_OVERLAP_DAYS}d overlap). Falls back to full history when the "
+             "table is empty or the watermark can't be read. Ignored when --date-start "
+             "is given.")
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE, help=f"Items per GraphQL page (default {DEFAULT_PAGE_SIZE}).")
     parser.add_argument("--max-pages", type=int, default=None, help="Cap pages per (store, object_type) -- useful for a quick trial on a large store.")
     parser.add_argument("--table", default="raw_dump_shopify", help="Target table (default: raw_dump_shopify).")
@@ -1283,7 +1388,13 @@ def main() -> int:
 
     print("Stores: " + ", ".join(describe_store_safely(s) for s in stores))
     print(f"Object types: {object_types}")
-    print(f"Date range: {args.date_start or '(full history)'} .. {args.date_end or 'today'}")
+    if args.date_start:
+        print(f"Date range: {args.date_start} .. {args.date_end or 'today'} (explicit, on updated_at)")
+    elif args.incremental:
+        print(f"Date range: incremental -- per-type watermark from {args.table}, "
+              f"{INCREMENTAL_OVERLAP_DAYS}d overlap, on updated_at")
+    else:
+        print(f"Date range: (full history) .. {args.date_end or 'today'}")
     print(f"Page size: {args.page_size}" + (f"  max_pages: {args.max_pages}" if args.max_pages else ""))
     if database_url:
         print(f"Target table: {args.table}")
@@ -1297,6 +1408,7 @@ def main() -> int:
             page_size=args.page_size, max_pages=args.max_pages,
             date_start=args.date_start, date_end=args.date_end,
             api_version=api_version, no_insert=args.no_insert,
+            incremental=args.incremental,
         )
     )
     return exit_code
@@ -1314,6 +1426,7 @@ async def _run_and_report(
     date_end: date | None,
     api_version: str,
     no_insert: bool,
+    incremental: bool = False,
 ) -> int:
     """CLI-only wrapper around `_run()`'s async core, adding the printed
     summary + write step -- kept separate from `_run()` itself so
@@ -1324,6 +1437,7 @@ async def _run_and_report(
     results = await _run(
         stores, object_types, page_size=page_size, max_pages=max_pages,
         date_start=date_start, date_end=date_end,
+        incremental=incremental, database_url=database_url, table=table,
     )
     fetch_wall_time = time.monotonic() - fetch_start
 
@@ -1338,7 +1452,7 @@ async def _run_and_report(
             _log_fetch_error(r)
         total_rows += len(r.items)
 
-    print(f"\nShopify fetch wall time (all {len(results)} calls in parallel): {fetch_wall_time:.2f}s")
+    print(f"\nShopify fetch wall time ({len(results)} calls, sequential): {fetch_wall_time:.2f}s")
     print(f"Total rows fetched: {total_rows}")
 
     if no_insert:
