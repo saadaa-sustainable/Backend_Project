@@ -77,7 +77,15 @@ class ShopifyStore:
 
     @property
     def graphql_url(self) -> str:
-        api_version = os.environ.get("SHOPIFY_API_VERSION", DEFAULT_API_VERSION)
+        # `or`, not os.environ.get's default: GitHub Actions materialises
+        # an UNSET secret as an EMPTY STRING, which is present as far as
+        # .get() is concerned, so the default never applied and the URL
+        # came out as ".../admin/api//graphql.json". Confirmed in the
+        # 2026-09-04 run logs, where the env block showed
+        # `SHOPIFY_API_VERSION:` with nothing after it. Local runs read a
+        # populated .env and never hit this, which is why it only ever
+        # broke in CI.
+        api_version = os.environ.get("SHOPIFY_API_VERSION") or DEFAULT_API_VERSION
         domain = self.domain
         if not domain.startswith("http"):
             domain = f"https://{domain}"
@@ -108,7 +116,9 @@ def discover_stores() -> dict[str, ShopifyStore]:
     access_token = os.environ.get("ADMIN_ACCESS_TOKEN")
     if domain and access_token:
         key = "1" if "1" not in raw else str(max((int(k) for k in raw), default=0) + 1)
-        raw[key] = {"domain": domain, "access_token": access_token, "name": os.environ.get("SHOP_NAME", "default")}
+        # Same empty-string-in-CI trap as SHOPIFY_API_VERSION above.
+        raw[key] = {"domain": domain, "access_token": access_token,
+                    "name": os.environ.get("SHOP_NAME") or "default"}
 
     stores = {}
     for k, fields in raw.items():
