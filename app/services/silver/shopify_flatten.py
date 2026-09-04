@@ -589,14 +589,41 @@ async def ensure_shopify_tables(session: AsyncSession) -> None:
     await session.commit()
 
 
+#: Per-transaction tuning for the flatten. SET LOCAL, not SET: the
+#: connection goes through Supabase's Supavisor in transaction-pooling
+#: mode, where a session-level SET can land on a backend that a later
+#: statement never sees. SET LOCAL is scoped to the surrounding
+#: transaction, which is exactly the unit each table's TRUNCATE+INSERT
+#: runs in.
+#:
+#: statement_timeout: the database default is 120s (confirmed live
+#: 2026-09-04 via pg_settings), which is a sensible ceiling for
+#: interactive queries and far too low for this ETL. The orders flatten
+#: alone de-duplicates ~385k bronze rows and measured 183s before dying
+#: -- silver_shopify had never once succeeded because of it, which is
+#: why shopify_inventory sat at 2026-08-27 while bronze already held
+#: 2026-09-04 data.
+#:
+#: work_mem: the default here is 3.5 MB, so that 385k-row sort spills to
+#: an on-disk merge. Raising it for just this transaction keeps the sort
+#: in memory. Deliberately modest -- work_mem is per sort node, not per
+#: query, so a large value multiplies across a plan.
+_FLATTEN_SESSION_TUNING = (
+    "SET LOCAL statement_timeout = '900s'",
+    "SET LOCAL work_mem = '64MB'",
+)
+
+
 async def refresh_shopify_tables(session: AsyncSession) -> dict[str, int]:
-    """Rebuild shopify_orders/shopify_customers/shopify_sessions from the
-    latest raw_dump_shopify snapshot of each entity. No cross-table
-    dependency, so order between them doesn't matter."""
+    """Rebuild the silver Shopify tables from the latest raw_dump_shopify
+    snapshot of each entity. No cross-table dependency, so order between
+    them doesn't matter."""
     await ensure_shopify_tables(session)
 
     counts: dict[str, int] = {}
     for table, _, truncate_sql, insert_sql in _TABLES:
+        for tuning in _FLATTEN_SESSION_TUNING:
+            await session.execute(text(tuning))
         await session.execute(text(truncate_sql))
         await session.execute(text(insert_sql))
         await session.commit()
