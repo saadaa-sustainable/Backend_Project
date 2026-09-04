@@ -1037,6 +1037,30 @@ def _build_rows(
             source_id = item.get(_NATURAL_ID_FIELD_BY_TYPE[result.object_type])
         else:
             source_id = item.get("id")
+
+        # A NULL source_id silently defeats deduplication. _insert_rows
+        # upserts with `ON CONFLICT (object_type, source_id) WHERE
+        # source_id IS NOT NULL`, and the backing unique index is partial
+        # on the same predicate -- so a row whose natural key is missing
+        # matches no conflict target and is INSERTED FRESH ON EVERY RUN,
+        # accumulating one duplicate per run forever, silently.
+        #
+        # The natural key can genuinely be absent: item.get("id") for a
+        # payload without one, or the order_id / fulfillment_id /
+        # customer_id in _NATURAL_ID_FIELD_BY_TYPE being null on an
+        # aggregate or guest row. Measured 2026-09-04: 20 object types in
+        # raw_dump_shopify already carry a NULL source_id (one row each,
+        # from a single discovery run) -- every one of them would have
+        # duplicated on a second run.
+        #
+        # Falling back to the payload hash keeps the key DETERMINISTIC on
+        # content, so re-fetching an unchanged row upserts onto itself
+        # instead of duplicating. A changed payload legitimately becomes
+        # a new row, which is the honest outcome when there is no natural
+        # identity to update in place.
+        if source_id is None or source_id == "":
+            source_id = f"sha_{_hash_payload(item)[:32]}"
+
         rows.append(
             {
                 "id": str(uuid.uuid4()),

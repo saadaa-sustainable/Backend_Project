@@ -93,10 +93,18 @@ _ORDERS_COLUMN_MIGRATIONS = [
 
 _ORDERS_INSERT = f"""
 WITH latest AS (
-    SELECT source_id, MAX(extracted_at) AS extracted_at
+    -- DISTINCT ON, not MAX()+self-join: the old form joined back
+    -- on (source_id, extracted_at), so two bronze rows sharing
+    -- BOTH emitted BOTH -- a duplicate-key failure against this
+    -- table's primary key. That tie is reachable: extracted_at is
+    -- one datetime.now() per write batch, so every row in a batch
+    -- carries the identical timestamp. DISTINCT ON picks exactly
+    -- one row per source_id and cannot tie; id breaks any
+    -- remaining ordering ambiguity deterministically.
+    SELECT DISTINCT ON (source_id) source_id, id
     FROM raw_dump_shopify
     WHERE object_type = 'orders' AND source_id IS NOT NULL
-    GROUP BY source_id
+    ORDER BY source_id, extracted_at DESC, id DESC
 )
 INSERT INTO shopify_orders (
     order_id, name, email, financial_status, fulfillment_status, subtotal_price, total_price,
@@ -129,7 +137,7 @@ SELECT
     a.extracted_at,
     now() AS flattened_at
 FROM raw_dump_shopify a
-JOIN latest ON latest.source_id = a.source_id AND latest.extracted_at = a.extracted_at
+JOIN latest ON latest.id = a.id
 WHERE a.object_type = 'orders'
 """
 
@@ -156,10 +164,18 @@ CREATE TABLE IF NOT EXISTS shopify_customers (
 
 _CUSTOMERS_INSERT = """
 WITH latest AS (
-    SELECT source_id, MAX(extracted_at) AS extracted_at
+    -- DISTINCT ON, not MAX()+self-join: the old form joined back
+    -- on (source_id, extracted_at), so two bronze rows sharing
+    -- BOTH emitted BOTH -- a duplicate-key failure against this
+    -- table's primary key. That tie is reachable: extracted_at is
+    -- one datetime.now() per write batch, so every row in a batch
+    -- carries the identical timestamp. DISTINCT ON picks exactly
+    -- one row per source_id and cannot tie; id breaks any
+    -- remaining ordering ambiguity deterministically.
+    SELECT DISTINCT ON (source_id) source_id, id
     FROM raw_dump_shopify
     WHERE object_type = 'customers' AND source_id IS NOT NULL
-    GROUP BY source_id
+    ORDER BY source_id, extracted_at DESC, id DESC
 )
 INSERT INTO shopify_customers (
     customer_id, first_name, last_name, email, phone, verified_email, state, number_of_orders,
@@ -183,7 +199,7 @@ SELECT
     a.extracted_at,
     now() AS flattened_at
 FROM raw_dump_shopify a
-JOIN latest ON latest.source_id = a.source_id AND latest.extracted_at = a.extracted_at
+JOIN latest ON latest.id = a.id
 WHERE a.object_type = 'customers'
 """
 
@@ -240,10 +256,13 @@ _SESSIONS_INSERT_COLUMNS = (
 
 _SESSIONS_INSERT = (
     "WITH latest AS (\n"
-    "    SELECT source_id, MAX(extracted_at) AS extracted_at\n"
+    "    -- DISTINCT ON, not MAX()+self-join -- see the orders\n"
+    "    -- flatten for why: a (source_id, extracted_at) tie made\n"
+    "    -- the old form emit BOTH rows, breaking this table's PK.\n"
+    "    SELECT DISTINCT ON (source_id) source_id, id\n"
     "    FROM raw_dump_shopify\n"
     "    WHERE object_type = 'sessions' AND source_id IS NOT NULL\n"
-    "    GROUP BY source_id\n"
+    "    ORDER BY source_id, extracted_at DESC, id DESC\n"
     ")\n"
     f"INSERT INTO shopify_sessions ({', '.join(_SESSIONS_INSERT_COLUMNS)})\n"
     "SELECT\n"
@@ -258,7 +277,7 @@ _SESSIONS_INSERT = (
     + "    a.extracted_at,\n"
     "    now() AS flattened_at\n"
     "FROM raw_dump_shopify a\n"
-    "JOIN latest ON latest.source_id = a.source_id AND latest.extracted_at = a.extracted_at\n"
+    "JOIN latest ON latest.id = a.id\n"
     "WHERE a.object_type = 'sessions'"
 )
 
@@ -347,10 +366,13 @@ _FULFILLMENTS_INSERT_COLUMNS = (
 
 _FULFILLMENTS_INSERT = (
     "WITH latest AS (\n"
-    "    SELECT source_id, MAX(extracted_at) AS extracted_at\n"
+    "    -- DISTINCT ON, not MAX()+self-join -- see the orders\n"
+    "    -- flatten for why: a (source_id, extracted_at) tie made\n"
+    "    -- the old form emit BOTH rows, breaking this table's PK.\n"
+    "    SELECT DISTINCT ON (source_id) source_id, id\n"
     "    FROM raw_dump_shopify\n"
     "    WHERE object_type = 'fulfillments' AND source_id IS NOT NULL\n"
-    "    GROUP BY source_id\n"
+    "    ORDER BY source_id, extracted_at DESC, id DESC\n"
     ")\n"
     f"INSERT INTO shopify_fulfillments ({', '.join(_FULFILLMENTS_INSERT_COLUMNS)})\n"
     "SELECT\n"
@@ -364,7 +386,7 @@ _FULFILLMENTS_INSERT = (
     + "    a.extracted_at,\n"
     "    now() AS flattened_at\n"
     "FROM raw_dump_shopify a\n"
-    "JOIN latest ON latest.source_id = a.source_id AND latest.extracted_at = a.extracted_at\n"
+    "JOIN latest ON latest.id = a.id\n"
     "WHERE a.object_type = 'fulfillments'"
 )
 
@@ -409,15 +431,18 @@ def _build_shopifyql_table_sql(
     select_lines += ["    a.extracted_at,", "    now() AS flattened_at"]
     insert_sql = (
         "WITH latest AS (\n"
-        "    SELECT source_id, MAX(extracted_at) AS extracted_at\n"
+        "    -- DISTINCT ON, not MAX()+self-join -- see the orders\n"
+        "    -- flatten for why: a (source_id, extracted_at) tie made\n"
+        "    -- the old form emit BOTH rows, breaking this table's PK.\n"
+        "    SELECT DISTINCT ON (source_id) source_id, id\n"
         "    FROM raw_dump_shopify\n"
         f"    WHERE object_type = '{object_type}' AND source_id IS NOT NULL\n"
-        "    GROUP BY source_id\n"
+        "    ORDER BY source_id, extracted_at DESC, id DESC\n"
         ")\n"
         f"INSERT INTO {table_name} ({', '.join(insert_columns)})\n"
         "SELECT\n" + "\n".join(select_lines) + "\n"
         "FROM raw_dump_shopify a\n"
-        "JOIN latest ON latest.source_id = a.source_id AND latest.extracted_at = a.extracted_at\n"
+        "JOIN latest ON latest.id = a.id\n"
         f"WHERE a.object_type = '{object_type}'"
     )
     return ddl, insert_sql
