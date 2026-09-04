@@ -114,7 +114,16 @@ PHASE_INGEST = [
 PHASE_SILVER = [
     ("silver_raw_dump_meta",  ["scripts/refresh_raw_dump_meta_daily.py"],   1200),
     ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],   900),
-    ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],         900),
+    # 900 -> 3600 (2026-09-04). refresh_shopify_silver.py TRUNCATEs and
+    # re-INSERTs all EIGHT silver tables from ~4.9M bronze rows every
+    # run -- sessions 1.37M, inventory 1.38M, customers 984k, orders
+    # 347k -- each needing a DISTINCT ON sort. Run #8 raised the
+    # Postgres statement_timeout (the 120s DB ceiling that killed it at
+    # 183s) only to hit THIS budget instead: "timeout after 900s" with
+    # the log stopped at "[1/2] refresh_shopify_tables". The work is
+    # genuinely bigger than 15 minutes; capping it lower just moves the
+    # failure.
+    ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],        3600),
     ("silver_inventory",      ["scripts/refresh_master_sku_inventory.py"],   600),
     ("silver_returns",        ["scripts/refresh_master_sku_returns.py"],     900),
     ("silver_cpis_daily",     ["scripts/refresh_cpis_by_sku_daily.py"],      900),
@@ -176,6 +185,13 @@ def main() -> int:
     ap.add_argument("--skip-cpis", action="store_true",
                     help="with --only-shopify, stop after the silver rebuild "
                          "and skip the CPIS aggregates.")
+    ap.add_argument("--force-silver", action="store_true",
+                    help="rebuild EVERY Shopify silver table, even ones whose "
+                         "bronze has not moved since the last run. Needed after "
+                         "editing the flatten SQL in "
+                         "app/services/silver/shopify_flatten.py -- the skip "
+                         "check watches bronze, so a code-only change looks "
+                         "like 'nothing to do'.")
     args = ap.parse_args()
 
     if args.only_shopify and (args.skip_meta or args.only_silver):
@@ -211,6 +227,19 @@ def main() -> int:
              [SHOPIFY_INGEST_CMD[0], *scoped, "--incremental"]
              if label in SHOPIFY_INGEST_STEPS else cmd,
              timeout)
+            for label, cmd, timeout in steps
+        ]
+
+    # --force-silver is the escape hatch for the one thing the silver
+    # freshness check cannot see. refresh_shopify_tables() skips a table
+    # whose bronze extracted_at has not advanced, which is right for a
+    # data refresh and wrong the first time NEW flatten SQL ships: bronze
+    # is untouched, so every table would be skipped and the new columns
+    # would never appear. Rewritten here rather than baked into
+    # PHASE_SILVER so the default stays the cheap path.
+    if args.force_silver:
+        steps = [
+            (label, [*cmd, "--force"] if label in SHOPIFY_SILVER_STEPS else cmd, timeout)
             for label, cmd, timeout in steps
         ]
 

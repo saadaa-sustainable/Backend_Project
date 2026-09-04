@@ -13,6 +13,12 @@
 #                                   _customers / _sessions / _sales /
 #                                   _discounts / _fulfillments /
 #                                   _customer_analytics + attribution
+#                                   Only rebuilds a table whose BRONZE has
+#                                   moved. This run fetches three object
+#                                   types, so the other five silver tables
+#                                   are skipped rather than re-flattened
+#                                   into identical rows. Set force_silver
+#                                   if you changed the flatten SQL itself.
 #   3. refresh_cpis_by_sku_daily.py \ CPIS pre-computed aggregates
 #      refresh_cpis_utm.py          / (skip with the input below)
 #
@@ -43,6 +49,11 @@ on:
         type: string
         required: false
         default: "products,inventory,orders"
+      force_silver:
+        description: "Rebuild EVERY silver table, even ones whose bronze has not changed. Needed only after editing the flatten SQL -- a normal data refresh should leave this off."
+        type: boolean
+        required: false
+        default: false
       verify_sku:
         description: "After refreshing, reconcile this master SKU's unit count (e.g. SMCP). Blank to skip."
         type: string
@@ -71,7 +82,12 @@ jobs:
     # (~4.8M bronze rows). This path scopes the fetch and gives the
     # ingest 5400s, so the job needs headroom above that plus silver
     # and the two CPIS rebuilds.
-    timeout-minutes: 150
+    # Must exceed the sum of the step budgets it can actually spend:
+    # ingest 5400s + silver 3600s + cpis_daily 900s + cpis_utm 1200s
+    # = 11100s = 185 min. A 150-minute cap would kill the job before its
+    # own steps could finish -- the same class of mistake as the 900s
+    # step budget sitting under a 1800s statement timeout.
+    timeout-minutes: 240
 
     steps:
       - name: Checkout
@@ -140,6 +156,9 @@ jobs:
           if [ -n "${{ inputs.object_types }}" ]; then
             FLAGS="$FLAGS --shopify-object-types ${{ inputs.object_types }}"
           fi
+          if [ "${{ inputs.force_silver }}" = "true" ]; then
+            FLAGS="$FLAGS --force-silver"
+          fi
           echo "Running: scripts/refresh_all_daily.py $FLAGS"
           python scripts/refresh_all_daily.py $FLAGS
 
@@ -162,17 +181,26 @@ jobs:
           try:
               import psycopg2
               with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
-                  cur.execute("""
-                      SELECT object_type, COUNT(*), MAX(extracted_at)
-                      FROM raw_dump_shopify
-                      WHERE object_type IN ('products','inventory','orders')
-                      GROUP BY object_type ORDER BY object_type
-                  """)
-                  rows = cur.fetchall()
-              if not rows:
+                  # One indexed MAX per type, not a GROUP BY over the
+                  # whole table: PostgreSQL has no index skip-scan, so
+                  # the grouped form seq-scans all ~5.2M bronze rows
+                  # (measured live 2026-09-04: 43.2s, versus 0.1ms for
+                  # a single MAX off ix_raw_dump_shopify_object_type_
+                  # extracted's tip). The row COUNT is deliberately
+                  # dropped -- there is no index that makes it cheap,
+                  # and the stamp is what says whether the fetch landed.
+                  rows = []
+                  for object_type in ("products", "inventory", "orders"):
+                      cur.execute(
+                          "SELECT MAX(extracted_at) FROM raw_dump_shopify"
+                          " WHERE object_type = %s", (object_type,))
+                      rows.append((object_type, cur.fetchone()[0]))
+              # rows now always has one entry per type (MAX returns NULL
+              # rather than no row), so "empty" means every stamp is NULL.
+              if all(newest is None for _, newest in rows):
                   print("No Shopify bronze rows found.")
-              for object_type, n, newest in rows:
-                  print(f"  {object_type:10s} rows={n:<8} newest extracted_at={newest}")
+              for object_type, newest in rows:
+                  print(f"  {object_type:10s} newest extracted_at={newest or '(no rows)'}")
           except Exception as exc:
               # Never fail the job on the report itself -- the refresh
               # result is what matters.

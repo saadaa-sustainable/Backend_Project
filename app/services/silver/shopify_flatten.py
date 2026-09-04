@@ -21,6 +21,9 @@ as the primary key, same as any other object type.
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import NamedTuple
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +37,24 @@ logger = get_logger(__name__)
 _BRONZE_SHOPIFY_INDEX = (
     "CREATE INDEX IF NOT EXISTS ix_raw_dump_shopify_object_type_source_extracted "
     "ON raw_dump_shopify (object_type, source_id, extracted_at DESC)"
+)
+
+# Supports the freshness probe in refresh_shopify_tables(), and nothing
+# else -- (object_type, extracted_at DESC) is a DIFFERENT index from the
+# one above, not a redundant prefix of it. The one above leads with
+# (object_type, source_id), so extracted_at is its THIRD column and
+# `MAX(extracted_at) WHERE object_type = ...` cannot be answered from an
+# index tip: Postgres has to walk every entry for that object_type.
+# Measured live 2026-09-04 on 5.2M bronze rows:
+#     MAX(extracted_at) WHERE object_type='orders'   3,772 ms
+#     the same as a GROUP BY over all eight types   43,243 ms  (seq scan)
+# With this index the same probe is a one-row backward index scan, so
+# running it eight times per refresh costs single-digit milliseconds
+# instead of half a minute. Without it, the skip check would cost more
+# than some of the rebuilds it is meant to avoid.
+_BRONZE_SHOPIFY_FRESHNESS_INDEX = (
+    "CREATE INDEX IF NOT EXISTS ix_raw_dump_shopify_object_type_extracted "
+    "ON raw_dump_shopify (object_type, extracted_at DESC)"
 )
 
 #: customAttributes is a `[{key, value}]` array (checkout-captured, from
@@ -522,16 +543,54 @@ _INVENTORY_DDL, _INVENTORY_INSERT = _build_shopifyql_table_sql(
 #: through Shopify. Deliberately not built, see ingest_shopify.py's
 #: matching note.
 
+class _Table(NamedTuple):
+    """One silver table and the bronze object_type it is built from.
+
+    `object_type` is not decoration: refresh_shopify_tables() uses it to
+    ask whether this table's SOURCE has moved since the table was last
+    built, and skips the rebuild when it hasn't. It must stay equal to
+    the object_type the INSERT itself filters on -- if the two drift, the
+    freshness check watches the wrong bronze slice and the table either
+    never rebuilds or always does. _assert_object_types_match() below
+    checks that mechanically at import time rather than trusting it.
+    """
+
+    table: str
+    object_type: str
+    ddl: str
+    truncate_sql: str
+    insert_sql: str
+
+
 _TABLES = [
-    ("shopify_orders", _ORDERS_DDL, "TRUNCATE shopify_orders", _ORDERS_INSERT),
-    ("shopify_customers", _CUSTOMERS_DDL, "TRUNCATE shopify_customers", _CUSTOMERS_INSERT),
-    ("shopify_sessions", _SESSIONS_DDL, "TRUNCATE shopify_sessions", _SESSIONS_INSERT),
-    ("shopify_fulfillments", _FULFILLMENTS_DDL, "TRUNCATE shopify_fulfillments", _FULFILLMENTS_INSERT),
-    ("shopify_customer_analytics", _CUSTOMER_ANALYTICS_DDL, "TRUNCATE shopify_customer_analytics", _CUSTOMER_ANALYTICS_INSERT),
-    ("shopify_sales", _SALES_DDL, "TRUNCATE shopify_sales", _SALES_INSERT),
-    ("shopify_discounts", _DISCOUNTS_DDL, "TRUNCATE shopify_discounts", _DISCOUNTS_INSERT),
-    ("shopify_inventory", _INVENTORY_DDL, "TRUNCATE shopify_inventory", _INVENTORY_INSERT),
+    _Table("shopify_orders", "orders", _ORDERS_DDL, "TRUNCATE shopify_orders", _ORDERS_INSERT),
+    _Table("shopify_customers", "customers", _CUSTOMERS_DDL, "TRUNCATE shopify_customers", _CUSTOMERS_INSERT),
+    _Table("shopify_sessions", "sessions", _SESSIONS_DDL, "TRUNCATE shopify_sessions", _SESSIONS_INSERT),
+    _Table("shopify_fulfillments", "fulfillments", _FULFILLMENTS_DDL, "TRUNCATE shopify_fulfillments", _FULFILLMENTS_INSERT),
+    _Table("shopify_customer_analytics", "customer_analytics", _CUSTOMER_ANALYTICS_DDL, "TRUNCATE shopify_customer_analytics", _CUSTOMER_ANALYTICS_INSERT),
+    _Table("shopify_sales", "sales", _SALES_DDL, "TRUNCATE shopify_sales", _SALES_INSERT),
+    _Table("shopify_discounts", "discounts", _DISCOUNTS_DDL, "TRUNCATE shopify_discounts", _DISCOUNTS_INSERT),
+    _Table("shopify_inventory", "inventory", _INVENTORY_DDL, "TRUNCATE shopify_inventory", _INVENTORY_INSERT),
 ]
+
+
+def _assert_object_types_match() -> None:
+    """Fail loudly at import if a _Table's declared object_type isn't the
+    one its own INSERT reads. The declared value drives the skip
+    decision, so a mismatch would silently stop a table refreshing --
+    exactly the class of bug that left shopify_inventory sitting at
+    2026-08-27. Cheap enough to run unconditionally on import."""
+    for entry in _TABLES:
+        needle = f"object_type = '{entry.object_type}'"
+        if needle not in entry.insert_sql:
+            raise AssertionError(
+                f"{entry.table}: declared object_type {entry.object_type!r} "
+                f"does not appear in its INSERT -- the freshness check would "
+                f"watch the wrong bronze rows."
+            )
+
+
+_assert_object_types_match()
 
 _INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_shopify_orders_customer_id ON shopify_orders (customer_id)",
@@ -578,17 +637,6 @@ _FULFILLMENTS_COLUMN_MIGRATIONS = (
 )
 
 
-async def ensure_shopify_tables(session: AsyncSession) -> None:
-    await session.execute(text(_BRONZE_SHOPIFY_INDEX))
-    for _, ddl, _, _ in _TABLES:
-        await session.execute(text(ddl))
-    for statement in _ORDERS_COLUMN_MIGRATIONS + _SESSIONS_COLUMN_MIGRATIONS + _FULFILLMENTS_COLUMN_MIGRATIONS:
-        await session.execute(text(statement))
-    for statement in _INDEX_STATEMENTS:
-        await session.execute(text(statement))
-    await session.commit()
-
-
 #: Per-transaction tuning for the flatten. SET LOCAL, not SET: the
 #: connection goes through Supabase's Supavisor in transaction-pooling
 #: mode, where a session-level SET can land on a backend that a later
@@ -609,26 +657,181 @@ async def ensure_shopify_tables(session: AsyncSession) -> None:
 #: in memory. Deliberately modest -- work_mem is per sort node, not per
 #: query, so a large value multiplies across a plan.
 _FLATTEN_SESSION_TUNING = (
-    "SET LOCAL statement_timeout = '900s'",
+    # 1800s, not 900s: the per-STATEMENT ceiling has to sit above the
+    # slowest single table's TRUNCATE+INSERT, while the orchestrator's
+    # per-STEP budget (3600s) covers all eight together. Setting them
+    # equal would make a single slow table consume the whole step.
+    "SET LOCAL statement_timeout = '1800s'",
     "SET LOCAL work_mem = '64MB'",
 )
 
 
-async def refresh_shopify_tables(session: AsyncSession) -> dict[str, int]:
+async def ensure_shopify_tables(session: AsyncSession) -> None:
+    # Same raised ceiling as the flatten itself. This function is
+    # normally a no-op sequence of IF NOT EXISTS statements, but on a
+    # database that does not yet have them it BUILDS them -- and
+    # ix_raw_dump_shopify_object_type_extracted over 5.2M bronze rows
+    # does not finish inside the 120s default. Without this, adding that
+    # index would make the first run after deploy fail on a statement
+    # whose entire purpose is to make later runs cheaper.
+    for tuning in _FLATTEN_SESSION_TUNING:
+        await session.execute(text(tuning))
+    await session.execute(text(_BRONZE_SHOPIFY_INDEX))
+    await _drop_invalid_freshness_index(session)
+    await session.execute(text(_BRONZE_SHOPIFY_FRESHNESS_INDEX))
+    for entry in _TABLES:
+        await session.execute(text(entry.ddl))
+    for statement in _ORDERS_COLUMN_MIGRATIONS + _SESSIONS_COLUMN_MIGRATIONS + _FULFILLMENTS_COLUMN_MIGRATIONS:
+        await session.execute(text(statement))
+    for statement in _INDEX_STATEMENTS:
+        await session.execute(text(statement))
+    await session.commit()
+
+
+#: An index whose build was interrupted is left behind INVALID: it is
+#: never used by the planner, is still maintained on every write, and --
+#: the part that matters here -- `CREATE INDEX IF NOT EXISTS` sees the
+#: name, finds it, and does nothing. The freshness probe would then fall
+#: back to the 3.8s-per-table scan silently, forever, with no error
+#: anywhere to explain why the refresh got slow again. Seen for real on
+#: 2026-09-04: a CONCURRENTLY build of this exact index was killed by the
+#: 120s default statement_timeout and left a 36MB invalid stub. So check
+#: before creating, and clear the stub if one is there.
+_INVALID_FRESHNESS_INDEX_SQL = """
+SELECT 1
+FROM pg_index i
+JOIN pg_class c ON c.oid = i.indexrelid
+WHERE c.relname = 'ix_raw_dump_shopify_object_type_extracted'
+  AND NOT i.indisvalid
+"""
+
+
+async def _drop_invalid_freshness_index(session: AsyncSession) -> None:
+    stub = (await session.execute(text(_INVALID_FRESHNESS_INDEX_SQL))).scalar_one_or_none()
+    if stub is None:
+        return
+    logger.warning("shopify_freshness_index_invalid_dropping")
+    await session.execute(text("DROP INDEX IF EXISTS ix_raw_dump_shopify_object_type_extracted"))
+
+
+#: Newest bronze row for one object_type. Answered from
+#: ix_raw_dump_shopify_object_type_extracted's tip -- see that index's
+#: note for why the leading column order matters.
+_BRONZE_WATERMARK_SQL = (
+    "SELECT MAX(extracted_at) FROM raw_dump_shopify WHERE object_type = :object_type"
+)
+
+
+async def _watermarks(session: AsyncSession, entry: _Table) -> tuple[datetime | None, datetime | None]:
+    """(newest bronze row for this object_type, newest row already in the
+    silver table).
+
+    Both sides read the same `extracted_at` value: the flatten copies the
+    bronze row's own stamp onto the silver row it produces. A bronze row
+    that wins its source_id's DISTINCT ON therefore reappears in silver
+    with an identical stamp, so after a rebuild the two maxima normally
+    match exactly and the next run skips.
+
+    ONE bronze row can hold the maximum without ever reaching silver: one
+    whose source_id is NULL, which every `latest` CTE here filters out.
+    Silver then stays permanently behind bronze and this table rebuilds
+    on EVERY run. Verified on PostgreSQL 16 (2026-09-04): inserting a
+    NULL-source_id orders row dated ahead of silver produced "bronze
+    advanced ... rebuilt" on two consecutive runs.
+
+    That is wasted work, not a wrong answer -- the failure direction is
+    "rebuild when it needn't", never "skip when it must not". It is also
+    already fixed upstream: scripts/ingest_shopify.py's _build_rows()
+    falls back to a payload hash when the API gives no natural id
+    (2026-09-04), so no NEW bronze row can be written with a NULL
+    source_id. Rows written before that fix are cleaned up by
+    scripts/dedupe_raw_dump_shopify.py, which keys them on payload_hash.
+    """
+    bronze = (
+        await session.execute(text(_BRONZE_WATERMARK_SQL), {"object_type": entry.object_type})
+    ).scalar_one_or_none()
+    silver = (
+        await session.execute(text(f"SELECT MAX(extracted_at) FROM {entry.table}"))
+    ).scalar_one_or_none()
+    return bronze, silver
+
+
+def _needs_rebuild(bronze: datetime | None, silver: datetime | None) -> tuple[bool, str]:
+    """Decide, and say why in words that end up in the log."""
+    if bronze is None:
+        # NOT a rebuild. A rebuild TRUNCATEs first, so treating "no
+        # source rows" as "rebuild" would empty a populated silver table
+        # on the strength of a bronze slice that has nothing to refill
+        # it with -- data loss caused by an absent fetch. Skipping leaves
+        # the last good snapshot in place, which is the safer of the two
+        # wrong answers if this ever fires unexpectedly.
+        return False, "no bronze rows for this object_type"
+    if silver is None:
+        return True, "silver table is empty"
+    if bronze > silver:
+        return True, f"bronze advanced to {bronze.isoformat()} (silver at {silver.isoformat()})"
+    return False, f"bronze unchanged at {bronze.isoformat()}"
+
+
+async def refresh_shopify_tables(session: AsyncSession, *, force: bool = False) -> dict[str, int]:
     """Rebuild the silver Shopify tables from the latest raw_dump_shopify
     snapshot of each entity. No cross-table dependency, so order between
-    them doesn't matter."""
+    them doesn't matter.
+
+    Only tables whose BRONZE HAS MOVED are rebuilt. The Shopify ingest
+    normally fetches products, inventory and orders (see
+    scripts/refresh_all_daily.py's DEFAULT_SHOPIFY_OBJECT_TYPES), so on a
+    typical run five of these eight tables have an unchanged source and
+    re-flattening them is pure cost: a TRUNCATE + full re-INSERT that
+    produces byte-identical rows. The rebuild is all-or-nothing per
+    table, so a skip is genuinely free -- there is no partial state to
+    reconcile.
+
+    Pass force=True to rebuild everything regardless. That is the escape
+    hatch for the case the watermarks cannot see: a change to the FLATTEN
+    ITSELF (a new column, a corrected expression) leaves bronze untouched,
+    so every table would be skipped and the new logic would never reach
+    the silver rows. After any change to the SQL in this module, run once
+    with force=True.
+    """
     await ensure_shopify_tables(session)
 
     counts: dict[str, int] = {}
-    for table, _, truncate_sql, insert_sql in _TABLES:
-        for tuning in _FLATTEN_SESSION_TUNING:
-            await session.execute(text(tuning))
-        await session.execute(text(truncate_sql))
-        await session.execute(text(insert_sql))
-        await session.commit()
-        result = await session.execute(text(f"SELECT COUNT(*) FROM {table}"))
-        counts[table] = result.scalar_one()
+    rebuilt: list[str] = []
+    skipped: list[str] = []
 
-    logger.info("shopify_tables_refreshed", **counts)
+    for entry in _TABLES:
+        if force:
+            rebuild, reason = True, "force=True"
+        else:
+            bronze, silver = await _watermarks(session, entry)
+            rebuild, reason = _needs_rebuild(bronze, silver)
+
+        if rebuild:
+            for tuning in _FLATTEN_SESSION_TUNING:
+                await session.execute(text(tuning))
+            await session.execute(text(entry.truncate_sql))
+            await session.execute(text(entry.insert_sql))
+            await session.commit()
+            rebuilt.append(entry.table)
+        else:
+            skipped.append(entry.table)
+
+        result = await session.execute(text(f"SELECT COUNT(*) FROM {entry.table}"))
+        counts[entry.table] = result.scalar_one()
+        logger.info(
+            "shopify_table_flatten",
+            table=entry.table,
+            object_type=entry.object_type,
+            action="rebuilt" if rebuild else "skipped",
+            reason=reason,
+            rows=counts[entry.table],
+        )
+
+    logger.info(
+        "shopify_tables_refreshed",
+        rebuilt=rebuilt,
+        skipped=skipped,
+        **counts,
+    )
     return counts
