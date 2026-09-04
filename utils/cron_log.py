@@ -31,6 +31,7 @@ import os
 import platform
 import socket
 import subprocess
+import threading
 import sys
 import time
 import traceback
@@ -75,41 +76,72 @@ class _Step:
         self.dur_s   = 0.0
 
     def run(self, cmd: list[str], cwd: str | None = None) -> int:
-        """Fork the subprocess and stream to console. On non-zero exit we
-        record the tail of the merged output; the orchestrator sees the
-        raised CalledProcessError so it can decide to continue vs abort."""
+        """Fork the subprocess, streaming its output line by line as it
+        arrives. On non-zero exit or timeout we record the tail of the
+        merged output; the orchestrator sees the raised error so it can
+        decide to continue vs abort.
+
+        Streaming matters more than it looks. This used to be a single
+        subprocess.run(stdout=PIPE) whose output was printed only AFTER
+        the child exited -- so a step that hung, timed out, or was
+        cancelled produced NOTHING in the log and NOTHING in the
+        cron_run_log tail. Three consecutive Shopify refreshes on
+        2026-09-04 were diagnosed blind for exactly that reason: 18
+        minutes of runtime with not one line to say what the ingest was
+        doing, and a timeout row whose `tail` was the empty string.
+
+        A reader thread pumps the pipe so output appears live even when
+        the child never exits, while the main thread owns the timeout --
+        a plain `for line in proc.stdout` would block forever on a child
+        that hangs without printing, which is the case we most need to
+        survive.
+        """
+        captured: list[str] = []
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,          # line buffered
+        )
+
+        def _pump() -> None:
+            # proc.stdout is not None because stdout=PIPE above.
+            for line in proc.stdout:          # type: ignore[union-attr]
+                print(line, end="", flush=True)
+                captured.append(line)
+
+        pump = threading.Thread(target=_pump, name=f"{self.name}-stdout", daemon=True)
+        pump.start()
+
+        def _tail() -> str:
+            return "".join(captured).strip()[-2000:]
+
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=cwd,
-                timeout=self.timeout,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except subprocess.TimeoutExpired as e:
+            returncode = proc.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            pump.join(timeout=5)
             self.status = "failed"
-            self.error  = f"timeout after {self.timeout}s"
+            # Keep whatever it managed to print. The old code threw this
+            # away, which is what made a timeout undiagnosable.
+            self.error = f"timeout after {self.timeout}s\n{_tail()}"
             print(f"[{self.name}] TIMEOUT after {self.timeout}s", flush=True)
             raise
 
-        # Always echo the child's stdout so GH Actions log shows it live-ish
-        # (subprocess.PIPE buffers, so it's not fully streaming -- fine for
-        # end-of-day cron use).
-        if proc.stdout:
-            print(proc.stdout, end="", flush=True)
-        if proc.returncode != 0:
+        pump.join(timeout=5)
+        if returncode != 0:
             self.status = "failed"
             # Tail so we don't blow the row size; last 2 KB is usually enough
             # to spot the traceback root.
-            tail = (proc.stdout or "").strip()[-2000:]
-            self.error = f"exit={proc.returncode}\n{tail}"
+            self.error = f"exit={returncode}\n{_tail()}"
         else:
             self.status = "ok"
-        return proc.returncode
+        return returncode
 
     def skip(self, reason: str) -> None:
         self.status = "skipped"
