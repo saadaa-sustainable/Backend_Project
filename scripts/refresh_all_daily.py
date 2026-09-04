@@ -90,6 +90,27 @@ PHASE_SILVER = [
 #: DOH, OOS -- read raw_dump_shopify and shopify_inventory live at query
 #: time, so those are current the moment silver_shopify finishes.) Pass
 #: --skip-cpis to stop after silver when you only care about inventory.
+#: ingest_shopify.py's 1800s budget in PHASE_INGEST is what has been
+#: killing it. With no --object-types it walks ALL ten object types over
+#: full history -- customers (984k), sessions (1.37M), inventory (1.28M),
+#: orders (347k) and the rest, ~4.8M bronze rows -- and times out every
+#: run. Measured 2026-09-04: raw_dump_shopify 'products' was 8 days
+#: stale (newest 2026-08-27) with cron_run_log showing
+#: shopify_daily = "timeout after 1800s" on every recent run.
+#:
+#: The manual path therefore does two things differently: it SCOPES the
+#: fetch to the object types the dashboard actually needs, and gives it
+#: a budget that a full walk of those can finish in.
+SHOPIFY_INGEST_TIMEOUT_S = 5400
+
+#: products  -> Units in Stock, in-stock rates, Selling Price, cost model
+#: inventory -> DoQ, Total DOH, OOS % (the daily sold/closing-stock grain)
+#: orders    -> the UTM attribution behind every CPIS metric
+#: Deliberately omits customers/sessions/fulfillments/sales/discounts/
+#: customer_analytics: ~2.9M rows that no CPIS column reads. Override
+#: with --shopify-object-types if you need them.
+DEFAULT_SHOPIFY_OBJECT_TYPES = "products,inventory,orders"
+
 SHOPIFY_INGEST_STEPS = ["shopify_daily"]
 SHOPIFY_SILVER_STEPS = ["silver_shopify"]
 SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm"]
@@ -124,6 +145,10 @@ def main() -> int:
                     help="only the Shopify chain: ingest -> silver -> CPIS "
                          "aggregates. For refreshing store data (inventory, "
                          "prices, orders) without waiting on Meta.")
+    ap.add_argument("--shopify-object-types", default=DEFAULT_SHOPIFY_OBJECT_TYPES,
+                    help="With --only-shopify, the object types to fetch "
+                         f"(default: {DEFAULT_SHOPIFY_OBJECT_TYPES}). Pass a "
+                         "comma-separated list, or 'all' for every type.")
     ap.add_argument("--skip-cpis", action="store_true",
                     help="with --only-shopify, stop after the silver rebuild "
                          "and skip the CPIS aggregates.")
@@ -142,7 +167,16 @@ def main() -> int:
         labels = SHOPIFY_INGEST_STEPS + SHOPIFY_SILVER_STEPS
         if not args.skip_cpis:
             labels += SHOPIFY_CPIS_STEPS
-        steps = _steps_by_label(labels)
+        # Scope and re-time the ingest step. The label lookup keeps the
+        # script path canonical; only the args and timeout differ here.
+        scoped = ([] if args.shopify_object_types.strip().lower() == "all"
+                  else ["--object-types", args.shopify_object_types])
+        steps = [
+            (label,
+             cmd + scoped if label in SHOPIFY_INGEST_STEPS else cmd,
+             SHOPIFY_INGEST_TIMEOUT_S if label in SHOPIFY_INGEST_STEPS else timeout)
+            for label, cmd, timeout in _steps_by_label(labels)
+        ]
     else:
         if not (args.skip_meta or args.only_silver):
             steps += PHASE_INGEST
