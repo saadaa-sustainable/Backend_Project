@@ -31,7 +31,10 @@ on:
         default: "false"
 
   schedule:
-    - cron: "30 1 * * *"   # 01:30 UTC = 07:00 IST
+    # 01:30 UTC = 07:00 IST, daily. Cron in GitHub Actions is always UTC,
+    # so this is the 7am-IST run -- do not "correct" it to 30 7 * * *,
+    # which would fire at 13:00 IST.
+    - cron: "30 1 * * *"
 
 concurrency:
   # Never let two refreshes race against the same Supabase tables.
@@ -41,9 +44,18 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Hard cap: refresh should take ~45 min. 90 min is a safety net
-    # for Meta throttle days -- past that, kill it and try again.
-    timeout-minutes: 90
+    # Raised from 90 (2026-09-04). The Shopify ingest step alone may now
+    # use up to 5400s (90 min) -- it was capped at 1800s before, which is
+    # precisely why it timed out on every run and left Shopify data 8
+    # days stale. A 90-minute JOB cap would kill the run before that one
+    # step could even reach its own limit, so the ceiling has to sit
+    # above the sum of the steps that actually run long.
+    #
+    # This is a safety net, not an expectation: a healthy run is still
+    # ~45-60 min. GitHub's own hard ceiling is 6h; 240 leaves room for a
+    # Meta-throttle day without letting a wedged run burn the whole
+    # allowance.
+    timeout-minutes: 240
 
     steps:
       - name: Checkout
