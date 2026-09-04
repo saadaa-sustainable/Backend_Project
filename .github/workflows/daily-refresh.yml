@@ -6,14 +6,31 @@
 # Claude in a future session) to inspect recent runs.
 #
 # ---------------------------------------------------------------------
-# Schedule (both dashboards use Meta -- 4h gap between projects):
+# Schedule (both dashboards use Meta -- gap between projects):
 #   CTD refresh   19:30 UTC = 01:00 IST  (~90-150 min)
-#   BP  refresh   23:30 UTC = 05:00 IST  (~35-60 min)   <-- this file
+#   BP  refresh   01:30 UTC = 07:00 IST  (~80-140 min)   <-- this file
 #
 # Manual trigger: Actions tab -> "Backend_Project daily refresh" -> Run.
-# The schedule block below is COMMENTED OUT for the first push -- enable
-# it after you've run the workflow manually once and confirmed the run
-# writes a row to cron_run_log.
+# The schedule below IS live (it was enabled once cron_run_log showed
+# real rows) -- both notes above previously said 05:00 IST and "commented
+# out", neither of which had been true since the 7am schedule landed.
+#
+# There is nothing Shopify-specific to add here. This file's only job is
+# to invoke scripts/refresh_all_daily.py; the step list lives in that
+# script's PHASE_INGEST/PHASE_SILVER, so every fix to the Shopify chain
+# -- the incremental scoped ingest (shopify_daily), the selective silver
+# flatten and the attribution statement_timeout (silver_shopify) -- is
+# picked up here automatically, with no edit to this workflow.
+#
+# What this run WILL refresh from Shopify: products, inventory, orders
+# (scripts/refresh_all_daily.py's DEFAULT_SHOPIFY_OBJECT_TYPES), and the
+# silver tables built from them -- shopify_orders and shopify_inventory.
+# What it will NOT: shopify_sessions / _sales / _discounts /
+# _fulfillments / _customer_analytics. Their BRONZE is never fetched on
+# this path, so the selective flatten correctly skips them. Widening it
+# means passing --shopify-object-types all, which re-walks ~2.9M rows of
+# ShopifyQL tables that have no incremental mode -- a deliberate
+# trade-off, not an oversight.
 # ---------------------------------------------------------------------
 
 name: Backend_Project daily refresh
@@ -142,6 +159,46 @@ jobs:
             FLAGS="$FLAGS --only-silver"
           fi
           python scripts/refresh_all_daily.py $FLAGS
+
+      - name: Report Shopify freshness
+        # The single quickest way to tell a 7am run that actually landed
+        # data from one that ran green and fetched nothing. Same check
+        # the manual Shopify workflow prints; kept identical on purpose.
+        #
+        # One indexed MAX per type, not a GROUP BY over the whole table:
+        # PostgreSQL has no index skip-scan, so the grouped form
+        # seq-scans all ~5.2M bronze rows (measured live 2026-09-04:
+        # 43.2s, versus 0.1ms off ix_raw_dump_shopify_object_type_
+        # extracted's tip).
+        if: always()
+        env:
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          dsn = (os.environ.get("DATABASE_URL_SYNC") or "").replace(
+              "postgresql+psycopg2://", "postgresql://")
+          if not dsn:
+              print("DATABASE_URL_SYNC not set -- skipping freshness check")
+              sys.exit(0)
+          try:
+              import psycopg2
+              with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+                  print("bronze (raw_dump_shopify):")
+                  for object_type in ("products", "inventory", "orders"):
+                      cur.execute(
+                          "SELECT MAX(extracted_at) FROM raw_dump_shopify"
+                          " WHERE object_type = %s", (object_type,))
+                      print(f"  {object_type:10s} {cur.fetchone()[0] or '(no rows)'}")
+                  print("silver (rebuilt only when its bronze moved):")
+                  for table in ("shopify_orders", "shopify_inventory"):
+                      cur.execute(f"SELECT MAX(extracted_at) FROM {table}")
+                      print(f"  {table:20s} {cur.fetchone()[0] or '(empty)'}")
+          except Exception as exc:
+              # Never fail the job on the report itself -- the refresh
+              # result is what matters.
+              print(f"Freshness check skipped: {type(exc).__name__}: {exc}")
+          PY
 
       - name: Upload full log
         # Keep the raw GH Actions log accessible for 14 days even after
