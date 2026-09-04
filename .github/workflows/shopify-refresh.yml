@@ -38,6 +38,16 @@ on:
         type: boolean
         required: false
         default: false
+      verify_sku:
+        description: "After refreshing, reconcile this master SKU's unit count (e.g. SMCP). Blank to skip."
+        type: string
+        required: false
+        default: ""
+      verify_expected:
+        description: "Your own expected unit total for that SKU, to compare against. Blank to skip."
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   # Deliberately the SAME group as daily-refresh.yml. Both write the same
@@ -130,6 +140,21 @@ jobs:
               # result is what matters.
               print(f"Freshness check skipped: {type(exc).__name__}: {exc}")
           PY
+
+      - name: Verify SKU unit count
+        # Reconciles Shopify ground truth against what the dashboard's
+        # Units in Stock column computes, itemising any gap by cause.
+        # Runs AFTER the refresh so it audits the data just pulled.
+        if: inputs.verify_sku != ''
+        env:
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:      ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS="--sku ${{ inputs.verify_sku }}"
+          if [ -n "${{ inputs.verify_expected }}" ]; then
+            ARGS="$ARGS --expected ${{ inputs.verify_expected }}"
+          fi
+          python scripts/verify_sku_inventory.py $ARGS
 
       - name: Upload full log
         if: always()
