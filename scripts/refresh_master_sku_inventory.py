@@ -17,6 +17,18 @@ metrics up per master SKU using MapleMonk's own aggregation semantics:
 
 These rules mirror CTD's refresh_product_doq.py.
 
+NOTE (2026-09-04): the CPIS section no longer reads this table's
+in-stock breadth columns (variant_in_stock_*, size_*, stock_by_size).
+Those three CPIS columns -- Units in Stock, Var In-Stock %, Size
+In-Stock % -- now come from Shopify
+(raw_dump_shopify products.variants[].inventoryQuantity) so they share
+one grain with each other and with the product-context columns. The
+columns are still computed here on purpose: they cost nothing at ~105
+SKUs and keep the MapleMonk figure available to cross-check the Shopify
+one when the two disagree. CPIS still depends on this table for the
+planning signals only MapleMonk has -- DoQ, OOS history, lead time,
+in-process stock, cost/price range.
+
 Usage:
     ./.venv/Scripts/python.exe scripts/refresh_master_sku_inventory.py
 """

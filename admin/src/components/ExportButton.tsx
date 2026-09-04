@@ -15,7 +15,7 @@
  *  - CSV headers are Object.keys(rows[0]) unless `columns` is passed
  *    to force order / rename.
  *  - Objects/arrays get JSON.stringify'd so nested jsonb columns
- *    (mm_stock_by_size, thumbnails, etc.) still land in the file.
+ *    (stock_by_size, thumbnails, etc.) still land in the file.
  *  - Values with commas / quotes / newlines are quoted per RFC 4180.
  *  - null / undefined -> empty cell.
  *  - Filename: `{filename}_{yyyy-mm-dd}[_{window}].csv`.

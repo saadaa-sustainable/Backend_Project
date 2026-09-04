@@ -1199,8 +1199,23 @@ export interface CpisUtmRow {
   // comparison. Nulls when no name-matched ads had any spend.
   spend_trend_current: number[] | null;
   spend_trend_prev_total: number | null;
-  // Inventory rollup on master_sku (latest per variant SKU)
+  // Inventory -- ONE Shopify source (2026-09-04). units_in_stock and
+  // both in-stock rates roll up from raw_dump_shopify
+  // products.variants[].inventoryQuantity on master_sku, so they
+  // reconcile with each other and with variant_count above. Rates are
+  // 0-100 percentages, already rounded to 1dp server-side.
   units_in_stock: number | null;
+  variant_in_stock_ct: number | null;
+  variant_in_stock_rate: number | null;
+  // size_* counts DISTINCT sizes (the _<size> suffix on the variant
+  // SKU) still available in ANY color -- catches size-run gaps the
+  // variant rate hides. null when the SKU has no size-suffixed variants.
+  size_total_ct: number | null;
+  size_in_stock_ct: number | null;
+  size_in_stock_rate: number | null;
+  // Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ...}.
+  // Not in the main table; kept for CSV export and drilldown.
+  stock_by_size: Record<string, number | null> | null;
   // MapleMonk inventory-planning (variant-latest, aggregated per
   // master_sku from bq_inventory_daily's 90-day pull)
   mm_as_of_date: string | null;
@@ -1229,17 +1244,6 @@ export interface CpisUtmRow {
   mm_oos_days_90: number | null;
   mm_lead_time: number | null;
   mm_buffer_days: number | null;
-  // In-stock breadth from MapleMonk variant snapshot (2026-09-02).
-  // Both rates are 0-100 percentages.
-  mm_variant_in_stock_ct: number | null;
-  mm_variant_in_stock_rate: number | null;
-  mm_size_total_ct: number | null;
-  mm_size_in_stock_ct: number | null;
-  mm_size_in_stock_rate: number | null;
-  // Per-size stock breakdown, e.g. {"XS":12, "S":65, "M":29, ...}.
-  // Frontend renders as one column per canonical size. null when no
-  // size-tagged variants exist.
-  mm_stock_by_size: Record<string, number> | null;
   // Business-model columns (2026-09-03, matches ops sheet formulas):
   //   COGS = SP*35%, Gross Margin % = 65%, LOG&RTN = SP*10%, Contribution = SP*55%
   selling_price: number | null;
