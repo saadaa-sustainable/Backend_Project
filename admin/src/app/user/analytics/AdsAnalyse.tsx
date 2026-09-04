@@ -36,6 +36,7 @@ import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/li
 import { KwikTile } from "./KwikTile";
 import { AdsAnalyseCharts } from "./AdsAnalyseCharts";
 import { TableSkeleton } from "./TableSkeleton";
+import { ExportButton } from "@/components/ExportButton";
 
 // ─────────────────────────────────────────────────────────────────────
 // Category definitions — mirrors CTD dashboard.js:5874-5896 (aeCategorise)
@@ -1113,6 +1114,12 @@ export function AdsAnalyse() {
             </div>
           )}
         </div>
+        <ExportButton
+          rows={rows as unknown as Record<string, unknown>[]}
+          filename="ads_analyse"
+          window={datePreset}
+          disabled={loading || !rows.length}
+        />
       </div>
 
       {/* ═══════════════════════════════════════════════════════════

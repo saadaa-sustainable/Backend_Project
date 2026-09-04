@@ -25,6 +25,7 @@ import {
   InstagramSort,
   fetchInstagram,
 } from "@/lib/api";
+import { ExportButton } from "@/components/ExportButton";
 
 const PAGE_SIZE = 60;
 
@@ -296,6 +297,11 @@ export function Instagram() {
         <span className="ml-auto text-xs text-text-secondary">
           {total.toLocaleString()} posts match
         </span>
+        <ExportButton
+          rows={rows as unknown as Record<string, unknown>[]}
+          filename="instagram"
+          disabled={loading || !rows.length}
+        />
       </div>
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">{error}</div>}

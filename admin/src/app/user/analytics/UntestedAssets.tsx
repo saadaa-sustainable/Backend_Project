@@ -32,6 +32,7 @@ import {
   UntestedMedia,
   fetchUntestedAssets,
 } from "@/lib/api";
+import { ExportButton } from "@/components/ExportButton";
 
 type SkuFilter = "all" | "matched" | "unmatched";
 
@@ -232,6 +233,11 @@ export function UntestedAssets() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search id / title / nomenclature / SKU…"
           className="ml-auto w-64 rounded border border-border-primary bg-surface-primary px-2 py-1 text-xs text-text-primary placeholder:text-text-tertiary"
+        />
+        <ExportButton
+          rows={filteredRows as unknown as Record<string, unknown>[]}
+          filename={`untested_${media}`}
+          disabled={loading || !filteredRows.length}
         />
       </div>
 
