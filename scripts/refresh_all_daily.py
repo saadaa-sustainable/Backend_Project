@@ -103,9 +103,18 @@ PHASE_SILVER = [
 #: a budget that a full walk of those can finish in.
 SHOPIFY_INGEST_TIMEOUT_S = 5400
 
-#: products  -> Units in Stock, in-stock rates, Selling Price, cost model
-#: inventory -> DoQ, Total DOH, OOS % (the daily sold/closing-stock grain)
-#: orders    -> the UTM attribution behind every CPIS metric
+#: ORDER MATTERS and is cheapest-first on purpose. ingest_shopify.py
+#: runs these sequentially in the order given (fixed 2026-09-04 -- it
+#: used to group ShopifyQL tables ahead of everything else, which ran
+#: the 1.28M-row `inventory` before the 635-row `products` regardless of
+#: what you asked for). Writes are per page/chunk, so a run that is
+#: later killed has still committed whatever finished:
+#:
+#:   products  ~635 rows, seconds   -> Units in Stock, in-stock rates,
+#:                                     Selling Price and the cost model
+#:   inventory ShopifyQL, 30 days   -> DoQ, Total DOH, OOS %
+#:   orders    full history, ~347k  -> the UTM attribution behind CPIS
+#:
 #: Deliberately omits customers/sessions/fulfillments/sales/discounts/
 #: customer_analytics: ~2.9M rows that no CPIS column reads. Override
 #: with --shopify-object-types if you need them.
