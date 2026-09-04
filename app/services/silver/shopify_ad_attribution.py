@@ -429,6 +429,28 @@ GROUP BY s.day, s.landing_page_path, s.landing_page_type, s.referrer_source, c.c
 """
 
 
+#: Identical per-transaction tuning to app/services/silver/
+#: shopify_flatten.py's _FLATTEN_SESSION_TUNING, and needed for the same
+#: reason -- this module runs as the SECOND half of the same
+#: silver_shopify step and never got it.
+#:
+#: What that cost, on run #9 (2026-09-04): the flatten finished, then
+#: _LANDING_PAGE_INSERT died with "canceling statement due to statement
+#: timeout" on the database's 120s default, failing the whole step after
+#: 2019s of successful work. That INSERT groups ~1.37M shopify_sessions
+#: rows on six keys into ~493k output rows -- 120s was never going to be
+#: enough, and the 3.5MB default work_mem sends that aggregate to an
+#: on-disk sort as well.
+#:
+#: SET LOCAL, not SET: Supabase's Supavisor pools in transaction mode, so
+#: a session-level SET can land on a backend a later statement never
+#: sees. Applied inside refresh_attribution_tables' own transactions.
+_ATTRIBUTION_SESSION_TUNING = (
+    "SET LOCAL statement_timeout = '1800s'",
+    "SET LOCAL work_mem = '64MB'",
+)
+
+
 async def ensure_attribution_tables(session: AsyncSession) -> None:
     await session.execute(text(_ATTRIBUTION_DDL))
     await session.execute(text(_LANDING_PAGE_DDL))
@@ -447,8 +469,16 @@ async def refresh_attribution_tables(session: AsyncSession) -> dict[str, int]:
     shopify_landing_page_analysis (plain SQL rollup, unchanged)."""
     await ensure_attribution_tables(session)
 
+    for statement in _ATTRIBUTION_SESSION_TUNING:
+        await session.execute(text(statement))
     attribution_count = await _refresh_order_attribution(session)
 
+    # TRUNCATE and INSERT stay in ONE transaction, so the run-#9 timeout
+    # rolled both back and left the previous 493k rows intact rather than
+    # an empty table. Keep them together; the tuning below just stops the
+    # INSERT being cancelled in the first place.
+    for statement in _ATTRIBUTION_SESSION_TUNING:
+        await session.execute(text(statement))
     await session.execute(text("TRUNCATE shopify_landing_page_analysis"))
     await session.execute(text(_LANDING_PAGE_INSERT))
     await session.commit()
