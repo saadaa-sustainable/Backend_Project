@@ -71,7 +71,12 @@ jobs:
     # (~4.8M bronze rows). This path scopes the fetch and gives the
     # ingest 5400s, so the job needs headroom above that plus silver
     # and the two CPIS rebuilds.
-    timeout-minutes: 150
+    # Must exceed the sum of the step budgets it can actually spend:
+    # ingest 5400s + silver 3600s + cpis_daily 900s + cpis_utm 1200s
+    # = 11100s = 185 min. A 150-minute cap would kill the job before its
+    # own steps could finish -- the same class of mistake as the 900s
+    # step budget sitting under a 1800s statement timeout.
+    timeout-minutes: 240
 
     steps:
       - name: Checkout

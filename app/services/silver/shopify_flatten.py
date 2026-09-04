@@ -609,7 +609,11 @@ async def ensure_shopify_tables(session: AsyncSession) -> None:
 #: in memory. Deliberately modest -- work_mem is per sort node, not per
 #: query, so a large value multiplies across a plan.
 _FLATTEN_SESSION_TUNING = (
-    "SET LOCAL statement_timeout = '900s'",
+    # 1800s, not 900s: the per-STATEMENT ceiling has to sit above the
+    # slowest single table's TRUNCATE+INSERT, while the orchestrator's
+    # per-STEP budget (3600s) covers all eight together. Setting them
+    # equal would make a single slow table consume the whole step.
+    "SET LOCAL statement_timeout = '1800s'",
     "SET LOCAL work_mem = '64MB'",
 )
 

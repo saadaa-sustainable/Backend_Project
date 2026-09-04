@@ -114,7 +114,16 @@ PHASE_INGEST = [
 PHASE_SILVER = [
     ("silver_raw_dump_meta",  ["scripts/refresh_raw_dump_meta_daily.py"],   1200),
     ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],   900),
-    ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],         900),
+    # 900 -> 3600 (2026-09-04). refresh_shopify_silver.py TRUNCATEs and
+    # re-INSERTs all EIGHT silver tables from ~4.9M bronze rows every
+    # run -- sessions 1.37M, inventory 1.38M, customers 984k, orders
+    # 347k -- each needing a DISTINCT ON sort. Run #8 raised the
+    # Postgres statement_timeout (the 120s DB ceiling that killed it at
+    # 183s) only to hit THIS budget instead: "timeout after 900s" with
+    # the log stopped at "[1/2] refresh_shopify_tables". The work is
+    # genuinely bigger than 15 minutes; capping it lower just moves the
+    # failure.
+    ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],        3600),
     ("silver_inventory",      ["scripts/refresh_master_sku_inventory.py"],   600),
     ("silver_returns",        ["scripts/refresh_master_sku_returns.py"],     900),
     ("silver_cpis_daily",     ["scripts/refresh_cpis_by_sku_daily.py"],      900),
