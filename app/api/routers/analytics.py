@@ -2341,6 +2341,18 @@ class CpisUtmRow(BaseModel):
     # Window is a fixed trailing 30 days anchored on the newest day
     # present in shopify_inventory, independent of the picked CPIS
     # window, so it stays comparable with the OOS 30d column.
+    # DoQ (Daily Order Quantity): mean units sold per day over the
+    # trailing 30 days, from Shopify. This is a RATE (units/day), which
+    # is what makes total_doh = units_in_stock / daily_order_qty come out
+    # in days. It replaces MapleMonk's doq_30 (which was itself already
+    # a days figure, so the two are not interchangeable).
+    daily_order_qty: float | None
+    units_sold_30d: int | None
+    # When the Shopify products snapshot behind units_in_stock and the
+    # price ladder was last pulled -- these columns are only ever as
+    # fresh as the last products ingest, so the UI shows this rather than
+    # letting a stale ingest read as a stock movement.
+    inventory_as_of: datetime | None
     ip_doq: float | None            # in-process days of cover
     total_doh: float | None         # days on hand from Shopify stock
     oos_pct: float | None           # % of variant-days out of stock, 30d
@@ -2746,21 +2758,32 @@ async def get_cpis_utm(
       -- and with the product-context columns (variant_count etc.).
       -- See products_ctx for the rollup; there is no separate inventory
       -- CTE any more.
-      -- Product context from raw_dump_shopify: matches products whose
-      -- tags contain a token matching ^S[DMU][A-Z]{{2,6}}$ (the same
-      -- Apps Script regex the user's Product-Listing sheet uses), pulls
-      -- productType / variant SKUs / variant prices / inventoryQuantity,
-      -- excludes "price test" and combo/set-style productTypes just like
-      -- the Apps Script exclusion list. Rolled up per master_sku (the
-      -- SKU-tag), aggregating across every product in that family.
+      -- Product context from raw_dump_shopify: productType / variant
+      -- SKUs / prices / inventoryQuantity, excluding "price test" and
+      -- combo/set-style productTypes per the Apps Script exclusion list.
+      --
+      -- 2026-09-04 -- master_sku is NO LONGER the product's SKU-shaped
+      -- tag. That was an undercount bug, not a style preference. The tag
+      -- regex ^S[DMU][A-Z]{{2,6}}$ accepts 2 to 6 trailing letters, so a
+      -- COLOUR-level code (SMCPBL) matched exactly as happily as the
+      -- master code (SMCP). Every other master_sku in CPIS is PARSED
+      -- from the variant SKU and validated against ^(SD|SM|SU)[A-Z]{{1,4}}$
+      -- (cpis.py, cpis_utm.py, cpis_by_sku_daily). So a product tagged
+      -- at colour level filed its stock under a key -- "SMCPBL" -- that
+      -- no CPIS row ever joins to, and those units silently vanished
+      -- from the SMCP row. Same for a product tagged with some other
+      -- SKU-shaped string, or carrying several SKU tags (the subquery
+      -- took an arbitrary one via LIMIT 1 with no ORDER BY), or not
+      -- tagged at all.
+      --
+      -- Parsing from the variant SKU instead makes the stock rollup use
+      -- the same key as every other CPIS metric, and makes it immune to
+      -- how any given product happens to be tagged. The tag is no longer
+      -- consulted; a product qualifies if its variant SKUs parse to a
+      -- valid master SKU. The productType exclusions still apply.
       product_sku_map AS (
         SELECT
           r.raw_payload->>'productType' AS product_type,
-          (
-            SELECT t FROM jsonb_array_elements_text(r.raw_payload->'tags') t
-            WHERE t ~ '^S[DMU][A-Z]{{2,6}}$'
-            LIMIT 1
-          ) AS master_sku,
           r.raw_payload AS p
         FROM raw_dump_shopify r
         WHERE r.object_type = 'products'
@@ -2774,7 +2797,18 @@ async def get_cpis_utm(
       ),
       product_variants AS (
         SELECT
-          psm.master_sku,
+          -- Master SKU parsed from the variant SKU: strip the trailing
+          -- _<size>, then strip the 2-char colour code. Byte-for-byte
+          -- the same derivation cpis_utm.py uses on order line items,
+          -- so a SKU rolls up identically on both sides of the join.
+          -- Validated below against ^(SD|SM|SU)[A-Z]{{1,4}}$.
+          SUBSTRING(
+            regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')
+            FROM 1
+            FOR GREATEST(1,
+              length(regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')) - 2
+            )
+          )                                                     AS master_sku,
           psm.product_type,
           edge->'node'->>'sku'                                  AS variant_sku,
           (edge->'node'->>'price')::numeric                     AS price,
@@ -2795,8 +2829,17 @@ async def get_cpis_utm(
           ) AS size
         FROM product_sku_map psm,
              LATERAL jsonb_array_elements(psm.p->'variants'->'edges') edge
-        WHERE psm.master_sku IS NOT NULL
-          AND edge->'node'->>'sku' IS NOT NULL
+        WHERE edge->'node'->>'sku' IS NOT NULL
+          -- Same validation as everywhere else in CPIS. Applied to the
+          -- PARSED value, so a colour-level or missing tag can no longer
+          -- misfile a variant's stock.
+          AND SUBSTRING(
+                regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')
+                FROM 1
+                FOR GREATEST(1,
+                  length(regexp_replace(edge->'node'->>'sku', '_[A-Za-z0-9]+$', '')) - 2
+                )
+              ) ~ '^(SD|SM|SU)[A-Z]{{1,4}}$'
       ),
       products_ctx AS (
         SELECT
@@ -2896,6 +2939,15 @@ async def get_cpis_utm(
       -- whenever it does.
       inv_window AS (
         SELECT MAX(day) AS anchor_day FROM shopify_inventory
+      ),
+      -- When the Shopify products snapshot behind Units in Stock and the
+      -- price ladder was last pulled. Surfaced on every row so a stale
+      -- ingest is VISIBLE in the UI instead of being mistaken for a
+      -- stock movement -- these columns are only ever as fresh as the
+      -- last products ingest (daily cron, 05:00 IST).
+      products_as_of AS (
+        SELECT MAX(extracted_at) AS inventory_as_of
+        FROM raw_dump_shopify WHERE object_type = 'products'
       ),
       -- Joined to variant_stock rather than re-parsing SKUs, which ties
       -- velocity and OOS to EXACTLY the variant universe behind Units in
@@ -3056,6 +3108,14 @@ async def get_cpis_utm(
              65.0::numeric                        AS gross_margin_pct,
              COALESCE(pc.price_max, pc.price_min) * 0.55 AS contribution_margin,
              COALESCE(pc.price_max, pc.price_min) * 0.10 AS logistics_return,
+             -- DoQ (Daily Order Quantity) -- mean units sold per day
+             -- over the trailing 30 days, from Shopify's own daily
+             -- inventory grain. Replaces MapleMonk's doq_30 as the
+             -- planning rate. Total DOH below is exactly
+             -- inventory / DoQ.
+             vc.avg_daily_units                              AS daily_order_qty,
+             vc.units_sold_30d::integer                      AS units_sold_30d,
+             pa.inventory_as_of                              AS inventory_as_of,
              -- In-Process DOQ: days the incoming pipeline covers at the
              -- trailing 30-day sales rate. The numerator stays
              -- MapleMonk's -- Shopify has no concept of stock on a
@@ -3159,6 +3219,7 @@ async def get_cpis_utm(
       LEFT JOIN stock_ctx sc  USING (master_sku)
       LEFT JOIN stock_by_size_ctx sbs USING (master_sku)
       LEFT JOIN velocity_ctx vc USING (master_sku)
+      CROSS JOIN products_as_of pa
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
       LEFT JOIN spend_trend st USING (master_sku)
       CROSS JOIN window_days wd

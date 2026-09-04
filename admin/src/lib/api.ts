@@ -1251,6 +1251,17 @@ export interface CpisUtmRow {
   gross_margin_pct: number | null;
   contribution_margin: number | null;
   logistics_return: number | null;
+  // DoQ (Daily Order Quantity): mean units sold per day over the
+  // trailing 30 days, from Shopify. A RATE (units/day), not days --
+  // which is what makes total_doh = units_in_stock / daily_order_qty
+  // come out in days. Replaces the MapleMonk mm_doq_30 column, which
+  // was itself already a days figure; the two are not interchangeable.
+  daily_order_qty: number | null;
+  units_sold_30d: number | null;
+  // ISO timestamp of the Shopify products snapshot behind
+  // units_in_stock and the price ladder. Shown on the KPI tile so a
+  // stale ingest doesn't read as a stock movement.
+  inventory_as_of: string | null;
   ip_doq: number | null;
   total_doh: number | null;
   oos_pct: number | null;
