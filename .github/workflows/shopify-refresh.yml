@@ -102,9 +102,36 @@ jobs:
           SHOP_NAME:             ${{ secrets.SHOP_NAME }}
           SHOPIFY_API_VERSION:   ${{ secrets.SHOPIFY_API_VERSION }}
 
-          # No Meta or BigQuery credentials here on purpose -- this path
-          # never calls them, and leaving them out means a throttled Meta
-          # token or an expired GCP key can't fail a Shopify refresh.
+          # --- Meta token: required to CONSTRUCT settings, not to call
+          # Meta. refresh_shopify_silver.py imports app.database.session,
+          # which builds Settings(), which validates every settings group
+          # including MetaAPISettings -- whose access_token is
+          # Field(..., alias="META_ACCESS_TOKEN"), i.e. required with no
+          # default. Omitting it on the theory that "this path never
+          # calls Meta" made silver_shopify die in 0.6s with
+          # `ValidationError: META_ACCESS_TOKEN Field required`, which is
+          # exactly what happened on run #6 (2026-09-04): the Shopify
+          # ingest succeeded and the silver rebuild then failed on a
+          # credential it never uses. Nothing here calls the Meta API, so
+          # a throttled or expired token still cannot fail this refresh
+          # -- the value only has to be present. ---
+          # There are TWO gates here, not one: the token above, and
+          # MetaAPISettings.accounts, whose default_factory raises
+          # "No Meta ad accounts configured" unless at least
+          # META_ACCOUNT_1_ID is present. The run-6 log only showed the
+          # token error because validation stops at the first failure --
+          # supplying the token alone would just have moved the error,
+          # not fixed it. Verified locally: token alone still raises.
+          META_ACCESS_TOKEN:     ${{ secrets.META_ACCESS_TOKEN }}
+          META_ACCOUNT_1_ID:     ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME:   ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID:     ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME:   ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID:     ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME:   ${{ secrets.META_ACCOUNT_3_NAME }}
+
+          # Still no BigQuery credentials: nothing on this path reads
+          # them, and they are not required to construct Settings.
         run: |
           FLAGS="--only-shopify"
           if [ "${{ inputs.skip_cpis }}" = "true" ]; then
