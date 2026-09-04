@@ -2246,6 +2246,11 @@ class CpisUtmRow(BaseModel):
     #                       variant rate hides. NULL when the family has
     #                       no _<size>-suffixed variants at all.
     units_in_stock: int | None
+    # Denominator for variant_in_stock_rate. NOT the same as
+    # variant_count above: that one counts non-price-test listings only
+    # (it describes the catalogue entry), while this counts every variant
+    # SKU holding stock (it describes the inventory).
+    variant_total_ct: int | None
     variant_in_stock_ct: int | None
     variant_in_stock_rate: float | None
     size_total_ct: int | None
@@ -2784,10 +2789,28 @@ async def get_cpis_utm(
       product_sku_map AS (
         SELECT
           r.raw_payload->>'productType' AS product_type,
+          -- 2026-09-04: a "price test" listing is a DUPLICATE of the same
+          -- product at a different price -- it carries the SAME variant
+          -- SKUs, pointing at the SAME physical stock. It is therefore
+          -- flagged, not excluded: excluding it threw away real
+          -- inventory. Measured on live data, SMCP had 8,641 units under
+          -- "Men Cotton Pant Price Test" (77 variants) against 1,152
+          -- under "Men Cotton Pant" (21 variants, all of them a SUBSET
+          -- of the 77) -- so the dashboard showed 1,152 for a SKU
+          -- holding 8,641. variant_stock below dedupes per variant SKU
+          -- with MAX, so counting both listings cannot double-count the
+          -- overlap.
+          --
+          -- The other exclusions stay hard filters: combo / set /
+          -- "buy any 3" listings are BUNDLES of different products, so
+          -- their inventory count is a bundle count, not this SKU's
+          -- units -- including those would genuinely inflate. Same for
+          -- the bedsheet/comforter/co-ord categories.
+          lower(coalesce(r.raw_payload->>'productType','')) LIKE '%price test%'
+            AS is_price_test,
           r.raw_payload AS p
         FROM raw_dump_shopify r
         WHERE r.object_type = 'products'
-          AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%price test%'
           AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%combo%'
           AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%bedsheet%'
           AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%co-ord%'
@@ -2810,6 +2833,7 @@ async def get_cpis_utm(
             )
           )                                                     AS master_sku,
           psm.product_type,
+          psm.is_price_test,
           edge->'node'->>'sku'                                  AS variant_sku,
           (edge->'node'->>'price')::numeric                     AS price,
           coalesce((edge->'node'->>'inventoryQuantity')::int, 0) AS inv,
@@ -2855,6 +2879,12 @@ async def get_cpis_utm(
           MIN(price)                                                AS price_min,
           MAX(price)                                                AS price_max
         FROM product_variants
+        -- Price-test listings excluded HERE only. They exist to carry a
+        -- different price, so letting them into the ladder would move
+        -- Selling Price -- and with it COGS, Contribution and LOG&RTN --
+        -- onto an experimental price. Stock below deliberately does
+        -- include them; these two answer different questions.
+        WHERE NOT is_price_test
         GROUP BY master_sku
       ),
       -- One row per (master_sku, variant_sku). A variant SKU can appear
@@ -2885,6 +2915,11 @@ async def get_cpis_utm(
           SUM(units)                                        AS units_in_stock,
           -- Var In-Stock %: share of this family's variants a customer
           -- can actually buy right now.
+          -- Stock-side variant total. products_ctx.variant_count counts
+          -- only non-price-test listings, so it is a DIFFERENT
+          -- denominator -- pairing that one with this numerator would
+          -- render nonsense like "63 of 21 variants in stock".
+          COUNT(*)                                          AS variant_total_ct,
           COUNT(*) FILTER (WHERE units > 0)                 AS variant_in_stock_ct,
           CASE WHEN COUNT(*) > 0
                THEN ROUND(100.0 * (COUNT(*) FILTER (WHERE units > 0))::numeric
@@ -3050,6 +3085,7 @@ async def get_cpis_utm(
              st.spend_trend_prev_total    AS spend_trend_prev_total,
              -- Inventory (Shopify products.variants.inventoryQuantity)
              sc.units_in_stock::integer,
+             sc.variant_total_ct::integer,
              sc.variant_in_stock_ct::integer,
              sc.variant_in_stock_rate,
              sc.size_total_ct::integer,

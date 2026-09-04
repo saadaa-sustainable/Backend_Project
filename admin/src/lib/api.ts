@@ -1205,6 +1205,10 @@ export interface CpisUtmRow {
   // reconcile with each other and with variant_count above. Rates are
   // 0-100 percentages, already rounded to 1dp server-side.
   units_in_stock: number | null;
+  // Denominator for variant_in_stock_rate. NOT variant_count above:
+  // that counts non-price-test listings (the catalogue entry), this
+  // counts every variant SKU holding stock (the inventory).
+  variant_total_ct: number | null;
   variant_in_stock_ct: number | null;
   variant_in_stock_rate: number | null;
   // size_* counts DISTINCT sizes (the _<size> suffix on the variant

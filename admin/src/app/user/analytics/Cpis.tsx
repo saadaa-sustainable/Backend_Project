@@ -1057,8 +1057,8 @@ function CpisView() {
                     and the two rates off MapleMonk/BigQuery, so they
                     never quite tied out; now they share a grain.
                     2026-09-03: dropped MM Stock, Sales 45d, Lead Time. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Live Shopify inventory summed across every variant of this master SKU. Oversold variants (negative quantity) count as 0. Excludes price-test and combo/set products.">Units in Stock</th>
-                <th className="px-3 py-3 text-right" title="% of the SKU's variants a customer can actually buy right now — Shopify variants with inventoryQuantity > 0 / total variants">Var In-Stock %</th>
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Live Shopify inventory summed across every variant SKU of this master SKU, deduplicated so a SKU listed twice is counted once. Includes price-test listings (same SKUs, same physical stock); excludes combo/set bundles, whose counts are bundle counts rather than this SKU's units. Oversold variants (negative quantity) count as 0.">Units in Stock</th>
+                <th className="px-3 py-3 text-right" title="% of this SKU's variants holding stock right now — Shopify variants with inventoryQuantity > 0 / all variant SKUs. Counts price-test listings, which carry the same SKUs and the same physical stock.">Var In-Stock %</th>
                 <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU in any color, from the _<size> suffix on the Shopify variant SKU. Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
                 <th className="px-3 py-3 text-right"
                     title="In-Process Days of Cover: stock already on purchase orders (MapleMonk total_inprogress — Shopify has no equivalent) divided by the trailing 30-day average daily units sold from Shopify. How long the incoming pipeline lasts at the current rate.">
@@ -1319,8 +1319,8 @@ function CpisView() {
                             : "text-error-text"
                     }`}
                     title={
-                      row.variant_in_stock_ct !== null && row.variant_count !== null
-                        ? `${row.variant_in_stock_ct} of ${row.variant_count} Shopify variants in stock`
+                      row.variant_in_stock_ct !== null && row.variant_total_ct !== null
+                        ? `${row.variant_in_stock_ct} of ${row.variant_total_ct} Shopify variants in stock`
                         : undefined
                     }
                   >

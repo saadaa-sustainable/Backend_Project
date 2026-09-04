@@ -38,6 +38,11 @@ on:
         type: boolean
         required: false
         default: false
+      object_types:
+        description: "Shopify object types to fetch. Default covers every dashboard column; 'all' fetches everything (slow)."
+        type: string
+        required: false
+        default: "products,inventory,orders"
       verify_sku:
         description: "After refreshing, reconcile this master SKU's unit count (e.g. SMCP). Blank to skip."
         type: string
@@ -61,9 +66,12 @@ concurrency:
 jobs:
   shopify-refresh:
     runs-on: ubuntu-latest
-    # The Shopify chain is the fast part of the daily run (~10-20 min).
-    # 45 is a safety net for a slow full-history products/orders walk.
-    timeout-minutes: 45
+    # The daily run's shopify_daily step has been dying on a 1800s
+    # budget because it walks all ten object types over full history
+    # (~4.8M bronze rows). This path scopes the fetch and gives the
+    # ingest 5400s, so the job needs headroom above that plus silver
+    # and the two CPIS rebuilds.
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
@@ -101,6 +109,9 @@ jobs:
           FLAGS="--only-shopify"
           if [ "${{ inputs.skip_cpis }}" = "true" ]; then
             FLAGS="$FLAGS --skip-cpis"
+          fi
+          if [ -n "${{ inputs.object_types }}" ]; then
+            FLAGS="$FLAGS --shopify-object-types ${{ inputs.object_types }}"
           fi
           echo "Running: scripts/refresh_all_daily.py $FLAGS"
           python scripts/refresh_all_daily.py $FLAGS
