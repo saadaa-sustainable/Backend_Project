@@ -2319,10 +2319,31 @@ class CpisUtmRow(BaseModel):
     gross_margin_pct: float | None
     contribution_margin: float | None
     logistics_return: float | None
-    # Inventory-derived metrics
-    ip_doq: float | None            # in-process days-of-quantity
-    total_doh: float | None         # days-on-hand from current stock
-    oos_pct: float | None           # oos_days_30 / 30 * 100
+    # Inventory-derived metrics. All three were recomputed 2026-09-04 --
+    # each was previously wrong, not merely sourced from elsewhere:
+    #
+    #   ip_doq / total_doh divided by MapleMonk's `daily_quantity`,
+    #     which is "today's ordered qty" -- one day's count, not a rate.
+    #     Days-of-cover therefore swung with a single day's orders and
+    #     went NULL whenever the SKU didn't sell that day. Both now
+    #     divide by a trailing 30-day mean from Shopify's daily
+    #     inventory grain. total_doh's numerator also moves to the
+    #     Shopify units_in_stock the table displays (it used to use
+    #     MapleMonk's current_stock, a number the merchant can't see).
+    #     ip_doq's numerator stays MapleMonk's total_inprogress --
+    #     Shopify has no stock-on-a-PO concept to move it to.
+    #
+    #   oos_pct was MapleMonk oos_days_30 / 30, but that column is
+    #     stored as MAX across variants (worst case by design), so one
+    #     chronically-out size pinned the whole family near 100%. Now
+    #     the share of variant-days closed with no sellable stock.
+    #
+    # Window is a fixed trailing 30 days anchored on the newest day
+    # present in shopify_inventory, independent of the picked CPIS
+    # window, so it stays comparable with the OOS 30d column.
+    ip_doq: float | None            # in-process days of cover
+    total_doh: float | None         # days on hand from Shopify stock
+    oos_pct: float | None           # % of variant-days out of stock, 30d
     tentative_replenish_date: date | None  # today + lead_time
     # Halo attribution share
     halo_sale_pct: float | None
@@ -2855,6 +2876,71 @@ async def get_cpis_utm(
           GROUP BY master_sku, size
         ) t
         GROUP BY master_sku
+      ),
+      -- Sales velocity + out-of-stock rate, from Shopify's own daily
+      -- inventory grain (shopify_inventory: one row per variant SKU per
+      -- day carrying that day's units sold and closing stock).
+      --
+      -- Why this exists (2026-09-04): IP DOQ and Total DOH divided by
+      -- MapleMonk's `daily_quantity`, which is "today's ordered qty" --
+      -- a SINGLE day's count, not a rate. That is MapleMonk's own
+      -- schema meaning, documented in CTD's refresh_product_doq.py.
+      -- Dividing stock by it produced a days-of-cover number that swung
+      -- with one day's orders and went NULL entirely whenever a SKU
+      -- happened not to sell that day. A trailing 30-day mean is the
+      -- rate those formulas always assumed they were dividing by.
+      --
+      -- Anchored on MAX(day) present in the table rather than
+      -- CURRENT_DATE: the ShopifyQL pull can lag a day, and CURRENT_DATE
+      -- would silently shorten the window and dilute the average
+      -- whenever it does.
+      inv_window AS (
+        SELECT MAX(day) AS anchor_day FROM shopify_inventory
+      ),
+      -- Joined to variant_stock rather than re-parsing SKUs, which ties
+      -- velocity and OOS to EXACTLY the variant universe behind Units in
+      -- Stock, the in-stock rates and the price ladder -- same
+      -- price-test/combo exclusions, same master-SKU mapping, no second
+      -- regex to drift. A variant that still sells but is no longer
+      -- listed drops out, which is correct for a forward-looking
+      -- days-of-cover figure.
+      inv_daily AS (
+        SELECT vs.master_sku,
+               si.product_variant_sku,
+               si.day,
+               COALESCE(si.inventory_units_sold, 0)   AS units_sold,
+               COALESCE(si.ending_inventory_units, 0) AS ending_units
+        FROM shopify_inventory si
+        JOIN variant_stock vs ON vs.variant_sku = si.product_variant_sku
+        CROSS JOIN inv_window w
+        WHERE si.day >= w.anchor_day - 29
+          AND si.day <= w.anchor_day
+      ),
+      velocity_ctx AS (
+        SELECT
+          master_sku,
+          SUM(units_sold)                  AS units_sold_30d,
+          -- Mean daily units over the fixed 30-day window. Divided by a
+          -- literal 30, not by the number of days actually observed: a
+          -- day with no row is a day with no sales, and dividing by the
+          -- observed count would overstate velocity for SKUs that only
+          -- appear in the feed when they move.
+          SUM(units_sold)::numeric / 30.0  AS avg_daily_units,
+          -- Out-of-stock rate = share of observed variant-days that
+          -- closed with no sellable stock. This is the family-level rate
+          -- the OOS % column always claimed to show. It previously read
+          -- MapleMonk's oos_days_30 / 30, but that column is stored as
+          -- MAX across variants -- deliberately worst-case -- so a
+          -- single chronically-out size pinned the whole family near
+          -- 100% while most of its sizes were in stock all month.
+          COUNT(*)                                          AS variant_days,
+          COUNT(*) FILTER (WHERE ending_units <= 0)         AS oos_variant_days,
+          CASE WHEN COUNT(*) > 0
+               THEN ROUND(100.0 * (COUNT(*) FILTER (WHERE ending_units <= 0))::numeric
+                          / COUNT(*)::numeric, 1)
+               END                                          AS oos_pct
+        FROM inv_daily
+        GROUP BY master_sku
       )
       SELECT p.master_sku, p.window_key, p.window_from, p.window_to,
              -- Product-context group (SKU-primary attribution basis)
@@ -2970,19 +3056,29 @@ async def get_cpis_utm(
              65.0::numeric                        AS gross_margin_pct,
              COALESCE(pc.price_max, pc.price_min) * 0.55 AS contribution_margin,
              COALESCE(pc.price_max, pc.price_min) * 0.10 AS logistics_return,
-             -- In-Process DOQ: how many days the pipeline covers at
-             -- current daily-sales rate. total_inprogress / daily_qty.
-             CASE WHEN mm.daily_quantity > 0
-                  THEN mm.total_inprogress::numeric / mm.daily_quantity
+             -- In-Process DOQ: days the incoming pipeline covers at the
+             -- trailing 30-day sales rate. The numerator stays
+             -- MapleMonk's -- Shopify has no concept of stock on a
+             -- purchase order, so total_inprogress has no Shopify
+             -- equivalent to move to. The DIVISOR is now the real rate
+             -- (see velocity_ctx); it used to be MapleMonk's
+             -- daily_quantity, i.e. today's orders alone.
+             CASE WHEN vc.avg_daily_units > 0
+                  THEN mm.total_inprogress::numeric / vc.avg_daily_units
                   END                                       AS ip_doq,
-             -- Total DOH: same for on-hand stock.
-             CASE WHEN mm.daily_quantity > 0
-                  THEN mm.current_stock::numeric / mm.daily_quantity
+             -- Total DOH: days the stock on hand covers at that same
+             -- rate. Numerator is the Shopify units_in_stock the table
+             -- actually displays -- it used to be MapleMonk's
+             -- current_stock, so Total DOH was computed against a stock
+             -- figure the merchant could not see and which no longer
+             -- matched the Units in Stock column beside it.
+             CASE WHEN vc.avg_daily_units > 0
+                  THEN sc.units_in_stock::numeric / vc.avg_daily_units
                   END                                       AS total_doh,
-             -- Out-of-stock rate over the last 30 days.
-             CASE WHEN mm.oos_days_30 IS NOT NULL
-                  THEN mm.oos_days_30::numeric / 30.0 * 100
-                  END                                       AS oos_pct,
+             -- Out-of-stock rate over the trailing 30 days -- share of
+             -- variant-days closed with no sellable stock. See
+             -- velocity_ctx for why the MapleMonk version was wrong.
+             vc.oos_pct                                      AS oos_pct,
              -- Tentative replenish date: today + lead_time. Naive
              -- projection -- assumes replenishment kicks off right now
              -- and lead-time is a straight-line delay from PO to stock.
@@ -3062,6 +3158,7 @@ async def get_cpis_utm(
       LEFT JOIN products_ctx pc USING (master_sku)
       LEFT JOIN stock_ctx sc  USING (master_sku)
       LEFT JOIN stock_by_size_ctx sbs USING (master_sku)
+      LEFT JOIN velocity_ctx vc USING (master_sku)
       LEFT JOIN public.master_sku_inventory_current mm USING (master_sku)
       LEFT JOIN spend_trend st USING (master_sku)
       CROSS JOIN window_days wd

@@ -191,6 +191,20 @@ query Products($first: Int!, $after: String, $query: String) {
               barcode
             }
           }
+          # A product with more than VARIANTS_PAGE_SIZE variants is
+          # truncated here. pageInfo lets _hydrate_product_variants()
+          # detect that and re-fetch the full set -- without it the
+          # truncation is silent and every downstream per-variant
+          # rollup (stock, in-stock rate, price ladder) quietly
+          # under-counts. Kept at 25 in THIS query on purpose: raising
+          # it multiplies the query's cost by the page size of the
+          # OUTER products connection too, and Shopify rejects the
+          # whole request past its calculated-cost ceiling. The rare
+          # wide product pays for a second round-trip instead.
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
       }
       cursor
@@ -198,6 +212,41 @@ query Products($first: Int!, $after: String, $query: String) {
     pageInfo {
       hasNextPage
       endCursor
+    }
+  }
+}
+"""
+
+#: Variants requested per page inside PRODUCTS_QUERY above. A product
+#: with more than this many variants comes back truncated and is
+#: completed by _hydrate_product_variants() via PRODUCT_VARIANTS_QUERY.
+VARIANTS_PAGE_SIZE = 25
+
+#: Page size for the follow-up variant fetch. Safe to be larger than
+#: VARIANTS_PAGE_SIZE because this query walks ONE product, so the
+#: cost isn't multiplied by an outer connection.
+VARIANT_HYDRATE_PAGE_SIZE = 100
+
+#: Re-fetches one product's variants as a standalone Relay connection so
+#: paginate_connection() can walk it to exhaustion.
+PRODUCT_VARIANTS_QUERY = """
+query ProductVariants($id: ID!, $first: Int!, $after: String) {
+  product(id: $id) {
+    variants(first: $first, after: $after) {
+      edges {
+        node {
+          id
+          title
+          sku
+          price
+          inventoryQuantity
+          barcode
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
     }
   }
 }
@@ -576,6 +625,57 @@ async def _fetch_shop(client: httpx.AsyncClient, store: ShopifyStore) -> FetchRe
     return result
 
 
+async def _hydrate_product_variants(
+    client: httpx.AsyncClient,
+    store: ShopifyStore,
+    products: list[dict[str, Any]],
+) -> int:
+    """Complete the variant list of any product PRODUCTS_QUERY truncated.
+
+    The bulk query asks for `variants(first: VARIANTS_PAGE_SIZE)`; a
+    product with more variants than that comes back with only the first
+    page and `hasNextPage: true`. Nothing downstream can tell a truncated
+    list from a complete one, so every per-variant rollup built on
+    raw_dump_shopify -- units in stock, in-stock rates, the price ladder
+    Selling Price is drawn from -- would silently under-count on exactly
+    the widest products.
+
+    Re-walks the affected product's variants as a standalone connection
+    and REPLACES the truncated edge list with the full one. We refetch
+    from the start rather than resuming at the first page's endCursor:
+    paginate_connection() has no initial-cursor parameter, and at this
+    catalogue's size the saved round-trip isn't worth widening a shared
+    helper for. Mutates the product dicts in place -- they're the same
+    objects paginate_connection() accumulates and hands to on_page.
+
+    Returns the number of products that needed completing.
+    """
+    hydrated = 0
+    for product in products:
+        connection = product.get("variants") or {}
+        if not (connection.get("pageInfo") or {}).get("hasNextPage"):
+            continue
+        product_id = product.get("id")
+        if not product_id:
+            continue
+        all_variants = await paginate_connection(
+            client, store, PRODUCT_VARIANTS_QUERY, ["product", "variants"],
+            page_size=VARIANT_HYDRATE_PAGE_SIZE,
+            variables={"id": product_id},
+        )
+        connection["edges"] = [{"node": node} for node in all_variants]
+        # hasNextPage is now false by construction; leaving it true would
+        # make a re-run think this product still needs hydrating.
+        connection["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+        hydrated += 1
+        # This module reports progress with print(), not a logger.
+        print(
+            f"    [variants] product {product_id} exceeded {VARIANTS_PAGE_SIZE} "
+            f"variants -- refetched {len(all_variants)} in full"
+        )
+    return hydrated
+
+
 async def _fetch_object_type(
     client: httpx.AsyncClient,
     store: ShopifyStore,
@@ -590,11 +690,22 @@ async def _fetch_object_type(
     query, path = OBJECT_TYPE_QUERIES[object_type]
     t0 = time.monotonic()
     result = FetchResult(store=store, object_type=object_type)
+
+    page_callback = on_page
+    if object_type == "products":
+        # Hydrate BEFORE the caller's on_page runs -- on_page is what
+        # writes the page to bronze, so a truncated variant list written
+        # there would persist until the next full ingest.
+        async def page_callback(nodes: list[dict[str, Any]]) -> None:  # noqa: F811
+            await _hydrate_product_variants(client, store, nodes)
+            if on_page:
+                await on_page(nodes)
+
     try:
         search_filter = _build_search_filter(date_start, date_end)
         result.items = await paginate_connection(
             client, store, query, path, page_size=page_size, max_pages=max_pages,
-            variables={"query": search_filter}, on_page=on_page,
+            variables={"query": search_filter}, on_page=page_callback,
         )
     except RuntimeError as exc:
         result.error = str(exc)
