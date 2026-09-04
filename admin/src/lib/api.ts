@@ -1347,7 +1347,13 @@ export interface CpisUtmParams {
   from_date?: string;    // YYYY-MM-DD
   to_date?:   string;    // YYYY-MM-DD
   search?: string;
+  // Default false server-side: the table shows the whole live catalogue,
+  // with attribution columns at zero for SKUs no ad drove. Set true to
+  // narrow to SKUs with at least one attributed order in the window.
   only_matched?: boolean;
+  // Include archived SKUs -- zero stock, no active listing, nothing sold
+  // in 30 days. ~11 of the 97 master SKUs. Off by default.
+  include_archived?: boolean;
   sort?: CpisUtmSort;
   limit?: number;
   offset?: number;
@@ -1363,6 +1369,7 @@ export function fetchCpisUtm(params: CpisUtmParams = {}): Promise<CpisUtmRespons
   }
   if (params.search) qs.set("search", params.search);
   if (params.only_matched !== undefined) qs.set("only_matched", String(params.only_matched));
+  if (params.include_archived) qs.set("include_archived", "true");
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
