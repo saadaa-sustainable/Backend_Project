@@ -185,6 +185,13 @@ def main() -> int:
     ap.add_argument("--skip-cpis", action="store_true",
                     help="with --only-shopify, stop after the silver rebuild "
                          "and skip the CPIS aggregates.")
+    ap.add_argument("--force-silver", action="store_true",
+                    help="rebuild EVERY Shopify silver table, even ones whose "
+                         "bronze has not moved since the last run. Needed after "
+                         "editing the flatten SQL in "
+                         "app/services/silver/shopify_flatten.py -- the skip "
+                         "check watches bronze, so a code-only change looks "
+                         "like 'nothing to do'.")
     args = ap.parse_args()
 
     if args.only_shopify and (args.skip_meta or args.only_silver):
@@ -220,6 +227,19 @@ def main() -> int:
              [SHOPIFY_INGEST_CMD[0], *scoped, "--incremental"]
              if label in SHOPIFY_INGEST_STEPS else cmd,
              timeout)
+            for label, cmd, timeout in steps
+        ]
+
+    # --force-silver is the escape hatch for the one thing the silver
+    # freshness check cannot see. refresh_shopify_tables() skips a table
+    # whose bronze extracted_at has not advanced, which is right for a
+    # data refresh and wrong the first time NEW flatten SQL ships: bronze
+    # is untouched, so every table would be skipped and the new columns
+    # would never appear. Rewritten here rather than baked into
+    # PHASE_SILVER so the default stays the cheap path.
+    if args.force_silver:
+        steps = [
+            (label, [*cmd, "--force"] if label in SHOPIFY_SILVER_STEPS else cmd, timeout)
             for label, cmd, timeout in steps
         ]
 
