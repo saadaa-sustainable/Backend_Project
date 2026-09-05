@@ -46,10 +46,33 @@ CREATE TABLE IF NOT EXISTS public.insights_daily_by_ad (
     ftewv_count   numeric,
     impressions   numeric,
     clicks        numeric,
+    -- Added 2026-09-05. ad_lifecycle used to take these from
+    -- ad_insights, which holds ONE arbitrary fetched date range per ad
+    -- (measured: 73% of 14,866 ads had a window under 30 days, from 6
+    -- days to 234) and presented it as lifetime. Summing the daily grain
+    -- instead gives a real total over the whole range bronze covers, and
+    -- gives every ad the SAME range so two ads can be compared at all.
+    purchases          numeric,
+    add_to_cart        numeric,
+    checkout_initiate  numeric,
+    thruplays          numeric,
+    three_sec_plays    numeric,
+    outbound_clicks    numeric,
+    post_engagements   numeric,
+    video_play_time    numeric,
     refreshed_at  timestamptz DEFAULT NOW(),
     PRIMARY KEY (ad_id, day)
 );
-ALTER TABLE public.insights_daily_by_ad ADD COLUMN IF NOT EXISTS ftewv_count numeric;
+ALTER TABLE public.insights_daily_by_ad
+    ADD COLUMN IF NOT EXISTS ftewv_count       numeric,
+    ADD COLUMN IF NOT EXISTS purchases         numeric,
+    ADD COLUMN IF NOT EXISTS add_to_cart       numeric,
+    ADD COLUMN IF NOT EXISTS checkout_initiate numeric,
+    ADD COLUMN IF NOT EXISTS thruplays         numeric,
+    ADD COLUMN IF NOT EXISTS three_sec_plays   numeric,
+    ADD COLUMN IF NOT EXISTS outbound_clicks   numeric,
+    ADD COLUMN IF NOT EXISTS post_engagements  numeric,
+    ADD COLUMN IF NOT EXISTS video_play_time   numeric;
 CREATE INDEX IF NOT EXISTS ix_idba_ad_day ON public.insights_daily_by_ad(ad_id, day);
 CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
 """
@@ -147,7 +170,32 @@ extracted AS (
         0
       ) AS ftewv_count,
       NULLIF(raw_payload->>'impressions','')::numeric AS impressions,
-      NULLIF(raw_payload->>'inline_link_clicks','')::numeric AS clicks
+      NULLIF(raw_payload->>'inline_link_clicks','')::numeric AS clicks,
+      -- omni_* first, plain second -- byte-for-byte ad_lifecycle.py's
+      -- _first_match() ordering, so the summed value and the lifetime
+      -- rollup agree on what counts as a purchase.
+      COALESCE(
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'omni_purchase' LIMIT 1),
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'purchase' LIMIT 1), 0) AS purchases,
+      COALESCE(
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'omni_add_to_cart' LIMIT 1),
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'add_to_cart' LIMIT 1), 0) AS add_to_cart,
+      COALESCE(
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'omni_initiated_checkout' LIMIT 1),
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'initiate_checkout' LIMIT 1), 0) AS checkout_initiate,
+      COALESCE((raw_payload->'video_thruplay_watched_actions'->0->>'value')::numeric, 0) AS thruplays,
+      COALESCE(
+        (SELECT (a->>'value')::numeric FROM jsonb_array_elements(raw_payload->'actions') a
+          WHERE a->>'action_type' = 'video_view' LIMIT 1), 0) AS three_sec_plays,
+      COALESCE((raw_payload->'outbound_clicks'->0->>'value')::numeric, 0) AS outbound_clicks,
+      COALESCE(NULLIF(raw_payload->>'inline_post_engagement','')::numeric, 0) AS post_engagements,
+      COALESCE((raw_payload->'video_avg_time_watched_actions'->0->>'value')::numeric, 0) AS video_play_time
     FROM raw_dedup
 ),
 expanded AS (
@@ -160,20 +208,31 @@ expanded AS (
       e.ncp_count   / NULLIF(e.de - e.ds + 1, 0) AS ncp_count,
       e.ftewv_count / NULLIF(e.de - e.ds + 1, 0) AS ftewv_count,
       e.impressions / NULLIF(e.de - e.ds + 1, 0) AS impressions,
-      e.clicks      / NULLIF(e.de - e.ds + 1, 0) AS clicks
+      e.clicks      / NULLIF(e.de - e.ds + 1, 0) AS clicks,
+      e.purchases         / NULLIF(e.de - e.ds + 1, 0) AS purchases,
+      e.add_to_cart       / NULLIF(e.de - e.ds + 1, 0) AS add_to_cart,
+      e.checkout_initiate / NULLIF(e.de - e.ds + 1, 0) AS checkout_initiate,
+      e.thruplays         / NULLIF(e.de - e.ds + 1, 0) AS thruplays,
+      e.three_sec_plays   / NULLIF(e.de - e.ds + 1, 0) AS three_sec_plays,
+      e.outbound_clicks   / NULLIF(e.de - e.ds + 1, 0) AS outbound_clicks,
+      e.post_engagements  / NULLIF(e.de - e.ds + 1, 0) AS post_engagements,
+      -- video_play_time is an AVERAGE seconds-watched, not a count, so
+      -- it is NOT divided across the range -- pro-rating an average
+      -- would turn "watched 8s" into "watched 1s a day for 8 days".
+      e.video_play_time                                AS video_play_time
     FROM extracted e,
          generate_series(e.ds, e.de, '1 day'::interval) gs
 ),
 best AS (
     SELECT DISTINCT ON (ad_id, day)
-      ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks
+      ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
     FROM expanded
     ORDER BY ad_id, day, range_days ASC
 )
 INSERT INTO public.insights_daily_by_ad (
-    ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks
+    ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
 )
-SELECT ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks
+SELECT ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
 FROM best
 """
 
