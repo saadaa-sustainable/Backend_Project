@@ -87,6 +87,7 @@ def _composed() -> dict[str, str]:
         "analytics:_EXTERNAL_DAILY": analytics._EXTERNAL_DAILY,
         "analytics:_LOCAL_DAILY": analytics._LOCAL_DAILY,
         "analytics:_AD_DAILY_EXTERNAL_EXISTS": analytics._AD_DAILY_EXTERNAL_EXISTS,
+        "analytics:_CPIS_UNTETHERED_BREAKDOWN": analytics._CPIS_UNTETHERED_BREAKDOWN,
     }
 
 

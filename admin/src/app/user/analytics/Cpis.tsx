@@ -601,6 +601,11 @@ function CpisView() {
   const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
   const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
   const [untetheredSpend, setUntetheredSpend] = useState<number | null>(null);
+  // Why the untethered slice is untethered -- printed in the Ad spend
+  // tile's info tooltip so the percentage is a diagnosis, not a mystery.
+  const [untetheredParts, setUntetheredParts] = useState<{
+    adUnknown: number | null; lag: number | null; noConversion: number | null;
+  }>({ adUnknown: null, lag: null, noConversion: null });
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -625,6 +630,11 @@ function CpisView() {
         setMetaTotalSpend(res.meta_total_spend);
         setAttributedSpend(res.attributed_spend);
         setUntetheredSpend(res.untethered_spend);
+        setUntetheredParts({
+          adUnknown: res.untethered_ad_unknown,
+          lag: res.untethered_lag,
+          noConversion: res.untethered_no_conversion,
+        });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -676,6 +686,7 @@ function CpisView() {
             metaTotalSpend={metaTotalSpend}
             attributedSpend={attributedSpend}
             untetheredSpend={untetheredSpend}
+            untetheredParts={untetheredParts}
             windowLabel={
               fromDate && toDate
                 ? `${fromDate} → ${toDate}`
@@ -1703,6 +1714,7 @@ function CpisKpiStrip({
   metaTotalSpend,
   attributedSpend,
   untetheredSpend,
+  untetheredParts,
 }: {
   rows: CpisUtmRow[];
   windowLabel: string;
@@ -1710,6 +1722,7 @@ function CpisKpiStrip({
   metaTotalSpend: number | null;
   attributedSpend: number | null;
   untetheredSpend: number | null;
+  untetheredParts: { adUnknown: number | null; lag: number | null; noConversion: number | null };
 }) {
   // KPI tiles follow the same toggle the table uses so they always
   // reconcile with what's rendered below:
@@ -1758,6 +1771,33 @@ function CpisKpiStrip({
   })();
   const blendedCostPerNcp = totalNcp > 0 && totalSpend > 0 ? totalSpend / totalNcp : null;
 
+  // "60% attributed" reads as "40% of the budget did nothing" unless the
+  // tile says otherwise, so spell out the three reasons the API measured.
+  // They sum to the untethered figure exactly, on both the pre-computed
+  // windows and a custom range.
+  const untetheredInfo = (() => {
+    if (!isFractional || untetheredSpend === null || metaTotalSpend === null) return undefined;
+    const { adUnknown, lag, noConversion } = untetheredParts;
+    if (adUnknown === null || lag === null || noConversion === null) return undefined;
+    const pct = (n: number) => (metaTotalSpend > 0 ? ` (${((n / metaTotalSpend) * 100).toFixed(0)}%)` : "");
+    const lines = [
+      `Of ${fmtINRCompact(metaTotalSpend)} Meta spend in this window, ` +
+        `${fmtINRCompact(attributedSpend ?? 0)} is claimed by an attributed order. ` +
+        `The remaining ${fmtINRCompact(untetheredSpend)} breaks down as:`,
+      `• ${fmtINRCompact(adUnknown)}${pct(adUnknown)} — an order named this ad, but the ad is missing from our Meta history, so the order could not be tied to it.`,
+    ];
+    if (lag > 0) {
+      lines.push(
+        `• ${fmtINRCompact(lag)}${pct(lag)} — the ad did convert in this window, just not on the day it spent. A custom date range matches spend to orders day by day; the preset windows do not.`,
+      );
+    }
+    lines.push(
+      `• ${fmtINRCompact(noConversion)}${pct(noConversion)} — the ad drove no attributed order at all. Prospecting and awareness spend lives here.`,
+      `Separately, roughly a third of orders carry no ad tag at all (organic, direct, other channels), so they can never attribute to Meta spend.`,
+    );
+    return lines.join("\n");
+  })();
+
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <KwikTile
@@ -1777,6 +1817,7 @@ function CpisKpiStrip({
             ? `${attrRate.toFixed(0)}% attributed · ${fmtINRCompact(untetheredSpend)} untethered`
             : windowLabel
         }
+        info={isFractional ? untetheredInfo : undefined}
       />
       <KwikTile
         icon={<span>🛒</span>}
