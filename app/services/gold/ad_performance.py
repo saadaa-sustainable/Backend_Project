@@ -91,7 +91,7 @@ _TRUNCATE = "TRUNCATE ad_performance_summary"
 
 _INSERT_TARGET_COLUMNS = ", ".join(name for name, _ in _COLUMNS)
 
-_INSERT = f"""
+_INSERT_TEMPLATE = f"""
 INSERT INTO ad_performance_summary ({_INSERT_TARGET_COLUMNS})
 SELECT
     al.ad_id,
@@ -116,11 +116,34 @@ SELECT
     al.roas AS meta_roas,
     al.cost_per_purchase,
     al.ctr_pct,
-    COALESCE(soa.shopify_orders, 0) AS shopify_orders,
-    COALESCE(soa.shopify_revenue, 0) AS shopify_revenue,
-    CASE WHEN COALESCE(soa.shopify_orders, 0) > 0 THEN soa.shopify_revenue / soa.shopify_orders ELSE NULL END AS shopify_aov,
-    CASE WHEN al.spend > 0 THEN COALESCE(soa.shopify_revenue, 0) / al.spend ELSE NULL END AS shopify_roas,
-    CASE WHEN COALESCE(soa.shopify_orders, 0) > 0 THEN al.spend / soa.shopify_orders ELSE NULL END AS cost_per_shopify_order,
+    -- Shopify figures prefer public.ad_metrics_external where it has
+    -- them, and fall back to this project's own attribution otherwise.
+    --
+    -- Not a preference for its own sake: this project's shopify_orders
+    -- silver holds 2026 only (2025 = 50 orders against 429,669), so its
+    -- attributed revenue was 184.4M against the reference system's
+    -- 444.0M -- 42%. Overlaying the Meta side alone would have made
+    -- things WORSE, not better: meta_shop_diff_pct is
+    -- (shopify_revenue - conv_value) / conv_value, so lifting
+    -- conv_value while leaving shopify_revenue at 42% swings the ratio
+    -- sharply negative, and shopify_roas (revenue / spend) roughly
+    -- halves. Both sides move together or neither does.
+    COALESCE(ext.shopify_orders, soa.shopify_orders, 0) AS shopify_orders,
+    COALESCE(ext.shopify_revenue, soa.shopify_revenue, 0) AS shopify_revenue,
+    COALESCE(
+        ext.shopify_aov,
+        CASE WHEN COALESCE(soa.shopify_orders, 0) > 0
+             THEN soa.shopify_revenue / soa.shopify_orders END
+    ) AS shopify_aov,
+    COALESCE(
+        ext.shopify_roas,
+        CASE WHEN al.spend > 0 THEN COALESCE(soa.shopify_revenue, 0) / al.spend END
+    ) AS shopify_roas,
+    -- Derived from whichever pair actually won above, so it can never
+    -- divide an overlaid numerator by a local denominator.
+    CASE WHEN COALESCE(ext.shopify_orders, soa.shopify_orders, 0) > 0
+         THEN al.spend / COALESCE(ext.shopify_orders, soa.shopify_orders)
+         END AS cost_per_shopify_order,
     now() AS gold_refreshed_at
 FROM ad_lifecycle al
 LEFT JOIN (
@@ -129,6 +152,36 @@ LEFT JOIN (
     WHERE matched_ad_id IS NOT NULL
     GROUP BY matched_ad_id
 ) soa ON soa.ad_id = al.ad_id
+LEFT JOIN public.ad_metrics_external ext ON ext.ad_id = al.ad_id
+"""
+
+
+#: public.ad_metrics_external is created by
+#: scripts/sync_ad_metrics_external.py and is absent on an install that
+#: has no source configured. Rather than duplicate that script's DDL
+#: here -- two definitions of one table is how columns drift -- the join
+#: is simply removed when the table is not there, and every Shopify
+#: figure falls back to this project's own attribution.
+_EXTERNAL_JOIN = "LEFT JOIN public.ad_metrics_external ext ON ext.ad_id = al.ad_id"
+
+#: With the mirror present: ext wins, local fills the gaps.
+_INSERT_WITH_EXTERNAL = _INSERT_TEMPLATE
+
+#: Without it: `ext.x` would not resolve, so every reference collapses to
+#: the local branch of its own COALESCE. NULL::numeric keeps each
+#: expression's shape and type identical to the overlaid form.
+_INSERT_LOCAL_ONLY = (
+    _INSERT_TEMPLATE
+    .replace(_EXTERNAL_JOIN, "")
+    .replace("ext.shopify_orders", "NULL::numeric")
+    .replace("ext.shopify_revenue", "NULL::numeric")
+    .replace("ext.shopify_aov", "NULL::numeric")
+    .replace("ext.shopify_roas", "NULL::numeric")
+)
+
+_EXTERNAL_TABLE_EXISTS = """
+SELECT 1 FROM information_schema.tables
+WHERE table_schema = 'public' AND table_name = 'ad_metrics_external'
 """
 
 
@@ -141,7 +194,10 @@ async def ensure_ad_performance_summary_table(session: AsyncSession) -> None:
 async def refresh_ad_performance_summary(session: AsyncSession) -> dict[str, int]:
     await ensure_ad_performance_summary_table(session)
     await session.execute(text(_TRUNCATE))
-    await session.execute(text(_INSERT))
+    has_external = (
+        await session.execute(text(_EXTERNAL_TABLE_EXISTS))
+    ).scalar_one_or_none() is not None
+    await session.execute(text(_INSERT_WITH_EXTERNAL if has_external else _INSERT_LOCAL_ONLY))
     await session.commit()
 
     result = await session.execute(text("SELECT COUNT(*) FROM ad_performance_summary"))

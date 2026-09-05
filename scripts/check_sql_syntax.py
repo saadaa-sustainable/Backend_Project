@@ -52,7 +52,12 @@ SQL_SOURCES: dict[str, tuple[str, ...]] = {
     "scripts/refresh_cpis_sku_context.py":      ("DDL", "REFRESH"),
     "scripts/refresh_ad_history_milestones.py": ("DDL", "REFRESH"),
     "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL"),
-    "app/services/silver/ad_lifecycle.py":      ("_INSERT",),
+    "app/services/silver/ad_lifecycle.py":      ("_INSERT", "_EXTERNAL_OVERLAY_UPDATE",
+                                                "_EXTERNAL_OVERLAY_INSERT",
+                                                "_EXTERNAL_TABLE_EXISTS"),
+    "app/services/gold/ad_performance.py":      ("_INSERT_WITH_EXTERNAL", "_INSERT_LOCAL_ONLY",
+                                                "_EXTERNAL_TABLE_EXISTS"),
+    "scripts/sync_ad_metrics_external.py":      ("DDL", "SELECT_SQL"),
 }
 
 
