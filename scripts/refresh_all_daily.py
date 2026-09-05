@@ -124,6 +124,17 @@ PHASE_SILVER = [
     # being read off eleven-day-old metrics. Runs after
     # silver_insights_daily because both read ad_insights and this one
     # is the heavier of the two.
+    # Mirrors the authoritative per-ad metrics into
+    # public.ad_metrics_external. MUST run before ad_lifecycle, which
+    # overlays from it -- reversed, the overlay would apply yesterday's
+    # mirror. No-ops with a clear message when no source is configured.
+    # --since-days 120: the source's daily rollup only holds ~90 days,
+    # so nothing older moves between nightly runs. Mirroring from
+    # 2025-01-01 every night would re-upsert 456,604 rows to rewrite a
+    # few thousand. Deep history is a one-off:
+    #   python scripts/sync_ad_metrics_external.py --since 2025-01-01
+    ("ad_metrics_sync",       ["scripts/sync_ad_metrics_external.py",
+                               "--since-days", "120"],                    1200),
     ("ad_lifecycle",          ["scripts/refresh_ad_lifecycle.py"],          1200),
     # Historical tagging: the day-14 category and the 50k-impressions
     # crossing date. Must run AFTER both of the above -- it reads

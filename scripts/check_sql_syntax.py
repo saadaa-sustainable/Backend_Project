@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -52,8 +53,58 @@ SQL_SOURCES: dict[str, tuple[str, ...]] = {
     "scripts/refresh_cpis_sku_context.py":      ("DDL", "REFRESH"),
     "scripts/refresh_ad_history_milestones.py": ("DDL", "REFRESH"),
     "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL"),
-    "app/services/silver/ad_lifecycle.py":      ("_INSERT",),
+    "app/services/silver/ad_lifecycle.py":      ("_INSERT", "_EXTERNAL_OVERLAY_UPDATE",
+                                                "_EXTERNAL_OVERLAY_INSERT",
+                                                "_EXTERNAL_TABLE_EXISTS"),
+    "app/services/gold/ad_performance.py":      ("_INSERT_WITH_EXTERNAL", "_INSERT_LOCAL_ONLY",
+                                                "_EXTERNAL_TABLE_EXISTS"),
+    "scripts/sync_ad_metrics_external.py":      ("DDL", "DAILY_DDL", "SELECT_SQL",
+                                                "DAILY_SELECT_SQL"),
 }
+
+#: Queries the API composes at request time out of several constants. A
+#: constant that parses on its own says nothing about the string the
+#: endpoint actually executes -- the pieces have to be assembled the
+#: same way. Each entry builds the real query through the endpoint's own
+#: builder function, so this gate cannot drift from what runs.
+def _composed() -> dict[str, str]:
+    analytics = _load("app/api/routers/analytics.py")
+    where = (
+        "WHERE aps.account_name = :account_name AND aps.category = :category AND "
+        + analytics._DELIVERED_IN_WINDOW
+    )
+    return {
+        "analytics:ads_analyse_rows":
+            analytics._ads_analyse_rows_sql(where, "aps.spend"),
+        "analytics:ads_analyse_count":
+            analytics._ads_analyse_count_sql(where),
+        "analytics:ads_analyse_category_counts":
+            analytics._ads_analyse_category_counts_sql(where),
+        "analytics:ads_analyse_totals[delivery]":
+            analytics._ads_analyse_totals_sql(where, windowed=True),
+        "analytics:ads_analyse_totals[lifetime]":
+            analytics._ads_analyse_totals_sql(where, windowed=False),
+        "analytics:_EXTERNAL_DAILY": analytics._EXTERNAL_DAILY,
+        "analytics:_LOCAL_DAILY": analytics._LOCAL_DAILY,
+        "analytics:_AD_DAILY_EXTERNAL_EXISTS": analytics._AD_DAILY_EXTERNAL_EXISTS,
+    }
+
+
+#: pglast parses SQL, not the driver placeholders embedded in it.
+#: psycopg2's %(name)s and SQLAlchemy's :name both stand where a value
+#: goes, so NULL substitutes for them without changing the shape of the
+#: statement being checked. The negative lookbehind keeps ::text casts
+#: intact.
+_PLACEHOLDERS = (
+    (re.compile(r"%\((\w+)\)s"), "NULL"),
+    (re.compile(r"(?<!:):[a-zA-Z_]\w*"), "NULL"),
+)
+
+
+def _normalise(sql: str) -> str:
+    for pattern, repl in _PLACEHOLDERS:
+        sql = pattern.sub(repl, sql)
+    return sql
 
 
 def _load(path: str):
@@ -88,12 +139,22 @@ def main() -> int:
                 continue
             checked += 1
             try:
-                pglast.parse_sql(sql)
+                pglast.parse_sql(_normalise(sql))
             except Exception as exc:
                 failures += 1
                 print(f"FAIL     {path}:{name}\n         {exc}", file=sys.stderr)
             else:
                 print(f"ok       {path}:{name}")
+
+    for label, sql in _composed().items():
+        checked += 1
+        try:
+            pglast.parse_sql(_normalise(sql))
+        except Exception as exc:
+            failures += 1
+            print(f"FAIL     {label}\n         {exc}", file=sys.stderr)
+        else:
+            print(f"ok       {label}")
 
     print(f"\n{checked} SQL constant(s) parsed, {failures} failure(s).")
     return 1 if failures else 0

@@ -1,0 +1,206 @@
+# Backend_Project -- MANUAL Shopify order history backfill.
+#
+# Why this exists
+# ---------------
+# The daily Shopify ingest runs with --incremental, which resumes from
+# the newest row already in bronze. It only ever moves FORWARD, so
+# whatever was missing before the first run stays missing for good.
+# Measured 2026-09-05, orders by year:
+#
+#     year   Backend_Project   Shopify (via Saada_Shopify_Data)
+#     2024                 0                          398,608
+#     2025                50                          429,669
+#     2026           351,498                          315,557
+#
+# 2026 is complete. All of 2025 is absent -- 429,669 orders. That is the
+# whole reason Ads Analyse shows 42% of the Creative Testing Dashboard's
+# Shopify revenue (184.4M vs 444.0M) and why the Meta-vs-Shopify % and
+# shopify_roas columns cannot match no matter what happens on the Meta
+# side.
+#
+# WHY FETCH RATHER THAN MIGRATE. Two other databases hold 2025 orders,
+# and neither is sufficient:
+#
+#   Saada_Shopify_Data.orders   429,669 orders for 2025, and utm_content
+#                               is NULL on every single one. No ad
+#                               linkage at all, so migrated orders would
+#                               attribute to nothing.
+#   CTD shopify_ad_attribution  has utm_content for 250,734 of 429,669
+#                               (58%), but its `ordered_item` column is
+#                               product TITLES ("Women Peacock Blue
+#                               Cotton Pant") -- no SKU, no quantity, no
+#                               unit price, so CPIS master-SKU
+#                               attribution is impossible from it.
+#
+# Shopify itself has both, in full, and is the source of truth the rest
+# of the pipeline already trusts. Migrating would trade a complete
+# answer for a partial one and add a standing dependency on two other
+# projects staying alive.
+#
+# MONTHLY CHUNKING IS DELIBERATE. scripts/ingest_shopify.py's CLI path
+# accumulates every page in memory and writes once at the end, so one
+# 430k-order invocation risks both the step timeout and losing
+# everything on a late failure. Each month is a separate invocation that
+# WRITES before the next begins, so a failure costs one month.
+#
+# The filter is on updated_at, not created_at (see _build_search_filter):
+# an order created in 2025 and refunded in 2026 is picked up by the 2026
+# window, which is what keeps bronze from serving a stale version.
+#
+#   Actions tab -> "Shopify order backfill (manual)" -> Run workflow.
+
+name: Shopify order backfill (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_month:
+        description: "First month to fetch, YYYY-MM. 2025-01 covers the whole missing year."
+        type: string
+        required: false
+        default: "2025-01"
+      to_month:
+        description: "Last month to fetch, YYYY-MM (inclusive)."
+        type: string
+        required: false
+        default: "2025-12"
+      object_types:
+        description: "Shopify object types. 'orders' is the gap; widen only if you know you need to."
+        type: string
+        required: false
+        default: "orders"
+      rebuild_downstream:
+        description: "Rebuild the silver + CPIS tables afterwards. Leave on -- the fetch alone changes nothing a dashboard reads."
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  # Same group as every other refresh: they all write raw_dump_shopify
+  # and the silver tables built from it.
+  group: bp-daily-refresh
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch Shopify order history
+        env:
+          DATABASE_URL_SYNC:    ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:         ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_KEY: ${{ secrets.DATABASE_SERVICE_KEY }}
+          SHOP_DOMAIN:          ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN:   ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOP_NAME:            ${{ secrets.SHOP_NAME }}
+          SHOPIFY_API_VERSION:  ${{ secrets.SHOPIFY_API_VERSION }}
+        run: |
+          set -u
+          FROM="${{ inputs.from_month }}"
+          TO="${{ inputs.to_month }}"
+          TYPES="${{ inputs.object_types }}"
+
+          # One invocation per calendar month. Each writes before the
+          # next starts, so a failure costs one month rather than the
+          # whole backfill. `|| true` keeps the loop going: a month that
+          # fails is reported in the summary below, and the months that
+          # succeeded are already committed.
+          cur="${FROM}-01"
+          end="${TO}-01"
+          failed=""
+          while [ "$(date -u -d "$cur" +%Y-%m)" \< "$(date -u -d "$end +1 month" +%Y-%m)" ]; do
+            m_start="$(date -u -d "$cur" +%Y-%m-%d)"
+            m_end="$(date -u -d "$cur +1 month -1 day" +%Y-%m-%d)"
+            echo ""
+            echo "===== $(date -u -d "$cur" +%Y-%m)  ($m_start .. $m_end) ====="
+            if ! python scripts/ingest_shopify.py \
+                 --object-types "$TYPES" \
+                 --date-start "$m_start" --date-end "$m_end"; then
+              echo "::warning::month $(date -u -d "$cur" +%Y-%m) failed -- continuing"
+              failed="$failed $(date -u -d "$cur" +%Y-%m)"
+            fi
+            cur="$(date -u -d "$cur +1 month" +%Y-%m-01)"
+          done
+
+          if [ -n "$failed" ]; then
+            echo "::warning::months that failed:$failed"
+            echo "Every other month is committed. Re-run this workflow with"
+            echo "from_month/to_month narrowed to just those months."
+          fi
+
+      - name: Rebuild downstream tables
+        # !cancelled(), not the default success() -- a month that failed
+        # must not stop the months that landed from reaching the
+        # dashboard. Same lesson as the Meta backfill, where gating this
+        # on a clean fetch silently discarded 174,625 rows.
+        if: ${{ !cancelled() && inputs.rebuild_downstream }}
+        env:
+          DATABASE_URL_SYNC:    ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:         ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_KEY: ${{ secrets.DATABASE_SERVICE_KEY }}
+          META_ACCESS_TOKEN:    ${{ secrets.META_ACCESS_TOKEN }}
+          META_ACCOUNT_1_ID:    ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME:  ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID:    ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME:  ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID:    ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME:  ${{ secrets.META_ACCOUNT_3_NAME }}
+          SHOP_DOMAIN:          ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN:   ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOP_NAME:            ${{ secrets.SHOP_NAME }}
+          SHOPIFY_API_VERSION:  ${{ secrets.SHOPIFY_API_VERSION }}
+        run: |
+          # Order matters. shopify_orders feeds the attribution engine,
+          # which feeds ad_performance_summary's shopify_revenue, which
+          # is what the Meta-vs-Shopify % reads.
+          python scripts/refresh_shopify_silver.py --force
+          python scripts/refresh_cpis_by_sku_daily.py
+          python scripts/refresh_cpis_utm.py
+          python scripts/refresh_cpis_sku_context.py
+
+      - name: Report order coverage by year
+        if: always()
+        env:
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          dsn = (os.environ.get("DATABASE_URL_SYNC") or "").replace(
+              "postgresql+psycopg2://", "postgresql://")
+          if not dsn:
+              print("DATABASE_URL_SYNC not set -- skipping coverage report")
+              sys.exit(0)
+          try:
+              import psycopg2
+              with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+                  cur.execute("""
+                      SELECT to_char(processed_at,'YYYY'), COUNT(*), ROUND(SUM(total_price))
+                      FROM shopify_orders GROUP BY 1 ORDER BY 1
+                  """)
+                  print(f"  {'year':6s} {'orders':>10s} {'total_price':>16s}")
+                  for yr, n, value in cur.fetchall():
+                      print(f"  {yr:6s} {n:>10,} {value or 0:>16,}")
+                  cur.execute("""
+                      SELECT COUNT(*) FROM shopify_order_attribution
+                      WHERE matched_ad_id IS NOT NULL
+                  """)
+                  print(f"\n  orders matched to an ad: {cur.fetchone()[0]:,}")
+          except Exception as exc:
+              print(f"Coverage report skipped: {type(exc).__name__}: {exc}")
+          PY

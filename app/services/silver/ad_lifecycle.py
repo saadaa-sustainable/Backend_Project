@@ -417,6 +417,83 @@ LEFT JOIN lifetime lt ON lt.ad_id = ai.ad_id
 """
 
 
+#: The overlay. ad_lifecycle computes its own rows from raw_dump_meta
+#: first; this then writes the authoritative figures over them wherever
+#: public.ad_metrics_external has a value, and leaves every other column
+#: alone. COALESCE, not a bare assignment: a NULL in the mirror must not
+#: erase a value this project does hold.
+#:
+#: Applied here rather than in the endpoint because
+#: ad_performance_summary is built FROM ad_lifecycle -- overlaying at
+#: this one point means the gold table, /admin/analytics/ads-analyse and
+#: the dashboard all agree without a single change to any of them.
+#:
+#: Columns NOT overlaid, and staying on this project's own data:
+#: everything CPIS reads (per-SKU line items), the asset/creative joins,
+#: the media thumbnails, and ad_history_milestones' day-14 replay. A
+#: column is either fully overlaid or fully local -- never half, or two
+#: grains would end up inside one ratio.
+_EXTERNAL_OVERLAY_UPDATE = """
+UPDATE ad_lifecycle
+SET ad_name = COALESCE(e.ad_name, ad_lifecycle.ad_name),
+    ad_status = COALESCE(e.ad_status, ad_lifecycle.ad_status),
+    ad_created_time = COALESCE(e.ad_created_time, ad_lifecycle.ad_created_time),
+    account_name = COALESCE(e.account_name, ad_lifecycle.account_name),
+    campaign_name = COALESCE(e.campaign_name, ad_lifecycle.campaign_name),
+    adset_id = COALESCE(e.adset_id, ad_lifecycle.adset_id),
+    adset_name = COALESCE(e.adset_name, ad_lifecycle.adset_name),
+    spend = COALESCE(e.spend, ad_lifecycle.spend),
+    impressions = COALESCE(e.impressions, ad_lifecycle.impressions),
+    reach = COALESCE(e.reach, ad_lifecycle.reach),
+    frequency = COALESCE(e.frequency, ad_lifecycle.frequency),
+    conv_value = COALESCE(e.conv_value, ad_lifecycle.conv_value),
+    purchases = COALESCE(e.purchases, ad_lifecycle.purchases),
+    ncp_count = COALESCE(e.ncp_count, ad_lifecycle.ncp_count),
+    ftewv_count = COALESCE(e.ftewv_count, ad_lifecycle.ftewv_count),
+    cost_per_ncp = COALESCE(e.cost_per_ncp, ad_lifecycle.cost_per_ncp),
+    cost_per_ftewv = COALESCE(e.cost_per_ftewv, ad_lifecycle.cost_per_ftewv),
+    cpc_link = COALESCE(e.cpc_link, ad_lifecycle.cpc_link),
+    ctr_pct = COALESCE(e.ctr_pct, ad_lifecycle.ctr_pct),
+    cpr_1000 = COALESCE(e.cpr_1000, ad_lifecycle.cpr_1000),
+    checkout_compl_pct = COALESCE(e.checkout_compl_pct, ad_lifecycle.checkout_compl_pct),
+    cr_lc_pct = COALESCE(e.cr_lc_pct, ad_lifecycle.cr_lc_pct),
+    atc_lc_pct = COALESCE(e.atc_lc_pct, ad_lifecycle.atc_lc_pct),
+    ci_atc_pct = COALESCE(e.ci_atc_pct, ad_lifecycle.ci_atc_pct),
+    contrib_margin_pct = COALESCE(e.contrib_margin_pct, ad_lifecycle.contrib_margin_pct),
+    profit_efficiency = COALESCE(e.profit_efficiency, ad_lifecycle.profit_efficiency),
+    engagement_count = COALESCE(e.engagement_count, ad_lifecycle.engagement_count),
+    inline_link_clicks = COALESCE(e.inline_link_clicks, ad_lifecycle.inline_link_clicks),
+    add_to_cart = COALESCE(e.add_to_cart, ad_lifecycle.add_to_cart),
+    checkout_initiate = COALESCE(e.checkout_initiate, ad_lifecycle.checkout_initiate),
+    f1_pass = COALESCE(e.f1_pass, ad_lifecycle.f1_pass),
+    f2_pass = COALESCE(e.f2_pass, ad_lifecycle.f2_pass),
+    f3_pass = COALESCE(e.f3_pass, ad_lifecycle.f3_pass),
+    f4_pass = COALESCE(e.f4_pass, ad_lifecycle.f4_pass),
+    category = COALESCE(e.category, ad_lifecycle.category)
+FROM public.ad_metrics_external e
+WHERE e.ad_id = ad_lifecycle.ad_id
+"""
+
+#: Ads the mirror knows about that this project never ingested (19,565
+#: against 14,866 as of 2026-09-05). Inserted so the row COUNT matches
+#: too, not just the values on rows that already exist here. Their
+#: local-only columns stay NULL, which is honest -- there is no data for
+#: them on this side.
+_EXTERNAL_OVERLAY_INSERT = """
+INSERT INTO ad_lifecycle (ad_id, ad_name, ad_status, ad_created_time, account_name, campaign_name, adset_id, adset_name, spend, impressions, reach, frequency, conv_value, purchases, ncp_count, ftewv_count, cost_per_ncp, cost_per_ftewv, cpc_link, ctr_pct, cpr_1000, checkout_compl_pct, cr_lc_pct, atc_lc_pct, ci_atc_pct, contrib_margin_pct, profit_efficiency, engagement_count, inline_link_clicks, add_to_cart, checkout_initiate, f1_pass, f2_pass, f3_pass, f4_pass, category)
+SELECT e.ad_id, e.ad_name, e.ad_status, e.ad_created_time, e.account_name, e.campaign_name, e.adset_id, e.adset_name, e.spend, e.impressions, e.reach, e.frequency, e.conv_value, e.purchases, e.ncp_count, e.ftewv_count, e.cost_per_ncp, e.cost_per_ftewv, e.cpc_link, e.ctr_pct, e.cpr_1000, e.checkout_compl_pct, e.cr_lc_pct, e.atc_lc_pct, e.ci_atc_pct, e.contrib_margin_pct, e.profit_efficiency, e.engagement_count, e.inline_link_clicks, e.add_to_cart, e.checkout_initiate, e.f1_pass, e.f2_pass, e.f3_pass, e.f4_pass, e.category
+FROM public.ad_metrics_external e
+WHERE NOT EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = e.ad_id)
+"""
+
+#: Skipped silently when the mirror does not exist yet -- a fresh install
+#: with no source configured must still refresh normally.
+_EXTERNAL_TABLE_EXISTS = """
+SELECT 1 FROM information_schema.tables
+WHERE table_schema = 'public' AND table_name = 'ad_metrics_external'
+"""
+
+
 async def ensure_ad_lifecycle_table(session: AsyncSession) -> None:
     for statement in _ddl_statements():
         await session.execute(text(statement))
@@ -427,7 +504,19 @@ async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
     await ensure_ad_lifecycle_table(session)
     await session.execute(text(_TRUNCATE))
     await session.execute(text(_INSERT))
+
+    # Overlay the authoritative figures, if a mirror is present. Runs in
+    # the SAME transaction as the rebuild above, so the table is never
+    # briefly visible carrying the un-overlaid numbers.
+    overlaid = 0
+    added = 0
+    if (await session.execute(text(_EXTERNAL_TABLE_EXISTS))).scalar_one_or_none():
+        overlaid = (await session.execute(text(_EXTERNAL_OVERLAY_UPDATE))).rowcount or 0
+        added = (await session.execute(text(_EXTERNAL_OVERLAY_INSERT))).rowcount or 0
     await session.commit()
+
+    if overlaid or added:
+        logger.info("ad_lifecycle_external_overlay", updated=overlaid, inserted=added)
 
     result = await session.execute(text("SELECT COUNT(*) FROM ad_lifecycle"))
     count = result.scalar_one()

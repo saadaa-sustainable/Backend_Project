@@ -161,6 +161,10 @@ jobs:
         if: ${{ !cancelled() && inputs.rebuild_downstream }}
         env:
           DATABASE_URL_SYNC:    ${{ secrets.DATABASE_URL_SYNC }}
+          # The per-ad + per-day metric source. Absent, scripts/
+          # sync_ad_metrics_external.py exits 0 without writing and the
+          # dashboard keeps this project's own figures.
+          AD_METRICS_SOURCE_URL:            ${{ secrets.AD_METRICS_SOURCE_URL }}
           DATABASE_URL:         ${{ secrets.DATABASE_URL }}
           DATABASE_SERVICE_KEY: ${{ secrets.DATABASE_SERVICE_KEY }}
           META_ACCESS_TOKEN:    ${{ secrets.META_ACCESS_TOKEN }}
@@ -176,8 +180,12 @@ jobs:
           SHOPIFY_API_VERSION:  ${{ secrets.SHOPIFY_API_VERSION }}
         run: |
           # Order matters: the daily grain feeds ad_lifecycle, which feeds
-          # the milestones replay.
+          # the milestones replay. The metric sync runs before
+          # ad_lifecycle because ad_lifecycle applies the overlay from
+          # what the sync just landed -- running it after would leave the
+          # rebuild a refresh behind.
           python scripts/refresh_insights_daily_by_ad.py
+          python scripts/sync_ad_metrics_external.py
           python scripts/refresh_ad_lifecycle.py
           python scripts/refresh_ad_history_milestones.py
 
