@@ -253,7 +253,7 @@ velocity_ctx AS (
                       / COUNT(*)::numeric, 1) END AS oos_pct
     FROM inv_daily
     GROUP BY master_sku
-),
+)
 INSERT INTO public.cpis_sku_context (
     master_sku, product_name, product_type_count, variant_count,
     available_variant_count, price_min, price_max,
