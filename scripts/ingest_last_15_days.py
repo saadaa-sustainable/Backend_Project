@@ -755,6 +755,7 @@ def main() -> int:
 
     fetch_start = time.monotonic()
     any_error = False
+    failed_windows: list[tuple] = []
     grand_total_rows = 0
     grand_total_inserted = 0
 
@@ -774,6 +775,7 @@ def main() -> int:
                   f"{status:<7} {len(r.items):>6} rows  {r.duration_seconds:6.2f}s", flush=True)
             if r.error:
                 any_error = True
+                failed_windows.append((w_since, w_until, r.account.key))
                 print(f"      error: {r.error}", file=sys.stderr, flush=True)
             grand_total_rows += len(r.items)
 
@@ -786,6 +788,16 @@ def main() -> int:
 
     fetch_wall_time = time.monotonic() - fetch_start
     print(f"\nTotal rows fetched: {grand_total_rows}")
+    if failed_windows:
+        # `any_error` is sticky across every chunk, so ONE bad account in
+        # ONE window makes the process exit 1 even when every other window
+        # wrote fine. Name them, or a red run looks like a total loss when
+        # it may have landed almost everything.
+        print(f"{len(failed_windows)} of {len(windows)} window(s) had a failed account:")
+        for w_since, w_until, account_key in failed_windows:
+            print(f"  {w_since} .. {w_until}  account {account_key}")
+        print("Rows from every OTHER window are committed and usable -- "
+              "the downstream rebuild does not need this run to be clean.")
     if args.no_insert:
         print("--no-insert set — nothing written.")
         return 1 if any_error else 0
