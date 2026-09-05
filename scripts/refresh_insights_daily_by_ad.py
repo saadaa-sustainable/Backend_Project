@@ -1,5 +1,5 @@
 """Materialise raw_dump_meta insights into a flat (ad_id, day, spend,
-conv_value, ncp_count) table so CPIS + Creative Testing endpoints can
+conv_value, ncp_count, ftewv_count, impressions, clicks) table so CPIS + Creative Testing endpoints can
 read windowed metrics without paying the per-row JSONB extraction cost
 that made the /cpis-utm endpoint hit 60+ seconds at 50-row pagination.
 
@@ -37,11 +37,19 @@ CREATE TABLE IF NOT EXISTS public.insights_daily_by_ad (
     spend         numeric,
     conv_value    numeric,
     ncp_count     numeric,
+    -- Added 2026-09-04 for the historical day-14 category. F4
+    -- (spend/ftewv <= 12) is what separates Incremental Winner from
+    -- Winner and P0 from P1, so without a daily ftewv the reconstructed
+    -- category could not tell those pairs apart. Same global
+    -- custom-conversion match ad_lifecycle.py uses for the lifetime
+    -- rollup, so the two agree by construction.
+    ftewv_count   numeric,
     impressions   numeric,
     clicks        numeric,
     refreshed_at  timestamptz DEFAULT NOW(),
     PRIMARY KEY (ad_id, day)
 );
+ALTER TABLE public.insights_daily_by_ad ADD COLUMN IF NOT EXISTS ftewv_count numeric;
 CREATE INDEX IF NOT EXISTS ix_idba_ad_day ON public.insights_daily_by_ad(ad_id, day);
 CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
 """
@@ -77,6 +85,11 @@ WITH ncp_ids AS (
     SELECT DISTINCT raw_payload ->> 'id' AS id
     FROM raw_dump_meta
     WHERE object_type = 'custom_conversion' AND raw_payload ->> 'name' = 'NCP'
+),
+ftewv_ids AS (
+    SELECT DISTINCT raw_payload ->> 'id' AS id
+    FROM raw_dump_meta
+    WHERE object_type = 'custom_conversion' AND raw_payload ->> 'name' = 'First-time EWV'
 ),
 raw_dedup AS (
     SELECT DISTINCT ON (
@@ -123,6 +136,16 @@ extracted AS (
            )),
         0
       ) AS ncp_count,
+      -- Same shape as ncp_count above, against the 'First-time EWV'
+      -- custom conversion.
+      COALESCE(
+        (SELECT SUM((act->>'value')::numeric)
+           FROM jsonb_array_elements(raw_payload->'actions') act
+           WHERE act->>'action_type' = ANY (
+             SELECT 'offsite_conversion.custom.' || id FROM ftewv_ids
+           )),
+        0
+      ) AS ftewv_count,
       NULLIF(raw_payload->>'impressions','')::numeric AS impressions,
       NULLIF(raw_payload->>'inline_link_clicks','')::numeric AS clicks
     FROM raw_dedup
@@ -135,6 +158,7 @@ expanded AS (
       e.spend       / NULLIF(e.de - e.ds + 1, 0) AS spend,
       e.conv_value  / NULLIF(e.de - e.ds + 1, 0) AS conv_value,
       e.ncp_count   / NULLIF(e.de - e.ds + 1, 0) AS ncp_count,
+      e.ftewv_count / NULLIF(e.de - e.ds + 1, 0) AS ftewv_count,
       e.impressions / NULLIF(e.de - e.ds + 1, 0) AS impressions,
       e.clicks      / NULLIF(e.de - e.ds + 1, 0) AS clicks
     FROM extracted e,
@@ -142,14 +166,14 @@ expanded AS (
 ),
 best AS (
     SELECT DISTINCT ON (ad_id, day)
-      ad_id, day, spend, conv_value, ncp_count, impressions, clicks
+      ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks
     FROM expanded
     ORDER BY ad_id, day, range_days ASC
 )
 INSERT INTO public.insights_daily_by_ad (
-    ad_id, day, spend, conv_value, ncp_count, impressions, clicks
+    ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks
 )
-SELECT ad_id, day, spend, conv_value, ncp_count, impressions, clicks
+SELECT ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks
 FROM best
 """
 

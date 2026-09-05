@@ -114,6 +114,23 @@ PHASE_INGEST = [
 PHASE_SILVER = [
     ("silver_raw_dump_meta",  ["scripts/refresh_raw_dump_meta_daily.py"],   1200),
     ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],   900),
+    # ad_lifecycle was NEVER in this pipeline. It was registered only as
+    # a FlattenJob in app/services/silver/registry.py, so the in-process
+    # scheduler was the only thing that refreshed it -- and that
+    # scheduler does not run in production. Measured 2026-09-05: the
+    # table's newest lifecycle_refreshed_at was 2026-08-25, eleven days
+    # stale, while insights_daily_by_ad beside it was six hours old.
+    # Every Winner/Discarded verdict on the Ads Analyse dashboard was
+    # being read off eleven-day-old metrics. Runs after
+    # silver_insights_daily because both read ad_insights and this one
+    # is the heavier of the two.
+    ("ad_lifecycle",          ["scripts/refresh_ad_lifecycle.py"],          1200),
+    # Historical tagging: the day-14 category and the 50k-impressions
+    # crossing date. Must run AFTER both of the above -- it reads
+    # ad_created_time from ad_lifecycle and the daily grain from
+    # insights_daily_by_ad, and a stale either side would date the
+    # milestones wrong.
+    ("ad_history_milestones", ["scripts/refresh_ad_history_milestones.py"],  900),
     # 900 -> 3600 (2026-09-04). refresh_shopify_silver.py TRUNCATEs and
     # re-INSERTs all EIGHT silver tables from ~4.9M bronze rows every
     # run -- sessions 1.37M, inventory 1.38M, customers 984k, orders
