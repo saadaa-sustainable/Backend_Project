@@ -237,19 +237,56 @@ FROM best
 """
 
 
+# 3600s, raised from 1200s on 2026-09-05.
+#
+# The Meta history backfill landed 174,625 rows in raw_dump_meta, taking
+# it to 708,780 insights rows, and this rebuild expands each one across
+# every day of its date range before deduplicating -- 1,752,382 output
+# rows. At 1200s it died mid-INSERT, exactly 1200.2s in:
+#
+#     [pg] rebuilding from raw_dump_meta ...
+#     psycopg2.errors.QueryCanceled: canceling statement due to
+#     statement timeout
+#
+# and because this step failed, every step after it in the workflow was
+# skipped -- so the metric mirrors were never synced and the dashboard
+# saw none of it. The fetch had worked; only the flatten was too slow
+# for its own limit.
+#
+# The job's own ceiling is 350 minutes, so an hour here is still a
+# safety net rather than an expectation. If it ever approaches this,
+# the rebuild wants to go incremental rather than get a bigger number.
+_TIMEOUT = "SET statement_timeout = '3600s'"
+
+
 def main() -> None:
     t0 = time.time()
     conn = psycopg2.connect(DSN)
     conn.autocommit = False
     try:
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '1200s'")
+            cur.execute(_TIMEOUT)
             cur.execute(DDL)
             conn.commit()
+
+            # The DDL commit above ended that transaction, and a session
+            # SET does not reliably survive one under Supavisor's
+            # transaction pooling -- the connection goes back to the pool
+            # and the next statement can land on a different backend.
+            # Re-apply inside the transaction that actually matters, so
+            # the rebuild cannot inherit the server default. Same lesson
+            # as app/services/silver/shopify_ad_attribution.py, where a
+            # single SET let a 34-minute job die on the 2-minute default.
+            cur.execute(_TIMEOUT)
 
             print("[pg] TRUNCATE insights_daily_by_ad", flush=True)
             cur.execute("TRUNCATE public.insights_daily_by_ad")
 
+            # TRUNCATE and the INSERT share one transaction on purpose:
+            # if the rebuild fails, the truncate rolls back with it and
+            # the table keeps yesterday's rows. Confirmed on the
+            # 2026-09-05 timeout below -- the run died mid-rebuild and
+            # all 1,752,382 rows were still there afterwards.
             print("[pg] rebuilding from raw_dump_meta ...", flush=True)
             cur.execute(REBUILD_SQL)
             conn.commit()
