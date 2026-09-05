@@ -1358,6 +1358,16 @@ export interface CpisUtmResponse {
   meta_total_spend: number | null;
   attributed_spend: number | null;
   untethered_spend: number | null;
+  //   untethered_*       why the untethered slice is untethered. The
+  //                      three always sum to untethered_spend:
+  //                        ad_unknown    an order named the ad but the
+  //                                      ad is missing from ad_lifecycle
+  //                        lag           the ad converted in the window,
+  //                                      on a different day than it spent
+  //                        no_conversion the ad drove no attributed order
+  untethered_ad_unknown: number | null;
+  untethered_lag: number | null;
+  untethered_no_conversion: number | null;
 }
 
 export interface CpisUtmParams {

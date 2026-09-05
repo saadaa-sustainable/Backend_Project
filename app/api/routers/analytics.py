@@ -2734,6 +2734,70 @@ class CpisUtmRow(BaseModel):
     avg_selling_price: float | None
 
 
+# ── why spend goes untethered ───────────────────────────────────────
+#
+# "Untethered" is Meta spend in the window that no attributed order
+# claims. A bare percentage next to it invites the wrong conclusion --
+# that 40% of the ad budget did nothing -- so the endpoint returns the
+# reasons, measured, and the tile prints them.
+#
+# The chain an order has to survive to attribute (see
+# scripts/refresh_cpis_by_sku_daily.py) is: utm_content present ->
+# utm_content is an ad_id -> that ad_id exists in ad_lifecycle -> the
+# order has line items -> a line's SKU parses to a master SKU. Measured
+# 2026-09-05 over 2026-08-06..09-04: 41,595 orders, 26,163 carry any
+# utm_content, 20,136 of those are an ad_id, and 15,231 survive the
+# ad_lifecycle check. The SKU parse loses nothing (21,896 of 21,896
+# lines). So the losses are utm coverage and ad coverage, not SKU
+# naming.
+#
+# This query splits the untethered spend into the two buckets that are
+# NOT a matter of attribution rules:
+#
+#   ad_unknown      an order that day named this ad, but the ad is
+#                   absent from ad_lifecycle so the order could not be
+#                   attributed. Pure coverage hole -- 369 of the 766 ads
+#                   named by orders in that window were missing.
+#   no_conversion   the ad drove no attributed order anywhere in the
+#                   window. Genuinely unconverted spend.
+#
+# Whatever is left over is conversion LAG -- the ad converted in the
+# window but not on the day it spent -- and the caller derives it by
+# subtraction, so the four numbers always sum to the Meta total no
+# matter which attribution rule the active view used.
+_CPIS_UNTETHERED_BREAKDOWN = """
+WITH spend AS (
+    SELECT ad_id, day AS d, spend
+      FROM public.insights_daily_by_ad
+     WHERE day BETWEEN :wf AND :wt AND spend > 0
+),
+cited AS (
+    SELECT DISTINCT so.utm_content AS ad_id, so.processed_at::date AS d
+      FROM shopify_orders so
+     WHERE so.processed_at::date BETWEEN :wf AND :wt
+       AND so.utm_content ~ '^[0-9]{10,20}$'
+),
+attributable AS (
+    SELECT DISTINCT so.utm_content AS ad_id, so.processed_at::date AS d
+      FROM shopify_orders so
+     WHERE so.processed_at::date BETWEEN :wf AND :wt
+       AND so.utm_content ~ '^[0-9]{10,20}$'
+       AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
+       AND jsonb_typeof(so.line_items->'edges') = 'array'
+),
+converted_ads AS (SELECT DISTINCT ad_id FROM attributable)
+SELECT
+    COALESCE(SUM(s.spend) FILTER (
+        WHERE a.ad_id IS NULL AND c.ad_id IS NOT NULL), 0) AS ad_unknown,
+    COALESCE(SUM(s.spend) FILTER (
+        WHERE a.ad_id IS NULL AND c.ad_id IS NULL AND ca.ad_id IS NULL), 0) AS no_conversion
+FROM spend s
+LEFT JOIN attributable  a  ON a.ad_id  = s.ad_id AND a.d = s.d
+LEFT JOIN cited         c  ON c.ad_id  = s.ad_id AND c.d = s.d
+LEFT JOIN converted_ads ca ON ca.ad_id = s.ad_id
+"""
+
+
 class CpisUtmResponse(BaseModel):
     rows: list[CpisUtmRow]
     total: int
@@ -2754,6 +2818,18 @@ class CpisUtmResponse(BaseModel):
     meta_total_spend: float | None
     attributed_spend: float | None
     untethered_spend: float | None
+    #: Why the untethered slice is untethered. See
+    #: _CPIS_UNTETHERED_BREAKDOWN. These three always sum to
+    #: untethered_spend, so the tile can print the reasons rather than
+    #: leaving a bare percentage to be read as wasted budget.
+    #:   untethered_ad_unknown    an order named the ad, but the ad is
+    #:                            missing from ad_lifecycle
+    #:   untethered_lag           the ad converted in the window, on a
+    #:                            different day than it spent
+    #:   untethered_no_conversion the ad drove no attributed order at all
+    untethered_ad_unknown: float | None
+    untethered_lag: float | None
+    untethered_no_conversion: float | None
 
 
 @router.get("/cpis-utm", response_model=CpisUtmResponse)
@@ -3479,6 +3555,9 @@ async def get_cpis_utm(
     meta_total_spend: float | None = None
     attributed_spend: float | None = None
     untethered_spend: float | None = None
+    untethered_ad_unknown: float | None = None
+    untethered_lag: float | None = None
+    untethered_no_conversion: float | None = None
     if wf and wt:
         meta_row = (
             await session.execute(
@@ -3517,12 +3596,33 @@ async def get_cpis_utm(
         attributed_spend = float(attr_row or 0)
         untethered_spend = max(0.0, meta_total_spend - attributed_spend)
 
+        brk = (
+            await session.execute(
+                text(_CPIS_UNTETHERED_BREAKDOWN), {"wf": wf, "wt": wt}
+            )
+        ).one()
+        untethered_ad_unknown = min(float(brk.ad_unknown or 0), untethered_spend)
+        untethered_no_conversion = min(
+            float(brk.no_conversion or 0), untethered_spend - untethered_ad_unknown
+        )
+        # Lag by subtraction, so the three always sum to untethered_spend
+        # whichever attribution rule the active view used. The pre-computed
+        # windows already count an ad's spend when it converted anywhere in
+        # the window, so lag comes out at zero there; the custom-range view
+        # is same-day only, so it does not.
+        untethered_lag = max(
+            0.0, untethered_spend - untethered_ad_unknown - untethered_no_conversion
+        )
+
     return CpisUtmResponse(
         rows=rows,
         total=total,
         meta_total_spend=meta_total_spend,
         attributed_spend=attributed_spend,
         untethered_spend=untethered_spend,
+        untethered_ad_unknown=untethered_ad_unknown,
+        untethered_lag=untethered_lag,
+        untethered_no_conversion=untethered_no_conversion,
     )
 
 
