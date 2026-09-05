@@ -179,6 +179,13 @@ _ADS_ANALYSE_SELECT = (
     "al.checkout_initiate AS ci_count, "
     "al.engagement_count, "
     "al.ad_created_time::date AS ad_created_date, "
+    # Historical tagging -- see AdsAnalyseRow's own comments. Sourced
+    # from ad_history_milestones so the day-14 replay is precomputed
+    # once daily rather than re-derived per request from 1.75M daily
+    # rows.
+    "ahm.category_at_day_14, ahm.history_status, "
+    "ahm.impressions_50k_date, ahm.days_to_50k, "
+    "ahm.impressions_at_day_14, "
     # Derivable columns — SELECT-time so no schema change needed.
     # Formulas match CTD's dashboard.js definitions verbatim.
     "CASE WHEN al.impressions > 0 THEN al.spend * 1000.0 / al.impressions END AS cost_per_1000, "
@@ -222,7 +229,10 @@ _ADS_ANALYSE_FROM = (
     # a proper subquery/materialized column.
     "LEFT JOIN LATERAL ("
     "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
-    ") fs ON true"
+    ") fs ON true "
+    # Historical tagging. A plain PK join onto a ~14.9k-row table, so it
+    # costs nothing next to the joins around it.
+    "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id"
 )
 
 
@@ -379,6 +389,35 @@ class AdsAnalyseRow(BaseModel):
     ltv_reach: float | None
     ltv_frequency: float | None
     first_seen_date: date | None
+
+    # ── Historical tagging (public.ad_history_milestones) ────────────
+    #: What this ad's category WAS on the 14th day of its life, scored
+    #: on metrics cumulative over creation_day..creation_day+13. The
+    #: `category` column above is a LIVE verdict re-evaluated against
+    #: today's lifetime metrics, so an ad that won its first fortnight
+    #: and has since decayed reads "Discarded" there and "Winner" here.
+    #: That difference is the point of the column.
+    #:
+    #: NULL when the first fortnight cannot be reconstructed -- read
+    #: history_status to find out why rather than treating NULL as
+    #: "no result".
+    category_at_day_14: str | None
+    #: 'ok' | 'not_yet_14_days' | 'partial_history' | 'no_history'.
+    #: Meta insights in bronze begin 2026-01-01, so ~9,800 of ~14,900
+    #: ads were created before any daily data exists for them.
+    history_status: str | None
+    #: The day this ad's cumulative impressions crossed 50,000 -- the F1
+    #: gate every category above "P2 analysis" depends on. NULL when it
+    #: never crossed, or when the ad predates the daily range and the
+    #: running sum would date the crossing too late to be honest.
+    impressions_50k_date: date | None
+    #: The same fact as an age: days from creation to crossing 50k.
+    days_to_50k: int | None
+    #: Cumulative impressions over the first fortnight -- the number
+    #: behind category_at_day_14's F1 test, shown so the verdict is
+    #: auditable rather than asserted.
+    impressions_at_day_14: float | None
+
     # Asset resolution from the three CTD content tables. Match source is
     # one of: 'direct' (workflow ad_id link), 'ctd_matched' (CTD's fuzzy
     # substring matcher), 'name_parsed' (regex-extracted from ad_name and

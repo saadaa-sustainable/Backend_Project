@@ -236,7 +236,27 @@ def _ddl_statements() -> list[str]:
 # name mismatch fails loudly ("column ai.x does not exist") instead of
 # silently misaligning.
 _INSERT_TARGET_COLUMNS = ", ".join(name for name, _ in _AD_INSIGHTS_COLUMNS + _COMPUTED_COLUMNS)
-_AI_COLUMN_LIST = ",\n    ".join(f"ai.{name}" for name, _ in _AD_INSIGHTS_COLUMNS)
+#: Columns whose value must come from the summed daily grain, not from
+#: ad_insights' single fetched window -- see the `lifetime` CTE for the
+#: measurements that forced this. Everything else still passes through
+#: from ai.* unchanged, including reach and frequency, which cannot be
+#: summed across days without counting the same person repeatedly.
+_LIFETIME_OVERRIDES = {
+    "spend": "COALESCE(lt.spend, 0)",
+    "impressions": "COALESCE(lt.impressions, 0)",
+    "inline_link_clicks": "COALESCE(lt.clicks, 0)",
+    "inline_post_engagement": "COALESCE(lt.post_engagements, 0)",
+    # date_start/date_stop described the arbitrary fetched window. They
+    # now describe the range the metrics beside them actually cover,
+    # which is what a reader assumes they mean.
+    "date_start": "COALESCE(lt.first_day, ai.date_start)",
+    "date_stop": "COALESCE(lt.last_day, ai.date_stop)",
+}
+
+_AI_COLUMN_LIST = ",\n    ".join(
+    f"{_LIFETIME_OVERRIDES[name]} AS {name}" if name in _LIFETIME_OVERRIDES else f"ai.{name}"
+    for name, _ in _AD_INSIGHTS_COLUMNS
+)
 
 
 _TRUNCATE = "TRUNCATE ad_lifecycle"
@@ -256,92 +276,134 @@ def _first_match(column: str, *action_types: str) -> str:
 
 _INSERT = f"""
 INSERT INTO ad_lifecycle ({_INSERT_TARGET_COLUMNS})
-WITH ncp_ids AS (
-    -- Global, not account-scoped -- custom-conversion ids are shared across ad
-    -- accounts at the Business Manager level (confirmed live, see module docstring).
-    SELECT DISTINCT raw_payload ->> 'id' AS id
-    FROM raw_dump_meta
-    WHERE object_type = 'custom_conversion' AND raw_payload ->> 'name' = 'NCP'
-),
-ftewv_ids AS (
-    SELECT DISTINCT raw_payload ->> 'id' AS id
-    FROM raw_dump_meta
-    WHERE object_type = 'custom_conversion' AND raw_payload ->> 'name' = 'First-time EWV'
+-- ncp_ids / ftewv_ids used to live here, resolving the custom-conversion
+-- ids so ncp_count and ftewv_count could be pulled out of ai.actions.
+-- Both now come from the `lifetime` rollup below, which does that same
+-- Business-Manager-global match once per day in
+-- scripts/refresh_insights_daily_by_ad.py instead of once per ad here.
+WITH -- ---------------------------------------------------------------------
+-- lifetime: the metrics, summed over EVERY day bronze covers.
+--
+-- These used to come from ad_insights, which is built by
+-- insights_flatten.py's DISTINCT ON (meta_id) ORDER BY extracted_at DESC
+-- -- one arbitrary FETCHED DATE RANGE per ad, whichever was pulled most
+-- recently for it. That is the right rule for an entity attribute
+-- (ad_status, ad_name) and the wrong one for a cumulative metric.
+--
+-- Measured live 2026-09-05 against the Creative Testing Dashboard, which
+-- has the same numbers over the same window:
+--     10,862 of 14,866 ads (73%) carried a window under 30 days
+--     shortest 6 days, longest 234 -- so no two ads were comparable
+--     ad 120215866514990422 read spend 2,583 against CTD's 2,142,916
+--       for 2026, because its window happened to be 2026-08-13..08-20
+--     ad 120215851600420422 read 0 against CTD's 5.4M lifetime
+-- Every ROAS, CPIS, cost-per-NCP and F1-F4 verdict downstream inherited
+-- that error, which is why the dashboards disagreed so wildly.
+--
+-- insights_daily_by_ad already solves this properly: it expands every
+-- fetched range to days, keeps the finest-grained slice per (ad_id,
+-- day), and so can be summed without double-counting overlapping
+-- fetches. Summing it gives every ad the SAME window -- the whole of
+-- bronze -- which is the only way two ads can be compared at all.
+--
+-- NOT moved: reach and frequency. Reach is a deduplicated count of
+-- PEOPLE, so daily reach cannot be summed into a lifetime reach without
+-- counting the same person once per day. Those two stay on the sync
+-- window, and CTD has the identical limitation and says so in
+-- refresh_ae_table.py. Everything derived from reach (cpr_1000,
+-- ltv_reach, pct_reach_ftewv) inherits that caveat.
+lifetime AS (
+    SELECT
+        ad_id,
+        SUM(spend)             AS spend,
+        SUM(impressions)       AS impressions,
+        SUM(clicks)            AS clicks,
+        SUM(conv_value)        AS conv_value,
+        SUM(purchases)         AS purchases,
+        SUM(add_to_cart)       AS add_to_cart,
+        SUM(checkout_initiate) AS checkout_initiate,
+        SUM(ncp_count)         AS ncp_count,
+        SUM(ftewv_count)       AS ftewv_count,
+        SUM(thruplays)         AS thruplays,
+        SUM(three_sec_plays)   AS three_sec_plays,
+        SUM(outbound_clicks)   AS outbound_clicks,
+        SUM(post_engagements)  AS post_engagements,
+        -- An average, not a count: averaged across days rather than
+        -- summed, or "8 seconds watched" becomes 8 x however many days
+        -- the ad ran.
+        AVG(NULLIF(video_play_time, 0)) AS video_play_time,
+        MIN(day)               AS first_day,
+        MAX(day)               AS last_day
+    FROM public.insights_daily_by_ad
+    GROUP BY ad_id
 ),
 calc AS (
     SELECT
         ai.ad_id,
-        {_first_match("actions", "omni_purchase", "purchase")} AS purchases,
-        {_first_match("action_values", "omni_purchase", "purchase")} AS conv_value,
-        {_first_match("actions", "omni_initiated_checkout", "initiate_checkout")} AS checkout_initiate,
-        {_first_match("actions", "omni_add_to_cart", "add_to_cart")} AS add_to_cart,
-        {_first_match("actions", "video_view")} AS three_sec_video_plays,
+        COALESCE(lt.purchases, 0) AS purchases,
+        COALESCE(lt.conv_value, 0) AS conv_value,
+        COALESCE(lt.checkout_initiate, 0) AS checkout_initiate,
+        COALESCE(lt.add_to_cart, 0) AS add_to_cart,
+        COALESCE(lt.three_sec_plays, 0) AS three_sec_video_plays,
         {_first_match("actions", "comment")} AS post_comments,
         {_first_match("actions", "post_reaction")} AS post_reactions,
         {_first_match("actions", "onsite_conversion.post_save")} AS post_saves,
         {_first_match("actions", "post")} AS post_shares,
         {_first_match("actions", "like")} AS page_likes,
-        COALESCE((ai.video_thruplay_watched_actions -> 0 ->> 'value')::numeric, 0) AS thruplays,
-        COALESCE((ai.video_avg_time_watched_actions -> 0 ->> 'value')::numeric, 0) AS video_play_time,
-        COALESCE((ai.outbound_clicks -> 0 ->> 'value')::numeric, 0) AS outbound_clicks_count,
-        COALESCE((
-            SELECT SUM((elem ->> 'value')::numeric)
-            FROM jsonb_array_elements(COALESCE(ai.actions, '[]'::jsonb)) elem
-            WHERE elem ->> 'action_type' = ANY (SELECT 'offsite_conversion.custom.' || id FROM ncp_ids)
-        ), 0) AS ncp_count,
-        COALESCE((
-            SELECT SUM((elem ->> 'value')::numeric)
-            FROM jsonb_array_elements(COALESCE(ai.actions, '[]'::jsonb)) elem
-            WHERE elem ->> 'action_type' = ANY (SELECT 'offsite_conversion.custom.' || id FROM ftewv_ids)
-        ), 0) AS ftewv_count
+        COALESCE(lt.thruplays, 0) AS thruplays,
+        COALESCE(lt.video_play_time, 0) AS video_play_time,
+        COALESCE(lt.outbound_clicks, 0) AS outbound_clicks_count,
+        COALESCE(lt.ncp_count, 0) AS ncp_count,
+        COALESCE(lt.ftewv_count, 0) AS ftewv_count
     FROM ad_insights ai
+    LEFT JOIN lifetime lt ON lt.ad_id = ai.ad_id
 )
 SELECT
     {_AI_COLUMN_LIST},
     ma.ad_status, ma.ad_effective_status, ma.created_time AS ad_created_time,
     c.purchases, c.conv_value, c.checkout_initiate, c.add_to_cart, c.ncp_count, c.ftewv_count,
-    CASE WHEN c.purchases > 0 THEN COALESCE(ai.spend, 0) / c.purchases ELSE NULL END AS cost_per_purchase,
+    CASE WHEN c.purchases > 0 THEN COALESCE(lt.spend, 0) / c.purchases ELSE NULL END AS cost_per_purchase,
     c.thruplays, c.three_sec_video_plays, c.video_play_time, c.outbound_clicks_count,
-    COALESCE(ai.inline_post_engagement, 0) AS post_engagements,
+    COALESCE(lt.post_engagements, 0) AS post_engagements,
     (c.thruplays + c.post_comments + c.post_reactions + c.post_saves + c.post_shares + c.page_likes
-        + COALESCE(ai.inline_link_clicks, 0)) AS engagement_count,
-    CASE WHEN COALESCE(ai.impressions, 0) > 0
-        THEN COALESCE(ai.inline_link_clicks, 0) / ai.impressions * 100 ELSE NULL END AS ctr_pct,
-    CASE WHEN COALESCE(ai.inline_link_clicks, 0) > 0
-        THEN COALESCE(ai.spend, 0) / ai.inline_link_clicks ELSE NULL END AS cpc_link,
+        + COALESCE(lt.clicks, 0)) AS engagement_count,
+    CASE WHEN COALESCE(lt.impressions, 0) > 0
+        THEN COALESCE(lt.clicks, 0) / COALESCE(lt.impressions, 0) * 100 ELSE NULL END AS ctr_pct,
+    CASE WHEN COALESCE(lt.clicks, 0) > 0
+        THEN COALESCE(lt.spend, 0) / COALESCE(lt.clicks, 0) ELSE NULL END AS cpc_link,
     CASE WHEN COALESCE(ai.reach, 0) > 0
-        THEN COALESCE(ai.spend, 0) / ai.reach * 1000 ELSE NULL END AS cpr_1000,
+        THEN COALESCE(lt.spend, 0) / ai.reach * 1000 ELSE NULL END AS cpr_1000,
     CASE WHEN c.checkout_initiate > 0 THEN c.purchases / c.checkout_initiate * 100 ELSE NULL END AS checkout_compl_pct,
-    CASE WHEN COALESCE(ai.inline_link_clicks, 0) > 0
-        THEN c.purchases / ai.inline_link_clicks * 100 ELSE NULL END AS cr_lc_pct,
-    CASE WHEN COALESCE(ai.inline_link_clicks, 0) > 0
-        THEN c.add_to_cart / ai.inline_link_clicks * 100 ELSE NULL END AS atc_lc_pct,
+    CASE WHEN COALESCE(lt.clicks, 0) > 0
+        THEN c.purchases / COALESCE(lt.clicks, 0) * 100 ELSE NULL END AS cr_lc_pct,
+    CASE WHEN COALESCE(lt.clicks, 0) > 0
+        THEN c.add_to_cart / COALESCE(lt.clicks, 0) * 100 ELSE NULL END AS atc_lc_pct,
     CASE WHEN c.add_to_cart > 0 THEN c.checkout_initiate / c.add_to_cart * 100 ELSE NULL END AS ci_atc_pct,
-    CASE WHEN COALESCE(ai.spend, 0) > 0 THEN c.conv_value / ai.spend ELSE 0 END AS roas,
-    CASE WHEN c.ncp_count > 0 THEN COALESCE(ai.spend, 0) / c.ncp_count ELSE NULL END AS cost_per_ncp,
-    CASE WHEN c.ftewv_count > 0 THEN COALESCE(ai.spend, 0) / c.ftewv_count ELSE NULL END AS cost_per_ftewv,
-    c.conv_value - COALESCE(ai.spend, 0) AS profit_efficiency,
-    CASE WHEN COALESCE(ai.spend, 0) > 0 AND c.conv_value > 0
-        THEN (1 - ai.spend / c.conv_value) * 100 ELSE -100 END AS contrib_margin_pct,
-    (COALESCE(ai.impressions, 0) >= 50000) AS f1_pass,
-    (COALESCE(ai.spend, 0) > 0 AND c.conv_value / ai.spend >= 3.0) AS f2_pass,
-    (c.ncp_count > 0 AND COALESCE(ai.spend, 0) / c.ncp_count <= 525) AS f3_pass,
-    (c.ftewv_count > 0 AND COALESCE(ai.spend, 0) / c.ftewv_count <= 12) AS f4_pass,
+    CASE WHEN COALESCE(lt.spend, 0) > 0 THEN c.conv_value / COALESCE(lt.spend, 0) ELSE 0 END AS roas,
+    CASE WHEN c.ncp_count > 0 THEN COALESCE(lt.spend, 0) / c.ncp_count ELSE NULL END AS cost_per_ncp,
+    CASE WHEN c.ftewv_count > 0 THEN COALESCE(lt.spend, 0) / c.ftewv_count ELSE NULL END AS cost_per_ftewv,
+    c.conv_value - COALESCE(lt.spend, 0) AS profit_efficiency,
+    CASE WHEN COALESCE(lt.spend, 0) > 0 AND c.conv_value > 0
+        THEN (1 - COALESCE(lt.spend, 0) / c.conv_value) * 100 ELSE -100 END AS contrib_margin_pct,
+    (COALESCE(lt.impressions, 0) >= 50000) AS f1_pass,
+    (COALESCE(lt.spend, 0) > 0 AND c.conv_value / COALESCE(lt.spend, 0) >= 3.0) AS f2_pass,
+    (c.ncp_count > 0 AND COALESCE(lt.spend, 0) / c.ncp_count <= 525) AS f3_pass,
+    (c.ftewv_count > 0 AND COALESCE(lt.spend, 0) / c.ftewv_count <= 12) AS f4_pass,
     CASE
-        WHEN COALESCE(ai.impressions, 0) >= 50000
-         AND ((COALESCE(ai.spend, 0) > 0 AND c.conv_value / ai.spend >= 3.0)
-              OR (c.ncp_count > 0 AND ai.spend / c.ncp_count <= 525))
-         AND c.ftewv_count > 0 AND ai.spend / c.ftewv_count <= 12
+        WHEN COALESCE(lt.impressions, 0) >= 50000
+         AND ((COALESCE(lt.spend, 0) > 0 AND c.conv_value / COALESCE(lt.spend, 0) >= 3.0)
+              OR (c.ncp_count > 0 AND COALESCE(lt.spend, 0) / c.ncp_count <= 525))
+         AND c.ftewv_count > 0 AND COALESCE(lt.spend, 0) / c.ftewv_count <= 12
             THEN 'Incremental Winner'
-        WHEN COALESCE(ai.impressions, 0) >= 50000
-         AND ((COALESCE(ai.spend, 0) > 0 AND c.conv_value / ai.spend >= 3.0)
-              OR (c.ncp_count > 0 AND ai.spend / c.ncp_count <= 525))
+        WHEN COALESCE(lt.impressions, 0) >= 50000
+         AND ((COALESCE(lt.spend, 0) > 0 AND c.conv_value / COALESCE(lt.spend, 0) >= 3.0)
+              OR (c.ncp_count > 0 AND COALESCE(lt.spend, 0) / c.ncp_count <= 525))
             THEN 'Winner'
-        WHEN COALESCE(ai.impressions, 0) >= 50000 AND c.ftewv_count > 0 AND ai.spend / c.ftewv_count <= 12
+        WHEN COALESCE(lt.impressions, 0) >= 50000 AND c.ftewv_count > 0 AND COALESCE(lt.spend, 0) / c.ftewv_count <= 12
             THEN 'P0 analysis'
-        WHEN COALESCE(ai.impressions, 0) >= 50000
+        WHEN COALESCE(lt.impressions, 0) >= 50000
             THEN 'P1 analysis'
-        WHEN COALESCE(ai.spend, 0) > 0 AND c.conv_value / ai.spend >= 3.0
+        WHEN COALESCE(lt.spend, 0) > 0 AND c.conv_value / COALESCE(lt.spend, 0) >= 3.0
             THEN 'P2 analysis'
         WHEN ma.created_time > now() - INTERVAL '14 days'
             THEN 'Result Awaited'
@@ -351,6 +413,7 @@ SELECT
 FROM ad_insights ai
 LEFT JOIN meta_ads ma ON ma.ad_id = ai.ad_id
 LEFT JOIN calc c ON c.ad_id = ai.ad_id
+LEFT JOIN lifetime lt ON lt.ad_id = ai.ad_id
 """
 
 

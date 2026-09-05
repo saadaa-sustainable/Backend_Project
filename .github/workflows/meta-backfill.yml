@@ -1,0 +1,176 @@
+# Backend_Project -- MANUAL Meta insights history backfill.
+#
+# Why this exists
+# ---------------
+# The daily pipeline runs scripts/ingest_last_15_days.py with its default
+# 15-day window. That keeps recent data current and NEVER fills in the
+# past, so any ad that stopped running before the rolling window reached
+# it was simply never fetched. Measured 2026-09-05 against the Creative
+# Testing Dashboard over the SAME window (2026-01-01 onward), counting
+# ads that had spend in each month:
+#
+#     month     CTD    Backend_Project
+#     2026-01  1,765     548   (31%)
+#     2026-02  1,326     406   (31%)
+#     2026-03  1,442     474   (33%)
+#     2026-04  1,248     336   (27%)
+#     2026-05  1,666     506   (30%)
+#     2026-06  1,462     685   (47%)
+#     2026-07  1,475   1,074   (73%)
+#     2026-08  1,712   1,863  (109%)
+#     2026-09  1,027   1,229  (120%)
+#
+# Complete for the last two months, missing roughly 70% of the ads
+# before that. In spend terms BP held 49.7M against CTD's 100.8M for
+# 2026. That gap is the single biggest reason the two dashboards
+# disagree on ROAS, Shopify sales and the Meta-vs-Shopify difference --
+# it is a coverage hole, not a formula difference.
+#
+# This workflow closes it: one fetch over a long window, writing daily
+# ad-level rows into raw_dump_shopify's Meta counterpart raw_dump_meta,
+# then rebuilding the silver and gold tables that read it.
+#
+# Run it ONCE with days=250 (2026-01-01 to today) and the history is
+# filled; after that the daily 15-day window keeps it current on its own.
+#
+#   Actions tab -> "Meta history backfill (manual)" -> Run workflow.
+#
+# Cost warning: 250 days x 3 ad accounts at ad-per-day granularity is a
+# large number of Meta API calls and will consume a real slice of the
+# app-level rate-limit budget. Run it when nothing else needs the token.
+
+name: Meta history backfill (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Trailing window to fetch, in days. 250 covers 2026-01-01 to today, which is as far back as bronze goes."
+        type: string
+        required: false
+        default: "250"
+      account:
+        description: "Restrict to one account key (blank = all three). Useful for splitting a large backfill across runs."
+        type: string
+        required: false
+        default: ""
+      rebuild_downstream:
+        description: "Rebuild insights_daily_by_ad + ad_lifecycle + ad_history_milestones afterwards? Leave on -- the fetch alone changes nothing a dashboard reads."
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  # Same group as the daily refresh: both write raw_dump_meta and the
+  # silver tables built from it, and refresh_ad_lifecycle in particular
+  # holds a long transaction. Queue, never race.
+  group: bp-daily-refresh
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # A 250-day ad-level fetch across three accounts is the longest
+    # single operation this repo has. GitHub's hard ceiling is 6h.
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch Meta history
+        env:
+          DATABASE_URL_SYNC:                ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:                     ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_KEY:             ${{ secrets.DATABASE_SERVICE_KEY }}
+          META_ACCESS_TOKEN:                ${{ secrets.META_ACCESS_TOKEN }}
+          META_API_VERSION:                 ${{ secrets.META_API_VERSION }}
+          META_APP_ID:                      ${{ secrets.META_APP_ID }}
+          META_APP_SECRET:                  ${{ secrets.META_APP_SECRET }}
+          META_GRAPH_API_BASE_URL:          ${{ secrets.META_GRAPH_API_BASE_URL }}
+          META_ACCOUNT_1_ID:                ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME:              ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID:                ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME:              ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID:                ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME:              ${{ secrets.META_ACCOUNT_3_NAME }}
+          META_HTTP_TIMEOUT_SECONDS:        ${{ secrets.META_HTTP_TIMEOUT_SECONDS }}
+          META_MAX_CONCURRENT_REQUESTS:     ${{ secrets.META_MAX_CONCURRENT_REQUESTS }}
+          META_MAX_RETRIES:                 ${{ secrets.META_MAX_RETRIES }}
+          META_PAGE_SIZE:                   ${{ secrets.META_PAGE_SIZE }}
+          META_RATE_LIMIT_SLEEP_BUFFER_SECONDS: ${{ secrets.META_RATE_LIMIT_SLEEP_BUFFER_SECONDS }}
+          META_RETRY_BACKOFF_BASE_SECONDS:  ${{ secrets.META_RETRY_BACKOFF_BASE_SECONDS }}
+          META_RETRY_BACKOFF_MAX_SECONDS:   ${{ secrets.META_RETRY_BACKOFF_MAX_SECONDS }}
+        run: |
+          ARGS="--days ${{ inputs.days }}"
+          if [ -n "${{ inputs.account }}" ]; then
+            ARGS="$ARGS --account ${{ inputs.account }}"
+          fi
+          echo "Running: scripts/ingest_last_15_days.py $ARGS"
+          python scripts/ingest_last_15_days.py $ARGS
+
+      - name: Rebuild downstream tables
+        if: inputs.rebuild_downstream
+        env:
+          DATABASE_URL_SYNC:    ${{ secrets.DATABASE_URL_SYNC }}
+          DATABASE_URL:         ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_KEY: ${{ secrets.DATABASE_SERVICE_KEY }}
+          META_ACCESS_TOKEN:    ${{ secrets.META_ACCESS_TOKEN }}
+          META_ACCOUNT_1_ID:    ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME:  ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID:    ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME:  ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID:    ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME:  ${{ secrets.META_ACCOUNT_3_NAME }}
+          SHOP_DOMAIN:          ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN:   ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOP_NAME:            ${{ secrets.SHOP_NAME }}
+          SHOPIFY_API_VERSION:  ${{ secrets.SHOPIFY_API_VERSION }}
+        run: |
+          # Order matters: the daily grain feeds ad_lifecycle, which feeds
+          # the milestones replay.
+          python scripts/refresh_insights_daily_by_ad.py
+          python scripts/refresh_ad_lifecycle.py
+          python scripts/refresh_ad_history_milestones.py
+
+      - name: Report coverage by month
+        # The whole point of the run. Prints ads-with-spend per month so
+        # you can see the older months fill in -- compare against the
+        # CTD figures in this file's header.
+        if: always()
+        env:
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          dsn = (os.environ.get("DATABASE_URL_SYNC") or "").replace(
+              "postgresql+psycopg2://", "postgresql://")
+          if not dsn:
+              print("DATABASE_URL_SYNC not set -- skipping coverage report")
+              sys.exit(0)
+          try:
+              import psycopg2
+              with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+                  cur.execute("""
+                      SELECT to_char(day,'YYYY-MM'), COUNT(DISTINCT ad_id), ROUND(SUM(spend))
+                      FROM insights_daily_by_ad
+                      WHERE day >= '2026-01-01' AND spend > 0
+                      GROUP BY 1 ORDER BY 1
+                  """)
+                  print(f"  {'month':8s} {'ads w/ spend':>13s} {'spend':>14s}")
+                  for month, ads, spend in cur.fetchall():
+                      print(f"  {month:8s} {ads:>13,} {spend:>14,}")
+          except Exception as exc:
+              print(f"Coverage report skipped: {type(exc).__name__}: {exc}")
+          PY

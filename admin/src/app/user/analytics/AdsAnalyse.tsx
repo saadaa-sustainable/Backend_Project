@@ -214,6 +214,41 @@ function CatBadge({ cat }: { cat: CategoryKey }) {
   return <span className={`cat-badge ${CATEGORY_CLASS[cat]}`}>{cat}</span>;
 }
 
+// The day-14 verdict. Same badge styling as the live Category column so
+// the two read as the same vocabulary, with a subtle ring when they
+// DISAGREE -- an ad that won its first fortnight and has since decayed
+// is exactly what this column exists to surface, and it is invisible if
+// both cells just render the same-looking pill.
+//
+// `status` explains a blank rather than leaving it ambiguous: Meta
+// insights in bronze start 2026-01-01, so an ad created before that has
+// no first fortnight to replay and its verdict is genuinely unknown --
+// which is not the same as "Discarded".
+const HISTORY_STATUS_REASON: Record<string, string> = {
+  not_yet_14_days: "Not 14 days old yet — no verdict until its first fortnight is complete.",
+  partial_history: "Created before 2026-01-01, where Meta insights in bronze begin. The first fortnight is only partly covered, so this verdict is approximate.",
+  no_history:      "No daily Meta insight rows for this ad. Meta insights in bronze start 2026-01-01; ads created earlier cannot be replayed.",
+};
+
+function Day14Badge({ cat, status, now }: { cat: string | null; status: string | null; now: string | null }) {
+  if (!cat) {
+    return <Placeholder reason={HISTORY_STATUS_REASON[status ?? ""] ?? "No day-14 verdict available."} />;
+  }
+  const changed = now != null && now !== cat;
+  const approx = status === "partial_history";
+  return (
+    <span
+      className={`cat-badge ${CATEGORY_CLASS[cat as CategoryKey] ?? ""}${changed ? " ring-1 ring-accent-yellow" : ""}`}
+      title={
+        (changed ? `Was "${cat}" on day 14, now "${now}".` : `Still "${cat}".`) +
+        (approx ? " Approximate — " + HISTORY_STATUS_REASON.partial_history : "")
+      }
+    >
+      {cat}{approx ? " ~" : ""}
+    </span>
+  );
+}
+
 function StatusPill({ status }: { status: string | null }) {
   if (!status) return <span>—</span>;
   const active = status.toUpperCase() === "ACTIVE";
@@ -509,17 +544,31 @@ const COLUMNS: ColDef[] = [
     render: (r) => <span>{r.ad_created_date ?? "—"}</span> },
   { key: "first_seen_date", header: "First Seen", kind: "date", group: "Timeline",
     render: (r) => <span>{r.first_seen_date ?? "—"}</span> },
-  { key: "date_target_imp_achieved", header: "F1 Hit Date", kind: "date", group: "Timeline",
-    render: () => <Placeholder reason="F1 hit date needs cumulative daily impressions scan — audit item C" /> },
+  // Audit item C, resolved 2026-09-05: the cumulative daily impressions
+  // scan now runs once a day in scripts/refresh_ad_history_milestones.py
+  // instead of per request, so these two are real columns rather than
+  // placeholders.
+  { key: "date_target_imp_achieved", header: "50k Imp. Date", kind: "date", group: "Timeline", defaultVisible: true,
+    render: (r) => r.impressions_50k_date
+      ? <span title={r.days_to_50k != null ? `${r.days_to_50k} days after launch` : undefined}>
+          {r.impressions_50k_date}
+        </span>
+      : <Placeholder reason={
+          r.history_status === "no_history" || r.history_status === "partial_history"
+            ? "Created before 2026-01-01, where Meta insights in bronze begin — the running impression total would start mid-life and date the crossing too late, so it is left blank rather than published wrong."
+            : "Has not crossed 50,000 cumulative impressions."
+        } /> },
   { key: "date_of_result", header: "Result Date", kind: "date", group: "Timeline",
     render: () => <Placeholder reason="Result date needs threshold-crossing timeline — audit item C" /> },
   { key: "days_to_result", header: "Days Result", kind: "int", group: "Timeline",
     render: () => <Placeholder reason="Depends on Result Date" /> },
-  { key: "days_to_target_f1", header: "Days F1", kind: "int", group: "Timeline",
-    render: () => <Placeholder reason="Depends on F1 Hit Date" /> },
+  { key: "days_to_target_f1", header: "Days to 50k", kind: "int", group: "Timeline",
+    render: (r) => <span className="num">{r.days_to_50k ?? "—"}</span> },
   // Category / Flags
-  { key: "category", header: "Category", kind: "cat", group: "Category", defaultVisible: true,
+  { key: "category", header: "Category (now)", kind: "cat", group: "Category", defaultVisible: true,
     render: (_r, cat) => <CatBadge cat={cat} /> },
+  { key: "category_at_day_14", header: "Category (day 14)", kind: "cat", group: "Category", defaultVisible: true,
+    render: (r, cat) => <Day14Badge cat={r.category_at_day_14} status={r.history_status} now={cat} /> },
   { key: "f1_pass", header: "F1", kind: "flag", group: "Category", defaultVisible: true,
     render: (r, _c, ) => <FBadge pass={r.f1_pass} name="F1" /> },
   { key: "f2_pass", header: "F2", kind: "flag", group: "Category", defaultVisible: true,

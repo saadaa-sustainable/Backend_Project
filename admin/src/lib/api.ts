@@ -537,6 +537,24 @@ export function fetchAdLifecycle(params: AdLifecycleParams = {}): Promise<AdLife
 // ---------------------------------------------------------------------
 
 export interface AdsAnalyseRow {
+  // ── Historical tagging (public.ad_history_milestones) ──────────────
+  // What the ad's category WAS on the 14th day of its life, versus the
+  // `category` field below which is re-evaluated against today's
+  // lifetime metrics. An ad that won its first fortnight and has since
+  // decayed reads "Discarded" there and "Winner" here.
+  category_at_day_14: string | null;
+  // 'ok' | 'not_yet_14_days' | 'partial_history' | 'no_history'.
+  // Explains a null verdict instead of leaving it ambiguous: Meta
+  // insights in bronze begin 2026-01-01, so ads created earlier have no
+  // first fortnight to replay.
+  history_status: string | null;
+  // Day cumulative impressions crossed 50,000 (the F1 gate), and the
+  // same fact as an age. Null when never crossed, or when the ad
+  // predates the daily range and the running sum would date it late.
+  impressions_50k_date: string | null;
+  days_to_50k: number | null;
+  impressions_at_day_14: number | null;
+
   ad_id: string;
   adset_id: string | null;
   campaign_id: string | null;
