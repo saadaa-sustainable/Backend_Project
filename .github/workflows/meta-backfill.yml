@@ -72,6 +72,11 @@ on:
         type: string
         required: false
         default: ""
+      skip_fetch:
+        description: "Skip the Meta fetch and ONLY rebuild the downstream tables. Use when a previous run already landed the bronze rows but its rebuild was skipped."
+        type: boolean
+        required: false
+        default: false
       rebuild_downstream:
         description: "Rebuild insights_daily_by_ad + ad_lifecycle + ad_history_milestones afterwards? Leave on -- the fetch alone changes nothing a dashboard reads."
         type: boolean
@@ -108,6 +113,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Fetch Meta history
+        if: ${{ !inputs.skip_fetch }}
         env:
           DATABASE_URL_SYNC:                ${{ secrets.DATABASE_URL_SYNC }}
           DATABASE_URL:                     ${{ secrets.DATABASE_URL }}
@@ -139,7 +145,20 @@ jobs:
           python scripts/ingest_last_15_days.py $ARGS
 
       - name: Rebuild downstream tables
-        if: inputs.rebuild_downstream
+        # !cancelled(), NOT the default (which implies success()). Run #2
+        # is why: all 36 chunks fetched and wrote -- 174,625 rows landed
+        # in bronze -- and the script still exited 1 because ONE account
+        # in ONE early window had errored, and `any_error` is sticky
+        # across the whole run. GitHub then skipped this step, so none of
+        # those rows ever reached insights_daily_by_ad and the coverage
+        # report printed the untouched pre-backfill numbers.
+        #
+        # Gating the step that CONSUMES partial progress on the fetch
+        # being flawless defeats the entire point of chunking. The
+        # rebuild is idempotent (TRUNCATE + INSERT from whatever bronze
+        # holds), so running it after a partial fetch is always correct
+        # and never worse than not running it.
+        if: ${{ !cancelled() && inputs.rebuild_downstream }}
         env:
           DATABASE_URL_SYNC:    ${{ secrets.DATABASE_URL_SYNC }}
           DATABASE_URL:         ${{ secrets.DATABASE_URL }}
