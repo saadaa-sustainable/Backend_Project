@@ -625,6 +625,64 @@ async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: st
         return await asyncio.gather(*tasks)
 
 
+def _write_results(dsn: str, results, *, api_version: str) -> int:
+    """Persist one chunk's fetch results. Returns rows inserted.
+
+    Lifted verbatim out of main() so a chunked backfill can commit each
+    window before starting the next one. Before this, main() fetched
+    EVERY account for the WHOLE window and only then wrote, so a 250-day
+    run that got throttled at hour two had nothing to show for it.
+    """
+    write_start = time.monotonic()
+    conn = psycopg2.connect(dsn)
+    try:
+        _ensure_schema(conn)
+
+        extracted_at = datetime.now(timezone.utc)
+        batch_ids: list[str] = []
+        total_inserted = 0
+        for r in results:
+            batch_id = uuid.uuid4()
+            batch_ids.append(str(batch_id))
+            batch_start = datetime.now(timezone.utc)
+            if r.error:
+                _insert_batch_row(
+                    conn, batch_id=batch_id, endpoint=r.api_endpoint, account=r.account,
+                    request_params=r.request_params, records_fetched=0, records_failed=len(r.items),
+                    status="failed", error_message=r.error[:4000],
+                    started_at=batch_start, finished_at=datetime.now(timezone.utc),
+                )
+                continue
+            rows = _build_rows(r, batch_id=batch_id, api_version=api_version, extracted_at=extracted_at)
+            inserted = _bulk_insert_rows(conn, rows)
+            total_inserted += inserted
+            _insert_batch_row(
+                conn, batch_id=batch_id, endpoint=r.api_endpoint, account=r.account,
+                request_params=r.request_params, records_fetched=inserted, records_failed=0,
+                status="success", error_message=None,
+                started_at=batch_start, finished_at=datetime.now(timezone.utc),
+            )
+
+        print(f"  wrote {total_inserted} raw_dump_meta rows in "
+              f"{time.monotonic() - write_start:.1f}s", flush=True)
+        return total_inserted
+    finally:
+        conn.close()
+
+
+def _chunks(since: date, until: date, chunk_days: int) -> list[tuple[date, date]]:
+    """Consecutive [start, end] windows covering since..until inclusive."""
+    if chunk_days <= 0:
+        return [(since, until)]
+    out: list[tuple[date, date]] = []
+    start = since
+    while start <= until:
+        end = min(start + timedelta(days=chunk_days - 1), until)
+        out.append((start, end))
+        start = end + timedelta(days=1)
+    return out
+
+
 def main() -> int:
     # Force line-buffered stdout even when piped/redirected to a file, so
     # progress (including the rate-limit retry messages from
@@ -637,6 +695,11 @@ def main() -> int:
     parser.add_argument("--account", default=None, help="Restrict to one account key. Default: every configured account.")
     parser.add_argument("--time-increment", default="1", choices=["1", "all_days"], help="'1' = one row per ad per day (default); 'all_days' = one row per ad for the whole window.")
     parser.add_argument("--no-insert", action="store_true", help="Fetch and time only — skip all DB writes.")
+    parser.add_argument("--chunk-days", type=int, default=0,
+                        help="Split the window into consecutive chunks of this many days, fetching "
+                             "AND WRITING each before starting the next. 0 (default) = one request "
+                             "per account for the whole window, which is fine for 15 days and wrong "
+                             "for 250 -- see the module docstring.")
     parser.add_argument("--include-roster", action="store_true", help="Also fetch campaigns/adsets/ads (current-state rosters, not time-windowed — off by default, see module docstring).")
     args = parser.parse_args()
 
@@ -684,89 +747,50 @@ def main() -> int:
         print("--no-insert set: fetching and timing only, no DB writes.")
     print("Token: [redacted, not printed] — loaded, present, not shown.\n")
 
+    windows = _chunks(since, until, args.chunk_days)
+    if len(windows) > 1:
+        print(f"Chunked into {len(windows)} window(s) of up to {args.chunk_days} days. "
+              f"Each is fetched AND WRITTEN before the next starts, so a throttle "
+              f"or timeout keeps everything already done.\n")
+
     fetch_start = time.monotonic()
-    results = asyncio.run(
-        _run(
-            accounts, base_url=base_url, access_token=access_token, since=since, until=until,
-            time_increment=args.time_increment, include_roster=args.include_roster,
-        )
-    )
-    fetch_wall_time = time.monotonic() - fetch_start
-
-    print("Fetch results:")
-    total_rows = 0
     any_error = False
-    for r in results:
-        status = "OK" if not r.error else "FAILED"
-        print(f"  [{r.account.key}] {r.account.name:<24} {r.object_type:<10} {status:<7} {len(r.items):>6} rows  {r.duration_seconds:6.2f}s")
-        if r.error:
-            any_error = True
-            print(f"      error: {r.error}", file=sys.stderr)
-        total_rows += len(r.items)
+    grand_total_rows = 0
+    grand_total_inserted = 0
 
-    print(f"\nMeta fetch wall time (all {len(results)} calls in parallel): {fetch_wall_time:.2f}s")
-    print(f"Total rows fetched: {total_rows}")
-
-    if args.no_insert:
-        print("\n--no-insert set — stopping before any DB write.")
-        return 1 if any_error else 0
-
-    write_start = time.monotonic()
-    conn = psycopg2.connect(dsn)
-    try:
-        _ensure_schema(conn)
-
-        extracted_at = datetime.now(timezone.utc)
-        batch_ids: list[str] = []
-        total_inserted = 0
+    for i, (w_since, w_until) in enumerate(windows, 1):
+        label = f"[{i}/{len(windows)}] {w_since} .. {w_until}"
+        print(f"{label}  fetching ...", flush=True)
+        results = asyncio.run(
+            _run(
+                accounts, base_url=base_url, access_token=access_token,
+                since=w_since, until=w_until,
+                time_increment=args.time_increment, include_roster=args.include_roster,
+            )
+        )
         for r in results:
-            batch_id = uuid.uuid4()
-            batch_ids.append(str(batch_id))
-            batch_start = datetime.now(timezone.utc)
+            status = "OK" if not r.error else "FAILED"
+            print(f"  [{r.account.key}] {r.account.name:<24} {r.object_type:<10} "
+                  f"{status:<7} {len(r.items):>6} rows  {r.duration_seconds:6.2f}s", flush=True)
             if r.error:
-                _insert_batch_row(
-                    conn, batch_id=batch_id, endpoint=r.api_endpoint, account=r.account,
-                    request_params=r.request_params, records_fetched=0, records_failed=len(r.items),
-                    status="failed", error_message=r.error[:4000],
-                    started_at=batch_start, finished_at=datetime.now(timezone.utc),
-                )
-                continue
-            rows = _build_rows(r, batch_id=batch_id, api_version=api_version, extracted_at=extracted_at)
-            inserted = _bulk_insert_rows(conn, rows)
-            total_inserted += inserted
-            _insert_batch_row(
-                conn, batch_id=batch_id, endpoint=r.api_endpoint, account=r.account,
-                request_params=r.request_params, records_fetched=inserted, records_failed=0,
-                status="success", error_message=None,
-                started_at=batch_start, finished_at=datetime.now(timezone.utc),
-            )
+                any_error = True
+                print(f"      error: {r.error}", file=sys.stderr, flush=True)
+            grand_total_rows += len(r.items)
 
-        write_wall_time = time.monotonic() - write_start
+        if args.no_insert:
+            continue
+        # Written per chunk, deliberately: partial progress survives a
+        # throttle. A failed account inside this chunk still records a
+        # failed_jobs row and the other accounts still commit.
+        grand_total_inserted += _write_results(dsn, results, api_version=api_version)
 
-        with conn.cursor() as cur:
-            # batch_id is UUID in the DB but psycopg2 sends the parameter
-            # as text -- Postgres refuses `uuid = text` with a fresh
-            # "operator does not exist" error. Cast the array elements
-            # explicitly so the ANY() comparison works. Live-caught
-            # 2026-09-02 during a real ingest; without this the final
-            # summary query dies AFTER inserts already committed, so
-            # rows land but the exit code is nonzero.
-            cur.execute(
-                "SELECT object_type, count(*) FROM raw_dump_meta "
-                "WHERE batch_id = ANY(%s::uuid[]) GROUP BY object_type ORDER BY object_type",
-                (batch_ids,),
-            )
-            verified_counts = cur.fetchall()
-
-        print(f"\nDB write time (schema check + batch rows + {total_inserted} raw_dump_meta rows): {write_wall_time:.2f}s")
-        print("Verified in Postgres (SELECT count(*) grouped by object_type, this run's batch_ids only):")
-        for object_type, count in verified_counts:
-            print(f"  {object_type:<10} {count}")
-
-        grand_total = fetch_wall_time + write_wall_time
-        print(f"\nGrand total (Meta fetch + Postgres write): {grand_total:.2f}s")
-    finally:
-        conn.close()
+    fetch_wall_time = time.monotonic() - fetch_start
+    print(f"\nTotal rows fetched: {grand_total_rows}")
+    if args.no_insert:
+        print("--no-insert set — nothing written.")
+        return 1 if any_error else 0
+    print(f"Total rows written: {grand_total_inserted}")
+    print(f"Wall time (fetch + write, {len(windows)} chunk(s)): {fetch_wall_time:.1f}s")
 
     return 1 if any_error else 0
 

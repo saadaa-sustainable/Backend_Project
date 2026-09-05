@@ -38,6 +38,19 @@
 # Cost warning: 250 days x 3 ad accounts at ad-per-day granularity is a
 # large number of Meta API calls and will consume a real slice of the
 # app-level rate-limit budget. Run it when nothing else needs the token.
+#
+# CHUNKING IS NOT OPTIONAL FOR A LONG WINDOW. Run #1 (2026-09-05) asked
+# Meta for all 250 days in one request per account and got:
+#
+#     status=500 error_code=1   "reduce the amount of data you are asking for"
+#     status=403 error_code=4   application request limit reached
+#
+# retried to exhaustion, and wrote ZERO rows in 40 minutes -- because
+# the script fetched every account for the whole window before writing
+# anything, and discarded a failed account's already-fetched pages. With
+# --chunk-days each window is fetched AND COMMITTED before the next
+# starts, so a throttle costs you one window instead of the whole run,
+# and each request is small enough that Meta answers it.
 
 name: Meta history backfill (manual)
 
@@ -49,6 +62,11 @@ on:
         type: string
         required: false
         default: "250"
+      chunk_days:
+        description: "Fetch AND WRITE in windows of this many days. 30 is the safe default. Do NOT set 0 for a long backfill -- that asks Meta for the whole range in one request, which is what got run #1 throttled to a standstill."
+        type: string
+        required: false
+        default: "30"
       account:
         description: "Restrict to one account key (blank = all three). Useful for splitting a large backfill across runs."
         type: string
@@ -113,7 +131,7 @@ jobs:
           META_RETRY_BACKOFF_BASE_SECONDS:  ${{ secrets.META_RETRY_BACKOFF_BASE_SECONDS }}
           META_RETRY_BACKOFF_MAX_SECONDS:   ${{ secrets.META_RETRY_BACKOFF_MAX_SECONDS }}
         run: |
-          ARGS="--days ${{ inputs.days }}"
+          ARGS="--days ${{ inputs.days }} --chunk-days ${{ inputs.chunk_days }}"
           if [ -n "${{ inputs.account }}" ]; then
             ARGS="$ARGS --account ${{ inputs.account }}"
           fi
