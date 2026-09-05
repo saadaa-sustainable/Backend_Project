@@ -35,13 +35,16 @@ matches rather than merely the values.
 
 WHAT IT DOES NOT COVER
 ----------------------
-The source has no purchases/add_to_cart/checkout_initiate at the daily
-grain and no per-SKU line items, so CPIS master-SKU attribution, the
-asset/creative joins, the media thumbnails and the day-14 replay all
-stay on this project's own data. Only the columns listed in
-_COLUMN_MAP are overlaid; everything else falls through untouched. That
-is deliberate -- a column is either fully overlaid or fully local, never
-half.
+The source has no per-SKU line items and no add_to_cart /
+checkout_initiate at the daily grain, so CPIS master-SKU attribution,
+the asset/creative joins, the media thumbnails and the day-14 replay all
+stay on this project's own data. Daily Shopify orders/sales exist only
+inside the 90-day rollup's coverage, so a windowed Shopify figure is
+available for recent windows and absent for older ones.
+
+Only the columns listed in _COLUMN_MAP are overlaid; everything else
+falls through untouched. That is deliberate -- a column is either fully
+overlaid or fully local, never half.
 
 CONFIGURATION
 -------------
@@ -60,6 +63,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -191,15 +195,68 @@ INSERT_SQL = (
 #
 # Mirroring the source's own daily series fixes all three at once: same
 # provenance as the per-ad overlay, one row per (ad, day), full history.
+# The source keeps THREE daily tables and its own window function picks
+# between them by DATE, so mirroring any single one of them reproduces a
+# number the reference dashboard does not actually show. Measured
+# 2026-09-05 over 2026-08-01..08-31:
+#
+#     source                       ads    spend        impressions
+#     90-day rollup              1,300   11,285,263    105,162,390
+#     detail + backfill, deduped 1,726   12,187,489    111,611,347
+#
+# 8% apart on spend and 426 ads apart on coverage -- not rounding. The
+# reference reads the rollup whenever the window falls inside its
+# coverage (every default view: it holds the last 90 days) and falls
+# back to the deduped detail tables only for older windows.
+#
+# So the mirror splits on the same boundary the source does: the rollup
+# supplies every day it covers, the deduped detail tables supply the
+# days before it starts. Verified 2026-09-05 -- over 2026-08-01..08-31
+# this query and the source's own window function agree to the rupee on
+# all eight aggregates (ads 1,300; spend 11,285,263; impressions
+# 105,162,390; conv 33,479,670; purchases 27,433; clicks 1,734,690; ncp
+# 11,106; ftewv 333,482).
+#
+# NOT a precedence dedup across all three. Trying that first -- rollup
+# wins per (ad, day), the detail tables fill the gaps -- came out 8%
+# high, because the detail tables hold (ad, day) pairs the rollup does
+# not, and every one of them leaked in as an extra row. The rollup is
+# not a superset of the tables it summarises; it is a different
+# selection, and the boundary between them is a date.
+#
+# For windows the rollup does not cover there is nothing to match: the
+# source's own fallback branch is broken. Any window starting before the
+# rollup's first day raises
+#
+#     42702: column reference "ad_id" is ambiguous
+#     DETAIL: It could refer to either a PL/pgSQL variable or a table
+#     column.
+#
+# from its window function (reproduced 2026-09-05 for 2026-03 and
+# 2026-05), and its dashboard swallows the error and leaves whatever
+# numbers were on screen. So the deduped-detail leg here has no
+# reference figure to agree with; it is this project's own answer for a
+# range the source cannot render at all. A window that STRADDLES the
+# boundary would take that same broken branch there, while the mirror
+# answers it from the rollup plus deduped detail.
+#
+# Only the rollup carries daily shopify_orders / shopify_sales, hence
+# the NULLs in the other two legs: a windowed Shopify figure exists for
+# the days the rollup covers and is honestly absent before that, rather
+# than being quietly backfilled from a lifetime total.
 _DAILY_COLUMN_MAP: dict[str, str] = {
     "ad_id": "ad_id",
     "date": "day",
-    "amount_spent_inr": "spend",
+    "spend": "spend",
     "impressions": "impressions",
     "reach": "reach",
-    "conversion_value": "conv_value",
+    "conv_value": "conv_value",
+    "purchases": "purchases",
+    "link_clicks": "link_clicks",
     "ncp_count": "ncp_count",
     "ftewv_count": "ftewv_count",
+    "shopify_orders": "shopify_orders",
+    "shopify_sales": "shopify_sales",
 }
 
 DAILY_TARGET_COLUMNS = list(_DAILY_COLUMN_MAP.values())
@@ -219,6 +276,15 @@ CREATE TABLE IF NOT EXISTS public.ad_daily_external (
 )
 """
 
+# The table shipped before purchases / link_clicks / the Shopify pair
+# existed, so an install that already has it needs them added rather
+# than the CREATE being enough.
+DAILY_ALTERS = [
+    "ALTER TABLE public.ad_daily_external "
+    f"ADD COLUMN IF NOT EXISTS {c} numeric"
+    for c in ("purchases", "link_clicks", "shopify_orders", "shopify_sales")
+]
+
 DAILY_INDEXES = [
     # The delivery filter selects by day range for a page of ad_ids, so
     # both orders get used.
@@ -226,11 +292,66 @@ DAILY_INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_ade_ad_day ON public.ad_daily_external (ad_id, day)",
 ]
 
-DAILY_SELECT_SQL = (
-    "SELECT " + ", ".join(_DAILY_COLUMN_MAP)
-    + " FROM backfill_table WHERE ad_id IS NOT NULL AND date IS NOT NULL"
-    " AND date >= %(since)s"
+DAILY_SELECT_SQL = """
+WITH bound AS (SELECT MIN(date) AS d0 FROM public.ae_daily_90d),
+u AS (
+    SELECT ad_id::text                            AS ad_id,
+           date,
+           amount_spent::numeric                  AS spend,
+           impressions::numeric                   AS impressions,
+           reach::numeric                         AS reach,
+           conversion_value::numeric              AS conv_value,
+           purchases::numeric                     AS purchases,
+           link_clicks_raw::numeric               AS link_clicks,
+           ncp_count::numeric                     AS ncp_count,
+           ftewv_count::numeric                   AS ftewv_count,
+           shopify_orders::numeric                AS shopify_orders,
+           shopify_sales::numeric                 AS shopify_sales,
+           0                                      AS pri
+      FROM public.ae_daily_90d
+     WHERE ad_id IS NOT NULL AND date IS NOT NULL AND date >= %(since)s
+    UNION ALL
+    SELECT ad_id::text, date,
+           amount_spent_inr::numeric,
+           impressions::numeric,
+           reach::numeric,
+           conversion_value::numeric,
+           purchases::numeric,
+           COALESCE(inline_link_clicks, outbound_clicks)::numeric,
+           ncp_count::numeric,
+           ftewv_count::numeric,
+           NULL::numeric,
+           NULL::numeric,
+           1
+      FROM public.primary_table, bound
+     WHERE ad_id IS NOT NULL AND date IS NOT NULL AND date >= %(since)s
+       AND date < bound.d0
+       AND impressions IS NOT NULL AND impressions > 0
+    UNION ALL
+    SELECT ad_id::text, date,
+           amount_spent_inr::numeric,
+           impressions::numeric,
+           reach::numeric,
+           conversion_value::numeric,
+           NULL::numeric,
+           outbound_clicks::numeric,
+           ncp_count::numeric,
+           ftewv_count::numeric,
+           NULL::numeric,
+           NULL::numeric,
+           2
+      FROM public.backfill_table, bound
+     WHERE ad_id IS NOT NULL AND date IS NOT NULL AND date >= %(since)s
+       AND date < bound.d0
+       AND impressions IS NOT NULL AND impressions > 0
 )
+SELECT DISTINCT ON (ad_id, date)
+       ad_id, date, spend, impressions, reach, conv_value, purchases,
+       link_clicks, ncp_count, ftewv_count, shopify_orders, shopify_sales
+  FROM u
+ ORDER BY ad_id, date, pri
+"""
+
 
 DAILY_INSERT_SQL = (
     f"INSERT INTO public.ad_daily_external ({', '.join(DAILY_TARGET_COLUMNS)}, synced_at) "
@@ -251,9 +372,17 @@ def main() -> int:
     ap.add_argument("--since", default="2025-01-01",
                     help="Earliest day to mirror for the daily grain (default 2025-01-01). "
                          "The per-ad table is always mirrored in full -- it is only ~19.6k rows.")
+    ap.add_argument("--since-days", type=int, default=None,
+                    help="Mirror the trailing N days instead of --since. The daily "
+                         "pipeline uses this: only the recent window changes between "
+                         "runs, and re-upserting 456k rows every night to rewrite a "
+                         "few thousand is time the run does not have. Use --since for "
+                         "a one-off deep backfill.")
     ap.add_argument("--skip-daily", action="store_true",
                     help="Mirror only the per-ad table, not the daily grain.")
     args = ap.parse_args()
+    if args.since_days is not None:
+        args.since = (date.today() - timedelta(days=args.since_days)).isoformat()
 
     if not SOURCE_DSN:
         # Not an error. An install without a configured source just keeps
@@ -330,6 +459,8 @@ def main() -> int:
         with tgt, tgt.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = '1800s'")
             cur.execute(DAILY_DDL)
+            for statement in DAILY_ALTERS:
+                cur.execute(statement)
             for statement in DAILY_INDEXES:
                 cur.execute(statement)
             # Upsert rather than TRUNCATE: this table is big enough that

@@ -108,6 +108,10 @@ jobs:
         env:
           # --- Supabase Postgres (required) ---
           DATABASE_URL_SYNC:                ${{ secrets.DATABASE_URL_SYNC }}
+          # The per-ad + per-day metric source. Absent, scripts/
+          # sync_ad_metrics_external.py exits 0 without writing and the
+          # dashboard keeps this project's own figures.
+          AD_METRICS_SOURCE_URL:            ${{ secrets.AD_METRICS_SOURCE_URL }}
           DATABASE_URL:                     ${{ secrets.DATABASE_URL }}
           DATABASE_SERVICE_KEY:             ${{ secrets.DATABASE_SERVICE_KEY }}
 

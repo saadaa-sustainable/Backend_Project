@@ -220,6 +220,125 @@ _ADS_ANALYSE_SELECT = (
     "at.instagram_permalink, at.video_source_url"
 )
 
+# ── the per-day metric mirror ──────────────────────────────────────
+#
+# public.ad_daily_external holds one row per (ad, day) from the same
+# provenance as the per-ad overlay. Everything the 'delivery' date mode
+# shows -- the table rows, the category tiles and the KPI strip -- is
+# summed from it, so the three cannot disagree.
+#
+# Availability is checked once per request rather than assumed: an
+# install with no source configured has the table absent or empty, and
+# an EMPTY mirror must never be read as "every ad spent nothing" -- that
+# renders a full page of zeroes, which looks like real data.
+_AD_DAILY_EXTERNAL_EXISTS = (
+    "SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema='public' AND table_name='ad_daily_external'"
+)
+
+
+def _sync_db_url() -> str:
+    """psycopg2 DSN for the app database.
+
+    The windowed reads go through a fresh sync connection to sidestep
+    SQLAlchemy asyncpg's prepared-statement collision under
+    transaction-mode pooling -- see
+    scripts/refresh_raw_dump_meta_daily.py for the same trick.
+    """
+    from app.config import get_settings
+
+    return (
+        get_settings().database.database_url
+        .replace("postgresql+asyncpg://", "postgresql://")
+        .split("?", 1)[0]
+    )
+
+
+def _daily_mirror_ready() -> bool:
+    """True when the per-day mirror exists AND holds at least one row."""
+    import psycopg2
+
+    try:
+        with psycopg2.connect(_sync_db_url(), connect_timeout=15) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_AD_DAILY_EXTERNAL_EXISTS)
+                if cur.fetchone() is None:
+                    return False
+                cur.execute("SELECT 1 FROM public.ad_daily_external LIMIT 1")
+                return cur.fetchone() is not None
+    except Exception:  # noqa: BLE001 -- availability probe, never fatal
+        return False
+
+
+# Per-ad windowed sums for the table rows.
+_EXTERNAL_DAILY = (
+    "SELECT ad_id, SUM(spend), SUM(impressions), SUM(reach), "
+    "       SUM(conv_value), SUM(purchases), SUM(link_clicks), "
+    "       SUM(ncp_count), SUM(ftewv_count), "
+    "       SUM(shopify_orders), SUM(shopify_sales) "
+    "FROM public.ad_daily_external "
+    "WHERE ad_id = ANY(%(ad_ids)s) AND day BETWEEN %(from_str)s AND %(to_str)s "
+    "GROUP BY ad_id"
+)
+
+# Fallback daily grain for an install with no source configured: this
+# project's own bronze insights. Carries spend / impressions / reach and
+# nothing else, and UNION ALLs two bronze tables that overlap, so an
+# (ad, day) present in both is counted twice. Kept exactly as it was --
+# see the elif branch in get_ads_analyse for why it is not "fixed" here.
+_LOCAL_DAILY = (
+    "SELECT ad_id, SUM(spend), SUM(impressions), SUM(reach) FROM ("
+    "  SELECT raw_payload->>'ad_id' AS ad_id, "
+    "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0) AS spend, "
+    "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0) AS impressions, "
+    "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) AS reach "
+    "  FROM public.raw_dump_meta_daily "
+    "  WHERE raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
+    "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
+    "  UNION ALL "
+    "  SELECT raw_payload->>'ad_id' AS ad_id, "
+    "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0), "
+    "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0), "
+    "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) "
+    "  FROM public.raw_dump_meta "
+    "  WHERE object_type='insights' "
+    "    AND raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
+    "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
+    ") u GROUP BY ad_id"
+)
+
+# Windowed sums for the KPI strip. Joined onto the SAME filtered ad set
+# the table rows come from, so the strip totals what is on screen and
+# not a different population.
+#
+# LEFT JOIN LATERAL rather than a plain LEFT JOIN: the join key is
+# (ad_id, day-range) and a plain join would fan each ad out to one row
+# per active day before the outer aggregate ran, multiplying every
+# lifetime column beside it by that ad's number of active days.
+_DELIVERY_TOTALS_JOIN = (
+    " LEFT JOIN LATERAL ("
+    "  SELECT SUM(d.spend) AS spend, SUM(d.impressions) AS impressions,"
+    "         SUM(d.reach) AS reach, SUM(d.conv_value) AS conv_value,"
+    "         SUM(d.purchases) AS purchases, SUM(d.link_clicks) AS link_clicks,"
+    "         SUM(d.ncp_count) AS ncp_count, SUM(d.ftewv_count) AS ftewv_count,"
+    "         SUM(d.shopify_orders) AS shopify_orders,"
+    "         SUM(d.shopify_sales) AS shopify_sales"
+    "    FROM public.ad_daily_external d"
+    "   WHERE d.ad_id = aps.ad_id AND d.day BETWEEN :from_date AND :to_date"
+    " ) w ON true"
+)
+
+# Restricts the ad set to ads that actually delivered in the window --
+# the source system's own 'delivery' semantics. Without it the table
+# kept every ad ever created and zero-filled the ones that did not run,
+# so a one-day window rendered ~14k rows of zeroes and the category
+# tiles counted every one of them.
+_DELIVERED_IN_WINDOW = (
+    "EXISTS (SELECT 1 FROM public.ad_daily_external d "
+    "WHERE d.ad_id = aps.ad_id AND d.day BETWEEN :from_date AND :to_date "
+    "AND d.impressions > 0)"
+)
+
 _ADS_ANALYSE_FROM = (
     "FROM ad_performance_summary aps "
     "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id "
@@ -317,6 +436,78 @@ _ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
     " LEFT JOIN public.ad_media am ON am.ad_id = aps.ad_id"
     " LEFT JOIN public.ad_thumbnails at ON at.ad_id = aps.ad_id"
 )
+
+
+def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
+    return (
+        f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} {where_sql} "
+        f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
+    )
+
+
+def _ads_analyse_count_sql(where_sql: str) -> str:
+    return f"SELECT COUNT(*) {_ADS_ANALYSE_FROM} {where_sql}"
+
+
+def _ads_analyse_category_counts_sql(where_sql: str) -> str:
+    return (
+        f"SELECT COALESCE(aps.category, 'Uncategorized'), COUNT(*) "
+        f"{_ADS_ANALYSE_FROM} {where_sql} GROUP BY 1"
+    )
+
+
+def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
+    """The KPI strip, over the same filter set as the table.
+
+    `windowed` picks the delivery-mode variant, which re-sums every
+    counter from the per-day mirror across the picked window and takes
+    BLENDED ratios (sum / sum). Blended, not a mean of per-ad ratios:
+    summing the parts and dividing once is the only figure that divides
+    out to the spend and revenue tiles printed beside it -- a mean would
+    let a Rs 200 ad with one sale outweigh a Rs 2,00,000 ad.
+
+    The lifetime variant keeps AVG for the rate-style metrics, with
+    NULLs excluded so a handful of unpopulated rows don't drag the tile
+    to zero.
+
+    Both are built here rather than inline so scripts/check_sql_syntax.py
+    parses the exact string the endpoint executes. The one time a query
+    in this repo shipped broken, what had been verified was a
+    hand-edited copy of it.
+    """
+    if windowed:
+        return (
+            "SELECT COUNT(*) AS ad_count, "
+            "COALESCE(SUM(w.spend),0) AS spend, "
+            "COALESCE(SUM(w.impressions),0) AS impressions, "
+            "COALESCE(SUM(w.reach),0) AS reach, "
+            "COALESCE(SUM(w.purchases),0) AS purchases, "
+            "COALESCE(SUM(w.conv_value),0) AS conv_value, "
+            "SUM(w.shopify_orders) AS shopify_orders, "
+            "SUM(w.shopify_sales) AS shopify_revenue, "
+            "COALESCE(SUM(w.ncp_count),0) AS ncp_count, "
+            "COALESCE(SUM(w.ftewv_count),0) AS ftewv_count, "
+            "SUM(w.conv_value) / NULLIF(SUM(w.spend),0) AS avg_meta_roas, "
+            "SUM(w.shopify_sales) / NULLIF(SUM(w.spend),0) AS avg_shopify_roas, "
+            "SUM(w.link_clicks) * 100.0 / NULLIF(SUM(w.impressions),0) AS avg_ctr_pct "
+            f"{_ADS_ANALYSE_FROM}{_DELIVERY_TOTALS_JOIN} {where_sql}"
+        )
+    return (
+        "SELECT COUNT(*) AS ad_count, "
+        "COALESCE(SUM(aps.spend),0) AS spend, "
+        "COALESCE(SUM(aps.impressions),0) AS impressions, "
+        "COALESCE(SUM(al.reach),0) AS reach, "
+        "COALESCE(SUM(aps.purchases),0) AS purchases, "
+        "COALESCE(SUM(al.conv_value),0) AS conv_value, "
+        "COALESCE(SUM(aps.shopify_orders),0) AS shopify_orders, "
+        "COALESCE(SUM(aps.shopify_revenue),0) AS shopify_revenue, "
+        "COALESCE(SUM(al.ncp_count),0) AS ncp_count, "
+        "COALESCE(SUM(al.ftewv_count),0) AS ftewv_count, "
+        "AVG(NULLIF(aps.meta_roas,0)) AS avg_meta_roas, "
+        "AVG(NULLIF(aps.shopify_roas,0)) AS avg_shopify_roas, "
+        "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct "
+        f"{_ADS_ANALYSE_FROM} {where_sql}"
+    )
 
 
 class AdsAnalyseRow(BaseModel):
@@ -454,18 +645,27 @@ class AdsAnalyseTotals(BaseModel):
     the tiles reflect exactly what the table below shows. Mirrors
     kwikengage's Marketing Insights KPI row.
 
-    ROAS/CTR/CPM are simple averages -- weighting by spend gets a more
-    honest number but changes the semantics from "average ad" to "one
-    ad's worth of the aggregate", which is harder to explain in a
-    tile. Kwikengage uses simple averages too."""
+    In every mode but 'delivery' the ROAS/CTR figures are simple
+    averages across ads -- weighting by spend gets a more honest number
+    but changes the semantics from "average ad" to "one ad's worth of
+    the aggregate", which is harder to explain in a tile. Kwikengage
+    uses simple averages too.
+
+    'delivery' is the exception and uses blended ratios (sum / sum),
+    because there the strip and the table are both re-summed over the
+    picked window and a mean of per-ad ratios would not divide out to
+    the spend and revenue tiles printed beside it.
+
+    The two Shopify tiles are None when the picked window predates the
+    daily Shopify series -- unknown, not zero."""
     ad_count: int
     spend: float
     impressions: float
     reach: float
     purchases: float
     conv_value: float
-    shopify_orders: float
-    shopify_revenue: float
+    shopify_orders: float | None
+    shopify_revenue: float | None
     ncp_count: float
     ftewv_count: float
     avg_meta_roas: float | None
@@ -522,9 +722,13 @@ async def get_ads_analyse(
             "'created' filters ads whose ad_created_date falls inside the window (default, "
             "matches CTD's Creative Testing behaviour where you're evaluating recently-launched creatives); "
             "'first_seen' filters ads whose first_seen_date (first ad_insights row) falls in the window; "
-            "'delivery' keeps every ad but OVERLAYS spend/impressions/reach in the response with values "
-            "summed from raw_dump_meta insights rows whose date_start is in the window (Ads Analyse "
-            "'delivery date' semantics)."
+            "'delivery' asks what the ads DID during the window: it keeps only ads that "
+            "delivered impressions in it, and every metric on the row -- spend, impressions, "
+            "reach, conversion value, purchases, NCP, FTEWV and every ratio built on them -- is "
+            "re-summed at daily grain over the window, as are the category tiles and the KPI "
+            "strip. Columns with no daily source (add-to-cart, checkout-initiate, engagement and "
+            "the funnel percentages) come back NULL rather than as a lifetime figure sitting "
+            "beside windowed spend."
         ),
     ),
     sort: Literal[
@@ -577,6 +781,20 @@ async def get_ads_analyse(
         params["from_date"] = from_date
         params["to_date"] = to_date
 
+    # 'delivery' needs the mirror's availability BEFORE the WHERE is
+    # built, because in that mode the window is a predicate on the ad
+    # set and not merely an overlay on the rows that came back.
+    # Resolving it here is what keeps the table, the category tiles and
+    # the KPI strip describing one population: they all inherit
+    # base_where.
+    windowed_delivery = False
+    if from_date and to_date and date_field == "delivery":
+        windowed_delivery = _daily_mirror_ready()
+        if windowed_delivery:
+            base_where.append(_DELIVERED_IN_WINDOW)
+            params["from_date"] = from_date
+            params["to_date"] = to_date
+
     row_where = list(base_where)
     if category:
         row_where.append("aps.category = :category")
@@ -585,155 +803,175 @@ async def get_ads_analyse(
     base_where_sql = f"WHERE {' AND '.join(base_where)}" if base_where else ""
 
     rows_result = await session.execute(
-        text(
-            f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} {row_where_sql} "
-            f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
-        ),
+        text(_ads_analyse_rows_sql(row_where_sql, sort_column)),
         {**params, "limit": limit, "offset": offset},
     )
     rows = [AdsAnalyseRow(**dict(r._mapping)) for r in rows_result]
 
-    # ── OPTIONAL windowed overlay ────────────────────────────────
-    # When from_date/to_date are set, replace lifetime spend / impressions
-    # / reach / purchases / conv_value / roas with values summed from
-    # Bronze insights rows in that window. Two-tier fallback: prefer
-    # raw_dump_meta_daily (deduped) when it has coverage; fall back to
-    # raw_dump_meta otherwise. Uses text comparison on date_start
-    # (YYYY-MM-DD sorts correctly) to keep the index scan cheap.
-    if rows and from_date and to_date and date_field == "delivery":
-        # Windowed overlay -- only when date_field='delivery'. For
-        # 'created' / 'first_seen' the rows themselves were already
-        # filtered by the date window above, so the lifetime metrics
-        # are what the user wants (they mean "everything this ad ever
-        # did, and it was launched inside the window"). For 'delivery'
-        # we keep every ad but replace lifetime metrics with the
-        # window's summed spend/impressions/reach.
-        #
-        # Computed via psycopg2 through a fresh sync connection to
-        # sidestep SQLAlchemy asyncpg's prepared statement collision
-        # under transaction-mode pgbouncer -- see
-        # scripts/refresh_raw_dump_meta_daily.py for the same trick.
+    # ── delivery-window overlay ──────────────────────────────────
+    # Only for date_field='delivery'. 'created' / 'first_seen' already
+    # filtered the ad set by the window, so their lifetime metrics are
+    # what the user asked for ("everything this ad ever did, and it
+    # launched inside the window"). 'delivery' instead asks what the ads
+    # did DURING the window, so every metric is re-summed at daily
+    # grain.
+    if rows and windowed_delivery:
+        # The ad set was already narrowed to ads that delivered in the
+        # window (see _DELIVERED_IN_WINDOW). What remains is to replace
+        # every lifetime metric on those rows with the window's sums, so
+        # a row describes the period the user picked and nothing else.
         import psycopg2
-        from app.config import get_settings
-        db_url = get_settings().database.database_url.replace(
-            "postgresql+asyncpg://", "postgresql://"
-        ).split("?", 1)[0]
-        ad_ids = [r.ad_id for r in rows]
-        windowed_map: dict[str, dict[str, float]] = {}
 
-        # Prefer public.ad_daily_external -- the same source the per-ad
-        # figures are overlaid from, at (ad_id, day) grain. Without it
-        # this was the ONE filter mode that bypassed the overlay: a user
-        # switching to 'delivery' silently dropped back to this
-        # project's incomplete raw_dump_meta, and the row went
-        # internally inconsistent, windowed local spend sitting beside
-        # overlaid lifetime conv_value so cost_per_ncp mixed two
-        # sources.
-        #
-        # The local fallback is kept for an install with no source
-        # configured, and is deliberately the OLD query, double-count
-        # and all -- changing its behaviour here would make the two
-        # paths disagree in a second way.
-        _EXTERNAL_DAILY = (
-            "SELECT ad_id, SUM(spend), SUM(impressions), SUM(reach) "
-            "FROM public.ad_daily_external "
-            "WHERE ad_id = ANY(%(ad_ids)s) AND day BETWEEN %(from_str)s AND %(to_str)s "
-            "GROUP BY ad_id"
-        )
-        _LOCAL_DAILY = (
-            "SELECT ad_id, SUM(spend) AS spend, SUM(impressions) AS impressions, SUM(reach) AS reach "
-            "FROM ("
-            "  SELECT raw_payload->>'ad_id' AS ad_id, "
-            "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0) AS spend, "
-            "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0) AS impressions, "
-            "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) AS reach "
-            "  FROM public.raw_dump_meta_daily "
-            "  WHERE raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
-            "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
-            "  UNION ALL "
-            "  SELECT raw_payload->>'ad_id' AS ad_id, "
-            "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0), "
-            "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0), "
-            "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) "
-            "  FROM public.raw_dump_meta "
-            "  WHERE object_type='insights' "
-            "    AND raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
-            "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
-            ") u GROUP BY ad_id"
-        )
-        with psycopg2.connect(db_url, connect_timeout=15) as sync_conn:
+        ad_ids = [r.ad_id for r in rows]
+        windowed_map: dict[str, dict[str, float | None]] = {}
+        with psycopg2.connect(_sync_db_url(), connect_timeout=15) as sync_conn:
             with sync_conn.cursor() as cur:
-                cur.execute(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_schema='public' AND table_name='ad_daily_external'"
-                )
-                use_external = cur.fetchone() is not None
-                if use_external:
-                    # An empty mirror must NOT be treated as "every ad
-                    # spent nothing" -- that renders as a table of
-                    # zeroes, which looks like real data.
-                    cur.execute("SELECT 1 FROM public.ad_daily_external LIMIT 1")
-                    use_external = cur.fetchone() is not None
-                cur.execute(
-                    _EXTERNAL_DAILY if use_external else _LOCAL_DAILY,
-                    {
-                        "ad_ids": ad_ids,
-                        "from_str": from_date.isoformat(),
-                        "to_str": to_date.isoformat(),
-                    },
-                )
-                for aid, spend, impr, reach in cur.fetchall():
-                    windowed_map[aid] = {"spend": float(spend), "impressions": float(impr), "reach": float(reach)}
+                cur.execute(_EXTERNAL_DAILY, {
+                    "ad_ids": ad_ids,
+                    "from_str": from_date.isoformat(),
+                    "to_str": to_date.isoformat(),
+                })
+                for (aid, spend, impr, reach, conv, purch, clicks,
+                     ncp, ftewv, s_orders, s_sales) in cur.fetchall():
+                    windowed_map[aid] = {
+                        "spend": float(spend or 0),
+                        "impressions": float(impr or 0),
+                        "reach": float(reach or 0),
+                        "conv_value": float(conv or 0),
+                        "purchases": float(purch or 0),
+                        "link_clicks": float(clicks or 0),
+                        "ncp_count": float(ncp or 0),
+                        "ftewv_count": float(ftewv or 0),
+                        # NULL, not 0: the daily Shopify pair only
+                        # exists inside the rolling 90-day series. A
+                        # zero for an older window would read as "this
+                        # ad sold nothing", which is a claim the data
+                        # cannot support.
+                        "shopify_orders": None if s_orders is None else float(s_orders),
+                        "shopify_revenue": None if s_sales is None else float(s_sales),
+                    }
 
         for r in rows:
-            w = windowed_map.get(r.ad_id)
-            if w is None:
-                # No coverage in window -> ad didn't run in that range
-                r.spend = 0.0
-                r.impressions = 0.0
-                r.reach = 0.0
+            w = windowed_map.get(r.ad_id) or {}
+            r.spend = w.get("spend", 0.0)
+            r.impressions = w.get("impressions", 0.0)
+            r.reach = w.get("reach", 0.0)
+            r.conv_value = w.get("conv_value", 0.0)
+            r.meta_conv_value = r.conv_value
+            r.purchases = w.get("purchases", 0.0)
+            r.link_clicks_raw = w.get("link_clicks", 0.0)
+            r.ncp_count = w.get("ncp_count", 0.0)
+            r.ftewv_count = w.get("ftewv_count", 0.0)
+            r.shopify_orders = w.get("shopify_orders")
+            r.shopify_revenue = w.get("shopify_revenue")
+
+            # Every ratio built on a windowed input has to be rebuilt
+            # from the windowed values. A stored lifetime ratio sitting
+            # beside a windowed numerator is how a row ends up
+            # describing two different periods at once.
+            r.frequency = (r.impressions / r.reach) if r.reach else None
+            r.cost_per_1000 = (r.spend * 1000.0 / r.impressions) if r.impressions else None
+            r.cpr_1000 = r.cost_per_1000
+            r.ctr_pct = (r.link_clicks_raw * 100.0 / r.impressions) if r.impressions else None
+            r.cpc_link = (r.spend / r.link_clicks_raw) if r.link_clicks_raw else None
+            r.roas = (r.conv_value / r.spend) if r.spend else None
+            r.meta_roas = r.roas
+            r.cost_per_purchase = (r.spend / r.purchases) if r.purchases else None
+            r.cost_per_ncp = (r.spend / r.ncp_count) if r.ncp_count else None
+            r.cost_per_ftewv = (r.spend / r.ftewv_count) if r.ftewv_count else None
+            r.profit_efficiency = r.conv_value - r.spend
+            r.contrib_margin_pct = (
+                (1 - r.spend / r.conv_value) * 100.0
+                if r.spend and r.conv_value else -100.0
+            )
+            if r.shopify_revenue is None:
+                r.shopify_aov = None
+                r.shopify_roas = None
+                r.cost_per_shopify_order = None
+                r.meta_shop_diff_pct = None
             else:
-                r.spend = w["spend"]
-                r.impressions = w["impressions"]
-                r.reach = w["reach"]
-            r.cost_per_1000 = (r.spend * 1000.0 / r.impressions) if r.spend and r.impressions else None
+                r.shopify_aov = (r.shopify_revenue / r.shopify_orders) if r.shopify_orders else None
+                r.shopify_roas = (r.shopify_revenue / r.spend) if r.spend else None
+                r.cost_per_shopify_order = (
+                    (r.spend / r.shopify_orders) if r.shopify_orders else None
+                )
+                r.meta_shop_diff_pct = (
+                    (r.shopify_revenue - r.conv_value) * 100.0 / r.conv_value
+                    if r.conv_value else None
+                )
+            # No daily source for these, so a windowed view cannot show
+            # them honestly. NULL renders as an em dash; a lifetime
+            # figure beside windowed spend would read as if it belonged
+            # to the window.
+            r.atc_count = None
+            r.ci_count = None
+            r.engagement_count = None
+            r.checkout_compl_pct = None
+            r.cr_lc_pct = None
+            r.atc_lc_pct = None
+            r.ci_atc_pct = None
+            r.pct_reach_ftewv = None
+
+    elif rows and from_date and to_date and date_field == "delivery":
+        # No source configured. Fall back to this project's own bronze
+        # insights, which carry spend / impressions / reach at daily
+        # grain and nothing else -- so only those three are windowed and
+        # the ad set is not narrowed. Deliberately the pre-existing
+        # query, double-count and all: this path exists so an install
+        # without a source still gets a working delivery filter, and
+        # changing its arithmetic here would make the two paths disagree
+        # in a second way on top of the coverage difference they already
+        # have.
+        import psycopg2
+
+        ad_ids = [r.ad_id for r in rows]
+        local_map: dict[str, dict[str, float]] = {}
+        with psycopg2.connect(_sync_db_url(), connect_timeout=15) as sync_conn:
+            with sync_conn.cursor() as cur:
+                cur.execute(_LOCAL_DAILY, {
+                    "ad_ids": ad_ids,
+                    "from_str": from_date.isoformat(),
+                    "to_str": to_date.isoformat(),
+                })
+                for aid, spend, impr, reach in cur.fetchall():
+                    local_map[aid] = {
+                        "spend": float(spend or 0),
+                        "impressions": float(impr or 0),
+                        "reach": float(reach or 0),
+                    }
+        for r in rows:
+            w = local_map.get(r.ad_id)
+            if w is None:
+                # No coverage in window -> the ad did not run in it.
+                r.spend = r.impressions = r.reach = 0.0
+            else:
+                r.spend, r.impressions, r.reach = w["spend"], w["impressions"], w["reach"]
+            r.cost_per_1000 = (r.spend * 1000.0 / r.impressions) if r.impressions else None
 
     total = (
-        await session.execute(text(f"SELECT COUNT(*) {_ADS_ANALYSE_FROM} {row_where_sql}"), params)
+        await session.execute(text(_ads_analyse_count_sql(row_where_sql)), params)
     ).scalar_one()
 
     counts_result = await session.execute(
-        text(
-            f"SELECT COALESCE(aps.category, 'Uncategorized'), COUNT(*) {_ADS_ANALYSE_FROM} "
-            f"{base_where_sql} GROUP BY 1"
-        ),
+        text(_ads_analyse_category_counts_sql(base_where_sql)),
         {k: v for k, v in params.items() if k != "category"},
     )
     category_counts = {row[0]: row[1] for row in counts_result}
 
     # Aggregate totals for the KPI strip -- kwikengage's Marketing
     # Insights row. Same filter set as `rows` (row_where_sql includes
-    # category + F1..F4 flags + date_field filter). Uses SUM for
-    # counters and AVG for rate-style metrics; NULLs excluded from AVG
-    # so a handful of unpopulated rows don't skew the number to zero.
+    # category + F1..F4 flags + date_field filter).
+    #
+    # In 'delivery' mode the strip is summed from the per-day mirror
+    # over the same window as the table, because a lifetime total above
+    # a windowed table is not a summary of it -- it is a different
+    # number for a different period, sitting where users read the
+    # headline. Every other mode keeps the lifetime aggregate, which is
+    # correct there: those modes filter the ad set by the window and
+    # then report what those ads did in total.
     totals_row = (
         await session.execute(
-            text(
-                f"SELECT COUNT(*) AS ad_count, "
-                f"COALESCE(SUM(aps.spend),0) AS spend, "
-                f"COALESCE(SUM(aps.impressions),0) AS impressions, "
-                f"COALESCE(SUM(al.reach),0) AS reach, "
-                f"COALESCE(SUM(aps.purchases),0) AS purchases, "
-                f"COALESCE(SUM(al.conv_value),0) AS conv_value, "
-                f"COALESCE(SUM(aps.shopify_orders),0) AS shopify_orders, "
-                f"COALESCE(SUM(aps.shopify_revenue),0) AS shopify_revenue, "
-                f"COALESCE(SUM(al.ncp_count),0) AS ncp_count, "
-                f"COALESCE(SUM(al.ftewv_count),0) AS ftewv_count, "
-                f"AVG(NULLIF(aps.meta_roas,0)) AS avg_meta_roas, "
-                f"AVG(NULLIF(aps.shopify_roas,0)) AS avg_shopify_roas, "
-                f"AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct "
-                f"{_ADS_ANALYSE_FROM} {row_where_sql}"
-            ),
+            text(_ads_analyse_totals_sql(row_where_sql, windowed=windowed_delivery)),
             params,
         )
     ).one()
@@ -744,8 +982,10 @@ async def get_ads_analyse(
         reach=float(totals_row.reach or 0),
         purchases=float(totals_row.purchases or 0),
         conv_value=float(totals_row.conv_value or 0),
-        shopify_orders=float(totals_row.shopify_orders or 0),
-        shopify_revenue=float(totals_row.shopify_revenue or 0),
+        shopify_orders=(None if totals_row.shopify_orders is None
+                        else float(totals_row.shopify_orders)),
+        shopify_revenue=(None if totals_row.shopify_revenue is None
+                         else float(totals_row.shopify_revenue)),
         ncp_count=float(totals_row.ncp_count or 0),
         ftewv_count=float(totals_row.ftewv_count or 0),
         avg_meta_roas=float(totals_row.avg_meta_roas) if totals_row.avg_meta_roas is not None else None,

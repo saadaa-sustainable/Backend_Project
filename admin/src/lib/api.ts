@@ -648,8 +648,10 @@ export interface AdsAnalyseTotals {
   reach: number;
   purchases: number;
   conv_value: number;
-  shopify_orders: number;
-  shopify_revenue: number;
+  // null in 'delivery' mode when the picked window predates the daily
+  // Shopify series -- unknown, not zero. The tiles render "—".
+  shopify_orders: number | null;
+  shopify_revenue: number | null;
   ncp_count: number;
   ftewv_count: number;
   avg_meta_roas: number | null;
