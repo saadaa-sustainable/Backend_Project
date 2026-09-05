@@ -620,28 +620,62 @@ async def get_ads_analyse(
         ).split("?", 1)[0]
         ad_ids = [r.ad_id for r in rows]
         windowed_map: dict[str, dict[str, float]] = {}
+
+        # Prefer public.ad_daily_external -- the same source the per-ad
+        # figures are overlaid from, at (ad_id, day) grain. Without it
+        # this was the ONE filter mode that bypassed the overlay: a user
+        # switching to 'delivery' silently dropped back to this
+        # project's incomplete raw_dump_meta, and the row went
+        # internally inconsistent, windowed local spend sitting beside
+        # overlaid lifetime conv_value so cost_per_ncp mixed two
+        # sources.
+        #
+        # The local fallback is kept for an install with no source
+        # configured, and is deliberately the OLD query, double-count
+        # and all -- changing its behaviour here would make the two
+        # paths disagree in a second way.
+        _EXTERNAL_DAILY = (
+            "SELECT ad_id, SUM(spend), SUM(impressions), SUM(reach) "
+            "FROM public.ad_daily_external "
+            "WHERE ad_id = ANY(%(ad_ids)s) AND day BETWEEN %(from_str)s AND %(to_str)s "
+            "GROUP BY ad_id"
+        )
+        _LOCAL_DAILY = (
+            "SELECT ad_id, SUM(spend) AS spend, SUM(impressions) AS impressions, SUM(reach) AS reach "
+            "FROM ("
+            "  SELECT raw_payload->>'ad_id' AS ad_id, "
+            "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0) AS spend, "
+            "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0) AS impressions, "
+            "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) AS reach "
+            "  FROM public.raw_dump_meta_daily "
+            "  WHERE raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
+            "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
+            "  UNION ALL "
+            "  SELECT raw_payload->>'ad_id' AS ad_id, "
+            "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0), "
+            "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0), "
+            "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) "
+            "  FROM public.raw_dump_meta "
+            "  WHERE object_type='insights' "
+            "    AND raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
+            "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
+            ") u GROUP BY ad_id"
+        )
         with psycopg2.connect(db_url, connect_timeout=15) as sync_conn:
             with sync_conn.cursor() as cur:
                 cur.execute(
-                    "SELECT ad_id, SUM(spend) AS spend, SUM(impressions) AS impressions, SUM(reach) AS reach "
-                    "FROM ("
-                    "  SELECT raw_payload->>'ad_id' AS ad_id, "
-                    "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0) AS spend, "
-                    "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0) AS impressions, "
-                    "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) AS reach "
-                    "  FROM public.raw_dump_meta_daily "
-                    "  WHERE raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
-                    "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
-                    "  UNION ALL "
-                    "  SELECT raw_payload->>'ad_id' AS ad_id, "
-                    "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0), "
-                    "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0), "
-                    "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) "
-                    "  FROM public.raw_dump_meta "
-                    "  WHERE object_type='insights' "
-                    "    AND raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
-                    "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
-                    ") u GROUP BY ad_id",
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema='public' AND table_name='ad_daily_external'"
+                )
+                use_external = cur.fetchone() is not None
+                if use_external:
+                    # An empty mirror must NOT be treated as "every ad
+                    # spent nothing" -- that renders as a table of
+                    # zeroes, which looks like real data.
+                    cur.execute("SELECT 1 FROM public.ad_daily_external LIMIT 1")
+                    use_external = cur.fetchone() is not None
+                cur.execute(
+                    _EXTERNAL_DAILY if use_external else _LOCAL_DAILY,
                     {
                         "ad_ids": ad_ids,
                         "from_str": from_date.isoformat(),

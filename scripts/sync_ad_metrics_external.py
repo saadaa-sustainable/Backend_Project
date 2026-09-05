@@ -172,11 +172,87 @@ INSERT_SQL = (
 )
 
 
+# ----------------------------------------------------------------------
+# Daily grain -- what the dashboard's "delivery date" filter reads
+# ----------------------------------------------------------------------
+#
+# date_field='delivery' in /admin/analytics/ads-analyse keeps every ad but
+# replaces spend/impressions/reach with the window's sums. It used to
+# compute those from this project's own raw_dump_meta, which meant the
+# one filter mode that re-aggregates was also the one mode that bypassed
+# the per-ad overlay entirely -- a user switching to 'delivery' silently
+# dropped back to the incomplete figures, and the row went internally
+# inconsistent (windowed local spend beside overlaid lifetime conv_value,
+# so cost_per_ncp on that row mixed two sources).
+#
+# It also double-counted: the old query UNION ALLed raw_dump_meta_daily
+# and raw_dump_meta and summed, so any (ad, day) present in both was
+# added twice.
+#
+# Mirroring the source's own daily series fixes all three at once: same
+# provenance as the per-ad overlay, one row per (ad, day), full history.
+_DAILY_COLUMN_MAP: dict[str, str] = {
+    "ad_id": "ad_id",
+    "date": "day",
+    "amount_spent_inr": "spend",
+    "impressions": "impressions",
+    "reach": "reach",
+    "conversion_value": "conv_value",
+    "ncp_count": "ncp_count",
+    "ftewv_count": "ftewv_count",
+}
+
+DAILY_TARGET_COLUMNS = list(_DAILY_COLUMN_MAP.values())
+
+DAILY_DDL = """
+CREATE TABLE IF NOT EXISTS public.ad_daily_external (
+    ad_id       text NOT NULL,
+    day         date NOT NULL,
+    spend       numeric,
+    impressions numeric,
+    reach       numeric,
+    conv_value  numeric,
+    ncp_count   numeric,
+    ftewv_count numeric,
+    synced_at   timestamptz,
+    PRIMARY KEY (ad_id, day)
+)
+"""
+
+DAILY_INDEXES = [
+    # The delivery filter selects by day range for a page of ad_ids, so
+    # both orders get used.
+    "CREATE INDEX IF NOT EXISTS ix_ade_day ON public.ad_daily_external (day)",
+    "CREATE INDEX IF NOT EXISTS ix_ade_ad_day ON public.ad_daily_external (ad_id, day)",
+]
+
+DAILY_SELECT_SQL = (
+    "SELECT " + ", ".join(_DAILY_COLUMN_MAP)
+    + " FROM backfill_table WHERE ad_id IS NOT NULL AND date IS NOT NULL"
+    " AND date >= %(since)s"
+)
+
+DAILY_INSERT_SQL = (
+    f"INSERT INTO public.ad_daily_external ({', '.join(DAILY_TARGET_COLUMNS)}, synced_at) "
+    "VALUES %s "
+    # The source can carry more than one row per (ad, day) across
+    # accounts; collapse rather than fail the whole batch.
+    "ON CONFLICT (ad_id, day) DO UPDATE SET "
+    + ", ".join(f"{c} = EXCLUDED.{c}" for c in DAILY_TARGET_COLUMNS if c not in ("ad_id", "day"))
+    + ", synced_at = EXCLUDED.synced_at"
+)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true",
                     help="Read the source and report the row count without writing.")
+    ap.add_argument("--since", default="2025-01-01",
+                    help="Earliest day to mirror for the daily grain (default 2025-01-01). "
+                         "The per-ad table is always mirrored in full -- it is only ~19.6k rows.")
+    ap.add_argument("--skip-daily", action="store_true",
+                    help="Mirror only the per-ad table, not the daily grain.")
     args = ap.parse_args()
 
     if not SOURCE_DSN:
@@ -228,6 +304,45 @@ def main() -> int:
         tgt.close()
 
     print(f"ad_metrics_external: {written:,} rows in {time.time() - t0:.1f}s")
+
+    if args.skip_daily:
+        print("--skip-daily: daily grain not mirrored.")
+        return 0
+
+    t1 = time.time()
+    src = psycopg2.connect(SOURCE_DSN)
+    try:
+        with src.cursor() as cur:
+            cur.execute(DAILY_SELECT_SQL, {"since": args.since})
+            daily = cur.fetchall()
+    finally:
+        src.close()
+    print(f"read {len(daily):,} daily rows (from {args.since}) in {time.time() - t1:.1f}s")
+
+    if not daily:
+        print("source returned 0 daily rows -- leaving the existing daily mirror alone.",
+              file=sys.stderr)
+        return 1
+
+    daily_payload = [tuple(r) + (now,) for r in daily]
+    tgt = psycopg2.connect(TARGET_DSN)
+    try:
+        with tgt, tgt.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '1800s'")
+            cur.execute(DAILY_DDL)
+            for statement in DAILY_INDEXES:
+                cur.execute(statement)
+            # Upsert rather than TRUNCATE: this table is big enough that
+            # a truncate leaves a visible window where the delivery
+            # filter would read an empty mirror and report zero spend
+            # for every ad.
+            execute_values(cur, DAILY_INSERT_SQL, daily_payload, page_size=2000)
+            cur.execute("SELECT COUNT(*) FROM public.ad_daily_external")
+            daily_written = cur.fetchone()[0]
+    finally:
+        tgt.close()
+
+    print(f"ad_daily_external: {daily_written:,} rows total in {time.time() - t1:.1f}s")
     return 0
 
 
