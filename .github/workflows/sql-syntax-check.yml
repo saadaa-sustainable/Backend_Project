@@ -1,0 +1,32 @@
+# Parse every SQL constant with a real PostgreSQL parser, on every push
+# and PR. Cheap (no database, no secrets) and catches the one class of
+# bug the other checks structurally cannot: a Python file that is
+# perfectly valid while the SQL string inside it is not.
+#
+# Added after scripts/refresh_cpis_sku_context.py shipped a dangling
+# comma before its INSERT and failed on every daily run for two days.
+# ruff was green throughout -- a broken SQL string is a valid str.
+
+name: SQL syntax check
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Parse SQL constants
+        run: python scripts/check_sql_syntax.py

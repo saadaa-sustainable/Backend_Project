@@ -25,3 +25,6 @@ respx==0.21.1
 ruff==0.6.9
 mypy==1.11.2
 aiosqlite==0.20.0
+# Offline PostgreSQL parser -- used by scripts/check_sql_syntax.py to
+# parse every SQL constant in CI. No database connection involved.
+pglast>=7
