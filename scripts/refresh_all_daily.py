@@ -136,6 +136,16 @@ PHASE_SILVER = [
     ("ad_metrics_sync",       ["scripts/sync_ad_metrics_external.py",
                                "--since-days", "120"],                    1200),
     ("ad_lifecycle",          ["scripts/refresh_ad_lifecycle.py"],          1200),
+    # The Gold table the dashboard actually SELECTs from, rebuilt FROM
+    # ad_lifecycle -- so it has to follow it, and it had the identical
+    # scheduler-only defect ad_lifecycle had. Measured 2026-09-06, with
+    # the overlay already correct in ad_lifecycle: gold still showed
+    # 635,741 where the source and ad_lifecycle both said 5,684,807, and
+    # called a "P1 analysis" ad "Discarded". Every row's
+    # gold_refreshed_at read 2026-08-28. The overlay had landed
+    # perfectly and stopped one table short of the only table anyone
+    # looks at.
+    ("ad_performance_gold",   ["scripts/refresh_ad_performance_summary.py"], 900),
     # Historical tagging: the day-14 category and the 50k-impressions
     # crossing date. Must run AFTER both of the above -- it reads
     # ad_created_time from ad_lifecycle and the daily grain from
