@@ -113,7 +113,14 @@ PHASE_INGEST = [
 
 PHASE_SILVER = [
     ("silver_raw_dump_meta",  ["scripts/refresh_raw_dump_meta_daily.py"],   1200),
-    ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],   900),
+    # 900 -> 3600 (2026-09-06). The script's own statement_timeout was
+    # raised to 3600s the day before, but this budget was not, so the
+    # nightly run killed the rebuild at 900s -- "timeout after 900s",
+    # log stopped at "[pg] rebuilding from raw_dump_meta ..." -- while
+    # the very same script had finished inside the backfill workflow,
+    # which has no per-step budget. Raising one timeout and leaving the
+    # other just moves the failure; the two have to agree.
+    ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],  3600),
     # ad_lifecycle was NEVER in this pipeline. It was registered only as
     # a FlattenJob in app/services/silver/registry.py, so the in-process
     # scheduler was the only thing that refreshed it -- and that
@@ -135,7 +142,21 @@ PHASE_SILVER = [
     #   python scripts/sync_ad_metrics_external.py --since 2025-01-01
     ("ad_metrics_sync",       ["scripts/sync_ad_metrics_external.py",
                                "--since-days", "120"],                    1200),
-    ("ad_lifecycle",          ["scripts/refresh_ad_lifecycle.py"],          1200),
+    # 1200 -> 2400 (2026-09-06): must sit ABOVE the 1800s statement_timeout
+    # the service now sets on its own transaction, so a genuine overrun
+    # is reported by the database (a clean QueryCanceled with the SQL)
+    # rather than by this runner killing the process mid-rollback.
+    ("ad_lifecycle",          ["scripts/refresh_ad_lifecycle.py"],          2400),
+    # The Gold table the dashboard actually SELECTs from, rebuilt FROM
+    # ad_lifecycle -- so it has to follow it, and it had the identical
+    # scheduler-only defect ad_lifecycle had. Measured 2026-09-06, with
+    # the overlay already correct in ad_lifecycle: gold still showed
+    # 635,741 where the source and ad_lifecycle both said 5,684,807, and
+    # called a "P1 analysis" ad "Discarded". Every row's
+    # gold_refreshed_at read 2026-08-28. The overlay had landed
+    # perfectly and stopped one table short of the only table anyone
+    # looks at.
+    ("ad_performance_gold",   ["scripts/refresh_ad_performance_summary.py"], 900),
     # Historical tagging: the day-14 category and the 50k-impressions
     # crossing date. Must run AFTER both of the above -- it reads
     # ad_created_time from ad_lifecycle and the daily grain from

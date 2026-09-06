@@ -500,8 +500,37 @@ async def ensure_ad_lifecycle_table(session: AsyncSession) -> None:
     await session.commit()
 
 
+# Applied INSIDE the rebuild transaction, so SET LOCAL is the right form:
+# it dies with the transaction and cannot leak into whatever the pooled
+# connection is handed next. A plain SET would not reliably reach the
+# rebuild at all under Supavisor's transaction pooling -- the connection
+# returns to the pool at the commit inside ensure_ad_lifecycle_table and
+# the next statement can land on a different backend.
+#
+# Why this exists at all: the rebuild used to run on the server default,
+# 120s, and got away with it while the INSERT was quick. On 2026-09-06
+# the nightly run killed it at 128s:
+#
+#     ad_lifecycle   exit=1 after 128s   (QueryCanceled on the INSERT)
+#
+# The same script had succeeded two hours earlier in the backfill run --
+# same data, same code, less load. A step whose survival depends on the
+# server being quiet is not a step; it is a coin toss with a nightly
+# schedule. 1800s matches shopify_ad_attribution, the other heavy silver
+# rebuild, and sits under refresh_all_daily's 2400s step budget so the
+# database, not the pipeline, is what reports a genuine overrun.
+_LIFECYCLE_SESSION_TUNING = (
+    "SET LOCAL statement_timeout = '1800s'",
+    "SET LOCAL work_mem = '64MB'",
+)
+
+
 async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
     await ensure_ad_lifecycle_table(session)
+    # ensure_ad_lifecycle_table() committed, so this is the first
+    # statement of the transaction the rebuild + overlay share below.
+    for statement in _LIFECYCLE_SESSION_TUNING:
+        await session.execute(text(statement))
     await session.execute(text(_TRUNCATE))
     await session.execute(text(_INSERT))
 
