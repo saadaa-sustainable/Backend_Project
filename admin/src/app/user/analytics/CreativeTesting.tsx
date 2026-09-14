@@ -27,7 +27,6 @@ import {
   ApiError,
   fetchAdsAnalyse,
 } from "@/lib/api";
-import { KwikTile } from "./KwikTile";
 import { ExportButton } from "@/components/ExportButton";
 
 const PAGE_SIZE = 100;
@@ -60,15 +59,6 @@ const CAT_CLASS: Record<CategoryKey, string> = {
   "Result Awaited": "cat-ra",
   Discarded: "cat-disc",
 };
-const CAT_ICON: Record<CategoryKey, string> = {
-  "Incremental Winner": "★", Winner: "★", "P0 analysis": "◆",
-  "P1 analysis": "▲", "P2 analysis": "▲", "Result Awaited": "⌛", Discarded: "✕",
-};
-const CAT_ICON_COLOR: Record<CategoryKey, "emerald" | "amber" | "sky" | "slate" | "rose"> = {
-  "Incremental Winner": "emerald", Winner: "emerald", "P0 analysis": "amber",
-  "P1 analysis": "sky", "P2 analysis": "sky", "Result Awaited": "slate", Discarded: "rose",
-};
-
 type DateFieldKey = "created" | "first_seen" | "delivery";
 const DATE_FIELDS: { key: DateFieldKey; label: string; hint: string }[] = [
   { key: "created",    label: "Created date",   hint: "Ad went live in Meta on this day (default -- what CTD Creative Testing uses)." },
@@ -169,6 +159,114 @@ function fmtMoney(n: number | null | undefined) {
 function fmtNum(n: number | null | undefined, digits = 2) {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+/** CTD-style KPI card — mirrors assets/dashboard.css .kpi (26px mono
+ *  value, 10px caps label, warm surface). Scoped to Creative Testing
+ *  so the rest of the admin panel keeps its KwikTile look. */
+function CtKpi({
+  label,
+  value,
+  subLine,
+}: {
+  label: string;
+  value: string;
+  subLine?: React.ReactNode;
+}) {
+  return (
+    <div
+      className="flex flex-col gap-1 rounded-lg p-3"
+      style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
+    >
+      <div
+        style={{
+          fontSize: "10px",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          color: "#9A9384",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+          fontSize: "26px",
+          fontWeight: 600,
+          lineHeight: 1.1,
+          color: "#161513",
+        }}
+      >
+        {value}
+      </div>
+      {subLine && (
+        <div style={{ fontSize: "11px", color: "#6E695E" }}>{subLine}</div>
+      )}
+    </div>
+  );
+}
+
+const CAT_ACCENT: Record<CategoryKey, string> = {
+  "Incremental Winner": "#2E7D32",
+  Winner: "#4CAF50",
+  "P0 analysis": "#D97706",
+  "P1 analysis": "#3B6BF5",
+  "P2 analysis": "#0891B2",
+  "Result Awaited": "#9A9384",
+  Discarded: "#B33A3A",
+};
+
+/** CTD-style category tile — colour-coded left border by category,
+ *  active state raises the surface to the yellow accent. */
+function CtCategoryTile({
+  label,
+  count,
+  active,
+  accent,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  accent: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex flex-col gap-1 rounded-lg p-3 text-left transition-colors"
+      style={{
+        background: active ? "#F0C61E" : "#FFFFFF",
+        border: `1px solid ${active ? "#F0C61E" : "#E7E2D2"}`,
+        borderLeft: `3px solid ${accent}`,
+      }}
+    >
+      <div
+        style={{
+          fontSize: "10px",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          color: active ? "#161513" : "#6E695E",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+          fontSize: "22px",
+          fontWeight: 600,
+          lineHeight: 1.1,
+          color: "#161513",
+        }}
+      >
+        {count.toLocaleString()}
+      </div>
+    </button>
+  );
 }
 
 export function CreativeTesting() {
@@ -324,230 +422,248 @@ export function CreativeTesting() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Header + date range picker */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold text-text-primary">Creative Testing</h2>
-            <button
-              type="button"
-              onClick={() => setShowDefs(true)}
-              title="Show category definitions (Winner / P0 / P1 / P2 / Result Awaited / Discarded / F1-F4)"
-              className="inline-flex items-center gap-1 rounded-md border border-border-primary bg-white px-2 py-0.5 text-[11px] font-medium text-text-secondary hover:bg-bg-hover"
-            >
-              <span aria-hidden="true">ⓘ</span>
-              Definitions
-            </button>
-          </div>
-          <p className="text-xs text-text-secondary">
-            Ads launched in the picked window — evaluate recently-shipped creatives before they age into the wider Ads Analyse view.
-          </p>
+    <div
+      className="flex flex-col gap-4 rounded-xl p-4"
+      style={{ background: "#FAF8F5", border: "1px solid #E7E2D2" }}
+    >
+      {/* Header — CTD .page-hdr style */}
+      <div className="flex flex-wrap items-baseline gap-3">
+        <h1
+          style={{
+            fontFamily: "'Space Grotesk', system-ui, sans-serif",
+            fontSize: "22px",
+            fontWeight: 700,
+            letterSpacing: "-0.01em",
+            color: "#161513",
+            margin: 0,
+          }}
+        >
+          Creative Testing
+        </h1>
+        <button
+          type="button"
+          onClick={() => setShowDefs(true)}
+          title="Show category definitions (Winner / P0 / P1 / P2 / Result Awaited / Discarded / F1-F4)"
+          className="inline-flex items-center gap-1 rounded-md px-2 py-0.5"
+          style={{
+            fontSize: "11px",
+            fontWeight: 500,
+            background: "#FFFFFF",
+            border: "1px solid #E7E2D2",
+            color: "#6E695E",
+          }}
+        >
+          <span aria-hidden="true">ⓘ</span>
+          Definitions
+        </button>
+        <p
+          style={{
+            fontSize: "12px",
+            color: "#6E695E",
+            margin: 0,
+            flex: "1 1 auto",
+            minWidth: "240px",
+          }}
+        >
+          Ads launched in the picked window — evaluate recently-shipped creatives before they age into the wider Ads Analyse view.
+        </p>
+      </div>
+
+      {/* Filter-top card — CTD .filter-top */}
+      <div
+        className="flex flex-wrap items-center gap-3 rounded-lg p-3"
+        style={{ background: "#F5F1EC", border: "1px solid #E7E2D2" }}
+      >
+        {/* Date-field selector — picks WHICH date the window filters on */}
+        <select
+          value={dateField}
+          onChange={(e) => setDateField(e.target.value as DateFieldKey)}
+          title={DATE_FIELDS.find((f) => f.key === dateField)?.hint}
+          className="rounded-md px-2 py-1 text-xs"
+          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
+        >
+          {DATE_FIELDS.map((f) => (
+            <option key={f.key} value={f.key} title={f.hint}>{f.label}</option>
+          ))}
+        </select>
+        {/* Preset pill row — CTD .preset-row */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {DATE_PRESETS.map((p) => {
+            const active = preset === p.key;
+            return (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => applyPreset(p.key)}
+                className="rounded-full px-3 py-1 text-[11px] font-medium transition-colors"
+                style={{
+                  background: active ? "#F0C61E" : "transparent",
+                  border: `1px solid ${active ? "#F0C61E" : "#E7E2D2"}`,
+                  color: active ? "#161513" : "#6E695E",
+                  fontFamily: "'Space Grotesk', system-ui, sans-serif",
+                  letterSpacing: "0.02em",
+                }}
+              >
+                {p.label}
+              </button>
+            );
+          })}
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {/* Date-field selector -- picks WHICH date the window filters on. */}
-          <select
-            value={dateField}
-            onChange={(e) => setDateField(e.target.value as DateFieldKey)}
-            title={DATE_FIELDS.find((f) => f.key === dateField)?.hint}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          >
-            {DATE_FIELDS.map((f) => (
-              <option key={f.key} value={f.key} title={f.hint}>{f.label}</option>
-            ))}
-          </select>
-          <select
-            value={preset}
-            onChange={(e) => applyPreset(e.target.value)}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          >
-            {DATE_PRESETS.map((p) => (
-              <option key={p.key} value={p.key}>{p.label}</option>
-            ))}
-          </select>
           <input
             type="date"
             value={fromDate}
             onChange={(e) => { setFromDate(e.target.value); setPreset("custom"); }}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+            className="rounded-md px-2 py-1 text-xs"
+            style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
           />
-          <span className="text-xs text-text-secondary">→</span>
+          <span style={{ fontSize: "12px", color: "#9A9384" }}>→</span>
           <input
             type="date"
             value={toDate}
             onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+            className="rounded-md px-2 py-1 text-xs"
+            style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
           />
-          {/* Excl. copy toggle -- CTD-parity. Meta duplicates append "- Copy N",
-              hiding them isolates the original creative under evaluation. */}
+          {/* Excl. copy toggle — CTD .ct-toggle (yellow dot slides right when active) */}
           <button
             type="button"
             onClick={() => setExclCopy((v) => !v)}
             title="Hide ads whose ad_name contains 'copy' (Meta duplicates). Applies to KPI tiles + totals too."
-            className={
-              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition " +
-              (exclCopy
-                ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
-                : "border-border-primary bg-white text-text-secondary hover:bg-bg-hover")
-            }
+            className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1"
+            style={{
+              fontSize: "11px",
+              fontWeight: 500,
+              background: exclCopy ? "#161513" : "#FAF8F5",
+              border: `1px solid ${exclCopy ? "#161513" : "#E7E2D2"}`,
+              color: exclCopy ? "#F5F1EC" : "#6E695E",
+              fontFamily: "'Space Grotesk', system-ui, sans-serif",
+              letterSpacing: "0.02em",
+            }}
             aria-pressed={exclCopy}
           >
             <span
-              className={
-                "inline-block h-2.5 w-2.5 rounded-full " +
-                (exclCopy ? "bg-emerald-500" : "bg-slate-300")
-              }
+              className="inline-block h-2.5 w-2.5 rounded-full"
+              style={{ background: exclCopy ? "#F0C61E" : "#C9C2AF" }}
             />
             Excl. copy
           </button>
         </div>
       </div>
 
-      {/* Filter grid — narrows the row query + KPI tiles + totals. Each
-          dropdown is a base_where predicate on the backend, so counts stay
-          honest under the picked filters (vs client-side which would only
-          filter the current 100-row page). */}
-      <div className="grid grid-cols-1 gap-2 rounded-lg border border-border-primary bg-white p-3 sm:grid-cols-2 md:grid-cols-4">
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Campaign</span>
-          <select
-            value={campaign}
-            onChange={(e) => setCampaign(e.target.value)}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          >
-            <option value="">All campaigns</option>
-            {Array.from(campaignOptions).sort().map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Content type</span>
-          <select
-            value={contentType}
-            onChange={(e) => setContentType(e.target.value)}
-            title="Matches ad_name substring (case-insensitive). IFAD/GAD/VID/STATIC are the Meta naming-convention tokens."
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          >
-            <option value="">All content</option>
-            {CONTENT_TYPES.map((c) => (
-              <option key={c.key} value={c.key}>{c.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Status</span>
-          <select
-            value={adStatus}
-            onChange={(e) => setAdStatus(e.target.value)}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          >
-            <option value="">All statuses</option>
-            {AD_STATUSES.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Account</span>
-          <select
-            value={account}
-            onChange={(e) => setAccount(e.target.value)}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          >
-            <option value="">All accounts</option>
-            {Array.from(accountOptions).sort().map((a) => (
-              <option key={a} value={a}>{a}</option>
-            ))}
-          </select>
-        </label>
+      {/* Filter grid — CTD .filter-grid, warm surface, caps labels.
+          Each dropdown is a base_where predicate on the backend so counts
+          stay honest under the picked filters (vs client-side which would
+          only filter the current 100-row page). */}
+      <div
+        className="grid grid-cols-1 gap-3 rounded-lg p-3 sm:grid-cols-2 md:grid-cols-4"
+        style={{ background: "#F5F1EC", border: "1px solid #E7E2D2" }}
+      >
+        {[
+          { label: "Campaign", value: campaign, setter: setCampaign, empty: "All campaigns", options: Array.from(campaignOptions).sort() },
+          { label: "Content type", value: contentType, setter: setContentType, empty: "All content", options: CONTENT_TYPES.map((c) => c.key), labels: Object.fromEntries(CONTENT_TYPES.map((c) => [c.key, c.label])) as Record<string, string> },
+          { label: "Status", value: adStatus, setter: setAdStatus, empty: "All statuses", options: AD_STATUSES },
+          { label: "Account", value: account, setter: setAccount, empty: "All accounts", options: Array.from(accountOptions).sort() },
+        ].map((f) => (
+          <label key={f.label} className="flex flex-col gap-1">
+            <span
+              style={{
+                fontSize: "10px",
+                fontWeight: 600,
+                letterSpacing: "0.08em",
+                color: "#9A9384",
+                textTransform: "uppercase",
+              }}
+            >
+              {f.label}
+            </span>
+            <select
+              value={f.value}
+              onChange={(e) => f.setter(e.target.value)}
+              className="rounded-md px-2 py-1 text-xs"
+              style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
+            >
+              <option value="">{f.empty}</option>
+              {f.options.map((opt) => (
+                <option key={opt} value={opt}>
+                  {("labels" in f && f.labels ? f.labels[opt] : opt)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
       </div>
 
-      {/* Aggregate KPI strip — original Creative Testing metrics */}
+      {/* KPI strip — CTD .kpi cards */}
       {totals && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-          <KwikTile
-            icon={<span className="text-base">◱</span>} iconColor="slate"
-            label="Ads launched" value={totals.ad_count.toLocaleString()}
+          <CtKpi
+            label="Ads launched"
+            value={totals.ad_count.toLocaleString()}
             subLine={`in ${DATE_PRESETS.find((p) => p.key === preset)?.label ?? "custom range"}`}
           />
-          <KwikTile
-            icon={<span className="text-base">₹</span>} iconColor="sky"
-            label="Total spend" value={fmtMoney(totals.spend)}
-          />
-          <KwikTile
-            icon={<span className="text-base">🛒</span>} iconColor="emerald"
-            label="Purchases" value={fmtCompact(totals.purchases)}
-          />
-          <KwikTile
-            icon={<span className="text-base">👥</span>} iconColor="emerald"
-            label="NCP" value={fmtCompact(totals.ncp_count)}
+          <CtKpi label="Total spend" value={fmtMoney(totals.spend)} />
+          <CtKpi label="Purchases" value={fmtCompact(totals.purchases)} />
+          <CtKpi
+            label="NCP"
+            value={fmtCompact(totals.ncp_count)}
             subLine="new-customer purchases"
           />
-          <KwikTile
-            icon={<span className="text-base">⚡</span>} iconColor="teal"
-            label="FTEWV" value={fmtCompact(totals.ftewv_count)}
+          <CtKpi
+            label="FTEWV"
+            value={fmtCompact(totals.ftewv_count)}
             subLine="first-time engaged"
           />
-          <KwikTile
-            icon={<span className="text-base">✦</span>} iconColor="amber"
+          <CtKpi
             label="Avg ROAS"
             value={totals.avg_meta_roas !== null ? totals.avg_meta_roas.toFixed(2) : "—"}
           />
-          <KwikTile
-            icon={<span className="text-base">💰</span>} iconColor="rose"
+          <CtKpi
             label="Cost / NCP"
             value={totals.ncp_count > 0 ? "₹" + fmtCompact(totals.spend / totals.ncp_count) : "—"}
           />
-          <KwikTile
-            icon={<span className="text-base">💸</span>} iconColor="rose"
+          <CtKpi
             label="Cost / FTEWV"
             value={totals.ftewv_count > 0 ? "₹" + fmtCompact(totals.spend / totals.ftewv_count) : "—"}
           />
         </div>
       )}
 
-      {/* Category tiles — click to filter */}
+      {/* Category tiles — CTD-style, color-coded, click to filter */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
         {CATEGORY_ORDER.map((cat) => {
           const count = categoryCounts[cat] ?? 0;
           const selected = categoryFilter === cat;
           return (
-            <KwikTile
+            <CtCategoryTile
               key={cat}
-              icon={<span className="text-base">{CAT_ICON[cat]}</span>}
-              iconColor={CAT_ICON_COLOR[cat]}
               label={cat}
-              value={count.toLocaleString()}
+              count={count}
               active={selected}
+              accent={CAT_ACCENT[cat]}
               onClick={() => setCategoryFilter(selected ? "" : cat)}
             />
           );
         })}
       </div>
 
-      {/* Filter row */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
+      {/* Filter row — search + sort + clear + counters + export */}
+      <div
+        className="flex flex-wrap items-center gap-2 rounded-lg p-3"
+        style={{ background: "#F5F1EC", border: "1px solid #E7E2D2" }}
+      >
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search ad name…"
-          className="w-64 rounded-md border border-border-primary px-2 py-1 text-sm"
+          className="w-64 rounded-md px-2 py-1 text-xs"
+          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
         />
-        <select
-          value={account}
-          onChange={(e) => setAccount(e.target.value)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-        >
-          <option value="">All accounts</option>
-          {[...accountOptions].sort().map((a) => (
-            <option key={a} value={a}>{a}</option>
-          ))}
-        </select>
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as typeof sort)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+          className="rounded-md px-2 py-1 text-xs"
+          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
         >
           <option value="spend">Sort: Spend</option>
           <option value="meta_roas">Sort: ROAS</option>
@@ -555,12 +671,23 @@ export function CreativeTesting() {
           <option value="cost_per_ftewv">Sort: Cost / FTEWV</option>
         </select>
         <button
-          onClick={() => { setSearch(""); setAccount(""); setCategoryFilter(""); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
+          onClick={() => {
+            setSearch("");
+            setAccount("");
+            setCampaign("");
+            setContentType("");
+            setAdStatus("");
+            setCategoryFilter("");
+          }}
+          className="rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
+          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#6E695E" }}
         >
           Clear filters
         </button>
-        <span className="ml-auto text-xs text-text-secondary">
+        <span
+          className="ml-auto text-[11px]"
+          style={{ color: "#6E695E", fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}
+        >
           {loading ? "loading…" : `${rows.length.toLocaleString()} of ${total.toLocaleString()} ads`}
         </span>
         <ExportButton
@@ -571,59 +698,143 @@ export function CreativeTesting() {
         />
       </div>
 
-      {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">{error}</div>}
+      {error && (
+        <div
+          className="rounded-md p-2 text-xs"
+          style={{ background: "#FDEDEB", border: "1px solid #E9B4AE", color: "#8B2A22" }}
+        >
+          {error}
+        </div>
+      )}
 
-      {/* Creative Type funnel — shows distribution of the loaded rows
-          across content type (rows) × category (cols). Populates from
-          rows.category and detectCtype(ad_name) client-side. */}
+      {/* Creative Type funnel — CTD .funnel-card, ctype × category matrix */}
       {funnel.active.length > 0 && (
-        <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
+        <div
+          className="rounded-lg p-3"
+          style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
+        >
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-text-primary">
+            <h3
+              style={{
+                fontFamily: "'Space Grotesk', system-ui, sans-serif",
+                fontSize: "13px",
+                fontWeight: 700,
+                color: "#161513",
+                margin: 0,
+              }}
+            >
               Creative Type funnel
-              <span className="ml-2 text-[11px] font-normal text-text-tertiary">
+              <span style={{ marginLeft: "8px", fontWeight: 400, fontSize: "11px", color: "#9A9384" }}>
                 distribution across categories
               </span>
             </h3>
-            <span className="font-mono text-[11px] text-text-tertiary">
+            <span
+              style={{
+                fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                fontSize: "11px",
+                color: "#9A9384",
+              }}
+            >
               {funnel.grand.total.toLocaleString()} ads loaded
             </span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-[11px]">
               <thead>
-                <tr className="border-b border-border-primary">
-                  <th className="px-2 py-1.5 font-medium text-text-tertiary">Creative Type</th>
-                  <th className="px-2 py-1.5 text-right font-medium text-text-tertiary">Total</th>
+                <tr style={{ borderBottom: "1px solid #E7E2D2", background: "#F5F1EC" }}>
+                  <th
+                    className="px-2 py-1.5"
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      letterSpacing: "0.08em",
+                      color: "#6E695E",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Creative Type
+                  </th>
+                  <th
+                    className="px-2 py-1.5 text-right"
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      letterSpacing: "0.08em",
+                      color: "#6E695E",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Total
+                  </th>
                   {FUNNEL_SUB_SHORT.map((s) => (
-                    <th key={s} className="px-2 py-1.5 text-right font-medium text-text-tertiary">{s}</th>
+                    <th
+                      key={s}
+                      className="px-2 py-1.5 text-right"
+                      style={{
+                        fontSize: "10px",
+                        fontWeight: 600,
+                        letterSpacing: "0.08em",
+                        color: "#6E695E",
+                        textTransform: "uppercase",
+                      }}
+                    >
+                      {s}
+                    </th>
                   ))}
-                  <th className="px-2 py-1.5 text-right font-medium text-text-tertiary" title="Count of ads passing F4 (win-rate quality gate)">F4 ✓</th>
+                  <th
+                    className="px-2 py-1.5 text-right"
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      letterSpacing: "0.08em",
+                      color: "#6E695E",
+                      textTransform: "uppercase",
+                    }}
+                    title="Count of ads passing F4 (win-rate quality gate)"
+                  >
+                    F4 ✓
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {funnel.active.map((ct) => {
                   const row = funnel.perCtype[ct];
                   return (
-                    <tr key={ct} className="border-b border-border-soft hover:bg-bg-hover">
-                      <td className="px-2 py-1.5 font-medium text-text-primary">{ct}</td>
-                      <td className="px-2 py-1.5 text-right font-mono">{row.total}</td>
+                    <tr key={ct} style={{ borderBottom: "1px solid #F0EBDF" }} className="hover:bg-[#FAF8F5]">
+                      <td className="px-2 py-1.5" style={{ fontWeight: 600, color: "#161513" }}>
+                        {ct}
+                      </td>
+                      <td
+                        className="px-2 py-1.5 text-right"
+                        style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                      >
+                        {row.total}
+                      </td>
                       {FUNNEL_SUB.map((s) => {
                         const n = row.byCat[s];
                         const pct = row.total ? Math.round((n / row.total) * 100) : 0;
                         return (
-                          <td key={s} className="px-2 py-1.5 text-right font-mono">
+                          <td
+                            key={s}
+                            className="px-2 py-1.5 text-right"
+                            style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                          >
                             {n}
                             {n > 0 && (
-                              <span className="ml-1 text-[10px] text-text-tertiary">{pct}%</span>
+                              <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
+                                {pct}%
+                              </span>
                             )}
                           </td>
                         );
                       })}
-                      <td className="px-2 py-1.5 text-right font-mono text-emerald-700">
+                      <td
+                        className="px-2 py-1.5 text-right"
+                        style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#2E7D32" }}
+                      >
                         {row.f4}
                         {row.total > 0 && (
-                          <span className="ml-1 text-[10px] text-text-tertiary">
+                          <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
                             {Math.round((row.f4 / row.total) * 100)}%
                           </span>
                         )}
@@ -631,25 +842,47 @@ export function CreativeTesting() {
                     </tr>
                   );
                 })}
-                <tr className="border-t-2 border-border-primary bg-bg-subtle font-semibold">
-                  <td className="px-2 py-1.5">Grand Total</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{funnel.grand.total}</td>
+                <tr
+                  style={{
+                    borderTop: "2px solid #E7E2D2",
+                    background: "#F5F1EC",
+                    fontWeight: 600,
+                  }}
+                >
+                  <td className="px-2 py-1.5" style={{ color: "#161513" }}>
+                    Grand Total
+                  </td>
+                  <td
+                    className="px-2 py-1.5 text-right"
+                    style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                  >
+                    {funnel.grand.total}
+                  </td>
                   {FUNNEL_SUB.map((s) => {
                     const n = funnel.grand.byCat[s];
                     const pct = funnel.grand.total ? Math.round((n / funnel.grand.total) * 100) : 0;
                     return (
-                      <td key={s} className="px-2 py-1.5 text-right font-mono">
+                      <td
+                        key={s}
+                        className="px-2 py-1.5 text-right"
+                        style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                      >
                         {n}
                         {n > 0 && (
-                          <span className="ml-1 text-[10px] text-text-tertiary">{pct}%</span>
+                          <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
+                            {pct}%
+                          </span>
                         )}
                       </td>
                     );
                   })}
-                  <td className="px-2 py-1.5 text-right font-mono text-emerald-700">
+                  <td
+                    className="px-2 py-1.5 text-right"
+                    style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#2E7D32" }}
+                  >
                     {funnel.grand.f4}
                     {funnel.grand.total > 0 && (
-                      <span className="ml-1 text-[10px] text-text-tertiary">
+                      <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
                         {Math.round((funnel.grand.f4 / funnel.grand.total) * 100)}%
                       </span>
                     )}
@@ -658,43 +891,84 @@ export function CreativeTesting() {
               </tbody>
             </table>
           </div>
-          <p className="mt-2 text-[10px] text-text-tertiary">
-            Aggregated from the {rows.length.toLocaleString()} loaded row(s). Scroll / paginate to expand -- server has {total.toLocaleString()} matches for the current filters.
+          <p style={{ marginTop: "8px", fontSize: "10px", color: "#9A9384" }}>
+            Aggregated from the {rows.length.toLocaleString()} loaded row(s). Scroll / paginate to expand — server has {total.toLocaleString()} matches for the current filters.
           </p>
         </div>
       )}
 
-      {/* Slim table -- Creative Testing focus columns only */}
+      {/* Slim results table — CTD .funnel-card style */}
       {loading ? (
-        <p className="text-sm text-text-secondary">Loading…</p>
+        <p style={{ fontSize: "12px", color: "#6E695E" }}>Loading…</p>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
+        <div
+          className="overflow-x-auto rounded-lg"
+          style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
+        >
           <table className="w-full text-left text-xs">
             <thead>
-              <tr className="border-b border-border-primary text-[11px] text-text-secondary">
-                <th className="px-3 py-2 font-medium">Ad</th>
-                <th className="px-3 py-2 font-medium">Account</th>
-                <th className="px-3 py-2 font-medium">Created</th>
-                <th className="px-3 py-2 font-medium">Category</th>
-                <th className="px-3 py-2 font-medium">F1234</th>
-                <th className="px-3 py-2 text-right font-medium">Spend</th>
-                <th className="px-3 py-2 text-right font-medium">ROAS</th>
-                <th className="px-3 py-2 text-right font-medium">Purchases</th>
-                <th className="px-3 py-2 text-right font-medium">NCP</th>
-                <th className="px-3 py-2 text-right font-medium">Cost / NCP</th>
-                <th className="px-3 py-2 text-right font-medium">Cost / FTEWV</th>
+              <tr style={{ borderBottom: "1px solid #E7E2D2", background: "#F5F1EC" }}>
+                {["Ad", "Account", "Created", "Category", "F1234"].map((h) => (
+                  <th
+                    key={h}
+                    className="px-3 py-2"
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      letterSpacing: "0.08em",
+                      color: "#6E695E",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+                {["Spend", "ROAS", "Purchases", "NCP", "Cost / NCP", "Cost / FTEWV"].map((h) => (
+                  <th
+                    key={h}
+                    className="px-3 py-2 text-right"
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      letterSpacing: "0.08em",
+                      color: "#6E695E",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => {
                 const cat = (r.category ?? "Discarded") as CategoryKey;
                 return (
-                  <tr key={r.ad_id} className="border-b border-border-soft hover:bg-bg-surface">
-                    <td className="max-w-[260px] truncate px-3 py-1.5 text-text-primary" title={r.ad_name ?? ""}>
+                  <tr
+                    key={r.ad_id}
+                    style={{ borderBottom: "1px solid #F0EBDF" }}
+                    className="hover:bg-[#FAF8F5]"
+                  >
+                    <td
+                      className="max-w-[260px] truncate px-3 py-1.5"
+                      style={{ color: "#161513" }}
+                      title={r.ad_name ?? ""}
+                    >
                       {r.ad_name ?? "—"}
                     </td>
-                    <td className="px-3 py-1.5 text-text-secondary">{r.account_name ?? "—"}</td>
-                    <td className="px-3 py-1.5 font-mono text-[11px] text-text-secondary">{r.ad_created_date ?? "—"}</td>
+                    <td className="px-3 py-1.5" style={{ color: "#6E695E" }}>
+                      {r.account_name ?? "—"}
+                    </td>
+                    <td
+                      className="px-3 py-1.5"
+                      style={{
+                        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                        fontSize: "11px",
+                        color: "#6E695E",
+                      }}
+                    >
+                      {r.ad_created_date ?? "—"}
+                    </td>
                     <td className="px-3 py-1.5">
                       <span className={`cat-badge ${CAT_CLASS[cat] ?? "cat-disc"}`}>{r.category ?? "—"}</span>
                     </td>
@@ -707,18 +981,48 @@ export function CreativeTesting() {
                         })}
                       </div>
                     </td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtMoney(r.spend)}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtNum(r.meta_roas ?? r.roas)}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtCompact(r.purchases)}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtCompact(r.ncp_count)}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtMoney(r.cost_per_ncp)}</td>
-                    <td className="px-3 py-1.5 text-right font-mono">{fmtMoney(r.cost_per_ftewv)}</td>
+                    <td
+                      className="px-3 py-1.5 text-right"
+                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                    >
+                      {fmtMoney(r.spend)}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-right"
+                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                    >
+                      {fmtNum(r.meta_roas ?? r.roas)}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-right"
+                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                    >
+                      {fmtCompact(r.purchases)}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-right"
+                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                    >
+                      {fmtCompact(r.ncp_count)}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-right"
+                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                    >
+                      {fmtMoney(r.cost_per_ncp)}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 text-right"
+                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
+                    >
+                      {fmtMoney(r.cost_per_ftewv)}
+                    </td>
                   </tr>
                 );
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="px-4 py-6 text-center text-text-secondary">
+                  <td colSpan={11} className="px-4 py-6 text-center" style={{ color: "#6E695E" }}>
                     No ads created in this window. Try widening the date range.
                   </td>
                 </tr>
@@ -726,11 +1030,12 @@ export function CreativeTesting() {
             </tbody>
           </table>
           {rows.length < total && (
-            <div className="border-t border-border-soft p-3 text-center">
+            <div className="p-3 text-center" style={{ borderTop: "1px solid #F0EBDF" }}>
               <button
                 onClick={loadMore}
                 disabled={loadingMore}
-                className="rounded-md bg-bg-muted px-4 py-1.5 text-xs font-medium text-text-primary hover:bg-bg-muted disabled:opacity-40"
+                className="rounded-md px-4 py-1.5 text-[11px] font-medium disabled:opacity-40"
+                style={{ background: "#F5F1EC", border: "1px solid #E7E2D2", color: "#161513" }}
               >
                 {loadingMore ? "Loading…" : `Load more (${rows.length} of ${total})`}
               </button>
