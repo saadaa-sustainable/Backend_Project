@@ -339,19 +339,27 @@ _DELIVERED_IN_WINDOW = (
     "AND d.impressions > 0)"
 )
 
-_ADS_ANALYSE_FROM = (
+# Base FROM used by COUNT / totals / category-counts. Deliberately does
+# NOT include the first_seen LATERAL nor the asset-lookup subquery --
+# neither is referenced by aggregate SELECTs, and the LATERAL costs one
+# ad_insights probe per aps row (~40s cold on a 220k-ad table). Only the
+# row query pays for those joins, via _ADS_ANALYSE_FROM_ROWS below.
+_ADS_ANALYSE_FROM_AGG = (
     "FROM ad_performance_summary aps "
     "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id "
-    # first_seen_date needs a per-ad MIN over ad_insights.date_start.
-    # ad_insights is 1:1 with ad_id so a lateral MIN is trivial -- no
-    # heavy scan. If ad_insights grows to daily grain later this becomes
-    # a proper subquery/materialized column.
-    "LEFT JOIN LATERAL ("
-    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
-    ") fs ON true "
     # Historical tagging. A plain PK join onto a ~14.9k-row table, so it
     # costs nothing next to the joins around it.
     "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id"
+)
+
+# Row-fetch FROM: extends the base with the per-row first_seen probe.
+# ad_insights is 1:1 with ad_id so a lateral MIN is trivial -- no heavy
+# scan. Split out of the aggregate FROM on 2026-09-14 because the count /
+# totals / category-counts queries were paying for it three extra times.
+_ADS_ANALYSE_FROM = _ADS_ANALYSE_FROM_AGG + (
+    " LEFT JOIN LATERAL ("
+    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
+    ") fs ON true"
 )
 
 
@@ -446,13 +454,13 @@ def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
 
 
 def _ads_analyse_count_sql(where_sql: str) -> str:
-    return f"SELECT COUNT(*) {_ADS_ANALYSE_FROM} {where_sql}"
+    return f"SELECT COUNT(*) {_ADS_ANALYSE_FROM_AGG} {where_sql}"
 
 
 def _ads_analyse_category_counts_sql(where_sql: str) -> str:
     return (
         f"SELECT COALESCE(aps.category, 'Uncategorized'), COUNT(*) "
-        f"{_ADS_ANALYSE_FROM} {where_sql} GROUP BY 1"
+        f"{_ADS_ANALYSE_FROM_AGG} {where_sql} GROUP BY 1"
     )
 
 
@@ -490,7 +498,7 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
             "SUM(w.conv_value) / NULLIF(SUM(w.spend),0) AS avg_meta_roas, "
             "SUM(w.shopify_sales) / NULLIF(SUM(w.spend),0) AS avg_shopify_roas, "
             "SUM(w.link_clicks) * 100.0 / NULLIF(SUM(w.impressions),0) AS avg_ctr_pct "
-            f"{_ADS_ANALYSE_FROM}{_DELIVERY_TOTALS_JOIN} {where_sql}"
+            f"{_ADS_ANALYSE_FROM_AGG}{_DELIVERY_TOTALS_JOIN} {where_sql}"
         )
     return (
         "SELECT COUNT(*) AS ad_count, "
@@ -506,7 +514,7 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
         "AVG(NULLIF(aps.meta_roas,0)) AS avg_meta_roas, "
         "AVG(NULLIF(aps.shopify_roas,0)) AS avg_shopify_roas, "
         "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct "
-        f"{_ADS_ANALYSE_FROM} {where_sql}"
+        f"{_ADS_ANALYSE_FROM_AGG} {where_sql}"
     )
 
 
