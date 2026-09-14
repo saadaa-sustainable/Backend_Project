@@ -120,6 +120,41 @@ const firstOfThisMonth = () => {
   return d.toISOString().slice(0, 10);
 };
 
+// Content-type detection from ad_name -- verbatim port of CTD's
+// detectCtype() so the funnel matches the numbers you'd see on the
+// legacy dashboard. Legacy tokens (VRP, NNC, VIDEO, IGP, NO-ID,
+// VID-AD prefix) and the CT-team's later tokens (OSP, CPL, USP, CSR,
+// ITE) all resolve to VID; STATIC is only when the ad name says so
+// explicitly; IFAD and GAD take precedence in that order.
+function detectCtype(name: string | null | undefined): "IFAD" | "Graphic AD" | "VID" | "STATIC" {
+  const n = (name || "").toUpperCase();
+  if (n.includes("IFAD")) return "IFAD";
+  if (n.includes("GAD")) return "Graphic AD";
+  if (
+    n.includes("VRP") || n.includes("NNC") || n.includes("VIDEO") ||
+    n.includes("IGP") || n.includes("NO-ID") || /^VID-AD/.test(n) ||
+    n.includes("OSP") || n.includes("CPL") || n.includes("USP") ||
+    n.includes("CSR") || n.includes("ITE")
+  ) return "VID";
+  if (n.includes("STATIC") || n.includes("_ST_") || n.includes("+ST+")) return "STATIC";
+  return "VID";
+}
+
+// The 7 sub-categories the funnel shows, in the exact order CTD lays
+// them out. Order matters -- the master row spans (Winner=2, P0=1,
+// P1/P2=2, Awaited=1, Discarded=1) assume this order.
+const FUNNEL_SUB: CategoryKey[] = [
+  "Incremental Winner", "Winner", "P0 analysis",
+  "P1 analysis", "P2 analysis", "Result Awaited", "Discarded",
+];
+const FUNNEL_SUB_SHORT: string[] = [
+  "Inc. Winner", "Winner", "P0", "P1", "P2", "Awaited", "Discarded",
+];
+
+const CTYPES: ("IFAD" | "Graphic AD" | "VID" | "STATIC")[] = [
+  "IFAD", "Graphic AD", "VID", "STATIC",
+];
+
 function fmtCompact(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   const abs = Math.abs(n);
@@ -163,6 +198,55 @@ export function CreativeTesting() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showDefs, setShowDefs] = useState(false);
+
+  // Funnel matrix -- (ctype × category) counts derived client-side from
+  // the loaded rows. Runs on the CURRENT page slice, so scrolling in
+  // more rows (loadMore) expands the numbers. That matches CTD's
+  // behaviour: the funnel there also aggregates whatever rows are in
+  // memory. If we later add server-side ctype categorisation, this
+  // memo swaps out for an object off the response.
+  const funnel = useMemo(() => {
+    const perCtype: Record<string, {
+      total: number;
+      byCat: Record<CategoryKey, number>;
+      f4: number;
+    }> = {};
+    for (const ct of CTYPES) {
+      perCtype[ct] = {
+        total: 0,
+        f4: 0,
+        byCat: {
+          "Incremental Winner": 0, Winner: 0, "P0 analysis": 0,
+          "P1 analysis": 0, "P2 analysis": 0, "Result Awaited": 0, Discarded: 0,
+        },
+      };
+    }
+    for (const r of rows) {
+      const ct = detectCtype(r.ad_name);
+      const bucket = perCtype[ct];
+      if (!bucket) continue;
+      bucket.total += 1;
+      const cat = (r.category ?? "Discarded") as CategoryKey;
+      if (bucket.byCat[cat] !== undefined) bucket.byCat[cat] += 1;
+      if (r.f4_pass) bucket.f4 += 1;
+    }
+    const active = CTYPES.filter((c) => perCtype[c].total > 0);
+    const grand = {
+      total: 0,
+      f4: 0,
+      byCat: {
+        "Incremental Winner": 0, Winner: 0, "P0 analysis": 0,
+        "P1 analysis": 0, "P2 analysis": 0, "Result Awaited": 0, Discarded: 0,
+      } as Record<CategoryKey, number>,
+    };
+    for (const ct of active) {
+      grand.total += perCtype[ct].total;
+      grand.f4 += perCtype[ct].f4;
+      for (const s of FUNNEL_SUB) grand.byCat[s] += perCtype[ct].byCat[s];
+    }
+    return { perCtype, active, grand };
+  }, [rows]);
 
   const filters = useMemo(
     () => ({
@@ -244,7 +328,18 @@ export function CreativeTesting() {
       {/* Header + date range picker */}
       <div className="flex flex-wrap items-center gap-3">
         <div>
-          <h2 className="text-base font-semibold text-text-primary">Creative Testing</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-semibold text-text-primary">Creative Testing</h2>
+            <button
+              type="button"
+              onClick={() => setShowDefs(true)}
+              title="Show category definitions (Winner / P0 / P1 / P2 / Result Awaited / Discarded / F1-F4)"
+              className="inline-flex items-center gap-1 rounded-md border border-border-primary bg-white px-2 py-0.5 text-[11px] font-medium text-text-secondary hover:bg-bg-hover"
+            >
+              <span aria-hidden="true">ⓘ</span>
+              Definitions
+            </button>
+          </div>
           <p className="text-xs text-text-secondary">
             Ads launched in the picked window — evaluate recently-shipped creatives before they age into the wider Ads Analyse view.
           </p>
@@ -478,6 +573,97 @@ export function CreativeTesting() {
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">{error}</div>}
 
+      {/* Creative Type funnel — shows distribution of the loaded rows
+          across content type (rows) × category (cols). Populates from
+          rows.category and detectCtype(ad_name) client-side. */}
+      {funnel.active.length > 0 && (
+        <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-text-primary">
+              Creative Type funnel
+              <span className="ml-2 text-[11px] font-normal text-text-tertiary">
+                distribution across categories
+              </span>
+            </h3>
+            <span className="font-mono text-[11px] text-text-tertiary">
+              {funnel.grand.total.toLocaleString()} ads loaded
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[11px]">
+              <thead>
+                <tr className="border-b border-border-primary">
+                  <th className="px-2 py-1.5 font-medium text-text-tertiary">Creative Type</th>
+                  <th className="px-2 py-1.5 text-right font-medium text-text-tertiary">Total</th>
+                  {FUNNEL_SUB_SHORT.map((s) => (
+                    <th key={s} className="px-2 py-1.5 text-right font-medium text-text-tertiary">{s}</th>
+                  ))}
+                  <th className="px-2 py-1.5 text-right font-medium text-text-tertiary" title="Count of ads passing F4 (win-rate quality gate)">F4 ✓</th>
+                </tr>
+              </thead>
+              <tbody>
+                {funnel.active.map((ct) => {
+                  const row = funnel.perCtype[ct];
+                  return (
+                    <tr key={ct} className="border-b border-border-soft hover:bg-bg-hover">
+                      <td className="px-2 py-1.5 font-medium text-text-primary">{ct}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{row.total}</td>
+                      {FUNNEL_SUB.map((s) => {
+                        const n = row.byCat[s];
+                        const pct = row.total ? Math.round((n / row.total) * 100) : 0;
+                        return (
+                          <td key={s} className="px-2 py-1.5 text-right font-mono">
+                            {n}
+                            {n > 0 && (
+                              <span className="ml-1 text-[10px] text-text-tertiary">{pct}%</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td className="px-2 py-1.5 text-right font-mono text-emerald-700">
+                        {row.f4}
+                        {row.total > 0 && (
+                          <span className="ml-1 text-[10px] text-text-tertiary">
+                            {Math.round((row.f4 / row.total) * 100)}%
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr className="border-t-2 border-border-primary bg-bg-subtle font-semibold">
+                  <td className="px-2 py-1.5">Grand Total</td>
+                  <td className="px-2 py-1.5 text-right font-mono">{funnel.grand.total}</td>
+                  {FUNNEL_SUB.map((s) => {
+                    const n = funnel.grand.byCat[s];
+                    const pct = funnel.grand.total ? Math.round((n / funnel.grand.total) * 100) : 0;
+                    return (
+                      <td key={s} className="px-2 py-1.5 text-right font-mono">
+                        {n}
+                        {n > 0 && (
+                          <span className="ml-1 text-[10px] text-text-tertiary">{pct}%</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                  <td className="px-2 py-1.5 text-right font-mono text-emerald-700">
+                    {funnel.grand.f4}
+                    {funnel.grand.total > 0 && (
+                      <span className="ml-1 text-[10px] text-text-tertiary">
+                        {Math.round((funnel.grand.f4 / funnel.grand.total) * 100)}%
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-[10px] text-text-tertiary">
+            Aggregated from the {rows.length.toLocaleString()} loaded row(s). Scroll / paginate to expand -- server has {total.toLocaleString()} matches for the current filters.
+          </p>
+        </div>
+      )}
+
       {/* Slim table -- Creative Testing focus columns only */}
       {loading ? (
         <p className="text-sm text-text-secondary">Loading…</p>
@@ -550,6 +736,84 @@ export function CreativeTesting() {
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Definitions modal -- opens on Definitions button click. Covers the
+          category ladder + F1-F4 gates so a new merchant can read the KPI
+          strip without asking the previous ops person. */}
+      {showDefs && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setShowDefs(false)}
+        >
+          <div
+            className="relative max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border-primary p-4">
+              <h3 className="text-base font-semibold text-text-primary">Creative Testing definitions</h3>
+              <button
+                onClick={() => setShowDefs(false)}
+                className="rounded-md p-1 text-text-tertiary hover:bg-bg-hover"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-4 p-4 text-sm text-text-secondary">
+              <section>
+                <h4 className="mb-2 font-semibold text-text-primary">Category ladder</h4>
+                <p className="text-xs">
+                  Every ad gets exactly one category derived from its lifecycle metrics.
+                  The ladder is evaluated top-down; the first rung that fits wins.
+                </p>
+                <dl className="mt-2 space-y-2">
+                  <div>
+                    <dt className="font-medium text-emerald-700">★ Winner / Incremental Winner</dt>
+                    <dd className="text-xs">Cleared F1 + F2 + F3 + F4 and delivered enough spend to be confident (not a fluke). Incremental Winner is the subset that also beats its adset&apos;s average — a true breakthrough creative, not just a good one.</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-amber-700">◆ P0 analysis</dt>
+                    <dd className="text-xs">Passed F1 (impressions target) and one of F2/F3/F4 but not all — worth a deeper look this week.</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-sky-700">▲ P1 / P2 analysis</dt>
+                    <dd className="text-xs">Passed F1 but is falling short on multiple efficiency gates. P1 is closer to salvageable; P2 is closer to Discarded.</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-slate-600">⌛ Result Awaited</dt>
+                    <dd className="text-xs">Less than 14 days old OR under the F1 impressions floor — too early to judge. Sits in the buffer while it accumulates data.</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-rose-700">✕ Discarded</dt>
+                    <dd className="text-xs">Cleared the buffer and failed enough gates that no version of the current metric will save it. Kill or replace.</dd>
+                  </div>
+                </dl>
+              </section>
+              <section>
+                <h4 className="mb-2 font-semibold text-text-primary">F1-F4 gates</h4>
+                <ul className="space-y-1 text-xs">
+                  <li><b>F1 — Volume</b>: impressions ≥ threshold (default 50,000). Confirms the ad had a fair delivery test.</li>
+                  <li><b>F2 — ROAS</b>: meta_roas ≥ threshold (default 3.0). Efficiency at the account level.</li>
+                  <li><b>F3 — Cost per NCP</b>: cost_per_ncp ≤ threshold (default ₹525). Cheap new-customer acquisition.</li>
+                  <li><b>F4 — Cost per FTEWV</b>: cost_per_ftewv ≤ threshold (default ₹12). Cheap first-time engaged viewer — the quality gate for hook strength.</li>
+                </ul>
+              </section>
+              <section>
+                <h4 className="mb-2 font-semibold text-text-primary">Content types</h4>
+                <p className="text-xs">
+                  Derived from the ad_name naming convention. Priority: IFAD &gt; GAD (Graphic AD) &gt; VID markers (VRP/NNC/VIDEO/IGP/NO-ID/OSP/CPL/USP/CSR/ITE) &gt; STATIC (only when ad_name explicitly contains STATIC / _ST_ / +ST+). Anything else defaults to VID.
+                </p>
+              </section>
+              <section>
+                <h4 className="mb-2 font-semibold text-text-primary">Excl. copy</h4>
+                <p className="text-xs">
+                  When ON (default), ads whose ad_name contains &apos;copy&apos; are hidden. Meta&apos;s duplication flow appends &apos;- Copy N&apos; to child ads, so hiding them isolates the original creative under evaluation. Filter runs server-side so KPI tiles and totals reflect the toggle.
+                </p>
+              </section>
+            </div>
+          </div>
         </div>
       )}
     </div>
