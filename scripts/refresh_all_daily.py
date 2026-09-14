@@ -167,6 +167,14 @@ PHASE_SILVER = [
     ("silver_cpis_utm",       ["scripts/refresh_cpis_utm.py"],              1200),
     ("silver_ad_product",     ["scripts/refresh_ad_product_daily.py"],       600),
     ("silver_ad_media",       ["scripts/refresh_ad_media.py"],               900),
+    # Gold: three landing-page tables (sessions_daily / analysis_30d /
+    # ad_breakdown_30d). Was left OUT of the daily chain until 2026-09-14
+    # -- the FlattenJob for it was only fired by the in-process scheduler,
+    # which is disabled on Render (SCHEDULER_ENABLED=false), so
+    # analysis_30d had been frozen on the 2026-08-28 window since then
+    # and the Landing Page Analysis tab was serving a fixed 30d snapshot
+    # that ended two weeks in the past.
+    ("landing_page_gold",     ["scripts/refresh_landing_page_gold.py"],      900),
 ]
 
 
