@@ -505,7 +505,14 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
         "COALESCE(SUM(al.ftewv_count),0) AS ftewv_count, "
         "AVG(NULLIF(aps.meta_roas,0)) AS avg_meta_roas, "
         "AVG(NULLIF(aps.shopify_roas,0)) AS avg_shopify_roas, "
-        "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct "
+        "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct, "
+        # Overview-Performance sums (see AdsAnalyseTotals docstring).
+        # ad_lifecycle carries these as lifetime accumulators so a plain
+        # SUM matches CTD's Overview strip.
+        "COALESCE(SUM(al.thruplays),0) AS thruplays, "
+        "COALESCE(SUM(al.three_sec_video_plays),0) AS three_sec_video_plays, "
+        "COALESCE(SUM(al.outbound_clicks),0) AS outbound_clicks, "
+        "COALESCE(SUM(al.post_engagements),0) AS post_engagements "
         f"{_ADS_ANALYSE_FROM} {where_sql}"
     )
 
@@ -671,6 +678,17 @@ class AdsAnalyseTotals(BaseModel):
     avg_meta_roas: float | None
     avg_shopify_roas: float | None
     avg_ctr_pct: float | None
+    # 2026-09-14: added for CTD-parity Overview-Performance block on the
+    # Creative Testing tab. All sums off ad_lifecycle (al). Rates
+    # (hook / thruplay / hold / engagement / CT ROAS / outbound CTR) are
+    # computed client-side from these + spend/impressions, so each tile
+    # divides the numerator and denominator over the same filter set
+    # the table shows. Windowed-delivery totals do not populate these
+    # -- there is no daily source for them yet.
+    thruplays: float
+    three_sec_video_plays: float
+    outbound_clicks: float
+    post_engagements: float
 
 
 class AdsAnalyseResponse(BaseModel):
@@ -1006,6 +1024,14 @@ async def get_ads_analyse(
             params,
         )
     ).one()
+    # Overview-Performance sums exist only on the non-windowed branch --
+    # the windowed totals SQL sums from the per-day mirror w, which does
+    # not carry thruplays/three_sec/etc. Return 0 there so the frontend
+    # tiles render 0.00% instead of NaN.
+    thruplays = float(getattr(totals_row, "thruplays", None) or 0)
+    three_sec = float(getattr(totals_row, "three_sec_video_plays", None) or 0)
+    outbound_clicks = float(getattr(totals_row, "outbound_clicks", None) or 0)
+    post_engagements = float(getattr(totals_row, "post_engagements", None) or 0)
     totals = AdsAnalyseTotals(
         ad_count=int(totals_row.ad_count or 0),
         spend=float(totals_row.spend or 0),
@@ -1022,6 +1048,10 @@ async def get_ads_analyse(
         avg_meta_roas=float(totals_row.avg_meta_roas) if totals_row.avg_meta_roas is not None else None,
         avg_shopify_roas=float(totals_row.avg_shopify_roas) if totals_row.avg_shopify_roas is not None else None,
         avg_ctr_pct=float(totals_row.avg_ctr_pct) if totals_row.avg_ctr_pct is not None else None,
+        thruplays=thruplays,
+        three_sec_video_plays=three_sec,
+        outbound_clicks=outbound_clicks,
+        post_engagements=post_engagements,
     )
 
     return AdsAnalyseResponse(

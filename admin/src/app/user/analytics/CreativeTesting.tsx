@@ -110,6 +110,52 @@ const firstOfThisMonth = () => {
   return d.toISOString().slice(0, 10);
 };
 
+// Product Focus buckets -- verbatim port of CTD's Product-in-Focus
+// detection off ad_name substrings. Matches what the merchant sees on
+// the legacy dashboard's Product Focus strip. Priority top-down; the
+// first bucket wins.
+type ProductFocusKey = "Home" | "Category" | "Collection" | "Product" | "Others";
+const PRODUCT_FOCUS_ORDER: ProductFocusKey[] = ["Home", "Category", "Collection", "Product", "Others"];
+const PRODUCT_FOCUS_COLOR: Record<ProductFocusKey, string> = {
+  Home: "#3B6BF5",
+  Category: "#0891B2",
+  Collection: "#2E7D32",
+  Product: "#D97706",
+  Others: "#9A9384",
+};
+function detectProductFocus(name: string | null | undefined): ProductFocusKey {
+  const n = (name || "").toUpperCase();
+  if (n.includes("HP+") || /(^|[_ +-])HP([_ +-]|$)/.test(n) || n.includes("HOME")) return "Home";
+  if (n.includes("CTG") || n.includes("CATEGORY")) return "Category";
+  if (n.includes("CLP") || n.includes("COLLECTION")) return "Collection";
+  if (n.includes("PDP") || n.includes("VRP") || n.includes("CTP") || n.includes("PRODUCT")) return "Product";
+  return "Others";
+}
+
+// Creative Focus buckets -- the four merchant-facing ctypes. Same
+// classifier as detectCtype below, only labelled differently for the
+// pill strip; keeping the two side-by-side would drift as CTD evolves.
+type CreativeFocusKey = "IFAD" | "GAD" | "VID" | "Others";
+const CREATIVE_FOCUS_ORDER: CreativeFocusKey[] = ["IFAD", "GAD", "VID", "Others"];
+const CREATIVE_FOCUS_COLOR: Record<CreativeFocusKey, string> = {
+  IFAD: "#7C3AED",
+  GAD: "#D97706",
+  VID: "#0891B2",
+  Others: "#9A9384",
+};
+function detectCreativeFocus(name: string | null | undefined): CreativeFocusKey {
+  const n = (name || "").toUpperCase();
+  if (n.includes("IFAD")) return "IFAD";
+  if (n.includes("GAD")) return "GAD";
+  if (
+    n.includes("VRP") || n.includes("NNC") || n.includes("VIDEO") ||
+    n.includes("IGP") || n.includes("NO-ID") || /^VID-AD/.test(n) ||
+    n.includes("OSP") || n.includes("CPL") || n.includes("USP") ||
+    n.includes("CSR") || n.includes("ITE")
+  ) return "VID";
+  return "Others";
+}
+
 // Content-type detection from ad_name -- verbatim port of CTD's
 // detectCtype() so the funnel matches the numbers you'd see on the
 // legacy dashboard. Legacy tokens (VRP, NNC, VIDEO, IGP, NO-ID,
@@ -344,6 +390,24 @@ export function CreativeTesting() {
       for (const s of FUNNEL_SUB) grand.byCat[s] += perCtype[ct].byCat[s];
     }
     return { perCtype, active, grand };
+  }, [rows]);
+
+  // Product Focus + Creative Focus counts, both client-side over the
+  // currently-loaded rows -- matches CTD's Product-in-Focus /
+  // Creative-Focus strip behaviour. Scoped to what's in memory so it
+  // grows when you Load More; the aggregate KPI strip and category
+  // tiles stay server-side.
+  const productFocus = useMemo(() => {
+    const map: Record<ProductFocusKey, number> = {
+      Home: 0, Category: 0, Collection: 0, Product: 0, Others: 0,
+    };
+    for (const r of rows) map[detectProductFocus(r.ad_name)] += 1;
+    return map;
+  }, [rows]);
+  const creativeFocus = useMemo(() => {
+    const map: Record<CreativeFocusKey, number> = { IFAD: 0, GAD: 0, VID: 0, Others: 0 };
+    for (const r of rows) map[detectCreativeFocus(r.ad_name)] += 1;
+    return map;
   }, [rows]);
 
   const filters = useMemo(
@@ -646,6 +710,216 @@ export function CreativeTesting() {
           );
         })}
       </div>
+
+      {/* Overview — Performance card. Ports CTD's op-grid: seven
+          Meta-side rate KPIs derived from the aggregate totals + one
+          highlighted CT ROAS tile on the right. All rates are blended
+          (sum ÷ sum) so a Rs 200 ad with one sale doesn't outweigh a
+          Rs 2,00,000 ad. Only rendered when totals arrived. */}
+      {totals && (
+        <div
+          className="flex flex-col gap-3 rounded-lg p-4"
+          style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
+        >
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div
+              style={{
+                fontFamily: "'Space Grotesk', system-ui, sans-serif",
+                fontSize: "12px",
+                fontWeight: 700,
+                letterSpacing: "0.14em",
+                color: "#161513",
+                textTransform: "uppercase",
+              }}
+            >
+              Overview <span style={{ color: "#9A9384" }}>—</span> Performance
+            </div>
+            <span
+              className="rounded-full px-2 py-0.5"
+              style={{
+                fontSize: "9px",
+                fontWeight: 700,
+                letterSpacing: "0.1em",
+                background: "#F5F1EC",
+                border: "1px solid #E7E2D2",
+                color: "#6E695E",
+              }}
+            >
+              SUM &amp; AVG · EXCL. COPY
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+            {(() => {
+              const impr = totals.impressions || 0;
+              const spend = totals.spend || 0;
+              const hookPct = impr > 0 ? (totals.three_sec_video_plays / impr) * 100 : null;
+              const ctrPct = impr > 0 ? (totals.outbound_clicks / impr) * 100 : null;
+              const engagePct = impr > 0 ? (totals.post_engagements / impr) * 100 : null;
+              const thruplayPct = impr > 0 ? (totals.thruplays / impr) * 100 : null;
+              const holdPct = totals.three_sec_video_plays > 0
+                ? (totals.thruplays / totals.three_sec_video_plays) * 100
+                : null;
+              const ctRoas = spend > 0 ? totals.conv_value / spend : null;
+              const tiles: {
+                label: string;
+                value: string;
+                sub: string;
+                highlight?: boolean;
+              }[] = [
+                { label: "Total spend", value: fmtMoney(totals.spend), sub: "Sum · INR" },
+                { label: "Total impressions", value: fmtCompact(totals.impressions), sub: "Sum" },
+                {
+                  label: "Avg. hook rate",
+                  value: hookPct === null ? "—" : hookPct.toFixed(2) + "%",
+                  sub: "3-sec plays ÷ impressions",
+                },
+                {
+                  label: "Avg. outbound CTR",
+                  value: ctrPct === null ? "—" : ctrPct.toFixed(2) + "%",
+                  sub: "Outbound clicks ÷ impressions",
+                },
+                {
+                  label: "Avg. engagement rate",
+                  value: engagePct === null ? "—" : engagePct.toFixed(2) + "%",
+                  sub: "Post engagements ÷ impressions",
+                },
+                {
+                  label: "Avg. thruplay rate",
+                  value: thruplayPct === null ? "—" : thruplayPct.toFixed(2) + "%",
+                  sub: "Thruplays ÷ impressions",
+                },
+                {
+                  label: "Avg. hold rate",
+                  value: holdPct === null ? "—" : holdPct.toFixed(2) + "%",
+                  sub: "Thruplays ÷ 3-sec plays",
+                },
+                {
+                  label: "CT ROAS",
+                  value: ctRoas === null ? "—" : ctRoas.toFixed(2),
+                  sub: "Conv. value ÷ spend",
+                  highlight: true,
+                },
+              ];
+              return tiles.map((t) => (
+                <div
+                  key={t.label}
+                  className="flex flex-col gap-1 rounded-lg p-3"
+                  style={{
+                    background: t.highlight ? "#F0C61E" : "#FAF8F5",
+                    border: `1px solid ${t.highlight ? "#F0C61E" : "#E7E2D2"}`,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 600,
+                      letterSpacing: "0.08em",
+                      color: t.highlight ? "#161513" : "#9A9384",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    {t.label}
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                      fontSize: "24px",
+                      fontWeight: 600,
+                      lineHeight: 1.1,
+                      color: "#161513",
+                    }}
+                  >
+                    {t.value}
+                  </div>
+                  <div style={{ fontSize: "10px", color: t.highlight ? "#4A3E00" : "#9A9384" }}>
+                    {t.sub}
+                  </div>
+                </div>
+              ));
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Product Focus + Creative Focus pill strips — side-by-side.
+          Counts are over the loaded rows, matching CTD's behaviour
+          where the strip grows as pagination brings more rows in. */}
+      {rows.length > 0 && (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          {[
+            {
+              title: "Product in Focus",
+              hint: "landing-page hierarchy from ad name",
+              buckets: PRODUCT_FOCUS_ORDER.map((k) => ({
+                key: k,
+                label: k === "Home" ? "Home page"
+                     : k === "Category" ? "Category page"
+                     : k === "Collection" ? "Collection page"
+                     : k === "Product" ? "Product page"
+                     : "Others",
+                count: productFocus[k],
+                color: PRODUCT_FOCUS_COLOR[k],
+              })),
+            },
+            {
+              title: "Creative Focus",
+              hint: "IFAD · GAD · VID · Others",
+              buckets: CREATIVE_FOCUS_ORDER.map((k) => ({
+                key: k,
+                label: k === "VID" ? "Video" : k,
+                count: creativeFocus[k],
+                color: CREATIVE_FOCUS_COLOR[k],
+              })),
+            },
+          ].map((panel) => (
+            <div
+              key={panel.title}
+              className="flex flex-col gap-2 rounded-lg p-3"
+              style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <h3
+                  style={{
+                    fontFamily: "'Space Grotesk', system-ui, sans-serif",
+                    fontSize: "13px",
+                    fontWeight: 700,
+                    color: "#161513",
+                    margin: 0,
+                  }}
+                >
+                  {panel.title}
+                </h3>
+                <span style={{ fontSize: "10px", color: "#9A9384" }}>{panel.hint}</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {panel.buckets.map((b) => (
+                  <div
+                    key={b.key}
+                    className="inline-flex items-center gap-2 rounded-full px-3 py-1"
+                    style={{ background: "#FAF8F5", border: "1px solid #E7E2D2" }}
+                  >
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ background: b.color }}
+                    />
+                    <span
+                      style={{
+                        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        color: "#161513",
+                      }}
+                    >
+                      {b.count.toLocaleString()}
+                    </span>
+                    <span style={{ fontSize: "11px", color: "#6E695E" }}>{b.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Filter row — search + sort + clear + counters + export */}
       <div
