@@ -20,8 +20,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from sqlalchemy.pool import NullPool
-
 from app.config import get_settings
 
 _engine: AsyncEngine | None = None
@@ -49,30 +47,36 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         settings = get_settings()
-        # Under pgbouncer transaction mode + asyncpg, keeping a pool of
-        # SQLAlchemy-side connections means auto-named prepared statements
-        # (__asyncpg_stmt_N__) get cached per Python connection object but
-        # pgbouncer rotates the underlying Postgres backend between
-        # transactions -- the next borrow gets a backend that doesn't
-        # know that name and raises DuplicatePreparedStatementError. The
-        # fix is NullPool: don't pool at all on our side; every request
-        # gets a fresh asyncpg connection that dies at end of request.
-        # pgbouncer's own pool absorbs the churn, and its high client
-        # cap (transaction mode is hundreds of clients, not 15) means
-        # this doesn't exhaust anything.
-        # `prepared_statement_name_func` is critical under pgbouncer
-        # transaction mode: asyncpg's default statement names look like
-        # __asyncpg_stmt_N__ where N is a per-connection counter, so
-        # even with cache disabled (statement_cache_size=0) two queries
-        # in one request can collide with a stale name pgbouncer's
-        # backend still remembers from a prior request. UUID-suffixing
-        # them makes every name globally unique so no collision is
-        # possible. Requires SQLAlchemy 2.0.30+ + asyncpg 0.29+.
+        # 2026-09-14: switched off NullPool. The historic reason was
+        # pgbouncer-transaction-mode DuplicatePreparedStatementError --
+        # asyncpg's default statement name (__asyncpg_stmt_N__) is a
+        # per-connection counter, so two Python-side pool borrows could
+        # collide on a name pgbouncer's rotated backend still
+        # remembered. NullPool sidestepped that by dropping the
+        # connection at end of request -- but the per-request TLS +
+        # asyncpg handshake to Supabase is 3-7 seconds locally, which
+        # turned into a 40+ second cold /ads-analyse.
+        #
+        # `prepared_statement_name_func` (added earlier) UUIDs the
+        # statement names, so collisions are impossible regardless of
+        # how connections are pooled. That makes a real pool safe under
+        # pgbouncer transaction mode: pool_pre_ping cheaply rejects a
+        # connection pgbouncer has recycled, and pool_recycle caps
+        # any idle-drop risk to 30 min. Warm-request DB-open cost drops
+        # from ~200ms to <1ms.
         import uuid as _uuid
         _engine = create_async_engine(
             settings.database.database_url,
             echo=settings.database.echo,
-            poolclass=NullPool,
+            # Modest pool: FastAPI serves a handful of concurrent tab
+            # requests, and each analytics query is a single SQL. 5 core
+            # + 10 overflow handles a burst without the churn NullPool
+            # forced. Bumping past this risks tripping pgbouncer's
+            # transaction-mode client cap.
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=1800,
             future=True,
             connect_args={
                 "statement_cache_size": 0,
