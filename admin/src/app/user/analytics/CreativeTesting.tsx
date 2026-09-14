@@ -428,8 +428,44 @@ export function CreativeTesting() {
      fromDate, toDate, dateField, exclCopy, sort],
   );
 
+  // sessionStorage cache — /ads-analyse takes 45s+ cold, so the tab
+  // is unusable without one. Keyed on the filter set that scopes the
+  // response; 5-minute TTL matches useCachedFetch's default so a
+  // merchant browsing tabs sees warm loads. Cache is served
+  // synchronously before the fetch fires, then refreshed in the
+  // background (SWR-style) so stale data flashes only when the
+  // filter genuinely changed.
   useEffect(() => {
     let cancelled = false;
+    const cacheKey = "ct-ads-analyse|" + JSON.stringify(filters);
+    const TTL_MS = 5 * 60 * 1000;
+    type Cached = {
+      rows: AdsAnalyseRow[];
+      total: number;
+      totals: AdsAnalyseTotals | null;
+      category_counts: Record<string, number>;
+      ts: number;
+    };
+    if (typeof window !== "undefined") {
+      try {
+        const raw = window.sessionStorage.getItem(cacheKey);
+        if (raw) {
+          const c = JSON.parse(raw) as Cached;
+          if (Date.now() - c.ts < TTL_MS) {
+            setRows(c.rows);
+            setTotal(c.total);
+            setTotals(c.totals);
+            setCategoryCounts(c.category_counts);
+            setLoading(false);
+            return () => {
+              cancelled = true;
+            };
+          }
+        }
+      } catch {
+        // Ignore quota errors; fall through to network fetch.
+      }
+    }
     setLoading(true);
     setError(null);
     fetchAdsAnalyse({ ...filters, limit: PAGE_SIZE, offset: 0 })
@@ -449,6 +485,22 @@ export function CreativeTesting() {
           res.rows.forEach((r) => r.campaign_name && next.add(r.campaign_name));
           return next;
         });
+        if (typeof window !== "undefined") {
+          try {
+            window.sessionStorage.setItem(
+              cacheKey,
+              JSON.stringify({
+                rows: res.rows,
+                total: res.total,
+                totals: res.totals ?? null,
+                category_counts: res.category_counts ?? {},
+                ts: Date.now(),
+              } satisfies Cached),
+            );
+          } catch {
+            // Quota exceeded; skip caching this response.
+          }
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
