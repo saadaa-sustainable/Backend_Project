@@ -806,8 +806,43 @@ export function AdsAnalyse() {
     [account, search, categoryFilter, adStatus, onlyWithOrders, fromDate, toDate, dateField],
   );
 
+  // sessionStorage cache -- /ads-analyse takes several seconds cold,
+  // so tab-switching / hard-refresh needs to skip the fetch when the
+  // filter set is unchanged. 5-min TTL matches Dashboard.tsx's
+  // useCachedFetch default. Filter-scoped key so a filter change
+  // always misses the cache and fetches fresh.
   useEffect(() => {
     let cancelled = false;
+    const cacheKey = "ae-ads-analyse|" + JSON.stringify(filters);
+    const TTL_MS = 5 * 60 * 1000;
+    type Cached = {
+      rows: AdsAnalyseRow[];
+      total: number;
+      totals: AdsAnalyseTotals | null;
+      category_counts: Record<string, number>;
+      ts: number;
+    };
+    if (typeof window !== "undefined") {
+      try {
+        const raw = window.sessionStorage.getItem(cacheKey);
+        if (raw) {
+          const c = JSON.parse(raw) as Cached;
+          if (Date.now() - c.ts < TTL_MS) {
+            setRows(c.rows);
+            setTotal(c.total);
+            setCategoryCountsFromApi(c.category_counts);
+            setTotals(c.totals);
+            setPage(0);
+            setLoading(false);
+            return () => {
+              cancelled = true;
+            };
+          }
+        }
+      } catch {
+        // Ignore quota / parse errors; fall through to network.
+      }
+    }
     setLoading(true);
     setError(null);
     // Fetch a large first batch so client-side recategorisation +
@@ -831,6 +866,22 @@ export function AdsAnalyse() {
           return next;
         });
         setPage(0);
+        if (typeof window !== "undefined") {
+          try {
+            window.sessionStorage.setItem(
+              cacheKey,
+              JSON.stringify({
+                rows: res.rows,
+                total: res.total,
+                totals: res.totals ?? null,
+                category_counts: res.category_counts ?? {},
+                ts: Date.now(),
+              } satisfies Cached),
+            );
+          } catch {
+            // Quota exceeded -- skip caching this response.
+          }
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
