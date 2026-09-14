@@ -339,19 +339,27 @@ _DELIVERED_IN_WINDOW = (
     "AND d.impressions > 0)"
 )
 
-_ADS_ANALYSE_FROM = (
+# Base FROM used by COUNT / totals / category-counts. Deliberately does
+# NOT include the first_seen LATERAL nor the asset-lookup subquery --
+# neither is referenced by aggregate SELECTs, and the LATERAL costs one
+# ad_insights probe per aps row (~40s cold on a 220k-ad table). Only the
+# row query pays for those joins, via _ADS_ANALYSE_FROM_ROWS below.
+_ADS_ANALYSE_FROM_AGG = (
     "FROM ad_performance_summary aps "
     "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id "
-    # first_seen_date needs a per-ad MIN over ad_insights.date_start.
-    # ad_insights is 1:1 with ad_id so a lateral MIN is trivial -- no
-    # heavy scan. If ad_insights grows to daily grain later this becomes
-    # a proper subquery/materialized column.
-    "LEFT JOIN LATERAL ("
-    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
-    ") fs ON true "
     # Historical tagging. A plain PK join onto a ~14.9k-row table, so it
     # costs nothing next to the joins around it.
     "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id"
+)
+
+# Row-fetch FROM: extends the base with the per-row first_seen probe.
+# ad_insights is 1:1 with ad_id so a lateral MIN is trivial -- no heavy
+# scan. Split out of the aggregate FROM on 2026-09-14 because the count /
+# totals / category-counts queries were paying for it three extra times.
+_ADS_ANALYSE_FROM = _ADS_ANALYSE_FROM_AGG + (
+    " LEFT JOIN LATERAL ("
+    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
+    ") fs ON true"
 )
 
 
@@ -446,13 +454,13 @@ def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
 
 
 def _ads_analyse_count_sql(where_sql: str) -> str:
-    return f"SELECT COUNT(*) {_ADS_ANALYSE_FROM} {where_sql}"
+    return f"SELECT COUNT(*) {_ADS_ANALYSE_FROM_AGG} {where_sql}"
 
 
 def _ads_analyse_category_counts_sql(where_sql: str) -> str:
     return (
         f"SELECT COALESCE(aps.category, 'Uncategorized'), COUNT(*) "
-        f"{_ADS_ANALYSE_FROM} {where_sql} GROUP BY 1"
+        f"{_ADS_ANALYSE_FROM_AGG} {where_sql} GROUP BY 1"
     )
 
 
@@ -490,7 +498,7 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
             "SUM(w.conv_value) / NULLIF(SUM(w.spend),0) AS avg_meta_roas, "
             "SUM(w.shopify_sales) / NULLIF(SUM(w.spend),0) AS avg_shopify_roas, "
             "SUM(w.link_clicks) * 100.0 / NULLIF(SUM(w.impressions),0) AS avg_ctr_pct "
-            f"{_ADS_ANALYSE_FROM}{_DELIVERY_TOTALS_JOIN} {where_sql}"
+            f"{_ADS_ANALYSE_FROM_AGG}{_DELIVERY_TOTALS_JOIN} {where_sql}"
         )
     return (
         "SELECT COUNT(*) AS ad_count, "
@@ -505,8 +513,18 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
         "COALESCE(SUM(al.ftewv_count),0) AS ftewv_count, "
         "AVG(NULLIF(aps.meta_roas,0)) AS avg_meta_roas, "
         "AVG(NULLIF(aps.shopify_roas,0)) AS avg_shopify_roas, "
-        "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct "
-        f"{_ADS_ANALYSE_FROM} {where_sql}"
+        "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct, "
+        # Overview-Performance sums (see AdsAnalyseTotals docstring).
+        # ad_lifecycle carries these as lifetime accumulators so a plain
+        # SUM matches CTD's Overview strip. outbound_clicks is stored as
+        # Meta's JSONB action-array (one row per action_type); extract
+        # the outbound_click value out of element 0 to keep the tile a
+        # scalar. Same pattern CTD's primary_sync.py uses.
+        "COALESCE(SUM(al.thruplays),0) AS thruplays, "
+        "COALESCE(SUM(al.three_sec_video_plays),0) AS three_sec_video_plays, "
+        "COALESCE(SUM(((al.outbound_clicks->0)->>'value')::numeric),0) AS outbound_clicks, "
+        "COALESCE(SUM(al.post_engagements),0) AS post_engagements "
+        f"{_ADS_ANALYSE_FROM_AGG} {where_sql}"
     )
 
 
@@ -671,6 +689,17 @@ class AdsAnalyseTotals(BaseModel):
     avg_meta_roas: float | None
     avg_shopify_roas: float | None
     avg_ctr_pct: float | None
+    # 2026-09-14: added for CTD-parity Overview-Performance block on the
+    # Creative Testing tab. All sums off ad_lifecycle (al). Rates
+    # (hook / thruplay / hold / engagement / CT ROAS / outbound CTR) are
+    # computed client-side from these + spend/impressions, so each tile
+    # divides the numerator and denominator over the same filter set
+    # the table shows. Windowed-delivery totals do not populate these
+    # -- there is no daily source for them yet.
+    thruplays: float
+    three_sec_video_plays: float
+    outbound_clicks: float
+    post_engagements: float
 
 
 class AdsAnalyseResponse(BaseModel):
@@ -1006,6 +1035,14 @@ async def get_ads_analyse(
             params,
         )
     ).one()
+    # Overview-Performance sums exist only on the non-windowed branch --
+    # the windowed totals SQL sums from the per-day mirror w, which does
+    # not carry thruplays/three_sec/etc. Return 0 there so the frontend
+    # tiles render 0.00% instead of NaN.
+    thruplays = float(getattr(totals_row, "thruplays", None) or 0)
+    three_sec = float(getattr(totals_row, "three_sec_video_plays", None) or 0)
+    outbound_clicks = float(getattr(totals_row, "outbound_clicks", None) or 0)
+    post_engagements = float(getattr(totals_row, "post_engagements", None) or 0)
     totals = AdsAnalyseTotals(
         ad_count=int(totals_row.ad_count or 0),
         spend=float(totals_row.spend or 0),
@@ -1022,6 +1059,10 @@ async def get_ads_analyse(
         avg_meta_roas=float(totals_row.avg_meta_roas) if totals_row.avg_meta_roas is not None else None,
         avg_shopify_roas=float(totals_row.avg_shopify_roas) if totals_row.avg_shopify_roas is not None else None,
         avg_ctr_pct=float(totals_row.avg_ctr_pct) if totals_row.avg_ctr_pct is not None else None,
+        thruplays=thruplays,
+        three_sec_video_plays=three_sec,
+        outbound_clicks=outbound_clicks,
+        post_engagements=post_engagements,
     )
 
     return AdsAnalyseResponse(

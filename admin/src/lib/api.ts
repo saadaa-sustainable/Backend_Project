@@ -657,6 +657,14 @@ export interface AdsAnalyseTotals {
   avg_meta_roas: number | null;
   avg_shopify_roas: number | null;
   avg_ctr_pct: number | null;
+  // 2026-09-14: Overview-Performance sums, added so the Creative
+  // Testing tab can render CTD's 8-tile block (hook / thruplay /
+  // hold / engagement rates + CT ROAS + outbound CTR). Server returns
+  // 0 in delivery-window mode because no daily source exists yet.
+  thruplays: number;
+  three_sec_video_plays: number;
+  outbound_clicks: number;
+  post_engagements: number;
 }
 
 export interface AdsAnalyseResponse {
