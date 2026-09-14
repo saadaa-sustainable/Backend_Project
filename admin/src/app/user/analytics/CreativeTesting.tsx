@@ -69,19 +69,32 @@ const CAT_ICON_COLOR: Record<CategoryKey, "emerald" | "amber" | "sky" | "slate" 
   "P1 analysis": "sky", "P2 analysis": "sky", "Result Awaited": "slate", Discarded: "rose",
 };
 
-const DATE_PRESETS: { key: string; label: string; days: number | null }[] = [
-  { key: "7d", label: "Last 7 days", days: 6 },
-  { key: "14d", label: "Last 14 days", days: 13 },
-  { key: "30d", label: "Last 30 days", days: 29 },
-  { key: "60d", label: "Last 60 days", days: 59 },
-  { key: "90d", label: "Last 90 days", days: 89 },
-  { key: "custom", label: "Custom…", days: null },
+type DateFieldKey = "created" | "first_seen" | "delivery";
+const DATE_FIELDS: { key: DateFieldKey; label: string; hint: string }[] = [
+  { key: "created",    label: "Created date",   hint: "Ad went live in Meta on this day (default -- what CTD Creative Testing uses)." },
+  { key: "first_seen", label: "First seen",     hint: "First day this ad had any insights row (impressions began delivering)." },
+  { key: "delivery",   label: "Delivery date",  hint: "Keep every ad, but re-sum spend/impressions/etc. over daily rows in the picked window." },
+];
+
+const DATE_PRESETS: { key: string; label: string; days: number | null; thisMonth?: boolean }[] = [
+  { key: "7d",         label: "Last 7 days",   days: 6 },
+  { key: "14d",        label: "Last 14 days",  days: 13 },
+  { key: "30d",        label: "Last 30 days",  days: 29 },
+  { key: "60d",        label: "Last 60 days",  days: 59 },
+  { key: "90d",        label: "Last 90 days",  days: 89 },
+  { key: "thisMonth",  label: "This Month",    days: null, thisMonth: true },
+  { key: "custom",     label: "Custom…",       days: null },
 ];
 
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n: number) => {
   const d = new Date();
   d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+};
+const firstOfThisMonth = () => {
+  const d = new Date();
+  d.setDate(1);
   return d.toISOString().slice(0, 10);
 };
 
@@ -105,6 +118,8 @@ export function CreativeTesting() {
   const [preset, setPreset] = useState("30d");
   const [fromDate, setFromDate] = useState(daysAgo(29));
   const [toDate, setToDate] = useState(today());
+  const [dateField, setDateField] = useState<DateFieldKey>("created");
+  const [exclCopy, setExclCopy] = useState(true);
   const [account, setAccount] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<CategoryKey | "">("");
   const [search, setSearch] = useState("");
@@ -126,10 +141,11 @@ export function CreativeTesting() {
       category: categoryFilter || undefined,
       from_date: fromDate,
       to_date: toDate,
-      date_field: "created" as const,
+      date_field: dateField,
+      excl_copy: exclCopy || undefined,
       sort,
     }),
-    [account, search, categoryFilter, fromDate, toDate, sort],
+    [account, search, categoryFilter, fromDate, toDate, dateField, exclCopy, sort],
   );
 
   useEffect(() => {
@@ -174,7 +190,11 @@ export function CreativeTesting() {
   function applyPreset(key: string) {
     setPreset(key);
     const p = DATE_PRESETS.find((x) => x.key === key);
-    if (p && p.days !== null) {
+    if (!p) return;
+    if (p.thisMonth) {
+      setFromDate(firstOfThisMonth());
+      setToDate(today());
+    } else if (p.days !== null) {
       setFromDate(daysAgo(p.days));
       setToDate(today());
     }
@@ -191,6 +211,17 @@ export function CreativeTesting() {
           </p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
+          {/* Date-field selector -- picks WHICH date the window filters on. */}
+          <select
+            value={dateField}
+            onChange={(e) => setDateField(e.target.value as DateFieldKey)}
+            title={DATE_FIELDS.find((f) => f.key === dateField)?.hint}
+            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+          >
+            {DATE_FIELDS.map((f) => (
+              <option key={f.key} value={f.key} title={f.hint}>{f.label}</option>
+            ))}
+          </select>
           <select
             value={preset}
             onChange={(e) => applyPreset(e.target.value)}
@@ -213,6 +244,28 @@ export function CreativeTesting() {
             onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }}
             className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
           />
+          {/* Excl. copy toggle -- CTD-parity. Meta duplicates append "- Copy N",
+              hiding them isolates the original creative under evaluation. */}
+          <button
+            type="button"
+            onClick={() => setExclCopy((v) => !v)}
+            title="Hide ads whose ad_name contains 'copy' (Meta duplicates). Applies to KPI tiles + totals too."
+            className={
+              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition " +
+              (exclCopy
+                ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                : "border-border-primary bg-white text-text-secondary hover:bg-bg-hover")
+            }
+            aria-pressed={exclCopy}
+          >
+            <span
+              className={
+                "inline-block h-2.5 w-2.5 rounded-full " +
+                (exclCopy ? "bg-emerald-500" : "bg-slate-300")
+              }
+            />
+            Excl. copy
+          </button>
         </div>
       </div>
 

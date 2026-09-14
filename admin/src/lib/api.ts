@@ -697,6 +697,10 @@ export interface AdsAnalyseParams {
   f4_pass?: boolean;
   search?: string;
   only_with_shopify_orders?: boolean;
+  /** Hide ads with 'copy' in the name (Meta's ad-duplication naming).
+   * Matches CTD Creative Testing's 'Excl. copy' toggle. Filter is applied
+   * server-side so KPI tiles + totals stay honest under the toggle. */
+  excl_copy?: boolean;
   /** When both from_date and to_date are set, the window is applied
    * per date_field: 'created' filters rows by ad_created_date;
    * 'first_seen' filters by first_seen_date; 'delivery' keeps every
@@ -721,6 +725,7 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   if (params.f4_pass !== undefined) qs.set("f4_pass", String(params.f4_pass));
   if (params.search) qs.set("search", params.search);
   if (params.only_with_shopify_orders) qs.set("only_with_shopify_orders", "true");
+  if (params.excl_copy) qs.set("excl_copy", "true");
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
   if (params.date_field) qs.set("date_field", params.date_field);
