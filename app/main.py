@@ -38,6 +38,15 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("application_startup", app_env=settings.app_env)
     start_scheduler()
+    # Pre-warm the /ads-analyse cache so the first real user hit finds a
+    # populated entry -- the cold SQL takes ~135s on Render, which
+    # exceeds the 120s HTTP gateway timeout. Firing as a background task
+    # (asyncio.create_task) so app startup doesn't block on the warmup.
+    # See analytics.warm_ads_analyse_cache for which filter combos.
+    import asyncio as _asyncio
+
+    from app.api.routers.analytics import warm_ads_analyse_cache
+    _asyncio.create_task(warm_ads_analyse_cache())
     try:
         yield
     finally:

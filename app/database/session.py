@@ -20,8 +20,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from sqlalchemy.pool import NullPool
-
 from app.config import get_settings
 
 _engine: AsyncEngine | None = None
@@ -49,30 +47,29 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         settings = get_settings()
-        # Under pgbouncer transaction mode + asyncpg, keeping a pool of
-        # SQLAlchemy-side connections means auto-named prepared statements
-        # (__asyncpg_stmt_N__) get cached per Python connection object but
-        # pgbouncer rotates the underlying Postgres backend between
-        # transactions -- the next borrow gets a backend that doesn't
-        # know that name and raises DuplicatePreparedStatementError. The
-        # fix is NullPool: don't pool at all on our side; every request
-        # gets a fresh asyncpg connection that dies at end of request.
-        # pgbouncer's own pool absorbs the churn, and its high client
-        # cap (transaction mode is hundreds of clients, not 15) means
-        # this doesn't exhaust anything.
-        # `prepared_statement_name_func` is critical under pgbouncer
-        # transaction mode: asyncpg's default statement names look like
-        # __asyncpg_stmt_N__ where N is a per-connection counter, so
-        # even with cache disabled (statement_cache_size=0) two queries
-        # in one request can collide with a stale name pgbouncer's
-        # backend still remembers from a prior request. UUID-suffixing
-        # them makes every name globally unique so no collision is
-        # possible. Requires SQLAlchemy 2.0.30+ + asyncpg 0.29+.
+        # 2026-09-15: NullPool is off. The historic reason was
+        # pgbouncer-transaction-mode DuplicatePreparedStatementError --
+        # asyncpg's default __asyncpg_stmt_N__ counter would collide
+        # with a name pgbouncer's rotated backend still remembered.
+        # `prepared_statement_name_func` (below) UUIDs every statement
+        # name so a real pool is safe: collisions are impossible
+        # regardless of how connections are recycled.
+        #
+        # Why this matters for perf: with NullPool, every HTTP request
+        # opened a fresh asyncpg connection, and the TLS + auth
+        # handshake to Supabase dominated cold latency (~135s on Render
+        # for /ads-analyse, which blows through the 120s HTTP gateway
+        # timeout). A modest pool (5 core + 10 overflow) hands out a
+        # warm connection in ~1ms, and pool_pre_ping cheaply rejects
+        # any connection pgbouncer has since recycled.
         import uuid as _uuid
         _engine = create_async_engine(
             settings.database.database_url,
             echo=settings.database.echo,
-            poolclass=NullPool,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=1800,
             future=True,
             connect_args={
                 "statement_cache_size": 0,
