@@ -516,10 +516,13 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
         "AVG(NULLIF(aps.ctr_pct,0)) AS avg_ctr_pct, "
         # Overview-Performance sums (see AdsAnalyseTotals docstring).
         # ad_lifecycle carries these as lifetime accumulators so a plain
-        # SUM matches CTD's Overview strip.
+        # SUM matches CTD's Overview strip. outbound_clicks is stored as
+        # Meta's JSONB action-array (one row per action_type); extract
+        # the outbound_click value out of element 0 to keep the tile a
+        # scalar. Same pattern CTD's primary_sync.py uses.
         "COALESCE(SUM(al.thruplays),0) AS thruplays, "
         "COALESCE(SUM(al.three_sec_video_plays),0) AS three_sec_video_plays, "
-        "COALESCE(SUM(al.outbound_clicks),0) AS outbound_clicks, "
+        "COALESCE(SUM(((al.outbound_clicks->0)->>'value')::numeric),0) AS outbound_clicks, "
         "COALESCE(SUM(al.post_engagements),0) AS post_engagements "
         f"{_ADS_ANALYSE_FROM_AGG} {where_sql}"
     )
