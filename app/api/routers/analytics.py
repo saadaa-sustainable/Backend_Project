@@ -718,6 +718,52 @@ class AdsAnalyseResponse(BaseModel):
     totals: AdsAnalyseTotals
 
 
+# ── /ads-analyse response cache ────────────────────────────────────
+# Short-TTL in-process cache. Keyed on the full sorted-tuple of query
+# params, so any change to filters / date / sort / limit / offset busts
+# it. 60s is the sweet spot: long enough that a merchant hitting the
+# tab a couple of times in a row skips the 4.5s warm cost, short enough
+# that a Silver refresh mid-session doesn't leave the tile stuck.
+# 128-entry LRU bound so a session bouncing between filter combos
+# doesn't grow the dict unbounded. AsyncSession is not shared across
+# requests, so caching the *response model* is safe: FastAPI serialises
+# it on the way out and never touches the DB connection.
+from collections import OrderedDict as _OrderedDict
+from time import monotonic as _monotonic
+
+_ADS_ANALYSE_CACHE_TTL_S = 60.0
+_ADS_ANALYSE_CACHE_MAX = 128
+_ads_analyse_cache: "_OrderedDict[tuple, tuple[float, AdsAnalyseResponse]]" = _OrderedDict()
+
+
+def _ads_analyse_cache_key(**kwargs) -> tuple:
+    """Freeze the request into a hashable key. Deliberately explicit so
+    a new query-param is opted in (rather than silently sharing a
+    cached response with old callers)."""
+    return tuple(sorted((k, str(v)) for k, v in kwargs.items()))
+
+
+def _ads_analyse_cache_get(key: tuple) -> "AdsAnalyseResponse | None":
+    entry = _ads_analyse_cache.get(key)
+    if entry is None:
+        return None
+    ts, resp = entry
+    if _monotonic() - ts > _ADS_ANALYSE_CACHE_TTL_S:
+        # Expired -- evict eagerly so the dict stays small.
+        _ads_analyse_cache.pop(key, None)
+        return None
+    # Move-to-end so LRU eviction below drops truly cold entries.
+    _ads_analyse_cache.move_to_end(key)
+    return resp
+
+
+def _ads_analyse_cache_put(key: tuple, resp: "AdsAnalyseResponse") -> None:
+    _ads_analyse_cache[key] = (_monotonic(), resp)
+    _ads_analyse_cache.move_to_end(key)
+    while len(_ads_analyse_cache) > _ADS_ANALYSE_CACHE_MAX:
+        _ads_analyse_cache.popitem(last=False)
+
+
 @router.get("/ads-analyse", response_model=AdsAnalyseResponse)
 async def get_ads_analyse(
     session: SessionDep,
@@ -787,6 +833,23 @@ async def get_ads_analyse(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> AdsAnalyseResponse:
+    # Response cache short-circuit -- see _ads_analyse_cache_* above.
+    # Runs before the ~4.5s SQL block so a repeated hit inside the TTL
+    # returns in microseconds. The cache is opt-out via ?nocache=1 if we
+    # ever add one, and evicts on TTL / LRU / restart.
+    _cache_key = _ads_analyse_cache_key(
+        account_name=account_name, campaign_name=campaign_name,
+        ad_effective_status=ad_effective_status, category=category,
+        f1_pass=f1_pass, f2_pass=f2_pass, f3_pass=f3_pass, f4_pass=f4_pass,
+        search=search, only_with_shopify_orders=only_with_shopify_orders,
+        content_type=content_type, excl_copy=excl_copy,
+        from_date=from_date, to_date=to_date, date_field=date_field,
+        sort=sort, limit=limit, offset=offset,
+    )
+    _cached = _ads_analyse_cache_get(_cache_key)
+    if _cached is not None:
+        return _cached
+
     sort_column = _ADS_ANALYSE_SORT_COLUMNS[sort]
 
     # Base predicates apply to BOTH the row query and the category_counts
@@ -1065,9 +1128,11 @@ async def get_ads_analyse(
         post_engagements=post_engagements,
     )
 
-    return AdsAnalyseResponse(
+    resp = AdsAnalyseResponse(
         rows=rows, total=total, category_counts=category_counts, totals=totals,
     )
+    _ads_analyse_cache_put(_cache_key, resp)
+    return resp
 
 
 # ----------------------------------------------------------------------
