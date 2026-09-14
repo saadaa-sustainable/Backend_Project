@@ -119,11 +119,20 @@ CREATE TABLE IF NOT EXISTS landing_page_sessions_daily (
 )
 """
 
+# 2026-09-14: bounded to the last 90 days. shopify_sessions has ~1.4M
+# rows total; the full-history SELECT + Python aggregation stalls
+# Supabase's session-pool statement_timeout every time. The upstream
+# consumer (landing_page_analysis_30d) only reads 30 days, so anything
+# older cannot influence its window -- and old (session_date, path)
+# rows in landing_page_sessions_daily stay put because the upsert is
+# additive. Adjust the interval only if a longer-window rollup is
+# added downstream; longer windows drive up refresh cost.
 _SELECT_RAW_SESSIONS = """
 SELECT day, landing_page_path, sessions, online_store_visitors,
        sessions_with_cart_additions, sessions_that_reached_checkout, bounces
 FROM shopify_sessions
 WHERE landing_page_path IS NOT NULL
+  AND day >= (CURRENT_DATE - INTERVAL '90 days')
 """
 
 _UPSERT_SESSIONS_DAILY = """
