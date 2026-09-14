@@ -719,19 +719,20 @@ class AdsAnalyseResponse(BaseModel):
 
 
 # ── /ads-analyse response cache ────────────────────────────────────
-# Short-TTL in-process cache. Keyed on the full sorted-tuple of query
-# params, so any change to filters / date / sort / limit / offset busts
-# it. 60s is the sweet spot: long enough that a merchant hitting the
-# tab a couple of times in a row skips the 4.5s warm cost, short enough
-# that a Silver refresh mid-session doesn't leave the tile stuck.
-# 128-entry LRU bound so a session bouncing between filter combos
-# doesn't grow the dict unbounded. AsyncSession is not shared across
-# requests, so caching the *response model* is safe: FastAPI serialises
-# it on the way out and never touches the DB connection.
+# In-process cache. Keyed on the full sorted-tuple of query params, so
+# any change to filters / date / sort / limit / offset busts it. TTL
+# was 60s originally, extended to 15min on 2026-09-15 because the SQL
+# takes ~135s cold on Render (asyncpg's UUID-suffixed statement names
+# defeat Supabase's plan cache -- every request pays full parse+plan
+# cost) and that blew past Render's 120s HTTP gateway timeout for the
+# unlucky first user. A 15-min window means each filter combo gets
+# pre-warmed once (via warm_ads_analyse_cache at startup) and every
+# subsequent hit inside the window returns in ~200ms. 128-entry LRU
+# keeps the dict bounded.
 from collections import OrderedDict as _OrderedDict
 from time import monotonic as _monotonic
 
-_ADS_ANALYSE_CACHE_TTL_S = 60.0
+_ADS_ANALYSE_CACHE_TTL_S = 900.0
 _ADS_ANALYSE_CACHE_MAX = 128
 _ads_analyse_cache: "_OrderedDict[tuple, tuple[float, AdsAnalyseResponse]]" = _OrderedDict()
 
@@ -762,6 +763,50 @@ def _ads_analyse_cache_put(key: tuple, resp: "AdsAnalyseResponse") -> None:
     _ads_analyse_cache.move_to_end(key)
     while len(_ads_analyse_cache) > _ADS_ANALYSE_CACHE_MAX:
         _ads_analyse_cache.popitem(last=False)
+
+
+async def warm_ads_analyse_cache() -> None:
+    """Pre-populate the cache with default Creative Testing filter combos
+    so the first real user hit is a cache HIT (~200ms) instead of a
+    ~135s cold SQL run that exceeds Render's 120s HTTP gateway timeout.
+
+    Runs as a background task from the FastAPI lifespan hook -- does not
+    block startup. Each fired combo is one SQL run: takes ~135s cold on
+    Render's cold PG buffer cache, populates the cache for 15 minutes.
+
+    Combos mirror what admin/src/app/user/analytics/CreativeTesting.tsx
+    sends on first load (default preset = Last 30 days) plus one common
+    fallback (Last 7 days). Adding more combos linearly extends startup
+    warmup time; keep the list short.
+    """
+    from datetime import timedelta as _timedelta
+
+    from app.database.session import session_scope
+
+    today = date.today()
+    windows = [
+        (today - _timedelta(days=29), today),
+        (today - _timedelta(days=6), today),
+    ]
+    for from_d, to_d in windows:
+        try:
+            async with session_scope() as session:
+                await get_ads_analyse(
+                    session=session,
+                    account_name=None, campaign_name=None,
+                    ad_effective_status=None, category=None,
+                    f1_pass=None, f2_pass=None, f3_pass=None, f4_pass=None,
+                    search=None, only_with_shopify_orders=False,
+                    content_type=None, excl_copy=True,
+                    from_date=from_d, to_date=to_d, date_field="created",
+                    sort="spend", limit=100, offset=0,
+                )
+        except Exception:
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                "ads_analyse_warmer_failed",
+                extra={"from_date": from_d.isoformat(), "to_date": to_d.isoformat()},
+            )
 
 
 @router.get("/ads-analyse", response_model=AdsAnalyseResponse)
