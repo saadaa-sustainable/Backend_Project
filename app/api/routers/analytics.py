@@ -707,6 +707,16 @@ async def get_ads_analyse(
     f4_pass: bool | None = Query(default=None),
     search: str | None = Query(default=None, description="Matches ad_name, case-insensitive substring."),
     only_with_shopify_orders: bool = Query(default=False),
+    content_type: str | None = Query(
+        default=None,
+        description=(
+            "Filter ads by naming-convention token in ad_name (case-insensitive). "
+            "Matches CTD Creative Testing's Content type dropdown: IFAD, GAD "
+            "(Graphic AD), VID (Video), STATIC. Applied as ILIKE '%<token>%' so "
+            "'GAD' matches 'GAD01', 'GAD-Sep' etc. Runs against base_where so "
+            "KPI tiles + totals reflect the filter."
+        ),
+    ),
     excl_copy: bool = Query(
         default=False,
         description=(
@@ -777,6 +787,11 @@ async def get_ads_analyse(
         # catches all variants because we're on Postgres, not the case-
         # sensitive Meta SQL some analysts are used to.
         base_where.append("aps.ad_name NOT ILIKE '%copy%'")
+    if content_type:
+        # Canned ILIKE against the naming token. Bound as a param so an
+        # analyst who pokes a value like '%; DROP TABLE' can't sneak it in.
+        base_where.append("aps.ad_name ILIKE :content_type")
+        params["content_type"] = f"%{content_type}%"
     for flag_name, flag_val in (
         ("f1_pass", f1_pass), ("f2_pass", f2_pass), ("f3_pass", f3_pass), ("f4_pass", f4_pass),
     ):

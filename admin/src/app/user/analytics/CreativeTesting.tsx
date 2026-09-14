@@ -76,6 +76,28 @@ const DATE_FIELDS: { key: DateFieldKey; label: string; hint: string }[] = [
   { key: "delivery",   label: "Delivery date",  hint: "Keep every ad, but re-sum spend/impressions/etc. over daily rows in the picked window." },
 ];
 
+// Naming-convention tokens Meta ad-ops uses in ad_name. Values are the
+// substring passed to the backend's ILIKE filter; labels are what the
+// merchant reads. Kept in a shared constant so the same list can seed
+// the dropdown in the future filter grid + any URL-hash preset.
+const CONTENT_TYPES: { key: string; label: string }[] = [
+  { key: "IFAD",   label: "IFAD" },
+  { key: "GAD",    label: "Graphic AD" },
+  { key: "VID",    label: "Video" },
+  { key: "STATIC", label: "Static" },
+];
+
+// Status values match ad_lifecycle.ad_effective_status. Full-text so
+// the merchant doesn't have to know Meta's internal enum spelling.
+const AD_STATUSES: string[] = [
+  "ACTIVE",
+  "PAUSED",
+  "WITH_ISSUES",
+  "CAMPAIGN_PAUSED",
+  "ADSET_PAUSED",
+  "ARCHIVED",
+];
+
 const DATE_PRESETS: { key: string; label: string; days: number | null; thisMonth?: boolean }[] = [
   { key: "7d",         label: "Last 7 days",   days: 6 },
   { key: "14d",        label: "Last 14 days",  days: 13 },
@@ -121,6 +143,9 @@ export function CreativeTesting() {
   const [dateField, setDateField] = useState<DateFieldKey>("created");
   const [exclCopy, setExclCopy] = useState(true);
   const [account, setAccount] = useState("");
+  const [campaign, setCampaign] = useState("");
+  const [contentType, setContentType] = useState("");
+  const [adStatus, setAdStatus] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<CategoryKey | "">("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"spend" | "meta_roas" | "cost_per_ncp" | "cost_per_ftewv">("spend");
@@ -130,6 +155,11 @@ export function CreativeTesting() {
   const [totals, setTotals] = useState<AdsAnalyseTotals | null>(null);
   const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({});
   const [accountOptions, setAccountOptions] = useState<Set<string>>(new Set());
+  // Campaign options accrete as rows load -- the backend does not expose a
+  // dedicated "list campaigns" endpoint yet, so we seed the dropdown from
+  // whatever campaign_names have appeared in this session. Same pattern as
+  // accountOptions above.
+  const [campaignOptions, setCampaignOptions] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -137,6 +167,9 @@ export function CreativeTesting() {
   const filters = useMemo(
     () => ({
       account_name: account || undefined,
+      campaign_name: campaign || undefined,
+      ad_effective_status: adStatus || undefined,
+      content_type: contentType || undefined,
       search: search || undefined,
       category: categoryFilter || undefined,
       from_date: fromDate,
@@ -145,7 +178,8 @@ export function CreativeTesting() {
       excl_copy: exclCopy || undefined,
       sort,
     }),
-    [account, search, categoryFilter, fromDate, toDate, dateField, exclCopy, sort],
+    [account, campaign, adStatus, contentType, search, categoryFilter,
+     fromDate, toDate, dateField, exclCopy, sort],
   );
 
   useEffect(() => {
@@ -162,6 +196,11 @@ export function CreativeTesting() {
         setAccountOptions((prev) => {
           const next = new Set(prev);
           res.rows.forEach((r) => r.account_name && next.add(r.account_name));
+          return next;
+        });
+        setCampaignOptions((prev) => {
+          const next = new Set(prev);
+          res.rows.forEach((r) => r.campaign_name && next.add(r.campaign_name));
           return next;
         });
       })
@@ -267,6 +306,66 @@ export function CreativeTesting() {
             Excl. copy
           </button>
         </div>
+      </div>
+
+      {/* Filter grid — narrows the row query + KPI tiles + totals. Each
+          dropdown is a base_where predicate on the backend, so counts stay
+          honest under the picked filters (vs client-side which would only
+          filter the current 100-row page). */}
+      <div className="grid grid-cols-1 gap-2 rounded-lg border border-border-primary bg-white p-3 sm:grid-cols-2 md:grid-cols-4">
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Campaign</span>
+          <select
+            value={campaign}
+            onChange={(e) => setCampaign(e.target.value)}
+            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+          >
+            <option value="">All campaigns</option>
+            {Array.from(campaignOptions).sort().map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Content type</span>
+          <select
+            value={contentType}
+            onChange={(e) => setContentType(e.target.value)}
+            title="Matches ad_name substring (case-insensitive). IFAD/GAD/VID/STATIC are the Meta naming-convention tokens."
+            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+          >
+            <option value="">All content</option>
+            {CONTENT_TYPES.map((c) => (
+              <option key={c.key} value={c.key}>{c.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Status</span>
+          <select
+            value={adStatus}
+            onChange={(e) => setAdStatus(e.target.value)}
+            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+          >
+            <option value="">All statuses</option>
+            {AD_STATUSES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">Account</span>
+          <select
+            value={account}
+            onChange={(e) => setAccount(e.target.value)}
+            className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
+          >
+            <option value="">All accounts</option>
+            {Array.from(accountOptions).sort().map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {/* Aggregate KPI strip — original Creative Testing metrics */}
