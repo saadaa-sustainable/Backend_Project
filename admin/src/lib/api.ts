@@ -1966,3 +1966,54 @@ export function fetchCreativeTestingAds(
     `/admin/analytics/creative-testing/${encodeURIComponent(assetId)}/ads`,
   );
 }
+
+// ---------------------------------------------------------------------
+// Ads Analyse -- adset / campaign rollup
+// ---------------------------------------------------------------------
+// Reach and frequency come from Meta's own per-entity figures
+// (adset_insights / campaign_insights), never a SUM over ad rows: Meta
+// dedupes a person per entity, so summing ad-level reach counts the same
+// human once per ad they saw (CTD measured 30-75% overstatement).
+
+export interface RollupRow {
+  entity_id: string;
+  entity_name: string | null;
+  account_name: string | null;
+  ads: number;
+  /** The window these figures actually cover -- rows are not all the same. */
+  date_start: string | null;
+  date_stop: string | null;
+  spend: number | null;
+  impressions: number | null;
+  reach: number | null;
+  frequency: number | null;
+  clicks: number | null;
+  ctr: number | null;
+  cpm: number | null;
+  purchases: number | null;
+  conv_value: number | null;
+  roas: number | null;
+  cost_per_purchase: number | null;
+  cpr_1000: number | null;
+}
+
+export interface RollupResponse {
+  level: "adset" | "campaign";
+  rows: RollupRow[];
+  total: number;
+}
+
+export function fetchAdsAnalyseRollup(params: {
+  level: "adset" | "campaign";
+  account_name?: string;
+  search?: string;
+  sort?: string;
+  limit?: number;
+}): Promise<RollupResponse> {
+  const qs = new URLSearchParams({ level: params.level });
+  if (params.account_name) qs.set("account_name", params.account_name);
+  if (params.search) qs.set("search", params.search);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`);
+}

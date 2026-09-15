@@ -120,6 +120,25 @@ def _composed() -> dict[str, str]:
         "analytics:cpis_trends_batch": str(_TRENDS_SQL),
         "analytics:creative_testing_response": asyncio.run(creative_query()),
         "analytics:_CT_ADS_SQL": analytics._CT_ADS_SQL,
+        # The rollup composes its SQL from _ROLLUP_CFG + _action_sql, so
+        # parse the real assembled string for both levels.
+        **{
+            f"analytics:rollup[{lvl}]": (
+                lambda table, id_col, name_col: (
+                    f"SELECT i.{id_col} AS entity_id, i.{name_col} AS entity_name, i.account_name, "
+                    f"COALESCE(c.ads,0)::int AS ads, i.date_start, i.date_stop, i.spend, i.impressions, "
+                    f"i.reach, i.frequency, i.clicks, i.ctr, i.cpm, "
+                    f"{analytics._action_sql('actions','omni_purchase','purchase')} AS purchases, "
+                    f"{analytics._action_sql('action_values','omni_purchase','purchase')} AS conv_value "
+                    f"FROM public.{table} i "
+                    f"LEFT JOIN (SELECT {id_col}, COUNT(*) AS ads FROM ad_lifecycle "
+                    f"WHERE {id_col} IS NOT NULL GROUP BY {id_col}) c ON c.{id_col} = i.{id_col} "
+                    f"WHERE i.{id_col} IS NOT NULL ORDER BY i.spend DESC NULLS LAST "
+                    f"LIMIT :limit OFFSET :offset"
+                )
+            )(*analytics._ROLLUP_CFG[lvl])
+            for lvl in analytics._ROLLUP_CFG
+        },
     }
 
 
