@@ -35,10 +35,12 @@ Usage:
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import os
 import re
 import sys
 from pathlib import Path
+from datetime import date
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -53,7 +55,11 @@ SQL_SOURCES: dict[str, tuple[str, ...]] = {
     "scripts/refresh_cpis_sku_context.py":      ("DDL", "REFRESH"),
     "scripts/refresh_ad_history_milestones.py": ("DDL", "REFRESH"),
     "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL"),
-    "app/services/silver/ad_lifecycle.py":      ("_INSERT", "_EXTERNAL_OVERLAY_UPDATE",
+    "scripts/ingest_asset_sources.py":          ("DDL",),
+    "scripts/refresh_ad_asset_map.py":          ("DDL", "CANDIDATES_SQL", "INSERT_SQL", "CONFLICT_SQL",
+                                                "SUMMARY_SQL", "COVERAGE_SQL",
+                                                "UNTESTED_SQL"),
+    "app/services/silver/ad_lifecycle.py":      ("_INSERT", "_RESULT_AWAITED_FIX", "_EXTERNAL_OVERLAY_UPDATE",
                                                 "_EXTERNAL_OVERLAY_INSERT",
                                                 "_EXTERNAL_TABLE_EXISTS"),
     "app/services/gold/ad_performance.py":      ("_INSERT_WITH_EXTERNAL", "_INSERT_LOCAL_ONLY",
@@ -69,6 +75,26 @@ SQL_SOURCES: dict[str, tuple[str, ...]] = {
 #: builder function, so this gate cannot drift from what runs.
 def _composed() -> dict[str, str]:
     analytics = _load("app/api/routers/analytics.py")
+    from app.services.analytics_trends import _BOUNDS_SQL, _TRENDS_SQL
+
+    # Capture the actual statement the handler sends, including its
+    # materialized CTE and all panel scopes. No DB connection is opened.
+    class CapturedQuery(Exception):
+        pass
+
+    class CaptureSession:
+        async def execute(self, statement, params):
+            raise CapturedQuery(str(statement))
+
+    async def creative_query() -> str:
+        try:
+            await analytics.get_creative_testing(
+                session=CaptureSession(), from_date=date(2026, 8, 17), to_date=date(2026, 9, 15),
+                media="video", kind="new", category="Winner", search="CPL", limit=50,
+            )
+        except CapturedQuery as captured:
+            return str(captured)
+        raise RuntimeError("Creative Testing did not execute its query")
     where = (
         "WHERE aps.account_name = :account_name AND aps.category = :category AND "
         + analytics._DELIVERED_IN_WINDOW
@@ -88,6 +114,12 @@ def _composed() -> dict[str, str]:
         "analytics:_LOCAL_DAILY": analytics._LOCAL_DAILY,
         "analytics:_AD_DAILY_EXTERNAL_EXISTS": analytics._AD_DAILY_EXTERNAL_EXISTS,
         "analytics:_CPIS_UNTETHERED_BREAKDOWN": analytics._CPIS_UNTETHERED_BREAKDOWN,
+        "analytics:cpis_reconciliation[custom]": analytics._cpis_reconciliation_sql(True),
+        "analytics:cpis_reconciliation[preset]": analytics._cpis_reconciliation_sql(False),
+        "analytics:cpis_trend_bounds": str(_BOUNDS_SQL),
+        "analytics:cpis_trends_batch": str(_TRENDS_SQL),
+        "analytics:creative_testing_response": asyncio.run(creative_query()),
+        "analytics:_CT_ADS_SQL": analytics._CT_ADS_SQL,
     }
 
 

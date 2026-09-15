@@ -1,38 +1,73 @@
 "use client";
 
 /**
- * Creative Testing — the focused view for evaluating recently-launched
- * creatives. Always filters ads by `ad_created_date` inside the picked
- * window (defaults to Last 30 Days) -- unlike Ads Analyse which is the
- * full lifetime table with a windowed-overlay option. The two coexist:
- * Creative Testing answers "how are the ads I launched recently
- * performing?"; Ads Analyse answers "what's the current state of every
- * ad we've ever run?".
+ * Creative Testing — uniquely tested creative ASSETS in a window,
+ * laid out to match the legacy CTD dashboard's Creative Testing page
+ * (creative-testing-dashboard.onrender.com/creative-testing):
  *
- * KPI strip is the classic CTD Creative Testing set (matches the old
- * AnalyticsDashboard's row): Total Ads · Total Spend · Purchases · NCP ·
- * FTEWV · Avg ROAS · Avg Cost/NCP · Avg Cost/FTEWV. Category KwikTiles
- * (Incremental Winner ... Discarded) sit below and click-to-filter.
- * Table is a slim 10-column view -- name, account, category, F1..F4,
- * ad_created_date, spend, ROAS, cost/NCP, cost/FTEWV, purchases.
+ *   1. New / Iteration / All tabs          (this project's addition)
+ *   2. Verdict buckets   Incremental Winner … Discarded, click-to-filter
+ *   3. Overview — Performance              8-tile strip, CT ROAS highlighted
+ *   4. Creative Type funnel                ctype × verdict matrix
+ *   5. Product Focus + Creative Focus      pill strips
+ *   6. Asset table
  *
- * Reuses fetchAdsAnalyse with date_field="created" + a required date
- * range so the server does the filtering.
+ * The unit is the ASSET, counted once — NOT the ad. One creative
+ * routinely runs in several ads, so at ad grain "how many creatives did
+ * we test" was unanswerable.
+ *
+ * NEW vs ITERATION is decided by the asset's own creation date in its
+ * register, never by an ad date:
+ *
+ *     created inside the window, with a non-copy ad -> New Creative
+ *     created before the window                     -> Iteration
+ *     only ever ran as a "copy" ad                  -> Iteration
+ *     no creation date on record                    -> Iteration
+ *
+ * That is the whole point. Measured 2026-09-15: 1,833 of 3,911 mapped
+ * ads (46%) carry "copy" in the name and 604 of 1,219 assets (50%)
+ * appear in at least one. Meta's duplication flow appends "- Copy" to
+ * the child ad, so dating off ads would make a creative first tested in
+ * March look like a brand-new September test. Anchoring on the register
+ * makes that impossible by construction. Copy ads still contribute
+ * spend and conversions — the same creative really did deliver through
+ * them — they just never make an asset count as new.
+ *
+ * The funnel and both focus strips are derived client-side from the full
+ * row set (the endpoint returns every asset in the window, table
+ * pagination is local), using verbatim ports of CTD's detectCtype /
+ * detectProductFocus so the numbers match the legacy dashboard.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  AdsAnalyseRow,
-  AdsAnalyseTotals,
   ApiError,
-  fetchAdsAnalyse,
+  CreativeTestingRow,
+  CreativeTestingTotals,
+  fetchCreativeTesting,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { AssetAdsModal } from "./AssetAdsModal";
+import { AssetPreviewCell } from "./AssetPreview";
+import { AdPreviewLinks, DestinationLink } from "./AdLinks";
 
-const PAGE_SIZE = 100;
+/** CTD's cream/gold palette. Scoped here rather than pushed into the
+ *  app's design tokens, which are blue-based for every other tab. */
+const CT = {
+  cream: "#FAF8F3",
+  border: "#E8E2D5",
+  muted: "#9A9384",
+  gold: "#C9A227",
+  goldDeep: "#B07E12",
+  goldFill: "#B8860B",
+  ink: "#3A362E",
+};
 
-// Same category catalog + colors as the wider Ads Analyse view -- users
-// switch between the two sections and the badges shouldn't shift.
+const PAGE_SIZE = 50;
+
+type KindTab = "all" | "new" | "iteration";
+type MediaKey = "video" | "graphic" | "influencer";
 type CategoryKey =
   | "Incremental Winner"
   | "Winner"
@@ -41,6 +76,7 @@ type CategoryKey =
   | "P2 analysis"
   | "Result Awaited"
   | "Discarded";
+
 const CATEGORY_ORDER: CategoryKey[] = [
   "Incremental Winner",
   "Winner",
@@ -50,72 +86,58 @@ const CATEGORY_ORDER: CategoryKey[] = [
   "Result Awaited",
   "Discarded",
 ];
-const CAT_CLASS: Record<CategoryKey, string> = {
-  "Incremental Winner": "cat-iw",
-  Winner: "cat-winner",
-  "P0 analysis": "cat-priority",
-  "P1 analysis": "cat-a1",
-  "P2 analysis": "cat-a2",
-  "Result Awaited": "cat-ra",
-  Discarded: "cat-disc",
-};
-type DateFieldKey = "created" | "first_seen" | "delivery";
-const DATE_FIELDS: { key: DateFieldKey; label: string; hint: string }[] = [
-  { key: "created",    label: "Created date",   hint: "Ad went live in Meta on this day (default -- what CTD Creative Testing uses)." },
-  { key: "first_seen", label: "First seen",     hint: "First day this ad had any insights row (impressions began delivering)." },
-  { key: "delivery",   label: "Delivery date",  hint: "Keep every ad, but re-sum spend/impressions/etc. over daily rows in the picked window." },
-];
 
-// Naming-convention tokens Meta ad-ops uses in ad_name. Values are the
-// substring passed to the backend's ILIKE filter; labels are what the
-// merchant reads. Kept in a shared constant so the same list can seed
-// the dropdown in the future filter grid + any URL-hash preset.
-const CONTENT_TYPES: { key: string; label: string }[] = [
-  { key: "IFAD",   label: "IFAD" },
-  { key: "GAD",    label: "Graphic AD" },
-  { key: "VID",    label: "Video" },
-  { key: "STATIC", label: "Static" },
-];
-
-// Status values match ad_lifecycle.ad_effective_status. Full-text so
-// the merchant doesn't have to know Meta's internal enum spelling.
-const AD_STATUSES: string[] = [
-  "ACTIVE",
-  "PAUSED",
-  "WITH_ISSUES",
-  "CAMPAIGN_PAUSED",
-  "ADSET_PAUSED",
-  "ARCHIVED",
-];
-
-const DATE_PRESETS: { key: string; label: string; days: number | null; thisMonth?: boolean }[] = [
-  { key: "7d",         label: "Last 7 days",   days: 6 },
-  { key: "14d",        label: "Last 14 days",  days: 13 },
-  { key: "30d",        label: "Last 30 days",  days: 29 },
-  { key: "60d",        label: "Last 60 days",  days: 59 },
-  { key: "90d",        label: "Last 90 days",  days: 89 },
-  { key: "thisMonth",  label: "This Month",    days: null, thisMonth: true },
-  { key: "custom",     label: "Custom…",       days: null },
-];
-
-const today = () => new Date().toISOString().slice(0, 10);
-const daysAgo = (n: number) => {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
-};
-const firstOfThisMonth = () => {
-  const d = new Date();
-  d.setDate(1);
-  return d.toISOString().slice(0, 10);
+const CAT_ACCENT: Record<CategoryKey, string> = {
+  "Incremental Winner": "#15803D",
+  Winner: "#2E7D32",
+  "P0 analysis": "#3B6BF5",
+  "P1 analysis": "#D97706",
+  "P2 analysis": "#8B5A2B",
+  "Result Awaited": "#C9A227",
+  Discarded: "#C0392B",
 };
 
-// Product Focus buckets -- verbatim port of CTD's Product-in-Focus
-// detection off ad_name substrings. Matches what the merchant sees on
-// the legacy dashboard's Product Focus strip. Priority top-down; the
-// first bucket wins.
+/** Funnel column groups, matching CTD's two-row header. */
+const FUNNEL_GROUPS: { label: string; cats: CategoryKey[]; tint: string }[] = [
+  { label: "Winner", cats: ["Incremental Winner", "Winner"], tint: "#EFF5EF" },
+  { label: "P0 analysis", cats: ["P0 analysis"], tint: "#EEF3FF" },
+  { label: "P1 / P2 analysis", cats: ["P1 analysis", "P2 analysis"], tint: "#F5F1EA" },
+  { label: "Awaited", cats: ["Result Awaited"], tint: "#FDF8E8" },
+  { label: "Discarded", cats: ["Discarded"], tint: "#FBEFEC" },
+];
+const FUNNEL_SHORT: Record<CategoryKey, string> = {
+  "Incremental Winner": "Inc. Winner",
+  Winner: "Winner",
+  "P0 analysis": "P0",
+  "P1 analysis": "P1",
+  "P2 analysis": "P2",
+  "Result Awaited": "Awaited",
+  Discarded: "Discarded",
+};
+
+const MEDIA_META: Record<MediaKey, { icon: string; label: string; cls: string }> = {
+  video: { icon: "🎬", label: "Video", cls: "bg-violet-100 text-violet-800 border-violet-200" },
+  graphic: { icon: "🖼", label: "Graphic", cls: "bg-sky-100 text-sky-800 border-sky-200" },
+  influencer: { icon: "👤", label: "Influencer", cls: "bg-rose-100 text-rose-800 border-rose-200" },
+};
+
+const DATE_PRESETS: { key: string; label: string; days: number | null }[] = [
+  { key: "7", label: "Last 7 days", days: 7 },
+  { key: "30", label: "Last 30 days", days: 30 },
+  { key: "90", label: "Last 90 days", days: 90 },
+  { key: "180", label: "Last 6 months", days: 180 },
+  { key: "365", label: "Last 12 months", days: 365 },
+];
+
+// ── CTD-verbatim classifiers ────────────────────────────────────────
 type ProductFocusKey = "Home" | "Category" | "Collection" | "Product" | "Others";
-const PRODUCT_FOCUS_ORDER: ProductFocusKey[] = ["Home", "Category", "Collection", "Product", "Others"];
+const PRODUCT_FOCUS_ORDER: ProductFocusKey[] = [
+  "Home",
+  "Category",
+  "Collection",
+  "Product",
+  "Others",
+];
 const PRODUCT_FOCUS_COLOR: Record<ProductFocusKey, string> = {
   Home: "#3B6BF5",
   Category: "#0891B2",
@@ -128,383 +150,126 @@ function detectProductFocus(name: string | null | undefined): ProductFocusKey {
   if (n.includes("HP+") || /(^|[_ +-])HP([_ +-]|$)/.test(n) || n.includes("HOME")) return "Home";
   if (n.includes("CTG") || n.includes("CATEGORY")) return "Category";
   if (n.includes("CLP") || n.includes("COLLECTION")) return "Collection";
-  if (n.includes("PDP") || n.includes("VRP") || n.includes("CTP") || n.includes("PRODUCT")) return "Product";
+  if (n.includes("PDP") || n.includes("VRP") || n.includes("CTP") || n.includes("PRODUCT"))
+    return "Product";
   return "Others";
 }
 
-// Creative Focus buckets -- the four merchant-facing ctypes. Same
-// classifier as detectCtype below, only labelled differently for the
-// pill strip; keeping the two side-by-side would drift as CTD evolves.
-type CreativeFocusKey = "IFAD" | "GAD" | "VID" | "Others";
-const CREATIVE_FOCUS_ORDER: CreativeFocusKey[] = ["IFAD", "GAD", "VID", "Others"];
-const CREATIVE_FOCUS_COLOR: Record<CreativeFocusKey, string> = {
+type CtypeKey = "IFAD" | "Graphic AD" | "VID" | "STATIC";
+const CTYPES: CtypeKey[] = ["IFAD", "Graphic AD", "VID", "STATIC"];
+const CREATIVE_FOCUS_COLOR: Record<string, string> = {
   IFAD: "#7C3AED",
-  GAD: "#D97706",
+  "Graphic AD": "#D97706",
   VID: "#0891B2",
-  Others: "#9A9384",
+  STATIC: "#9A9384",
 };
-function detectCreativeFocus(name: string | null | undefined): CreativeFocusKey {
-  const n = (name || "").toUpperCase();
-  if (n.includes("IFAD")) return "IFAD";
-  if (n.includes("GAD")) return "GAD";
-  if (
-    n.includes("VRP") || n.includes("NNC") || n.includes("VIDEO") ||
-    n.includes("IGP") || n.includes("NO-ID") || /^VID-AD/.test(n) ||
-    n.includes("OSP") || n.includes("CPL") || n.includes("USP") ||
-    n.includes("CSR") || n.includes("ITE")
-  ) return "VID";
-  return "Others";
-}
-
-// Content-type detection from ad_name -- verbatim port of CTD's
-// detectCtype() so the funnel matches the numbers you'd see on the
-// legacy dashboard. Legacy tokens (VRP, NNC, VIDEO, IGP, NO-ID,
-// VID-AD prefix) and the CT-team's later tokens (OSP, CPL, USP, CSR,
-// ITE) all resolve to VID; STATIC is only when the ad name says so
-// explicitly; IFAD and GAD take precedence in that order.
-function detectCtype(name: string | null | undefined): "IFAD" | "Graphic AD" | "VID" | "STATIC" {
-  const n = (name || "").toUpperCase();
+/** Asset media is a stronger signal than the ad name here — the asset
+ *  register already knows what kind of thing it is. Fall back to CTD's
+ *  ad-name classifier only when media is missing. */
+function detectCtype(row: CreativeTestingRow): CtypeKey {
+  if (row.media === "influencer") return "IFAD";
+  if (row.media === "graphic") return "Graphic AD";
+  if (row.media === "video") return "VID";
+  const n = (row.sample_ad_name || "").toUpperCase();
   if (n.includes("IFAD")) return "IFAD";
   if (n.includes("GAD")) return "Graphic AD";
-  if (
-    n.includes("VRP") || n.includes("NNC") || n.includes("VIDEO") ||
-    n.includes("IGP") || n.includes("NO-ID") || /^VID-AD/.test(n) ||
-    n.includes("OSP") || n.includes("CPL") || n.includes("USP") ||
-    n.includes("CSR") || n.includes("ITE")
-  ) return "VID";
   if (n.includes("STATIC") || n.includes("_ST_") || n.includes("+ST+")) return "STATIC";
   return "VID";
 }
 
-// The 7 sub-categories the funnel shows, in the exact order CTD lays
-// them out. Order matters -- the master row spans (Winner=2, P0=1,
-// P1/P2=2, Awaited=1, Discarded=1) assume this order.
-const FUNNEL_SUB: CategoryKey[] = [
-  "Incremental Winner", "Winner", "P0 analysis",
-  "P1 analysis", "P2 analysis", "Result Awaited", "Discarded",
-];
-const FUNNEL_SUB_SHORT: string[] = [
-  "Inc. Winner", "Winner", "P0", "P1", "P2", "Awaited", "Discarded",
-];
-
-const CTYPES: ("IFAD" | "Graphic AD" | "VID" | "STATIC")[] = [
-  "IFAD", "Graphic AD", "VID", "STATIC",
-];
-
-function fmtCompact(n: number | null | undefined) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return Math.round(n).toLocaleString();
+function iso(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+function presetRange(days: number) {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - days + 1);
+  return { from: iso(from), to: iso(to) };
 }
 function fmtMoney(n: number | null | undefined) {
-  return n === null || n === undefined ? "—" : "₹" + fmtCompact(n);
+  if (n === null || n === undefined) return "—";
+  return "₹" + Math.round(n).toLocaleString("en-IN");
+}
+function fmtCompact(n: number | null | undefined) {
+  if (n === null || n === undefined) return "—";
+  if (Math.abs(n) >= 1e7) return (n / 1e7).toFixed(2) + "Cr";
+  if (Math.abs(n) >= 1e5) return (n / 1e5).toFixed(2) + "L";
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return Math.round(n).toLocaleString("en-IN");
 }
 function fmtNum(n: number | null | undefined, digits = 2) {
   if (n === null || n === undefined) return "—";
-  return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+  return n.toFixed(digits);
 }
-
-/** CTD-style KPI card — mirrors assets/dashboard.css .kpi (26px mono
- *  value, 10px caps label, warm surface). Scoped to Creative Testing
- *  so the rest of the admin panel keeps its KwikTile look. */
-function CtKpi({
-  label,
-  value,
-  subLine,
-}: {
-  label: string;
-  value: string;
-  subLine?: React.ReactNode;
-}) {
-  return (
-    <div
-      className="flex flex-col gap-1 rounded-lg p-3"
-      style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
-    >
-      <div
-        style={{
-          fontSize: "10px",
-          fontWeight: 600,
-          letterSpacing: "0.08em",
-          color: "#9A9384",
-          textTransform: "uppercase",
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-          fontSize: "26px",
-          fontWeight: 600,
-          lineHeight: 1.1,
-          color: "#161513",
-        }}
-      >
-        {value}
-      </div>
-      {subLine && (
-        <div style={{ fontSize: "11px", color: "#6E695E" }}>{subLine}</div>
-      )}
-    </div>
-  );
-}
-
-const CAT_ACCENT: Record<CategoryKey, string> = {
-  "Incremental Winner": "#2E7D32",
-  Winner: "#4CAF50",
-  "P0 analysis": "#D97706",
-  "P1 analysis": "#3B6BF5",
-  "P2 analysis": "#0891B2",
-  "Result Awaited": "#9A9384",
-  Discarded: "#B33A3A",
-};
-
-/** CTD-style category tile — colour-coded left border by category,
- *  active state raises the surface to the yellow accent. */
-function CtCategoryTile({
-  label,
-  count,
-  active,
-  accent,
-  onClick,
-}: {
-  label: string;
-  count: number;
-  active: boolean;
-  accent: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex flex-col gap-1 rounded-lg p-3 text-left transition-colors"
-      style={{
-        background: active ? "#F0C61E" : "#FFFFFF",
-        border: `1px solid ${active ? "#F0C61E" : "#E7E2D2"}`,
-        borderLeft: `3px solid ${accent}`,
-      }}
-    >
-      <div
-        style={{
-          fontSize: "10px",
-          fontWeight: 600,
-          letterSpacing: "0.08em",
-          color: active ? "#161513" : "#6E695E",
-          textTransform: "uppercase",
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-          fontSize: "22px",
-          fontWeight: 600,
-          lineHeight: 1.1,
-          color: "#161513",
-        }}
-      >
-        {count.toLocaleString()}
-      </div>
-    </button>
-  );
+function pct(num: number, den: number): string {
+  if (!den) return "—";
+  return ((num / den) * 100).toFixed(2) + "%";
 }
 
 export function CreativeTesting() {
-  const [preset, setPreset] = useState("30d");
-  const [fromDate, setFromDate] = useState(daysAgo(29));
-  const [toDate, setToDate] = useState(today());
-  const [dateField, setDateField] = useState<DateFieldKey>("created");
-  const [exclCopy, setExclCopy] = useState(true);
-  const [account, setAccount] = useState("");
-  const [campaign, setCampaign] = useState("");
-  const [contentType, setContentType] = useState("");
-  const [adStatus, setAdStatus] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<CategoryKey | "">("");
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<"spend" | "meta_roas" | "cost_per_ncp" | "cost_per_ftewv">("spend");
-
-  const [rows, setRows] = useState<AdsAnalyseRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [totals, setTotals] = useState<AdsAnalyseTotals | null>(null);
+  const [allRows, setAllRows] = useState<CreativeTestingRow[]>([]);
+  const [totals, setTotals] = useState<CreativeTestingTotals | null>(null);
+  const [kindCounts, setKindCounts] = useState<Record<string, number>>({});
   const [categoryCounts, setCategoryCounts] = useState<Record<string, number>>({});
-  const [accountOptions, setAccountOptions] = useState<Set<string>>(new Set());
-  // Campaign options accrete as rows load -- the backend does not expose a
-  // dedicated "list campaigns" endpoint yet, so we seed the dropdown from
-  // whatever campaign_names have appeared in this session. Same pattern as
-  // accountOptions above.
-  const [campaignOptions, setCampaignOptions] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showDefs, setShowDefs] = useState(false);
+  const [defsOpen, setDefsOpen] = useState(false);
+  const [openAsset, setOpenAsset] = useState<string | null>(null);
 
-  // Funnel matrix -- (ctype × category) counts derived client-side from
-  // the loaded rows. Runs on the CURRENT page slice, so scrolling in
-  // more rows (loadMore) expands the numbers. That matches CTD's
-  // behaviour: the funnel there also aggregates whatever rows are in
-  // memory. If we later add server-side ctype categorisation, this
-  // memo swaps out for an object off the response.
-  const funnel = useMemo(() => {
-    const perCtype: Record<string, {
-      total: number;
-      byCat: Record<CategoryKey, number>;
-      f4: number;
-    }> = {};
-    for (const ct of CTYPES) {
-      perCtype[ct] = {
-        total: 0,
-        f4: 0,
-        byCat: {
-          "Incremental Winner": 0, Winner: 0, "P0 analysis": 0,
-          "P1 analysis": 0, "P2 analysis": 0, "Result Awaited": 0, Discarded: 0,
-        },
-      };
-    }
-    for (const r of rows) {
-      const ct = detectCtype(r.ad_name);
-      const bucket = perCtype[ct];
-      if (!bucket) continue;
-      bucket.total += 1;
-      const cat = (r.category ?? "Discarded") as CategoryKey;
-      if (bucket.byCat[cat] !== undefined) bucket.byCat[cat] += 1;
-      if (r.f4_pass) bucket.f4 += 1;
-    }
-    const active = CTYPES.filter((c) => perCtype[c].total > 0);
-    const grand = {
-      total: 0,
-      f4: 0,
-      byCat: {
-        "Incremental Winner": 0, Winner: 0, "P0 analysis": 0,
-        "P1 analysis": 0, "P2 analysis": 0, "Result Awaited": 0, Discarded: 0,
-      } as Record<CategoryKey, number>,
-    };
-    for (const ct of active) {
-      grand.total += perCtype[ct].total;
-      grand.f4 += perCtype[ct].f4;
-      for (const s of FUNNEL_SUB) grand.byCat[s] += perCtype[ct].byCat[s];
-    }
-    return { perCtype, active, grand };
-  }, [rows]);
+  const [preset, setPreset] = useState("30");
+  const initial = presetRange(30);
+  const [fromDate, setFromDate] = useState(initial.from);
+  const [toDate, setToDate] = useState(initial.to);
+  const [kindTab, setKindTab] = useState<KindTab>("all");
+  const [media, setMedia] = useState<MediaKey | "">("");
+  const [category, setCategory] = useState<CategoryKey | "">("");
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim());
+  const [page, setPage] = useState(0);
 
-  // Product Focus + Creative Focus counts, both client-side over the
-  // currently-loaded rows -- matches CTD's Product-in-Focus /
-  // Creative-Focus strip behaviour. Scoped to what's in memory so it
-  // grows when you Load More; the aggregate KPI strip and category
-  // tiles stay server-side.
-  const productFocus = useMemo(() => {
-    const map: Record<ProductFocusKey, number> = {
-      Home: 0, Category: 0, Collection: 0, Product: 0, Others: 0,
-    };
-    for (const r of rows) map[detectProductFocus(r.ad_name)] += 1;
-    return map;
-  }, [rows]);
-  const creativeFocus = useMemo(() => {
-    const map: Record<CreativeFocusKey, number> = { IFAD: 0, GAD: 0, VID: 0, Others: 0 };
-    for (const r of rows) map[detectCreativeFocus(r.ad_name)] += 1;
-    return map;
-  }, [rows]);
+  function applyPreset(key: string) {
+    setPreset(key);
+    const p = DATE_PRESETS.find((x) => x.key === key);
+    if (p?.days) {
+      const r = presetRange(p.days);
+      setFromDate(r.from);
+      setToDate(r.to);
+    }
+    setPage(0);
+  }
 
   const filters = useMemo(
     () => ({
-      account_name: account || undefined,
-      campaign_name: campaign || undefined,
-      ad_effective_status: adStatus || undefined,
-      content_type: contentType || undefined,
-      search: search || undefined,
-      category: categoryFilter || undefined,
       from_date: fromDate,
       to_date: toDate,
-      date_field: dateField,
-      excl_copy: exclCopy || undefined,
-      sort,
+      kind: kindTab === "all" ? undefined : kindTab,
+      media: media || undefined,
+      category: category || undefined,
+      search: debouncedSearch || undefined,
     }),
-    [account, campaign, adStatus, contentType, search, categoryFilter,
-     fromDate, toDate, dateField, exclCopy, sort],
+    [fromDate, toDate, kindTab, media, category, debouncedSearch],
   );
 
-  // sessionStorage cache — /ads-analyse takes 45s+ cold, so the tab
-  // is unusable without one. Keyed on the filter set that scopes the
-  // response; 5-minute TTL matches useCachedFetch's default so a
-  // merchant browsing tabs sees warm loads. Cache is served
-  // synchronously before the fetch fires, then refreshed in the
-  // background (SWR-style) so stale data flashes only when the
-  // filter genuinely changed.
   useEffect(() => {
     let cancelled = false;
-    const cacheKey = "ct-ads-analyse|" + JSON.stringify(filters);
-    const TTL_MS = 5 * 60 * 1000;
-    type Cached = {
-      rows: AdsAnalyseRow[];
-      total: number;
-      totals: AdsAnalyseTotals | null;
-      category_counts: Record<string, number>;
-      ts: number;
-    };
-    if (typeof window !== "undefined") {
-      try {
-        const raw = window.sessionStorage.getItem(cacheKey);
-        if (raw) {
-          const c = JSON.parse(raw) as Cached;
-          if (Date.now() - c.ts < TTL_MS) {
-            setRows(c.rows);
-            setTotal(c.total);
-            setTotals(c.totals);
-            setCategoryCounts(c.category_counts);
-            setLoading(false);
-            return () => {
-              cancelled = true;
-            };
-          }
-        }
-      } catch {
-        // Ignore quota errors; fall through to network fetch.
-      }
-    }
     setLoading(true);
     setError(null);
-    fetchAdsAnalyse({ ...filters, limit: PAGE_SIZE, offset: 0 })
+    setPage(0);
+    fetchCreativeTesting({ ...filters, sort: "spend" })
       .then((res) => {
         if (cancelled) return;
-        setRows(res.rows);
-        setTotal(res.total);
-        setTotals(res.totals ?? null);
-        setCategoryCounts(res.category_counts ?? {});
-        setAccountOptions((prev) => {
-          const next = new Set(prev);
-          res.rows.forEach((r) => r.account_name && next.add(r.account_name));
-          return next;
-        });
-        setCampaignOptions((prev) => {
-          const next = new Set(prev);
-          res.rows.forEach((r) => r.campaign_name && next.add(r.campaign_name));
-          return next;
-        });
-        if (typeof window !== "undefined") {
-          try {
-            window.sessionStorage.setItem(
-              cacheKey,
-              JSON.stringify({
-                rows: res.rows,
-                total: res.total,
-                totals: res.totals ?? null,
-                category_counts: res.category_counts ?? {},
-                ts: Date.now(),
-              } satisfies Cached),
-            );
-          } catch {
-            // Quota exceeded; skip caching this response.
-          }
-        }
+        setAllRows(res.rows);
+        setTotals(res.totals);
+        setKindCounts(res.kind_counts);
+        setCategoryCounts(res.category_counts);
       })
-      .catch((err: unknown) => {
+      .catch((e) => {
         if (cancelled) return;
-        setError(err instanceof ApiError ? err.message : "Could not reach the backend.");
+        setError(
+          e instanceof ApiError
+            ? e.message
+            : "Could not reach the backend. Is it running, and is NEXT_PUBLIC_API_BASE_URL correct?",
+        );
       })
       .finally(() => !cancelled && setLoading(false));
     return () => {
@@ -512,937 +277,667 @@ export function CreativeTesting() {
     };
   }, [filters]);
 
-  async function loadMore() {
-    setLoadingMore(true);
-    try {
-      const res = await fetchAdsAnalyse({ ...filters, limit: PAGE_SIZE, offset: rows.length });
-      setRows((prev) => [...prev, ...res.rows]);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load more rows.");
-    } finally {
-      setLoadingMore(false);
-    }
-  }
+  const newCount = kindCounts.new ?? 0;
+  const iterCount = kindCounts.iteration ?? 0;
 
-  function applyPreset(key: string) {
-    setPreset(key);
-    const p = DATE_PRESETS.find((x) => x.key === key);
-    if (!p) return;
-    if (p.thisMonth) {
-      setFromDate(firstOfThisMonth());
-      setToDate(today());
-    } else if (p.days !== null) {
-      setFromDate(daysAgo(p.days));
-      setToDate(today());
+  // ── funnel + focus strips, derived over the full row set ──────────
+  const derived = useMemo(() => {
+    const funnel: Record<string, Record<string, number>> = {};
+    for (const ct of CTYPES) {
+      funnel[ct] = {};
+      for (const c of CATEGORY_ORDER) funnel[ct][c] = 0;
     }
-  }
+    const productFocus: Record<ProductFocusKey, number> = {
+      Home: 0,
+      Category: 0,
+      Collection: 0,
+      Product: 0,
+      Others: 0,
+    };
+    const creativeFocus: Record<string, number> = {};
+    const spendByCat: Record<string, number> = {};
+    for (const r of allRows) {
+      const ct = detectCtype(r);
+      const cat = (r.category ?? "Discarded") as CategoryKey;
+      if (funnel[ct] && cat in funnel[ct]) funnel[ct][cat] += 1;
+      productFocus[detectProductFocus(r.sample_ad_name)] += 1;
+      creativeFocus[ct] = (creativeFocus[ct] ?? 0) + 1;
+      spendByCat[cat] = (spendByCat[cat] ?? 0) + (r.spend ?? 0);
+    }
+    return { funnel, productFocus, creativeFocus, spendByCat };
+  }, [allRows]);
+
+  const pageRows = allRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const imp = totals?.impressions || 0;
 
   return (
-    <div
-      className="flex flex-col gap-4 rounded-xl p-4"
-      style={{ background: "#FAF8F5", border: "1px solid #E7E2D2" }}
-    >
-      {/* Header — CTD .page-hdr style */}
-      <div className="flex flex-wrap items-baseline gap-3">
-        <h1
-          style={{
-            fontFamily: "'Space Grotesk', system-ui, sans-serif",
-            fontSize: "22px",
-            fontWeight: 700,
-            letterSpacing: "-0.01em",
-            color: "#161513",
-            margin: 0,
-          }}
-        >
-          Creative Testing
-        </h1>
-        <button
-          type="button"
-          onClick={() => setShowDefs(true)}
-          title="Show category definitions (Winner / P0 / P1 / P2 / Result Awaited / Discarded / F1-F4)"
-          className="inline-flex items-center gap-1 rounded-md px-2 py-0.5"
-          style={{
-            fontSize: "11px",
-            fontWeight: 500,
-            background: "#FFFFFF",
-            border: "1px solid #E7E2D2",
-            color: "#6E695E",
-          }}
-        >
-          <span aria-hidden="true">ⓘ</span>
-          Definitions
-        </button>
-        <p
-          style={{
-            fontSize: "12px",
-            color: "#6E695E",
-            margin: 0,
-            flex: "1 1 auto",
-            minWidth: "240px",
-          }}
-        >
-          Ads launched in the picked window — evaluate recently-shipped creatives before they age into the wider Ads Analyse view.
-        </p>
-      </div>
-
-      {/* Filter-top card — CTD .filter-top */}
-      <div
-        className="flex flex-wrap items-center gap-3 rounded-lg p-3"
-        style={{ background: "#F5F1EC", border: "1px solid #E7E2D2" }}
-      >
-        {/* Date-field selector — picks WHICH date the window filters on */}
-        <select
-          value={dateField}
-          onChange={(e) => setDateField(e.target.value as DateFieldKey)}
-          title={DATE_FIELDS.find((f) => f.key === dateField)?.hint}
-          className="rounded-md px-2 py-1 text-xs"
-          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
-        >
-          {DATE_FIELDS.map((f) => (
-            <option key={f.key} value={f.key} title={f.hint}>{f.label}</option>
-          ))}
-        </select>
-        {/* Preset pill row — CTD .preset-row */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {DATE_PRESETS.map((p) => {
-            const active = preset === p.key;
-            return (
-              <button
-                key={p.key}
-                type="button"
-                onClick={() => applyPreset(p.key)}
-                className="rounded-full px-3 py-1 text-[11px] font-medium transition-colors"
-                style={{
-                  background: active ? "#F0C61E" : "transparent",
-                  border: `1px solid ${active ? "#F0C61E" : "#E7E2D2"}`,
-                  color: active ? "#161513" : "#6E695E",
-                  fontFamily: "'Space Grotesk', system-ui, sans-serif",
-                  letterSpacing: "0.02em",
-                }}
-              >
-                {p.label}
-              </button>
-            );
-          })}
+    <div className="space-y-3" style={{ backgroundColor: CT.cream }}>
+      {/* ── page header ───────────────────────────────────────── */}
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight" style={{ color: CT.ink }}>
+            Creative Testing <span style={{ color: CT.muted }}>—</span> Analytics
+          </h2>
+          <p className="text-xs" style={{ color: CT.muted }}>
+            uniquely tested assets · powered by ad_asset_map (asset grain, not ad grain)
+          </p>
         </div>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <input
-            type="date"
-            value={fromDate}
-            onChange={(e) => { setFromDate(e.target.value); setPreset("custom"); }}
-            className="rounded-md px-2 py-1 text-xs"
-            style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
-          />
-          <span style={{ fontSize: "12px", color: "#9A9384" }}>→</span>
-          <input
-            type="date"
-            value={toDate}
-            onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }}
-            className="rounded-md px-2 py-1 text-xs"
-            style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
-          />
-          {/* Excl. copy toggle — CTD .ct-toggle (yellow dot slides right when active) */}
+        <div className="flex items-center gap-2">
           <button
-            type="button"
-            onClick={() => setExclCopy((v) => !v)}
-            title="Hide ads whose ad_name contains 'copy' (Meta duplicates). Applies to KPI tiles + totals too."
-            className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1"
-            style={{
-              fontSize: "11px",
-              fontWeight: 500,
-              background: exclCopy ? "#161513" : "#FAF8F5",
-              border: `1px solid ${exclCopy ? "#161513" : "#E7E2D2"}`,
-              color: exclCopy ? "#F5F1EC" : "#6E695E",
-              fontFamily: "'Space Grotesk', system-ui, sans-serif",
-              letterSpacing: "0.02em",
-            }}
-            aria-pressed={exclCopy}
+            onClick={() => setDefsOpen(true)}
+            className="rounded-md border bg-white px-3 py-2 text-sm"
+            style={{ borderColor: CT.border, color: CT.ink }}
           >
-            <span
-              className="inline-block h-2.5 w-2.5 rounded-full"
-              style={{ background: exclCopy ? "#F0C61E" : "#C9C2AF" }}
-            />
-            Excl. copy
+            ⓘ Definitions
           </button>
+          <ExportButton
+            rows={allRows as unknown as Record<string, unknown>[]}
+            filename={`creative-testing-${fromDate}-to-${toDate}`}
+          />
         </div>
       </div>
 
-      {/* Filter grid — CTD .filter-grid, warm surface, caps labels.
-          Each dropdown is a base_where predicate on the backend so counts
-          stay honest under the picked filters (vs client-side which would
-          only filter the current 100-row page). */}
-      <div
-        className="grid grid-cols-1 gap-3 rounded-lg p-3 sm:grid-cols-2 md:grid-cols-4"
-        style={{ background: "#F5F1EC", border: "1px solid #E7E2D2" }}
-      >
-        {[
-          { label: "Campaign", value: campaign, setter: setCampaign, empty: "All campaigns", options: Array.from(campaignOptions).sort() },
-          { label: "Content type", value: contentType, setter: setContentType, empty: "All content", options: CONTENT_TYPES.map((c) => c.key), labels: Object.fromEntries(CONTENT_TYPES.map((c) => [c.key, c.label])) as Record<string, string> },
-          { label: "Status", value: adStatus, setter: setAdStatus, empty: "All statuses", options: AD_STATUSES },
-          { label: "Account", value: account, setter: setAccount, empty: "All accounts", options: Array.from(accountOptions).sort() },
-        ].map((f) => (
-          <label key={f.label} className="flex flex-col gap-1">
-            <span
-              style={{
-                fontSize: "10px",
-                fontWeight: 600,
-                letterSpacing: "0.08em",
-                color: "#9A9384",
-                textTransform: "uppercase",
-              }}
-            >
-              {f.label}
-            </span>
-            <select
-              value={f.value}
-              onChange={(e) => f.setter(e.target.value)}
-              className="rounded-md px-2 py-1 text-xs"
-              style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
-            >
-              <option value="">{f.empty}</option>
-              {f.options.map((opt) => (
-                <option key={opt} value={opt}>
-                  {("labels" in f && f.labels ? f.labels[opt] : opt)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ))}
+      {/* ── filters ───────────────────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
+        <select
+          value={preset}
+          onChange={(e) => applyPreset(e.target.value)}
+          className="rounded-md border border-border-primary px-2 py-1 text-sm"
+        >
+          {DATE_PRESETS.map((p) => (
+            <option key={p.key} value={p.key}>
+              {p.label}
+            </option>
+          ))}
+          <option value="custom">Custom…</option>
+        </select>
+        <input
+          type="date"
+          value={fromDate}
+          onChange={(e) => {
+            setFromDate(e.target.value);
+            setPreset("custom");
+          }}
+          className="rounded-md border border-border-primary px-2 py-1 text-sm"
+        />
+        <span className="text-xs text-text-tertiary">to</span>
+        <input
+          type="date"
+          value={toDate}
+          onChange={(e) => {
+            setToDate(e.target.value);
+            setPreset("custom");
+          }}
+          className="rounded-md border border-border-primary px-2 py-1 text-sm"
+        />
+        <select
+          value={media}
+          onChange={(e) => setMedia(e.target.value as MediaKey | "")}
+          className="rounded-md border border-border-primary px-2 py-1 text-sm"
+        >
+          <option value="">All media</option>
+          <option value="video">🎬 Video</option>
+          <option value="graphic">🖼 Graphic</option>
+          <option value="influencer">👤 Influencer</option>
+        </select>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search asset id…"
+          className="w-48 rounded-md border border-border-primary px-2 py-1 text-sm"
+        />
       </div>
 
-      {/* KPI strip — CTD .kpi cards */}
-      {totals && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-          <CtKpi
-            label="Ads launched"
-            value={totals.ad_count.toLocaleString()}
-            subLine={`in ${DATE_PRESETS.find((p) => p.key === preset)?.label ?? "custom range"}`}
-          />
-          <CtKpi label="Total spend" value={fmtMoney(totals.spend)} />
-          <CtKpi label="Purchases" value={fmtCompact(totals.purchases)} />
-          <CtKpi
-            label="NCP"
-            value={fmtCompact(totals.ncp_count)}
-            subLine="new-customer purchases"
-          />
-          <CtKpi
-            label="FTEWV"
-            value={fmtCompact(totals.ftewv_count)}
-            subLine="first-time engaged"
-          />
-          <CtKpi
-            label="Avg ROAS"
-            value={totals.avg_meta_roas !== null ? totals.avg_meta_roas.toFixed(2) : "—"}
-          />
-          <CtKpi
-            label="Cost / NCP"
-            value={totals.ncp_count > 0 ? "₹" + fmtCompact(totals.spend / totals.ncp_count) : "—"}
-          />
-          <CtKpi
-            label="Cost / FTEWV"
-            value={totals.ftewv_count > 0 ? "₹" + fmtCompact(totals.spend / totals.ftewv_count) : "—"}
-          />
-        </div>
-      )}
-
-      {/* Category tiles — CTD-style, color-coded, click to filter */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-        {CATEGORY_ORDER.map((cat) => {
-          const count = categoryCounts[cat] ?? 0;
-          const selected = categoryFilter === cat;
+      {/* ── New / Iteration tabs ──────────────────────────────── */}
+      <div className="flex flex-wrap gap-2">
+        {(
+          [
+            ["all", "All tested", newCount + iterCount, "Every asset with an ad launched in this window."],
+            ["new", "New creatives", newCount, "Asset was created inside this window — its first real test."],
+            ["iteration", "Iterations", iterCount, "Asset predates this window, or ran only as a copy."],
+          ] as [KindTab, string, number, string][]
+        ).map(([key, label, count, hint]) => {
+          const active = kindTab === key;
           return (
-            <CtCategoryTile
-              key={cat}
-              label={cat}
-              count={count}
-              active={selected}
-              accent={CAT_ACCENT[cat]}
-              onClick={() => setCategoryFilter(selected ? "" : cat)}
-            />
+            <button
+              key={key}
+              title={hint}
+              onClick={() => setKindTab(key)}
+              className={
+                "rounded-lg border px-3 py-2 text-left transition-colors " +
+                (active
+                  ? "border-emerald-400 bg-emerald-50 text-emerald-900"
+                  : "border-border-primary bg-white hover:bg-bg-muted")
+              }
+            >
+              <div className="text-[11px] uppercase tracking-wide opacity-70">{label}</div>
+              <div className="text-lg font-semibold">{count.toLocaleString("en-IN")}</div>
+            </button>
           );
         })}
       </div>
 
-      {/* Overview — Performance card. Ports CTD's op-grid: seven
-          Meta-side rate KPIs derived from the aggregate totals + one
-          highlighted CT ROAS tile on the right. All rates are blended
-          (sum ÷ sum) so a Rs 200 ad with one sale doesn't outweigh a
-          Rs 2,00,000 ad. Only rendered when totals arrived. */}
-      {totals && (
-        <div
-          className="flex flex-col gap-3 rounded-lg p-4"
-          style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
-        >
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <div
-              style={{
-                fontFamily: "'Space Grotesk', system-ui, sans-serif",
-                fontSize: "12px",
-                fontWeight: 700,
-                letterSpacing: "0.14em",
-                color: "#161513",
-                textTransform: "uppercase",
-              }}
-            >
-              Overview <span style={{ color: "#9A9384" }}>—</span> Performance
-            </div>
-            <span
-              className="rounded-full px-2 py-0.5"
-              style={{
-                fontSize: "9px",
-                fontWeight: 700,
-                letterSpacing: "0.1em",
-                background: "#F5F1EC",
-                border: "1px solid #E7E2D2",
-                color: "#6E695E",
-              }}
-            >
-              SUM &amp; AVG · EXCL. COPY
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-            {(() => {
-              const impr = totals.impressions || 0;
-              const spend = totals.spend || 0;
-              const hookPct = impr > 0 ? (totals.three_sec_video_plays / impr) * 100 : null;
-              const ctrPct = impr > 0 ? (totals.outbound_clicks / impr) * 100 : null;
-              const engagePct = impr > 0 ? (totals.post_engagements / impr) * 100 : null;
-              const thruplayPct = impr > 0 ? (totals.thruplays / impr) * 100 : null;
-              const holdPct = totals.three_sec_video_plays > 0
-                ? (totals.thruplays / totals.three_sec_video_plays) * 100
-                : null;
-              const ctRoas = spend > 0 ? totals.conv_value / spend : null;
-              const tiles: {
-                label: string;
-                value: string;
-                sub: string;
-                highlight?: boolean;
-              }[] = [
-                { label: "Total spend", value: fmtMoney(totals.spend), sub: "Sum · INR" },
-                { label: "Total impressions", value: fmtCompact(totals.impressions), sub: "Sum" },
-                {
-                  label: "Avg. hook rate",
-                  value: hookPct === null ? "—" : hookPct.toFixed(2) + "%",
-                  sub: "3-sec plays ÷ impressions",
-                },
-                {
-                  label: "Avg. outbound CTR",
-                  value: ctrPct === null ? "—" : ctrPct.toFixed(2) + "%",
-                  sub: "Outbound clicks ÷ impressions",
-                },
-                {
-                  label: "Avg. engagement rate",
-                  value: engagePct === null ? "—" : engagePct.toFixed(2) + "%",
-                  sub: "Post engagements ÷ impressions",
-                },
-                {
-                  label: "Avg. thruplay rate",
-                  value: thruplayPct === null ? "—" : thruplayPct.toFixed(2) + "%",
-                  sub: "Thruplays ÷ impressions",
-                },
-                {
-                  label: "Avg. hold rate",
-                  value: holdPct === null ? "—" : holdPct.toFixed(2) + "%",
-                  sub: "Thruplays ÷ 3-sec plays",
-                },
-                {
-                  label: "CT ROAS",
-                  value: ctRoas === null ? "—" : ctRoas.toFixed(2),
-                  sub: "Conv. value ÷ spend",
-                  highlight: true,
-                },
-              ];
-              return tiles.map((t) => (
-                <div
-                  key={t.label}
-                  className="flex flex-col gap-1 rounded-lg p-3"
-                  style={{
-                    background: t.highlight ? "#F0C61E" : "#FAF8F5",
-                    border: `1px solid ${t.highlight ? "#F0C61E" : "#E7E2D2"}`,
-                  }}
-                >
+      {/* ── verdict buckets ───────────────────────────────────── */}
+      <div>
+        <div className="mb-1 text-[11px] uppercase tracking-wide text-text-tertiary">
+          F1–F4 verdict buckets · click to filter
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {CATEGORY_ORDER.map((c) => {
+            const n = categoryCounts[c] ?? 0;
+            const active = category === c;
+            return (
+              <button
+                key={c}
+                onClick={() => setCategory(active ? "" : c)}
+                className="min-w-[150px] flex-1 overflow-hidden rounded-lg border bg-white text-left shadow-sm transition-transform hover:-translate-y-0.5"
+                style={{
+                  borderColor: active ? CAT_ACCENT[c] : CT.border,
+                  boxShadow: active ? `0 0 0 2px ${CAT_ACCENT[c]}33` : undefined,
+                }}
+              >
+                <div style={{ height: 3, backgroundColor: CAT_ACCENT[c] }} />
+                <div className="p-3">
                   <div
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      letterSpacing: "0.08em",
-                      color: t.highlight ? "#161513" : "#9A9384",
-                      textTransform: "uppercase",
-                    }}
+                    className="text-[10px] font-semibold uppercase tracking-wider"
+                    style={{ color: CT.muted }}
                   >
-                    {t.label}
+                    {c}
                   </div>
-                  <div
-                    style={{
-                      fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                      fontSize: "24px",
-                      fontWeight: 600,
-                      lineHeight: 1.1,
-                      color: "#161513",
-                    }}
-                  >
-                    {t.value}
+                  <div className="text-2xl font-bold" style={{ color: CT.ink }}>
+                    {n.toLocaleString("en-IN")}
                   </div>
-                  <div style={{ fontSize: "10px", color: t.highlight ? "#4A3E00" : "#9A9384" }}>
-                    {t.sub}
+                  <div className="text-[11px]" style={{ color: CT.muted }}>
+                    Spend{" "}
+                    <span style={{ color: CAT_ACCENT[c] }}>
+                      {fmtMoney(derived.spendByCat[c] ?? 0)}
+                    </span>
                   </div>
                 </div>
-              ));
-            })()}
-          </div>
+              </button>
+            );
+          })}
         </div>
-      )}
-
-      {/* Product Focus + Creative Focus pill strips — side-by-side.
-          Counts are over the loaded rows, matching CTD's behaviour
-          where the strip grows as pagination brings more rows in. */}
-      {rows.length > 0 && (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {[
-            {
-              title: "Product in Focus",
-              hint: "landing-page hierarchy from ad name",
-              buckets: PRODUCT_FOCUS_ORDER.map((k) => ({
-                key: k,
-                label: k === "Home" ? "Home page"
-                     : k === "Category" ? "Category page"
-                     : k === "Collection" ? "Collection page"
-                     : k === "Product" ? "Product page"
-                     : "Others",
-                count: productFocus[k],
-                color: PRODUCT_FOCUS_COLOR[k],
-              })),
-            },
-            {
-              title: "Creative Focus",
-              hint: "IFAD · GAD · VID · Others",
-              buckets: CREATIVE_FOCUS_ORDER.map((k) => ({
-                key: k,
-                label: k === "VID" ? "Video" : k,
-                count: creativeFocus[k],
-                color: CREATIVE_FOCUS_COLOR[k],
-              })),
-            },
-          ].map((panel) => (
-            <div
-              key={panel.title}
-              className="flex flex-col gap-2 rounded-lg p-3"
-              style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
-            >
-              <div className="flex items-baseline justify-between gap-2">
-                <h3
-                  style={{
-                    fontFamily: "'Space Grotesk', system-ui, sans-serif",
-                    fontSize: "13px",
-                    fontWeight: 700,
-                    color: "#161513",
-                    margin: 0,
-                  }}
-                >
-                  {panel.title}
-                </h3>
-                <span style={{ fontSize: "10px", color: "#9A9384" }}>{panel.hint}</span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {panel.buckets.map((b) => (
-                  <div
-                    key={b.key}
-                    className="inline-flex items-center gap-2 rounded-full px-3 py-1"
-                    style={{ background: "#FAF8F5", border: "1px solid #E7E2D2" }}
-                  >
-                    <span
-                      className="inline-block h-2 w-2 rounded-full"
-                      style={{ background: b.color }}
-                    />
-                    <span
-                      style={{
-                        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        color: "#161513",
-                      }}
-                    >
-                      {b.count.toLocaleString()}
-                    </span>
-                    <span style={{ fontSize: "11px", color: "#6E695E" }}>{b.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Filter row — search + sort + clear + counters + export */}
-      <div
-        className="flex flex-wrap items-center gap-2 rounded-lg p-3"
-        style={{ background: "#F5F1EC", border: "1px solid #E7E2D2" }}
-      >
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search ad name…"
-          className="w-64 rounded-md px-2 py-1 text-xs"
-          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
-        />
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as typeof sort)}
-          className="rounded-md px-2 py-1 text-xs"
-          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#161513" }}
-        >
-          <option value="spend">Sort: Spend</option>
-          <option value="meta_roas">Sort: ROAS</option>
-          <option value="cost_per_ncp">Sort: Cost / NCP</option>
-          <option value="cost_per_ftewv">Sort: Cost / FTEWV</option>
-        </select>
-        <button
-          onClick={() => {
-            setSearch("");
-            setAccount("");
-            setCampaign("");
-            setContentType("");
-            setAdStatus("");
-            setCategoryFilter("");
-          }}
-          className="rounded-md px-2 py-1 text-[11px] font-medium transition-colors"
-          style={{ background: "#FAF8F5", border: "1px solid #E7E2D2", color: "#6E695E" }}
-        >
-          Clear filters
-        </button>
-        <span
-          className="ml-auto text-[11px]"
-          style={{ color: "#6E695E", fontFamily: "'JetBrains Mono', ui-monospace, monospace" }}
-        >
-          {loading ? "loading…" : `${rows.length.toLocaleString()} of ${total.toLocaleString()} ads`}
-        </span>
-        <ExportButton
-          rows={rows as unknown as Record<string, unknown>[]}
-          filename="creative_testing"
-          window={preset}
-          disabled={loading || !rows.length}
-        />
       </div>
 
-      {error && (
+      {/* ── Overview — Performance ────────────────────────────── */}
+      {totals && (
         <div
-          className="rounded-md p-2 text-xs"
-          style={{ background: "#FDEDEB", border: "1px solid #E9B4AE", color: "#8B2A22" }}
+          className="overflow-hidden rounded-lg border bg-white shadow-sm"
+          style={{ borderColor: CT.border }}
         >
-          {error}
+          <div
+            className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5"
+            style={{ borderColor: CT.border }}
+          >
+            <div className="text-sm font-semibold tracking-wide" style={{ color: CT.ink }}>
+              OVERVIEW <span style={{ color: CT.muted }}>—</span> PERFORMANCE
+            </div>
+            <div
+              className="rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wider"
+              style={{ borderColor: CT.gold, color: CT.goldDeep, backgroundColor: "#FDF8E8" }}
+            >
+              sum &amp; avg · {fromDate} → {toDate} ·{" "}
+              {totals.assets.toLocaleString("en-IN")} assets
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
+            {(
+              [
+                ["TOTAL AMOUNT SPENT", fmtMoney(totals.spend), "Sum · INR", false],
+                ["TOTAL IMPRESSIONS", Math.round(totals.impressions).toLocaleString("en-IN"), "Sum", false],
+                ["AVG. HOOK RATE", pct(totals.three_sec_plays, imp), "Sum(3-Sec Video Plays) ÷ Sum(Impressions)", false],
+                ["AVG. OUTBOUND CTR", pct(totals.outbound_clicks, imp), "Sum(Outbound Clicks) ÷ Sum(Impressions)", false],
+                ["AVG. ENGAGEMENT RATE", pct(totals.post_engagements, imp), "Sum(Post Engagements) ÷ Sum(Impressions)", false],
+                ["AVG. THRUPLAY RATE", pct(totals.thruplays, imp), "Sum(ThruPlays) ÷ Sum(Impressions)", false],
+                ["AVG. HOLD RATE", pct(totals.thruplays, totals.three_sec_plays), "Sum(ThruPlays) ÷ Sum(3-Sec Video Plays)", false],
+                ["CT ROAS", fmtNum(totals.roas), "Sum(Conv. Value) ÷ Sum(Spend)", true],
+              ] as [string, string, string, boolean][]
+            ).map(([label, value, formula, hi]) => (
+              <div
+                key={label}
+                className="border-b border-r p-4 last:border-r-0"
+                style={{
+                  borderColor: CT.border,
+                  backgroundColor: hi ? CT.goldFill : "#FFFFFF",
+                }}
+              >
+                <div
+                  className="text-[10px] font-semibold uppercase tracking-wider"
+                  style={{ color: hi ? "#F6E7C4" : CT.muted }}
+                >
+                  {label}
+                </div>
+                <div
+                  className="mt-1 text-2xl font-bold tracking-tight"
+                  style={{ color: hi ? "#FFFFFF" : CT.ink }}
+                >
+                  {value}
+                </div>
+                <div className="mt-1 text-[10px]" style={{ color: hi ? "#F0DDB4" : CT.goldDeep }}>
+                  {formula}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {/* Creative Type funnel — CTD .funnel-card, ctype × category matrix */}
-      {funnel.active.length > 0 && (
+      {/* ── funnel + focus strips ─────────────────────────────── */}
+      <div className="grid gap-3 lg:grid-cols-3">
         <div
-          className="rounded-lg p-3"
-          style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
+          className="rounded-lg border bg-white p-3 shadow-sm lg:col-span-2"
+          style={{ borderColor: CT.border }}
         >
-          <div className="mb-2 flex items-center justify-between">
-            <h3
-              style={{
-                fontFamily: "'Space Grotesk', system-ui, sans-serif",
-                fontSize: "13px",
-                fontWeight: 700,
-                color: "#161513",
-                margin: 0,
-              }}
-            >
-              Creative Type funnel
-              <span style={{ marginLeft: "8px", fontWeight: 400, fontSize: "11px", color: "#9A9384" }}>
+          <div className="mb-2 flex items-baseline justify-between">
+            <div className="text-sm font-semibold" style={{ color: CT.ink }}>
+              CREATIVE TYPE FUNNEL{" "}
+              <span className="text-[11px] font-normal" style={{ color: CT.muted }}>
                 distribution across categories
               </span>
-            </h3>
-            <span
-              style={{
-                fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                fontSize: "11px",
-                color: "#9A9384",
-              }}
-            >
-              {funnel.grand.total.toLocaleString()} ads loaded
-            </span>
+            </div>
+            <div className="text-[11px]" style={{ color: CT.muted }}>
+              {allRows.length} assets
+            </div>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-[11px]">
+            <table className="w-full min-w-[720px] border-collapse text-xs">
               <thead>
-                <tr style={{ borderBottom: "1px solid #E7E2D2", background: "#F5F1EC" }}>
-                  <th
-                    className="px-2 py-1.5"
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      letterSpacing: "0.08em",
-                      color: "#6E695E",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Creative Type
-                  </th>
-                  <th
-                    className="px-2 py-1.5 text-right"
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      letterSpacing: "0.08em",
-                      color: "#6E695E",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Total
-                  </th>
-                  {FUNNEL_SUB_SHORT.map((s) => (
+                <tr>
+                  <th className="px-2 py-1" />
+                  <th className="px-2 py-1" />
+                  {FUNNEL_GROUPS.map((g) => (
                     <th
-                      key={s}
-                      className="px-2 py-1.5 text-right"
-                      style={{
-                        fontSize: "10px",
-                        fontWeight: 600,
-                        letterSpacing: "0.08em",
-                        color: "#6E695E",
-                        textTransform: "uppercase",
-                      }}
+                      key={g.label}
+                      colSpan={g.cats.length}
+                      className="px-2 py-1.5 text-center text-[10px] font-semibold uppercase tracking-wider"
+                      style={{ backgroundColor: g.tint, color: CAT_ACCENT[g.cats[0]] }}
                     >
-                      {s}
+                      {g.label}
                     </th>
                   ))}
-                  <th
-                    className="px-2 py-1.5 text-right"
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      letterSpacing: "0.08em",
-                      color: "#6E695E",
-                      textTransform: "uppercase",
-                    }}
-                    title="Count of ads passing F4 (win-rate quality gate)"
-                  >
-                    F4 ✓
+                </tr>
+                <tr style={{ color: CT.muted }}>
+                  <th className="px-2 py-1.5 text-left text-[10px] uppercase tracking-wider">
+                    Creative type
                   </th>
+                  <th className="px-2 py-1.5 text-right text-[10px] uppercase tracking-wider">
+                    Total
+                  </th>
+                  {FUNNEL_GROUPS.flatMap((g) =>
+                    g.cats.map((c) => (
+                      <th
+                        key={c}
+                        className="px-2 py-1.5 text-right text-[10px] uppercase tracking-wider"
+                        style={{ backgroundColor: g.tint }}
+                      >
+                        {FUNNEL_SHORT[c]}
+                      </th>
+                    )),
+                  )}
                 </tr>
               </thead>
               <tbody>
-                {funnel.active.map((ct) => {
-                  const row = funnel.perCtype[ct];
+                {CTYPES.map((ct) => {
+                  const row = derived.funnel[ct];
+                  const tot = CATEGORY_ORDER.reduce((a, c) => a + row[c], 0);
+                  if (!tot) return null;
                   return (
-                    <tr key={ct} style={{ borderBottom: "1px solid #F0EBDF" }} className="hover:bg-[#FAF8F5]">
-                      <td className="px-2 py-1.5" style={{ fontWeight: 600, color: "#161513" }}>
+                    <tr key={ct} className="border-t" style={{ borderColor: CT.border }}>
+                      <td
+                        className="px-2 py-2 font-medium"
+                        style={{ color: CREATIVE_FOCUS_COLOR[ct] }}
+                      >
                         {ct}
+                        <div className="text-[10px] font-normal" style={{ color: CT.muted }}>
+                          {tot} assets
+                        </div>
                       </td>
-                      <td
-                        className="px-2 py-1.5 text-right"
-                        style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                      >
-                        {row.total}
-                      </td>
-                      {FUNNEL_SUB.map((s) => {
-                        const n = row.byCat[s];
-                        const pct = row.total ? Math.round((n / row.total) * 100) : 0;
-                        return (
-                          <td
-                            key={s}
-                            className="px-2 py-1.5 text-right"
-                            style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                          >
-                            {n}
-                            {n > 0 && (
-                              <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
-                                {pct}%
-                              </span>
-                            )}
-                          </td>
-                        );
-                      })}
-                      <td
-                        className="px-2 py-1.5 text-right"
-                        style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#2E7D32" }}
-                      >
-                        {row.f4}
-                        {row.total > 0 && (
-                          <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
-                            {Math.round((row.f4 / row.total) * 100)}%
-                          </span>
-                        )}
-                      </td>
+                      <td className="px-2 py-2 text-right text-base font-bold">{tot}</td>
+                      {FUNNEL_GROUPS.flatMap((g) =>
+                        g.cats.map((c) => {
+                          const n = row[c];
+                          const share = tot ? (n / tot) * 100 : 0;
+                          return (
+                            <td key={c} className="px-2 py-2 align-top">
+                              <div className="flex items-baseline justify-end gap-1">
+                                <span className="text-sm font-semibold">{n}</span>
+                                <span className="text-[10px]" style={{ color: CT.muted }}>
+                                  {share.toFixed(0)}%
+                                </span>
+                              </div>
+                              <div
+                                className="mt-1 h-1 w-full rounded"
+                                style={{ backgroundColor: "#EFEDE6" }}
+                              >
+                                <div
+                                  className="h-1 rounded"
+                                  style={{
+                                    width: `${share}%`,
+                                    backgroundColor: CAT_ACCENT[c],
+                                  }}
+                                />
+                              </div>
+                            </td>
+                          );
+                        }),
+                      )}
                     </tr>
                   );
                 })}
                 <tr
-                  style={{
-                    borderTop: "2px solid #E7E2D2",
-                    background: "#F5F1EC",
-                    fontWeight: 600,
-                  }}
+                  className="border-t-2"
+                  style={{ borderColor: CT.border, backgroundColor: CT.cream }}
                 >
-                  <td className="px-2 py-1.5" style={{ color: "#161513" }}>
-                    Grand Total
+                  <td className="px-2 py-2 text-[10px] font-semibold uppercase tracking-wider">
+                    Grand total
                   </td>
-                  <td
-                    className="px-2 py-1.5 text-right"
-                    style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                  >
-                    {funnel.grand.total}
-                  </td>
-                  {FUNNEL_SUB.map((s) => {
-                    const n = funnel.grand.byCat[s];
-                    const pct = funnel.grand.total ? Math.round((n / funnel.grand.total) * 100) : 0;
-                    return (
-                      <td
-                        key={s}
-                        className="px-2 py-1.5 text-right"
-                        style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                      >
-                        {n}
-                        {n > 0 && (
-                          <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
-                            {pct}%
+                  <td className="px-2 py-2 text-right text-base font-bold">{allRows.length}</td>
+                  {FUNNEL_GROUPS.flatMap((g) =>
+                    g.cats.map((c) => {
+                      const n = categoryCounts[c] ?? 0;
+                      const share = allRows.length ? (n / allRows.length) * 100 : 0;
+                      return (
+                        <td key={c} className="px-2 py-2 text-right">
+                          <span className="text-sm font-bold">{n}</span>{" "}
+                          <span className="text-[10px]" style={{ color: CT.muted }}>
+                            {share.toFixed(0)}%
                           </span>
-                        )}
-                      </td>
-                    );
-                  })}
-                  <td
-                    className="px-2 py-1.5 text-right"
-                    style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#2E7D32" }}
-                  >
-                    {funnel.grand.f4}
-                    {funnel.grand.total > 0 && (
-                      <span style={{ marginLeft: "4px", fontSize: "10px", color: "#9A9384" }}>
-                        {Math.round((funnel.grand.f4 / funnel.grand.total) * 100)}%
-                      </span>
-                    )}
-                  </td>
+                        </td>
+                      );
+                    }),
+                  )}
                 </tr>
               </tbody>
             </table>
           </div>
-          <p style={{ marginTop: "8px", fontSize: "10px", color: "#9A9384" }}>
-            Aggregated from the {rows.length.toLocaleString()} loaded row(s). Scroll / paginate to expand — server has {total.toLocaleString()} matches for the current filters.
-          </p>
+        </div>
+
+        <div className="space-y-3">
+          <div
+            className="rounded-lg border bg-white p-3 shadow-sm"
+            style={{ borderColor: CT.border }}
+          >
+            <div className="mb-2 flex items-baseline justify-between">
+              <div className="text-sm font-semibold" style={{ color: CT.ink }}>
+                PRODUCT IN FOCUS
+              </div>
+              <div className="text-[10px]" style={{ color: CT.muted }}>
+                landing-page hierarchy from ad name
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {PRODUCT_FOCUS_ORDER.map((k) => {
+                const n = derived.productFocus[k];
+                return (
+                  <span
+                    key={k}
+                    className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs"
+                    style={{
+                      borderColor: CT.border,
+                      backgroundColor: n ? "#FFFFFF" : CT.cream,
+                      color: n ? CT.ink : CT.muted,
+                    }}
+                  >
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ backgroundColor: PRODUCT_FOCUS_COLOR[k] }}
+                    />
+                    <b>{n}</b> {k} page
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+
+          <div
+            className="rounded-lg border bg-white p-3 shadow-sm"
+            style={{ borderColor: CT.border }}
+          >
+            <div className="mb-2 flex items-baseline justify-between">
+              <div className="text-sm font-semibold" style={{ color: CT.ink }}>
+                CREATIVE FOCUS
+              </div>
+              <div className="text-[10px]" style={{ color: CT.muted }}>
+                IFAD · GAD · VID
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {CTYPES.map((k) => {
+                const n = derived.creativeFocus[k] ?? 0;
+                if (!n) return null;
+                return (
+                  <span
+                    key={k}
+                    className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs"
+                    style={{ borderColor: CT.border, color: CT.ink }}
+                  >
+                    <span
+                      className="inline-block h-2 w-2 rounded-full"
+                      style={{ backgroundColor: CREATIVE_FOCUS_COLOR[k] }}
+                    />
+                    <b>{n}</b> {k}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+          {error}
         </div>
       )}
 
-      {/* Slim results table — CTD .funnel-card style */}
-      {loading ? (
-        <p style={{ fontSize: "12px", color: "#6E695E" }}>Loading…</p>
-      ) : (
-        <div
-          className="overflow-x-auto rounded-lg"
-          style={{ background: "#FFFFFF", border: "1px solid #E7E2D2" }}
-        >
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr style={{ borderBottom: "1px solid #E7E2D2", background: "#F5F1EC" }}>
-                {["Ad", "Account", "Created", "Category", "F1234"].map((h) => (
-                  <th
-                    key={h}
-                    className="px-3 py-2"
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      letterSpacing: "0.08em",
-                      color: "#6E695E",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
-                {["Spend", "ROAS", "Purchases", "NCP", "Cost / NCP", "Cost / FTEWV"].map((h) => (
-                  <th
-                    key={h}
-                    className="px-3 py-2 text-right"
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 600,
-                      letterSpacing: "0.08em",
-                      color: "#6E695E",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
+      {/* ── asset table ───────────────────────────────────────── */}
+      <p className="text-xs" style={{ color: CT.muted }}>
+        Ad preview and website links show the highest-spend ad for each asset. Open a row to see links for every iteration.
+      </p>
+      <div
+        className="overflow-x-auto rounded-lg border bg-white shadow-sm"
+        style={{ borderColor: CT.border }}
+      >
+        <table className="w-full min-w-[1520px] text-sm">
+          <thead
+            className="text-left text-[10px] font-semibold uppercase tracking-wider"
+            style={{ backgroundColor: CT.cream, color: CT.muted }}
+          >
+            <tr>
+              <th className="px-3 py-2">Preview</th>
+              <th className="px-3 py-2">Asset</th>
+              <th className="px-3 py-2">Ad preview</th>
+              <th className="px-3 py-2">Website destination</th>
+              <th className="px-3 py-2">Media</th>
+              <th className="px-3 py-2">Kind</th>
+              <th className="px-3 py-2">Category</th>
+              <th className="px-3 py-2 text-right">Created</th>
+              <th className="px-3 py-2 text-right">Ads</th>
+              <th className="px-3 py-2 text-right">Copies</th>
+              <th className="px-3 py-2 text-right">Spend</th>
+              <th className="px-3 py-2 text-right">Purch.</th>
+              <th className="px-3 py-2 text-right">ROAS</th>
+              <th className="px-3 py-2 text-right">₹/NCP</th>
+              <th className="px-3 py-2 text-right">₹/FTEWV</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (
+              <tr>
+                <td colSpan={15} className="px-3 py-6 text-center text-text-tertiary">
+                  Loading…
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => {
+            )}
+            {!loading && pageRows.length === 0 && (
+              <tr>
+                <td colSpan={15} className="px-3 py-6 text-center text-text-tertiary">
+                  No assets tested in this window.
+                </td>
+              </tr>
+            )}
+            {!loading &&
+              pageRows.map((r) => {
+                const mm = r.media ? MEDIA_META[r.media] : null;
                 const cat = (r.category ?? "Discarded") as CategoryKey;
                 return (
                   <tr
-                    key={r.ad_id}
-                    style={{ borderBottom: "1px solid #F0EBDF" }}
-                    className="hover:bg-[#FAF8F5]"
+                    key={r.asset_id}
+                    onClick={() => setOpenAsset(r.asset_id)}
+                    title={
+                      r.kind === "new"
+                        ? "Open this asset's ad"
+                        : `Open all ${r.ads} ads for this asset, by iteration`
+                    }
+                    className="cursor-pointer border-t transition-colors"
+                    style={{ borderColor: CT.border }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#FDF8E8")}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "")}
                   >
-                    <td
-                      className="max-w-[260px] truncate px-3 py-1.5"
-                      style={{ color: "#161513" }}
-                      title={r.ad_name ?? ""}
-                    >
-                      {r.ad_name ?? "—"}
+                    <td className="px-3 py-2">
+                      <AssetPreviewCell asset={r} />
                     </td>
-                    <td className="px-3 py-1.5" style={{ color: "#6E695E" }}>
-                      {r.account_name ?? "—"}
+                    <td className="px-3 py-2 font-mono text-[12px]">
+                      {r.asset_id}
+                      {r.name_conflict && (
+                        <span
+                          className="ml-1 rounded border border-amber-300 bg-amber-100 px-1 text-[10px] text-amber-900"
+                          title="An ad naming this asset also names another one."
+                        >
+                          ⚠
+                        </span>
+                      )}
                     </td>
-                    <td
-                      className="px-3 py-1.5"
-                      style={{
-                        fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-                        fontSize: "11px",
-                        color: "#6E695E",
-                      }}
-                    >
-                      {r.ad_created_date ?? "—"}
+                    <td className="px-3 py-2">
+                      <AdPreviewLinks adId={r.preview_ad_id} url={r.ad_preview_url} />
                     </td>
-                    <td className="px-3 py-1.5">
-                      <span className={`cat-badge ${CAT_CLASS[cat] ?? "cat-disc"}`}>{r.category ?? "—"}</span>
+                    <td className="px-3 py-2">
+                      <DestinationLink adId={r.preview_ad_id} url={r.destination_url} />
                     </td>
-                    <td className="px-3 py-1.5">
-                      <div className="flex gap-0.5">
-                        {(["f1_pass", "f2_pass", "f3_pass", "f4_pass"] as const).map((k, i) => {
-                          const v = r[k];
-                          const cls = v === null ? "u" : v ? "y" : "n";
-                          return <span key={k} className={`ae-flag ${cls}`}>F{i + 1}</span>;
-                        })}
-                      </div>
+                    <td className="px-3 py-2">
+                      {mm && (
+                        <span className={`rounded border px-1.5 py-0.5 text-[11px] ${mm.cls}`}>
+                          {mm.icon} {mm.label}
+                        </span>
+                      )}
                     </td>
-                    <td
-                      className="px-3 py-1.5 text-right"
-                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                    >
-                      {fmtMoney(r.spend)}
+                    <td className="px-3 py-2">
+                      {r.kind === "new" ? (
+                        <span className="rounded border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-800">
+                          New
+                        </span>
+                      ) : (
+                        <span
+                          className="rounded border border-amber-200 bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-900"
+                          title={`Reused ${r.iteration_count}× beyond its first outing`}
+                        >
+                          Iter ×{r.iteration_count}
+                        </span>
+                      )}
                     </td>
-                    <td
-                      className="px-3 py-1.5 text-right"
-                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                    >
-                      {fmtNum(r.meta_roas ?? r.roas)}
+                    <td className="px-3 py-2">
+                      <span className="text-[11px] font-medium" style={{ color: CAT_ACCENT[cat] }}>
+                        {cat}
+                      </span>
                     </td>
-                    <td
-                      className="px-3 py-1.5 text-right"
-                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                    >
-                      {fmtCompact(r.purchases)}
+                    <td className="px-3 py-2 text-right text-[12px] text-text-tertiary">
+                      {r.asset_created ?? "—"}
                     </td>
-                    <td
-                      className="px-3 py-1.5 text-right"
-                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                    >
-                      {fmtCompact(r.ncp_count)}
-                    </td>
-                    <td
-                      className="px-3 py-1.5 text-right"
-                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                    >
-                      {fmtMoney(r.cost_per_ncp)}
-                    </td>
-                    <td
-                      className="px-3 py-1.5 text-right"
-                      style={{ fontFamily: "'JetBrains Mono', ui-monospace, monospace", color: "#161513" }}
-                    >
-                      {fmtMoney(r.cost_per_ftewv)}
-                    </td>
+                    <td className="px-3 py-2 text-right">{r.ads}</td>
+                    <td className="px-3 py-2 text-right text-text-tertiary">{r.copy_ads}</td>
+                    <td className="px-3 py-2 text-right">{fmtMoney(r.spend)}</td>
+                    <td className="px-3 py-2 text-right">{fmtCompact(r.purchases)}</td>
+                    <td className="px-3 py-2 text-right">{fmtNum(r.roas)}</td>
+                    <td className="px-3 py-2 text-right">{fmtMoney(r.cost_per_ncp)}</td>
+                    <td className="px-3 py-2 text-right">{fmtMoney(r.cost_per_ftewv)}</td>
                   </tr>
                 );
               })}
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={11} className="px-4 py-6 text-center" style={{ color: "#6E695E" }}>
-                    No ads created in this window. Try widening the date range.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-          {rows.length < total && (
-            <div className="p-3 text-center" style={{ borderTop: "1px solid #F0EBDF" }}>
-              <button
-                onClick={loadMore}
-                disabled={loadingMore}
-                className="rounded-md px-4 py-1.5 text-[11px] font-medium disabled:opacity-40"
-                style={{ background: "#F5F1EC", border: "1px solid #E7E2D2", color: "#161513" }}
-              >
-                {loadingMore ? "Loading…" : `Load more (${rows.length} of ${total})`}
-              </button>
-            </div>
-          )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex items-center justify-between text-xs" style={{ color: CT.muted }}>
+        <span>
+          click a row to see the ad(s) behind it ·{" "}
+          {allRows.length.toLocaleString("en-IN")} asset{allRows.length === 1 ? "" : "s"} · showing{" "}
+          {pageRows.length ? page * PAGE_SIZE + 1 : 0}–{page * PAGE_SIZE + pageRows.length}
+        </span>
+        <div className="flex gap-2">
+          <button
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            className="rounded-md border border-border-primary px-2 py-1 disabled:opacity-40"
+          >
+            Prev
+          </button>
+          <button
+            disabled={(page + 1) * PAGE_SIZE >= allRows.length}
+            onClick={() => setPage((p) => p + 1)}
+            className="rounded-md border border-border-primary px-2 py-1 disabled:opacity-40"
+          >
+            Next
+          </button>
         </div>
+      </div>
+
+      {openAsset && (
+        <AssetAdsModal assetId={openAsset} onClose={() => setOpenAsset(null)} />
       )}
 
-      {/* Definitions modal -- opens on Definitions button click. Covers the
-          category ladder + F1-F4 gates so a new merchant can read the KPI
-          strip without asking the previous ops person. */}
-      {showDefs && (
+      {/* ── definitions ───────────────────────────────────────── */}
+      {defsOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setShowDefs(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setDefsOpen(false)}
         >
           <div
-            className="relative max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white shadow-xl"
+            className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-4 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-border-primary p-4">
-              <h3 className="text-base font-semibold text-text-primary">Creative Testing definitions</h3>
-              <button
-                onClick={() => setShowDefs(false)}
-                className="rounded-md p-1 text-text-tertiary hover:bg-bg-hover"
-                aria-label="Close"
-              >
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-base font-semibold">Definitions</h3>
+              <button onClick={() => setDefsOpen(false)} className="text-text-tertiary">
                 ✕
               </button>
             </div>
-            <div className="space-y-4 p-4 text-sm text-text-secondary">
-              <section>
-                <h4 className="mb-2 font-semibold text-text-primary">Category ladder</h4>
-                <p className="text-xs">
-                  Every ad gets exactly one category derived from its lifecycle metrics.
-                  The ladder is evaluated top-down; the first rung that fits wins.
+            <div className="space-y-3 text-sm">
+              <div>
+                <div className="font-medium">New creative vs Iteration</div>
+                <p className="text-text-tertiary">
+                  Decided by the asset&rsquo;s own creation date in its register, never by an ad
+                  date. Created inside the window &rarr; <b>New</b>. Created earlier, or only ever
+                  run as a duplicated (&ldquo;copy&rdquo;) ad, or no creation date on record &rarr;{" "}
+                  <b>Iteration</b>. 46% of mapped ads carry &ldquo;copy&rdquo; in the name, so
+                  dating off ads would make every duplicated creative look newly tested.
                 </p>
-                <dl className="mt-2 space-y-2">
-                  <div>
-                    <dt className="font-medium text-emerald-700">★ Winner / Incremental Winner</dt>
-                    <dd className="text-xs">Cleared F1 + F2 + F3 + F4 and delivered enough spend to be confident (not a fluke). Incremental Winner is the subset that also beats its adset&apos;s average — a true breakthrough creative, not just a good one.</dd>
-                  </div>
-                  <div>
-                    <dt className="font-medium text-amber-700">◆ P0 analysis</dt>
-                    <dd className="text-xs">Passed F1 (impressions target) and one of F2/F3/F4 but not all — worth a deeper look this week.</dd>
-                  </div>
-                  <div>
-                    <dt className="font-medium text-sky-700">▲ P1 / P2 analysis</dt>
-                    <dd className="text-xs">Passed F1 but is falling short on multiple efficiency gates. P1 is closer to salvageable; P2 is closer to Discarded.</dd>
-                  </div>
-                  <div>
-                    <dt className="font-medium text-slate-600">⌛ Result Awaited</dt>
-                    <dd className="text-xs">Less than 14 days old OR under the F1 impressions floor — too early to judge. Sits in the buffer while it accumulates data.</dd>
-                  </div>
-                  <div>
-                    <dt className="font-medium text-rose-700">✕ Discarded</dt>
-                    <dd className="text-xs">Cleared the buffer and failed enough gates that no version of the current metric will save it. Kill or replace.</dd>
-                  </div>
-                </dl>
-              </section>
-              <section>
-                <h4 className="mb-2 font-semibold text-text-primary">F1-F4 gates</h4>
-                <ul className="space-y-1 text-xs">
-                  <li><b>F1 — Volume</b>: impressions ≥ threshold (default 50,000). Confirms the ad had a fair delivery test.</li>
-                  <li><b>F2 — ROAS</b>: meta_roas ≥ threshold (default 3.0). Efficiency at the account level.</li>
-                  <li><b>F3 — Cost per NCP</b>: cost_per_ncp ≤ threshold (default ₹525). Cheap new-customer acquisition.</li>
-                  <li><b>F4 — Cost per FTEWV</b>: cost_per_ftewv ≤ threshold (default ₹12). Cheap first-time engaged viewer — the quality gate for hook strength.</li>
+              </div>
+              <div>
+                <div className="font-medium">Thresholds</div>
+                <ul className="list-disc pl-5 text-text-tertiary">
+                  <li>F1 — min impressions: 50,000</li>
+                  <li>F2 — ROAS &ge; 3.0</li>
+                  <li>F3 — Cost / NCP &le; ₹525</li>
+                  <li>F4 — Cost / FTEWV &le; ₹12</li>
                 </ul>
-              </section>
-              <section>
-                <h4 className="mb-2 font-semibold text-text-primary">Content types</h4>
-                <p className="text-xs">
-                  Derived from the ad_name naming convention. Priority: IFAD &gt; GAD (Graphic AD) &gt; VID markers (VRP/NNC/VIDEO/IGP/NO-ID/OSP/CPL/USP/CSR/ITE) &gt; STATIC (only when ad_name explicitly contains STATIC / _ST_ / +ST+). Anything else defaults to VID.
+              </div>
+              <div>
+                <div className="font-medium">Verdict buckets</div>
+                <ul className="list-disc pl-5 text-text-tertiary">
+                  <li>Incremental Winner — F1 and (F2 or F3) and F4</li>
+                  <li>Winner — F1 and (F2 or F3)</li>
+                  <li>P0 analysis — F1 and F4</li>
+                  <li>P1 analysis — F1 only</li>
+                  <li>P2 analysis — F2 only</li>
+                  <li>Result Awaited — created less than 14 days ago</li>
+                  <li>Discarded — none of the above</li>
+                </ul>
+                <p className="mt-1 text-text-tertiary">
+                  An asset takes the <b>best</b> verdict any of its ads reached — a creative that
+                  produced one Winner is a Winner, even if another ad using it was discarded.
                 </p>
-              </section>
-              <section>
-                <h4 className="mb-2 font-semibold text-text-primary">Excl. copy</h4>
-                <p className="text-xs">
-                  When ON (default), ads whose ad_name contains &apos;copy&apos; are hidden. Meta&apos;s duplication flow appends &apos;- Copy N&apos; to child ads, so hiding them isolates the original creative under evaluation. Filter runs server-side so KPI tiles and totals reflect the toggle.
-                </p>
-              </section>
+              </div>
             </div>
           </div>
         </div>
@@ -1450,3 +945,5 @@ export function CreativeTesting() {
     </div>
   );
 }
+
+export default CreativeTesting;

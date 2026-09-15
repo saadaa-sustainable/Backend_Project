@@ -10,7 +10,7 @@ or simply ``python -m app.main``.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,18 +38,18 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("application_startup", app_env=settings.app_env)
     start_scheduler()
-    # Pre-warm the /ads-analyse cache so the first real user hit finds a
-    # populated entry -- the cold SQL takes ~135s on Render, which
-    # exceeds the 120s HTTP gateway timeout. Firing as a background task
-    # (asyncio.create_task) so app startup doesn't block on the warmup.
-    # See analytics.warm_ads_analyse_cache for which filter combos.
+    # Warm default dashboard reads without blocking startup. Concurrent
+    # visitors share the same cache fill and its database work.
     import asyncio as _asyncio
 
     from app.api.routers.analytics import warm_ads_analyse_cache
-    _asyncio.create_task(warm_ads_analyse_cache())
+    warmup = _asyncio.create_task(warm_ads_analyse_cache())
     try:
         yield
     finally:
+        warmup.cancel()
+        with suppress(_asyncio.CancelledError):
+            await warmup
         shutdown_scheduler()
         await dispose_engine()
         logger.info("application_shutdown")

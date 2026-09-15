@@ -46,3 +46,9 @@ alembic/versions/__pycache__/
 admin/node_modules/
 admin/.next/
 admin/out/
+
+# Ad-level data exports. This repo is PUBLIC -- exports/ carries real ad
+# names, spend and revenue (e.g. the 457-row Result Awaited reclassification
+# from 2026-09-15). The .xlsx files already tracked here are schema/field
+# references, not performance data; keep it that way.
+exports/*.csv

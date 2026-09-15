@@ -45,7 +45,13 @@ def test_get_insights_fields_extra_and_exclude() -> None:
     fields = get_insights_fields(
         include_groups=["spend"], exclude_fields=["spend"], extra_fields=["brand_new_metric"]
     )
-    assert fields == ["brand_new_metric"]
+    # The "spend" group is {spend, social_spend}; excluding "spend" leaves
+    # social_spend behind. Assert the contract (exclude removes, extra adds)
+    # rather than the group's exact membership, so adding a metric to the
+    # group in meta_registry doesn't break this test again.
+    assert "spend" not in fields
+    assert "brand_new_metric" in fields
+    assert "social_spend" in fields
 
 
 def test_resolve_attribution_windows_defaults() -> None:

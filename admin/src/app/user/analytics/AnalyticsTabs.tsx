@@ -1,17 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Dashboard } from "./Dashboard";
-import { AdsAnalyse } from "./AdsAnalyse";
-import { CreativeTesting } from "./CreativeTesting";
-import { LastClickUtm } from "./LastClickUtm";
-import { CustomerJourney } from "./CustomerJourney";
-import { LandingPageAnalysis } from "./LandingPageAnalysis";
-import { ShopifyExplorer } from "./ShopifyExplorer";
-import { MetaExplorer } from "./MetaExplorer";
-import { Cpis } from "./Cpis";
-import { Instagram } from "./Instagram";
-import { UntestedAssets } from "./UntestedAssets";
+import { useMemo, useSyncExternalStore } from "react";
+import dynamic from "next/dynamic";
+
+function TabLoading() {
+  return <div role="status" className="min-h-40 py-8 text-sm text-text-secondary">Loading analytics…</div>;
+}
+
+// Only the selected section downloads its components and starts its requests.
+const Dashboard = dynamic(() => import("./Dashboard").then((m) => m.Dashboard), { loading: TabLoading });
+const AdsAnalyse = dynamic(() => import("./AdsAnalyse").then((m) => m.AdsAnalyse), { loading: TabLoading });
+const CreativeTesting = dynamic(() => import("./CreativeTesting").then((m) => m.CreativeTesting), { loading: TabLoading });
+const LastClickUtm = dynamic(() => import("./LastClickUtm").then((m) => m.LastClickUtm), { loading: TabLoading });
+const CustomerJourney = dynamic(() => import("./CustomerJourney").then((m) => m.CustomerJourney), { loading: TabLoading });
+const LandingPageAnalysis = dynamic(() => import("./LandingPageAnalysis").then((m) => m.LandingPageAnalysis), { loading: TabLoading });
+const ShopifyExplorer = dynamic(() => import("./ShopifyExplorer").then((m) => m.ShopifyExplorer), { loading: TabLoading });
+const MetaExplorer = dynamic(() => import("./MetaExplorer").then((m) => m.MetaExplorer), { loading: TabLoading });
+const Cpis = dynamic(() => import("./Cpis").then((m) => m.Cpis), { loading: TabLoading });
+const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), { loading: TabLoading });
+const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
 
 type Tab =
   | "dashboard"
@@ -83,36 +90,32 @@ function loadTabOrder(): Tab[] {
   }
 }
 
+function subscribeToHash(onChange: () => void) {
+  window.addEventListener("hashchange", onChange);
+  return () => window.removeEventListener("hashchange", onChange);
+}
+
+function getCurrentTab(): Tab {
+  const hash = window.location.hash.replace(/^#/, "");
+  return (DEFAULT_TAB_ORDER as readonly string[]).includes(hash) ? hash as Tab : "dashboard";
+}
+
+function getServerTab(): null {
+  return null;
+}
+
+function selectTab(tab: Tab) {
+  // Keep browser navigation state and avoid adding a history entry per click.
+  window.history.replaceState(window.history.state, "", `#${tab}`);
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+}
+
 export function AnalyticsTabs() {
-  const [tabOrder, setTabOrder] = useState<Tab[]>(DEFAULT_TAB_ORDER);
-  const [tab, setTab] = useState<Tab>("dashboard");
-
-  useEffect(() => {
-    setTabOrder(loadTabOrder());
-    // Deep-link support: /user/analytics#creative-testing selects that
-    // tab on load. Also listen for browser back/forward (hashchange).
-    if (typeof window === "undefined") return;
-    const applyHash = () => {
-      const hash = window.location.hash.replace(/^#/, "");
-      if (hash && (DEFAULT_TAB_ORDER as readonly string[]).includes(hash)) {
-        setTab(hash as Tab);
-      }
-    };
-    applyHash();
-    window.addEventListener("hashchange", applyHash);
-    return () => window.removeEventListener("hashchange", applyHash);
-  }, []);
-
-  // Push the tab into the URL hash so a shared / bookmarked link lands
-  // on the same view. Use replaceState -- we don't want every tab click
-  // to add a browser-history entry (would break the back button).
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const current = window.location.hash.replace(/^#/, "");
-    if (current !== tab) {
-      window.history.replaceState(null, "", `#${tab}`);
-    }
-  }, [tab]);
+  // A server cannot see URL fragments. Wait for the browser snapshot so a
+  // deep link never mounts Dashboard or issues its five unrelated requests.
+  const tab = useSyncExternalStore(subscribeToHash, getCurrentTab, getServerTab);
+  const ready = tab !== null;
+  const tabOrder = useMemo(() => ready ? loadTabOrder() : DEFAULT_TAB_ORDER, [ready]);
 
 
   return (
@@ -133,7 +136,7 @@ export function AnalyticsTabs() {
               return (
                 <button
                   key={t}
-                  onClick={() => setTab(t)}
+                  onClick={() => selectTab(t)}
                   className={`relative px-3 pb-3 pt-1 text-[13px] font-medium transition-colors ${
                     active
                       ? "text-text-primary"
@@ -151,7 +154,7 @@ export function AnalyticsTabs() {
         </div>
       </div>
 
-      {TAB_META[tab].render()}
+      {tab === null ? <TabLoading /> : TAB_META[tab].render()}
     </div>
   );
 }
