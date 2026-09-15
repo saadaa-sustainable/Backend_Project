@@ -2,6 +2,8 @@
 // (app/api/routers/admin.py). Kept deliberately free of any UI concerns —
 // pages import types and call functions from here, nothing more.
 
+import { RequestCache } from "./apiCache";
+
 // Default port is 8002 (was 8001 before a stuck-socket incident on
 // 2026-08-29). Port 8000 is typically occupied by CTD's api_ae.py in
 // local dev on this machine. Override with NEXT_PUBLIC_API_BASE_URL
@@ -127,7 +129,30 @@ class ApiError extends Error {
   }
 }
 
+const analyticsCache = new RequestCache();
+
+export function clearAnalyticsCache(): void {
+  analyticsCache.clear();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const analyticsRead = path.startsWith("/admin/analytics/") && (
+    method === "GET" || (method === "POST" && path === "/admin/analytics/cpis-utm/spend-trends")
+  );
+  // Browser memory only: never share a user's response through SSR or
+  // a public HTTP cache. Include headers and request body in the key.
+  if (analyticsRead && typeof window !== "undefined" && !init?.signal && init?.cache !== "reload") {
+    const key = JSON.stringify([API_BASE_URL, method, path, init?.body ?? null,
+      [...new Headers(init?.headers).entries()].sort()]);
+    return analyticsCache.get(key, () => fetchResponse<T>(path, init));
+  }
+  const result = await fetchResponse<T>(path, init);
+  if (method !== "GET" && !analyticsRead) clearAnalyticsCache();
+  return result;
+}
+
+async function fetchResponse<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
@@ -620,7 +645,13 @@ export interface AdsAnalyseRow {
   //   'name_synthetic'   -- regex-extracted from ad_name, code not yet in a register table
   asset_id: string | null;
   asset_media: "video" | "graphic" | "influencer" | null;
-  asset_match_source: "direct" | "ctd_matched" | "name_parsed" | "name_synthetic" | null;
+  /** Always "asset_id" -- matching is strictly the register identifier
+   * (asset_id / requisition_id / post_id) found inside ad_name. */
+  asset_match_source: "asset_id" | null;
+  /** true when the ad name resolves to MORE THAN ONE registered asset
+   * (e.g. CPL010-0785-0736 carries two codes). A winner was picked
+   * deterministically; the row is flagged for a human to adjudicate. */
+  asset_name_conflict: boolean | null;
   // Per-ad media (ad_media silver, built from raw_dump_meta joins).
   // Coverage ~19% today (ads whose creative has an asset_feed_spec).
   // All null for the other 81% -- follow-up: /adcreatives fetcher.
@@ -712,6 +743,12 @@ export interface AdsAnalyseParams {
   /** Naming-convention token to substring-match in ad_name (case-insensitive).
    * Matches CTD's Content type dropdown -- IFAD / GAD / VID / STATIC. */
   content_type?: string;
+  /** Filter on whether the ad resolved to a creative asset.
+   * true  = Asset ID column has a value (any match source);
+   * false = Asset ID column is empty;
+   * undefined = no filter. Applied server-side to base_where, so the
+   * count, category tiles and KPI strip move with the table. */
+  has_asset_id?: boolean;
   /** When both from_date and to_date are set, the window is applied
    * per date_field: 'created' filters rows by ad_created_date;
    * 'first_seen' filters by first_seen_date; 'delivery' keeps every
@@ -738,6 +775,9 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   if (params.only_with_shopify_orders) qs.set("only_with_shopify_orders", "true");
   if (params.excl_copy) qs.set("excl_copy", "true");
   if (params.content_type) qs.set("content_type", params.content_type);
+  // Explicit undefined check: `false` is a real filter value here
+  // (show only ads with an EMPTY Asset ID), not "unset".
+  if (params.has_asset_id !== undefined) qs.set("has_asset_id", String(params.has_asset_id));
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
   if (params.date_field) qs.set("date_field", params.date_field);
@@ -1438,6 +1478,18 @@ export function fetchCpisSpendTrend(masterSku: string, window: CpisUtmWindow): P
   return request<CpisSpendTrendResponse>(`/admin/analytics/cpis-utm/spend-trend?${qs.toString()}`);
 }
 
+export function fetchCpisSpendTrends(
+  masterSkus: string[], window: CpisUtmWindow, fromDate?: string, toDate?: string,
+): Promise<{ rows: CpisSpendTrendResponse[] }> {
+  return request("/admin/analytics/cpis-utm/spend-trends", {
+    method: "POST",
+    body: JSON.stringify({
+      master_skus: [...new Set(masterSkus)].sort(), window,
+      ...(fromDate && toDate ? { from_date: fromDate, to_date: toDate } : {}),
+    }),
+  });
+}
+
 // ---------------------------------------------------------------------
 // Instagram — per-post Silver read over public.insta_data
 // ---------------------------------------------------------------------
@@ -1769,3 +1821,148 @@ export function fetchFileErrors(source: FileErrorSource, limit = 50): Promise<Fi
 }
 
 export { ApiError };
+
+// ---------------------------------------------------------------------
+// Creative Testing -- ASSET grain
+// ---------------------------------------------------------------------
+// One row per creative asset, counted once, not per ad. "New" vs
+// "Iteration" is decided by the asset's own creation date in its
+// register, never by the ad's date -- 46% of mapped ads carry "copy" in
+// the name, so dating off ads would make every duplicated creative look
+// newly tested.
+
+export interface CreativeTestingRow {
+  asset_id: string;
+  media: "video" | "graphic" | "influencer" | null;
+  asset_created: string | null;
+  /** Original asset/post URL and optional thumbnail from the creative register. */
+  preview_url?: string | null;
+  thumbnail_url?: string | null;
+  /** Both ad links belong to this asset's highest-spend ad. */
+  preview_ad_id?: string | null;
+  ad_preview_url?: string | null;
+  destination_url?: string | null;
+  /** Best verdict any ad of this asset reached. */
+  category: string | null;
+  /** One of the asset's ad names -- Product Focus is derived from it. */
+  sample_ad_name: string | null;
+  kind: "new" | "iteration";
+  /** Times reused beyond its first outing. 0 = new. */
+  iteration_count: number;
+  ads: number;
+  copy_ads: number;
+  ads_in_window: number;
+  first_ad_date: string | null;
+  last_ad_date: string | null;
+  account_name: string | null;
+  name_conflict: boolean | null;
+  spend: number | null;
+  impressions: number | null;
+  purchases: number | null;
+  conv_value: number | null;
+  ncp_count: number | null;
+  ftewv_count: number | null;
+  roas: number | null;
+  cost_per_ncp: number | null;
+  cost_per_ftewv: number | null;
+  ctr_pct: number | null;
+}
+
+export interface CreativeTestingTotals {
+  assets: number;
+  new_creatives: number;
+  iterations: number;
+  spend: number;
+  impressions: number;
+  purchases: number;
+  conv_value: number;
+  ncp_count: number;
+  ftewv_count: number;
+  roas: number | null;
+  cost_per_ncp: number | null;
+  cost_per_ftewv: number | null;
+  thruplays: number;
+  three_sec_plays: number;
+  outbound_clicks: number;
+  post_engagements: number;
+}
+
+export interface CreativeTestingResponse {
+  rows: CreativeTestingRow[];
+  total: number;
+  totals: CreativeTestingTotals;
+  category_counts: Record<string, number>;
+  kind_counts: Record<string, number>;
+}
+
+export interface CreativeTestingParams {
+  from_date: string;
+  to_date: string;
+  kind?: "new" | "iteration";
+  media?: "video" | "graphic" | "influencer";
+  category?: string;
+  account_name?: string;
+  search?: string;
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchCreativeTesting(
+  params: CreativeTestingParams,
+): Promise<CreativeTestingResponse> {
+  const qs = new URLSearchParams();
+  qs.set("from_date", params.from_date);
+  qs.set("to_date", params.to_date);
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.media) qs.set("media", params.media);
+  if (params.category) qs.set("category", params.category);
+  if (params.account_name) qs.set("account_name", params.account_name);
+  if (params.search) qs.set("search", params.search);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  return request<CreativeTestingResponse>(`/admin/analytics/creative-testing?${qs}`);
+}
+
+/** One ad that named a given asset, in launch order. */
+export interface CreativeTestingAdRow {
+  ad_id: string;
+  ad_name: string | null;
+  ad_preview_url?: string | null;
+  destination_url?: string | null;
+  ad_status: string | null;
+  category: string | null;
+  ad_created_date: string | null;
+  is_copy: boolean;
+  /** 0 = the original outing, 1 = 1st iteration, 2 = 2nd, ... */
+  iteration_index: number;
+  spend: number | null;
+  impressions: number | null;
+  purchases: number | null;
+  conv_value: number | null;
+  ncp_count: number | null;
+  ftewv_count: number | null;
+  roas: number | null;
+  cost_per_ncp: number | null;
+  cost_per_ftewv: number | null;
+  ctr_pct: number | null;
+  f1_pass: boolean | null;
+  f2_pass: boolean | null;
+  f3_pass: boolean | null;
+  f4_pass: boolean | null;
+}
+
+export interface CreativeTestingAdsResponse {
+  asset_id: string;
+  media: string | null;
+  ads: CreativeTestingAdRow[];
+}
+
+export function fetchCreativeTestingAds(
+  assetId: string,
+): Promise<CreativeTestingAdsResponse> {
+  return request<CreativeTestingAdsResponse>(
+    `/admin/analytics/creative-testing/${encodeURIComponent(assetId)}/ads`,
+  );
+}

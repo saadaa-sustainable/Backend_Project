@@ -104,11 +104,39 @@ SHOPIFY_INGEST_CMD = [
 
 # (label, [script + args], timeout_seconds). Ordered by dependency.
 PHASE_INGEST = [
-    ("meta_insights_15d",     ["scripts/ingest_last_15_days.py"],           2700),
+    # TWO insights fetches, because two consumers need two grains.
+    #
+    #   daily (time_increment=1, ad level)  -> insights_daily_by_ad, which
+    #       reads raw_payload directly and dedups on (ad_id, date_start).
+    #       This is the historical behaviour; unchanged.
+    #
+    #   lifetime (all_days, all three levels) -> ad_insights /
+    #       adset_insights / campaign_insights, whose primary key is the
+    #       bare entity id. Feeding those from the daily fetch produces
+    #       15 rows per entity and fails outright: confirmed live,
+    #       `duplicate key value violates unique constraint
+    #       campaign_insights_pkey`.
+    #
+    # Only the lifetime fetch tags parent_ids->>'level', which is what
+    # the silver flatten selects on -- see _build_rows in the ingest.
+    # Until 2026-09-15 the ingest hardcoded level=ad and never tagged
+    # level at all, so campaign_insights / adset_insights sat at 488 and
+    # 1,171 rows against 523 campaigns and 3,126 adsets.
+    ("meta_insights_15d",     ["scripts/ingest_last_15_days.py",
+                               "--levels", "ad"],                           2700),
+    ("meta_insights_lifetime",["scripts/ingest_last_15_days.py",
+                               "--levels", "campaign,adset,ad",
+                               "--time-increment", "all_days"],             2700),
     ("meta_dpa_products",     ["scripts/fetch_ad_product_insights.py"],     1800),
     ("instagram_posts",       ["scripts/ingest_instagram_chronological.py"], 1800),
     ("shopify_daily",         SHOPIFY_INGEST_CMD,        SHOPIFY_INGEST_TIMEOUT_S),
     ("bq_inventory",          ["scripts/fetch_bq_inventory_daily.py"],       900),
+    # The three creative-asset registers (video / influencer / graphics).
+    # Ingest, not silver: two are other Supabase projects and one is a
+    # Google Sheet, so this is an external-API pull like every other step
+    # in this phase. Feeds ad_asset_map in PHASE_SILVER below.
+    ("asset_sources",         ["scripts/ingest_asset_sources.py",
+                               "--source", "all"],                          900),
 ]
 
 PHASE_SILVER = [
@@ -133,6 +161,10 @@ PHASE_SILVER = [
     # 2025-01-01 every night would re-upsert 456,604 rows to rewrite a
     # few thousand. Deep history is a one-off:
     #   python scripts/sync_ad_metrics_external.py --since 2025-01-01
+    # ad_insights / adset_insights / campaign_insights. Another job that
+    # lived only in the FlattenJob registry, so nothing in production ever
+    # ran it. MUST precede ad_lifecycle, which reads ad_insights.
+    ("silver_insights_tables",["scripts/refresh_insights_tables.py"],        1800),
     ("ad_metrics_sync",       ["scripts/sync_ad_metrics_external.py",
                                "--since-days", "120"],                    1200),
     ("ad_lifecycle",          ["scripts/refresh_ad_lifecycle.py"],          1200),
@@ -142,6 +174,13 @@ PHASE_SILVER = [
     # insights_daily_by_ad, and a stale either side would date the
     # milestones wrong.
     ("ad_history_milestones", ["scripts/refresh_ad_history_milestones.py"],  900),
+    # ad_id -> content-workflow asset code. Reads ad_lifecycle (for the ad
+    # universe + ad_name) and the three mirrored content registers, so it
+    # must follow ad_lifecycle. Persists what /ads-analyse used to compute
+    # inline on every request; also the input the Untested Assets view
+    # needs to stop calling an asset untested purely because the register's
+    # own ad_id column was never written back.
+    ("ad_asset_map",          ["scripts/refresh_ad_asset_map.py"],           600),
     # 900 -> 3600 (2026-09-04). refresh_shopify_silver.py TRUNCATEs and
     # re-INSERTs all EIGHT silver tables from ~4.9M bronze rows every
     # run -- sessions 1.37M, inventory 1.38M, customers 984k, orders

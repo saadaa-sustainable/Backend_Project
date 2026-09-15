@@ -33,6 +33,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/lib/api";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
 import { AdsAnalyseCharts } from "./AdsAnalyseCharts";
 import { TableSkeleton } from "./TableSkeleton";
@@ -255,24 +256,17 @@ function StatusPill({ status }: { status: string | null }) {
   return <span className={`ae-status ${active ? "active" : ""}`}>{status}</span>;
 }
 
-// Asset ID cell — shows the mapped asset with a small badge indicating
-// how the mapping was resolved. Backend chain (highest confidence first):
-//   direct           workflow-optimiser explicit ad_id link
-//   ctd_matched      CTD's fuzzy substring matcher hit
-//   name_parsed      regex-extracted from ad_name AND verified in a register table
-//   name_synthetic   regex-extracted only — surfaced so a merchant can
-//                    trace which brief the ad_name refers to, even if
-//                    that brief isn't in the register yet
-const ASSET_SOURCE_META: Record<
-  NonNullable<AdsAnalyseRow["asset_match_source"]>,
-  { label: string; cls: string }
-> = {
-  direct: { label: "direct", cls: "bg-emerald-100 text-emerald-800 border-emerald-200" },
-  ctd_matched: { label: "match", cls: "bg-sky-100 text-sky-800 border-sky-200" },
-  name_parsed: { label: "parsed", cls: "bg-amber-100 text-amber-800 border-amber-200" },
-  name_synthetic: { label: "synth", cls: "bg-slate-100 text-slate-600 border-slate-200" },
-};
-
+// Asset ID cell — the asset whose identifier appears in this ad's name.
+// Source is public.ad_asset_map (scripts/refresh_ad_asset_map.py), which
+// matches STRICTLY on one identifier per media and nothing else:
+//   video       content_asset_register.asset_id          CPL012-0963
+//   graphic     content_graphic_register.requisition_id  GAD-Sep-1493
+//   influencer  content_influencer_posts.post_id         SIF-15233-P1
+// No nomenclature, no username, no register ad_id column, and no regex
+// scrape of ad_name that a register can't vouch for. So there is only
+// one match source and it needs no badge — a value here means a real
+// registered asset was named by the ad. The only thing worth flagging is
+// an ad naming more than one.
 const ASSET_MEDIA_ICON: Record<NonNullable<AdsAnalyseRow["asset_media"]>, string> = {
   video: "🎬",
   graphic: "🖼",
@@ -281,19 +275,17 @@ const ASSET_MEDIA_ICON: Record<NonNullable<AdsAnalyseRow["asset_media"]>, string
 
 function AssetIdCell({ row }: { row: AdsAnalyseRow }) {
   if (!row.asset_id) return <span className="text-text-tertiary">—</span>;
-  const src = row.asset_match_source;
   const media = row.asset_media;
-  const meta = src ? ASSET_SOURCE_META[src] : null;
   return (
     <span className="inline-flex items-center gap-1">
       {media && <span title={media}>{ASSET_MEDIA_ICON[media]}</span>}
       <span className="font-mono text-[11px]">{row.asset_id}</span>
-      {meta && (
+      {row.asset_name_conflict && (
         <span
-          className={`rounded border px-1 text-[10px] font-medium ${meta.cls}`}
-          title={`Mapped via ${src?.replace("_", " ")}`}
+          className="rounded border border-amber-300 bg-amber-100 px-1 text-[10px] font-medium text-amber-900"
+          title="This ad name resolves to more than one registered asset. A winner was picked deterministically — worth a human check."
         >
-          {meta.label}
+          ⚠ multi
         </span>
       )}
     </span>
@@ -740,7 +732,12 @@ export function AdsAnalyse() {
   // last 7 days" instead of "ads that ran in the last 7 days".
   const [dateField, setDateField] = useState<"delivery" | "created" | "first_seen">("created");
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim());
   const [onlyWithOrders, setOnlyWithOrders] = useState(false);
+  // "" = no filter, "yes" = Asset ID populated, "no" = Asset ID empty.
+  // A tri-state string rather than boolean|undefined so it binds
+  // straight to a <select> without the false/undefined ambiguity.
+  const [assetFilter, setAssetFilter] = useState<"" | "yes" | "no">("");
   // Date range window -- when both are set, spend / impressions /
   // purchases / conv_value / roas in the response are overwritten
   // with values summed from Bronze raw_dump_meta within the window.
@@ -793,17 +790,18 @@ export function AdsAnalyse() {
   const filters = useMemo(
     () => ({
       account_name: account || undefined,
-      search: search || undefined,
+      search: debouncedSearch || undefined,
       category: categoryFilter || undefined,
       ad_effective_status: adStatus || undefined,
       only_with_shopify_orders: onlyWithOrders,
+      has_asset_id: assetFilter === "" ? undefined : assetFilter === "yes",
       // Only send both together -- one without the other has no meaning
       // on the server side (the overlay/filter branch keys on both being set).
       from_date: fromDate && toDate ? fromDate : undefined,
       to_date: fromDate && toDate ? toDate : undefined,
       date_field: fromDate && toDate ? dateField : undefined,
     }),
-    [account, search, categoryFilter, adStatus, onlyWithOrders, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, adStatus, onlyWithOrders, assetFilter, fromDate, toDate, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -1168,6 +1166,19 @@ export function AdsAnalyse() {
         <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" checked={onlyWithOrders} onChange={(e) => setOnlyWithOrders(e.target.checked)} />
           Has Shopify orders
+        </label>
+        <label className="flex items-center gap-1.5 text-xs">
+          Asset ID
+          <select
+            value={assetFilter}
+            onChange={(e) => setAssetFilter(e.target.value as "" | "yes" | "no")}
+            className="rounded-md border border-border-primary px-2 py-1 text-xs"
+            title="Filter by whether the ad resolved to a creative asset. Matched includes every match source (direct / ctd_matched / name_parsed / name_synthetic)."
+          >
+            <option value="">All ads</option>
+            <option value="yes">Has asset ID</option>
+            <option value="no">No asset ID</option>
+          </select>
         </label>
         <div className="relative ml-auto">
           <button

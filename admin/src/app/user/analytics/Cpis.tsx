@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   CpisMatchedAdRow,
@@ -11,10 +11,11 @@ import {
   SaturationYMetric,
   fetchCpisDataFreshness,
   fetchCpisMatchedAds,
-  fetchCpisSpendTrend,
+  fetchCpisSpendTrends,
   fetchCpisUtm,
   fetchSaturationCurve,
   type CpisDataFreshness,
+  type CpisSpendTrendResponse,
 } from "@/lib/api";
 import { SaturationCurveChart } from "./charts/SaturationCurveChart";
 import { KwikTile } from "./KwikTile";
@@ -26,6 +27,7 @@ import { ExportButton } from "@/components/ExportButton";
 // Total distinct SKUs across every window stays <100, so a single-page
 // fetch is still fast.
 const PAGE_SIZE = 500;
+const DISPLAY_PAGE_SIZE = 50;
 
 const SATURATION_Y_METRICS: { value: SaturationYMetric; label: string }[] = [
   { value: "ncp_count", label: "NCP" },
@@ -278,46 +280,22 @@ function fmtNumFull(n: number | null | undefined): string {
   return Math.round(n).toLocaleString("en-IN");
 }
 
-/** Inline spend-trend sparkline that lazy-loads its own daily-series
- *  data via /cpis-utm/spend-trend when the row mounts. Split from the
- *  main /cpis-utm endpoint because the raw_dump_meta scan for 50 rows
- *  ballooned to 60+s; per-SKU the fetch is under a second. */
-function LazySpendTrendCell({
-  masterSku,
-  window,
+/** The table fetches one batch for the visible page; cells only render it. */
+function SpendTrendCell({
+  trend,
+  loading,
 }: {
-  masterSku: string;
-  window: CpisUtmWindow;
+  trend: CpisSpendTrendResponse | undefined;
+  loading: boolean;
 }) {
-  const [daily, setDaily] = useState<number[] | null>(null);
-  const [prevTotal, setPrevTotal] = useState<number | null>(null);
-  const [state, setState] = useState<"loading" | "loaded" | "error">("loading");
-
-  useEffect(() => {
-    let cancelled = false;
-    setState("loading");
-    fetchCpisSpendTrend(masterSku, window)
-      .then((r) => {
-        if (cancelled) return;
-        setDaily(r.spend_trend_current);
-        setPrevTotal(r.spend_trend_prev_total);
-        setState("loaded");
-      })
-      .catch(() => !cancelled && setState("error"));
-    return () => {
-      cancelled = true;
-    };
-  }, [masterSku, window]);
-
-  if (state === "loading") {
+  if (loading) {
     return (
       <div className="flex items-center justify-end">
         <div className="h-1 w-16 animate-pulse rounded bg-bg-muted" />
       </div>
     );
   }
-  if (state === "error") return <span className="text-text-tertiary">—</span>;
-  return <SpendTrendSparkline daily={daily} prevTotal={prevTotal} />;
+  return <SpendTrendSparkline daily={trend?.spend_trend_current} prevTotal={trend?.spend_trend_prev_total} />;
 }
 
 /** Inline spend-trend sparkline + % change badge vs. previous period.
@@ -514,8 +492,13 @@ function RoasChip({ roas }: { roas: number | null | undefined }) {
 }
 
 function CpisView() {
-  const [window_, setWindow] = useState<CpisUtmWindow>("30d");
+  const window_: CpisUtmWindow = "30d";
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const timeout = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timeout);
+  }, [search]);
   // Default false (was true). The row set is now the whole live
   // catalogue, not just SKUs an ad happened to drive -- a SKU with 412
   // units and no ad spend was previously ABSENT, which reads as "we
@@ -556,17 +539,21 @@ function CpisView() {
   // "Data through <date>" indicator so the merchant sees the freshness
   // at a glance instead of picking a range that ends in empty days.
   const [freshness, setFreshness] = useState<CpisDataFreshness | null>(null);
+  const [freshnessReady, setFreshnessReady] = useState(false);
+  const datesTouchedRef = useRef(false);
   useEffect(() => {
+    let cancelled = false;
     fetchCpisDataFreshness()
       .then((f) => {
+        if (cancelled) return;
         setFreshness(f);
         // Use max_daily_day (the freshest day for which BOTH Meta spend
         // AND Shopify orders exist -- it's min(max_meta, max_orders)).
         // Fall back to max_meta_day if daily table hasn't been
         // populated. Only auto-fill when the user hasn't touched the
-        // picker yet (fromDate/toDate still equal their initial values).
+        // picker while the freshness request was in flight.
         const cap = f.max_daily_day || f.max_meta_day;
-        if (!cap) return;
+        if (!cap || datesTouchedRef.current) return;
         setToDate(cap);
         // Slide fromDate back 29 days from cap for a stable "last 30d"
         // default anchored on data reality, not wall-clock today.
@@ -576,7 +563,11 @@ function CpisView() {
       })
       .catch(() => {
         /* silent: leave the naive today-based defaults if probe fails */
-      });
+      })
+      .finally(() => !cancelled && setFreshnessReady(true));
+    return () => {
+      cancelled = true;
+    };
   }, []);
   // Collapse toggles for each of the three analytics blocks (KPI strip,
   // saturation curve, main table). Default: everything open. Merchant
@@ -595,6 +586,7 @@ function CpisView() {
 
   const [rows, setRows] = useState<CpisUtmRow[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
   // Reconciliation totals for the picked window -- fed into the KPI
   // strip so the fractional "Ad spend" tile can show the honest Meta
   // total (not just the paginated row sum).
@@ -606,27 +598,42 @@ function CpisView() {
   const [untetheredParts, setUntetheredParts] = useState<{
     adUnknown: number | null; lag: number | null; noConversion: number | null;
   }>({ adUnknown: null, lag: null, noConversion: null });
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const [loadedFiltersKey, setLoadedFiltersKey] = useState<string | null>(null);
+  const [loadedRangeKey, setLoadedRangeKey] = useState<string | null>(null);
+  const [loadingMoreKey, setLoadingMoreKey] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<{ key: string; message: string } | null>(null);
+  const requestVersionRef = useRef(0);
 
   const filters = useMemo(
     () =>
       fromDate && toDate
-        ? { from_date: fromDate, to_date: toDate, search: search || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort }
-        : { window: window_, search: search || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort },
-    [fromDate, toDate, window_, search, onlyMatched, includeArchived, sort],
+        ? { from_date: fromDate, to_date: toDate, search: debouncedSearch || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort }
+        : { window: window_, search: debouncedSearch || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort },
+    [fromDate, toDate, window_, debouncedSearch, onlyMatched, includeArchived, sort],
   );
+  const filtersKey = JSON.stringify(filters);
+  const rangeKey = JSON.stringify(fromDate && toDate ? [fromDate, toDate] : [window_]);
+  const loading = !freshnessReady || settledKey !== filtersKey;
+  const loadingMore = loadingMoreKey === filtersKey;
+  const error = requestError?.key === filtersKey ? requestError.message : null;
+  const hasCurrentRange = loadedRangeKey === rangeKey;
+  const showingPreviousResults = hasCurrentRange && loadedFiltersKey !== filtersKey;
 
   useEffect(() => {
+    if (!freshnessReady) return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
+    requestVersionRef.current += 1;
     fetchCpisUtm({ ...filters, limit: PAGE_SIZE, offset: 0 })
       .then((res) => {
         if (cancelled) return;
         setRows(res.rows);
         setTotal(res.total);
+        setPage(0);
+        setLoadingMoreKey(null);
+        setLoadedFiltersKey(filtersKey);
+        setLoadedRangeKey(rangeKey);
+        setRequestError(null);
         setMetaTotalSpend(res.meta_total_spend);
         setAttributedSpend(res.attributed_spend);
         setUntetheredSpend(res.untethered_spend);
@@ -638,30 +645,59 @@ function CpisView() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof ApiError ? err.message : "Could not reach the FastAPI backend.");
+        setRequestError({ key: filtersKey, message: err instanceof ApiError ? err.message : "Could not reach the FastAPI backend." });
       })
-      .finally(() => !cancelled && setLoading(false));
+      .finally(() => !cancelled && setSettledKey(filtersKey));
     return () => {
       cancelled = true;
+      requestVersionRef.current += 1;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+  }, [filters, filtersKey, rangeKey, freshnessReady]);
 
   async function loadMore() {
-    setLoadingMore(true);
+    if (loading || loadingMore || showingPreviousResults) return;
+    const version = requestVersionRef.current;
+    setLoadingMoreKey(filtersKey);
     try {
       const res = await fetchCpisUtm({ ...filters, limit: PAGE_SIZE, offset: rows.length });
+      if (version !== requestVersionRef.current) return;
       setRows((prev) => [...prev, ...res.rows]);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load more rows.");
+      if (version !== requestVersionRef.current) return;
+      setRequestError({ key: filtersKey, message: err instanceof ApiError ? err.message : "Could not load more rows." });
     } finally {
-      setLoadingMore(false);
+      if (version === requestVersionRef.current) setLoadingMoreKey(null);
     }
   }
 
-  const windowLabel = window_;
-  const windowFrom = rows[0]?.window_from ?? null;
-  const windowTo = rows[0]?.window_to ?? null;
+  const pageCount = Math.max(1, Math.ceil(rows.length / DISPLAY_PAGE_SIZE));
+  const visiblePage = Math.min(page, pageCount - 1);
+  const displayedRows = useMemo(
+    () => rows.slice(visiblePage * DISPLAY_PAGE_SIZE, (visiblePage + 1) * DISPLAY_PAGE_SIZE),
+    [rows, visiblePage],
+  );
+  const displayedSkus = useMemo(() => displayedRows.map((row) => row.master_sku), [displayedRows]);
+  const trendFrom = fromDate && toDate ? fromDate : undefined;
+  const trendTo = fromDate && toDate ? toDate : undefined;
+  const trendKey = JSON.stringify([window_, trendFrom, trendTo, displayedSkus]);
+  const [trends, setTrends] = useState<{ key: string; rows: Record<string, CpisSpendTrendResponse> } | null>(null);
+  const currentTrends = trends?.key === trendKey ? trends.rows : null;
+
+  useEffect(() => {
+    if (!openTable || loading || showingPreviousResults || !hasCurrentRange || displayedSkus.length === 0) return;
+    let cancelled = false;
+    fetchCpisSpendTrends(displayedSkus, window_, trendFrom, trendTo)
+      .then((res) => {
+        if (cancelled) return;
+        setTrends({ key: trendKey, rows: Object.fromEntries(res.rows.map((row) => [row.master_sku, row])) });
+      })
+      .catch(() => {
+        if (!cancelled) setTrends({ key: trendKey, rows: {} });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [displayedSkus, window_, trendFrom, trendTo, trendKey, openTable, loading, showingPreviousResults, hasCurrentRange]);
 
   return (
     <>
@@ -679,7 +715,7 @@ function CpisView() {
         open={openKpi}
         onToggle={() => setOpenKpi((v) => !v)}
       >
-        {rows.length > 0 && (
+        {hasCurrentRange && rows.length > 0 && (
           <CpisKpiStrip
             rows={rows}
             spendMatchMode={spendMatchMode}
@@ -729,6 +765,7 @@ function CpisView() {
         <select
           value={datePreset}
           onChange={(e) => {
+            datesTouchedRef.current = true;
             const v = e.target.value;
             setDatePreset(v);
             // Anchor presets to the FRESHEST DAY that has data, not the
@@ -767,7 +804,7 @@ function CpisView() {
         <input
           type="date"
           value={fromDate}
-          onChange={(e) => { setFromDate(e.target.value); setDatePreset("custom"); }}
+          onChange={(e) => { datesTouchedRef.current = true; setFromDate(e.target.value); setDatePreset("custom"); }}
           className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
           title="Window start (YYYY-MM-DD)"
         />
@@ -775,7 +812,7 @@ function CpisView() {
         <input
           type="date"
           value={toDate}
-          onChange={(e) => { setToDate(e.target.value); setDatePreset("custom"); }}
+          onChange={(e) => { datesTouchedRef.current = true; setToDate(e.target.value); setDatePreset("custom"); }}
           className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
           title="Window end (YYYY-MM-DD)"
         />
@@ -882,14 +919,19 @@ function CpisView() {
           rows={rows as unknown as Record<string, unknown>[]}
           filename="cpis"
           window={fromDate && toDate ? `${fromDate}_${toDate}` : window_}
-          disabled={loading || !rows.length}
+          disabled={loading || showingPreviousResults || search !== debouncedSearch || !hasCurrentRange || !rows.length}
         />
       </div>
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
-      {loading ? (
+      {hasCurrentRange && (loading || search !== debouncedSearch || showingPreviousResults) && (
+        <p role="status" className="px-1 py-2 text-xs text-text-secondary">
+          {loading || search !== debouncedSearch ? "Updating results…" : "Showing the previous results while the latest request is unavailable."}
+        </p>
+      )}
+      {!hasCurrentRange && loading ? (
         <TableSkeleton rows={12} columns={16} showKpis />
-      ) : (
+      ) : hasCurrentRange ? (
         <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
           {/* min-w on the table forces the 23-column layout to overflow
               its parent so the outer overflow-x-auto shows a scrollbar
@@ -1113,7 +1155,7 @@ function CpisView() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {displayedRows.map((row) => (
                 <tr
                   key={row.master_sku}
                   onClick={() => setDrilldownSku({ master_sku: row.master_sku, product_name: row.product_name })}
@@ -1224,7 +1266,7 @@ function CpisView() {
                     {fmtINRFull(row.active_spend_per_day)}
                   </td>
                   <td className="px-3 py-2.5 text-right">
-                    <LazySpendTrendCell masterSku={row.master_sku} window={window_} />
+                    <SpendTrendCell trend={currentTrends?.[row.master_sku]} loading={currentTrends === null} />
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {/* utm mode renders `ad_spend` (fractional / equal-per-order
@@ -1392,10 +1434,8 @@ function CpisView() {
                     {row.tentative_replenish_date ?? "—"}
                   </td>
                   {/* MapleMonk sell-through planning */}
-                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
-                    <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {row.daily_order_qty !== null ? row.daily_order_qty.toFixed(1) : "—"}
-                  </td>
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px]">
                     <OosCell value={row.mm_oos_days_30} outOf={30} />
@@ -1411,11 +1451,37 @@ function CpisView() {
               )}
             </tbody>
           </table>
+          {rows.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 border-t border-border-soft px-3 py-2 text-xs text-text-secondary">
+              <span>
+                Showing {visiblePage * DISPLAY_PAGE_SIZE + 1}–{Math.min((visiblePage + 1) * DISPLAY_PAGE_SIZE, rows.length)} of {rows.length} loaded SKUs
+              </span>
+              <span className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPage(Math.max(0, visiblePage - 1))}
+                  disabled={visiblePage === 0 || loading || showingPreviousResults}
+                  className="rounded border border-border-primary px-2 py-1 hover:bg-bg-muted disabled:opacity-40"
+                >
+                  Previous
+                </button>
+                <span>Page {visiblePage + 1} of {pageCount}</span>
+                <button
+                  type="button"
+                  onClick={() => setPage(Math.min(pageCount - 1, visiblePage + 1))}
+                  disabled={visiblePage >= pageCount - 1 || loading || showingPreviousResults}
+                  className="rounded border border-border-primary px-2 py-1 hover:bg-bg-muted disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </span>
+            </div>
+          )}
           {rows.length < total && (
             <div className="border-t border-border-soft p-3 text-center">
               <button
                 onClick={loadMore}
-                disabled={loadingMore}
+                disabled={loadingMore || loading || showingPreviousResults}
                 className="rounded-md bg-bg-muted px-4 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-bg-muted disabled:opacity-40"
               >
                 {loadingMore ? "Loading…" : `Load more (${rows.length} of ${total})`}
@@ -1423,7 +1489,7 @@ function CpisView() {
             </div>
           )}
         </div>
-      )}
+      ) : null}
       </CollapsibleSection>
       {drilldownSku && (
         <MatchedAdsModal
@@ -1850,4 +1916,3 @@ function CpisKpiStrip({
     </div>
   );
 }
-

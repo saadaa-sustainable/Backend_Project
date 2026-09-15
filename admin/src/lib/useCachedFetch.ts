@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { clearAnalyticsCache } from "./api";
 
 /**
  * sessionStorage-backed cache for API fetches. Survives page refresh
@@ -21,6 +22,7 @@ import { useEffect, useRef, useState } from "react";
  */
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
+const inFlight = new Map<string, Promise<unknown>>();
 
 interface CacheEntry<T> {
   data: T;
@@ -33,7 +35,10 @@ function readCache<T>(key: string, ttlMs: number): T | null {
     const raw = window.sessionStorage.getItem(key);
     if (!raw) return null;
     const entry = JSON.parse(raw) as CacheEntry<T>;
-    if (Date.now() - entry.ts > ttlMs) {
+    if (!entry || typeof entry.ts !== "number" || !Number.isFinite(entry.ts) || !("data" in entry)) {
+      return null;
+    }
+    if (Date.now() - entry.ts >= ttlMs) {
       window.sessionStorage.removeItem(key);
       return null;
     }
@@ -51,6 +56,26 @@ function writeCache<T>(key: string, data: T): void {
     // Quota exceeded or private-mode: cache silently disabled, fetch
     // still works fine. Not worth surfacing to the user.
   }
+}
+
+function fetchShared<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  const pending = inFlight.get(key);
+  if (pending) return pending as Promise<T>;
+
+  // Share requests across components and React Strict Mode remounts. An
+  // explicit refetch can replace this request, so only its successor may
+  // populate the cache after that point.
+  const request = Promise.resolve()
+    .then(fetcher)
+    .then((data) => {
+      if (inFlight.get(key) === request) writeCache(key, data);
+      return data;
+    })
+    .finally(() => {
+      if (inFlight.get(key) === request) inFlight.delete(key);
+    });
+  inFlight.set(key, request);
+  return request;
 }
 
 export interface UseCachedFetchResult<T> {
@@ -72,45 +97,63 @@ export function useCachedFetch<T>(
   fetcher: () => Promise<T>,
   ttlMs: number = DEFAULT_TTL_MS,
 ): UseCachedFetchResult<T> {
-  const initial = readCache<T>(key, ttlMs);
-  const [data, setData] = useState<T | null>(initial);
-  const [error, setError] = useState<Error | null>(null);
-  const [loading, setLoading] = useState<boolean>(initial === null);
-  // Track the latest key we fetched so a fast key-swap (e.g. filter
-  // changed twice in a row) doesn't let an in-flight stale response
-  // clobber the newer one.
-  const activeKeyRef = useRef<string>(key);
-
-  const load = () => {
-    activeKeyRef.current = key;
-    setLoading(true);
-    setError(null);
-    fetcher()
-      .then((d) => {
-        // Bail if the caller re-keyed while our request was in flight.
-        if (activeKeyRef.current !== key) return;
-        writeCache(key, d);
-        setData(d);
-        setLoading(false);
-      })
-      .catch((e: unknown) => {
-        if (activeKeyRef.current !== key) return;
-        setError(e instanceof Error ? e : new Error(String(e)));
-        setLoading(false);
-      });
-  };
+  const [revision, setRevision] = useState(0);
+  // Parse sessionStorage only when the request changes, rather than on
+  // every render of a dashboard tile.
+  const scope = useMemo(
+    () => ({ key, revision, cached: readCache<T>(key, ttlMs) }),
+    [key, ttlMs, revision],
+  );
+  const [result, setResult] = useState<{
+    scope: typeof scope;
+    data: T | null;
+    error: Error | null;
+  } | null>(null);
+  const fetcherRef = useRef(fetcher);
 
   useEffect(() => {
-    const cached = readCache<T>(key, ttlMs);
-    if (cached !== null) {
-      setData(cached);
-      setLoading(false);
-      return;
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
+
+  useEffect(() => {
+    if (scope.cached !== null) return;
+    let cancelled = false;
+    fetchShared(scope.key, fetcherRef.current)
+      .then((data) => {
+        if (!cancelled) setResult({ scope, data, error: null });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setResult({
+            scope,
+            data: null,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+        }
+      });
+    // This also invalidates a pending response when the next key is a
+    // cache hit, and prevents updates after the component unmounts.
+    return () => {
+      cancelled = true;
+    };
+  }, [scope]);
+
+  const refetch = useCallback(() => {
+    try {
+      window.sessionStorage.removeItem(key);
+    } catch {
+      // Fetching remains available when browser storage is disabled.
     }
-    setData(null);
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    inFlight.delete(key);
+    clearAnalyticsCache();
+    setRevision((value) => value + 1);
   }, [key]);
 
-  return { data, error, loading, refetch: load };
+  const current = result?.scope === scope ? result : null;
+  return {
+    data: current ? current.data : scope.cached,
+    error: current?.error ?? null,
+    loading: current === null && scope.cached === null,
+    refetch,
+  };
 }

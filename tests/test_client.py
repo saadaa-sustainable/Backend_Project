@@ -195,6 +195,23 @@ async def test_paginate_follows_next_cursor_across_pages(credentials: MetaCreden
     page_one_url = "https://graph.facebook.com/v21.0/act_1234567890/campaigns"
     page_two_url = "https://graph.facebook.com/v21.0/act_1234567890/campaigns?after=CURSOR2"
 
+    # Page two is matched on the `after` param, NOT on `page_two_url`
+    # verbatim, and is registered before the catch-all page-one route.
+    # Both details matter:
+    #   * A respx pattern carrying a query string requires the request's
+    #     query to match it EXACTLY. MetaAPIClient appends access_token
+    #     (and limit) to every request, so a `?after=CURSOR2` pattern
+    #     never matches the real follow-up request.
+    #   * A pattern built from a bare URL matches on path only, so the
+    #     page-one route otherwise swallows the follow-up request too.
+    # Get either wrong and page one answers both calls, keeps handing
+    # back `next: page_two_url`, and paginate() spins forever
+    # accumulating items until the box runs out of memory.
+    respx.get(page_one_url, params__contains={"after": "CURSOR2"}).mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"id": "3"}], "paging": {"cursors": {"after": "CURSOR3"}}}
+        )
+    )
     respx.get(page_one_url).mock(
         return_value=httpx.Response(
             200,
@@ -202,11 +219,6 @@ async def test_paginate_follows_next_cursor_across_pages(credentials: MetaCreden
                 "data": [{"id": "1"}, {"id": "2"}],
                 "paging": {"cursors": {"after": "CURSOR2"}, "next": page_two_url},
             },
-        )
-    )
-    respx.get(page_two_url).mock(
-        return_value=httpx.Response(
-            200, json={"data": [{"id": "3"}], "paging": {"cursors": {"after": "CURSOR3"}}}
         )
     )
 

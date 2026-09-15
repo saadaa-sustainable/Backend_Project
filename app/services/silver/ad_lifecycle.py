@@ -500,6 +500,33 @@ async def ensure_ad_lifecycle_table(session: AsyncSession) -> None:
     await session.commit()
 
 
+#: Re-assign the 14-day grace bucket AFTER the external overlay.
+#:
+#: The category CASE in _INSERT reads `ma.created_time` from meta_ads,
+#: but meta_ads is built by the `meta_entities` FlattenJob, which has no
+#: script in the nightly pipeline -- measured 2026-09-15, its newest
+#: created_time was 2026-08-24, 22 days old. So `now() - 14 days` could
+#: never be satisfied and the bucket was permanently empty: legacy had
+#: 573 Result Awaited, this table had 0, and 457 of the 518 ads actually
+#: launched in the last 14 days were being labelled Discarded -- marked
+#: a failure before their grace period had even run.
+#:
+#: The overlay a few lines above already repairs ad_created_time from
+#: the external mirror, so by this point the row itself carries the
+#: right date; only the verdict was decided on the stale one. Recompute
+#: it from the row.
+#:
+#: Scoped to Discarded ONLY, which is exactly where the legacy CASE
+#: places this test -- below P2, above the final ELSE. A recent ad that
+#: genuinely passed F1/F2 keeps its better verdict.
+_RESULT_AWAITED_FIX = """
+UPDATE ad_lifecycle
+   SET category = 'Result Awaited'
+ WHERE category = 'Discarded'
+   AND ad_created_time > now() - INTERVAL '14 days'
+"""
+
+
 async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
     await ensure_ad_lifecycle_table(session)
     await session.execute(text(_TRUNCATE))
@@ -513,7 +540,12 @@ async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
     if (await session.execute(text(_EXTERNAL_TABLE_EXISTS))).scalar_one_or_none():
         overlaid = (await session.execute(text(_EXTERNAL_OVERLAY_UPDATE))).rowcount or 0
         added = (await session.execute(text(_EXTERNAL_OVERLAY_INSERT))).rowcount or 0
+
+    awaited = (await session.execute(text(_RESULT_AWAITED_FIX))).rowcount or 0
     await session.commit()
+
+    if awaited:
+        logger.info("ad_lifecycle_result_awaited_reassigned", ads=awaited)
 
     if overlaid or added:
         logger.info("ad_lifecycle_external_overlay", updated=overlaid, inserted=added)

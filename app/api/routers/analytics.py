@@ -20,11 +20,13 @@ from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import SessionDep
+from app.services.analytics_cache import cached_analytics
+from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
 
@@ -203,9 +205,10 @@ _ADS_ANALYSE_SELECT = (
     # chain that populates these. asset_match_source tells the UI whether
     # the mapping came from a direct workflow link, CTD's fuzzy match,
     # or a regex parse of the ad_name (verified or synthetic).
-    "COALESCE(asset_direct.asset_id, asset_name.asset_id) AS asset_id, "
-    "COALESCE(asset_direct.media, asset_name.media)       AS asset_media, "
-    "COALESCE(asset_direct.source, asset_name.source)     AS asset_match_source, "
+    "aam.asset_id, "
+    "aam.media        AS asset_media, "
+    "aam.match_source AS asset_match_source, "
+    "aam.name_conflict AS asset_name_conflict, "
     # Per-ad media (from ad_media silver, populated by
     # scripts/refresh_ad_media.py from raw_dump_meta joins).
     "am.thumbnail_url, am.video_url, am.video_id, "
@@ -237,37 +240,13 @@ _AD_DAILY_EXTERNAL_EXISTS = (
 )
 
 
-def _sync_db_url() -> str:
-    """psycopg2 DSN for the app database.
-
-    The windowed reads go through a fresh sync connection to sidestep
-    SQLAlchemy asyncpg's prepared-statement collision under
-    transaction-mode pooling -- see
-    scripts/refresh_raw_dump_meta_daily.py for the same trick.
-    """
-    from app.config import get_settings
-
-    return (
-        get_settings().database.database_url
-        .replace("postgresql+asyncpg://", "postgresql://")
-        .split("?", 1)[0]
-    )
-
-
-def _daily_mirror_ready() -> bool:
-    """True when the per-day mirror exists AND holds at least one row."""
-    import psycopg2
-
-    try:
-        with psycopg2.connect(_sync_db_url(), connect_timeout=15) as conn:
-            with conn.cursor() as cur:
-                cur.execute(_AD_DAILY_EXTERNAL_EXISTS)
-                if cur.fetchone() is None:
-                    return False
-                cur.execute("SELECT 1 FROM public.ad_daily_external LIMIT 1")
-                return cur.fetchone() is not None
-    except Exception:  # noqa: BLE001 -- availability probe, never fatal
+@cached_analytics(ttl=60.0, max_entries=1)
+async def _daily_mirror_ready(session: AsyncSession) -> bool:
+    """Probe through the existing async pool, without blocking the server."""
+    exists = (await session.execute(text(_AD_DAILY_EXTERNAL_EXISTS))).first()
+    if exists is None:
         return False
+    return (await session.execute(text("SELECT 1 FROM public.ad_daily_external LIMIT 1"))).first() is not None
 
 
 # Per-ad windowed sums for the table rows.
@@ -277,7 +256,7 @@ _EXTERNAL_DAILY = (
     "       SUM(ncp_count), SUM(ftewv_count), "
     "       SUM(shopify_orders), SUM(shopify_sales) "
     "FROM public.ad_daily_external "
-    "WHERE ad_id = ANY(%(ad_ids)s) AND day BETWEEN %(from_str)s AND %(to_str)s "
+    "WHERE ad_id = ANY(:ad_ids) AND day BETWEEN :from_str AND :to_str "
     "GROUP BY ad_id"
 )
 
@@ -293,8 +272,8 @@ _LOCAL_DAILY = (
     "         COALESCE(NULLIF(raw_payload->>'impressions','')::numeric,0) AS impressions, "
     "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) AS reach "
     "  FROM public.raw_dump_meta_daily "
-    "  WHERE raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
-    "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
+    "  WHERE raw_payload->>'ad_id' = ANY(:ad_ids) "
+    "    AND raw_payload->>'date_start' BETWEEN :from_str AND :to_str "
     "  UNION ALL "
     "  SELECT raw_payload->>'ad_id' AS ad_id, "
     "         COALESCE(NULLIF(raw_payload->>'spend','')::numeric,0), "
@@ -302,8 +281,8 @@ _LOCAL_DAILY = (
     "         COALESCE(NULLIF(raw_payload->>'reach','')::numeric,0) "
     "  FROM public.raw_dump_meta "
     "  WHERE object_type='insights' "
-    "    AND raw_payload->>'ad_id' = ANY(%(ad_ids)s) "
-    "    AND raw_payload->>'date_start' BETWEEN %(from_str)s AND %(to_str)s "
+    "    AND raw_payload->>'ad_id' = ANY(:ad_ids) "
+    "    AND raw_payload->>'date_start' BETWEEN :from_str AND :to_str "
     ") u GROUP BY ad_id"
 )
 
@@ -337,6 +316,31 @@ _DELIVERED_IN_WINDOW = (
     "EXISTS (SELECT 1 FROM public.ad_daily_external d "
     "WHERE d.ad_id = aps.ad_id AND d.day BETWEEN :from_date AND :to_date "
     "AND d.impressions > 0)"
+)
+
+# True for exactly the ads the asset resolver below produces a non-NULL
+# asset_id for -- i.e. the ads whose "Asset ID" column is populated in
+# the UI.
+#
+# Written WITHOUT the asset joins on purpose. The resolver lives in
+# _ADS_ANALYSE_FROM_ROWS, which only the row query uses; COUNT / totals /
+# category-counts run against _ADS_ANALYSE_FROM_AGG. A filter expressed
+# in terms of the resolver's output column could therefore only be
+# applied to the rows, and the table would silently disagree with the
+# count above it and the KPI tiles beside it -- the exact class of bug
+# the delivery-window work went out of its way to fix. Restating the
+# predicate over aps alone keeps all four queries filtering the same
+# population.
+#
+# The three EXISTS cover the `direct` and `ctd_matched` tiers; the three
+# regexes cover `name_parsed` and `name_synthetic` alike, since both are
+# reached only when a code is present in ad_name (name_parsed just also
+# finds it in a register). COALESCE because a NULL ad_name would make the
+# whole OR-chain NULL, which would drop those ads out of BOTH sides of
+# the filter rather than putting them on the "no asset" side where they
+# belong.
+_HAS_ASSET_ID = (
+    "EXISTS (SELECT 1 FROM public.ad_asset_map m WHERE m.ad_id = aps.ad_id)"
 )
 
 # Base FROM used by COUNT / totals / category-counts. Deliberately does
@@ -394,49 +398,19 @@ _ADS_ANALYSE_FROM = _ADS_ANALYSE_FROM_AGG + (
 #
 # The asset lookup is deliberately NOT in the base FROM used by
 # COUNT/totals queries -- row query only.
+# Row-fetching FROM. The asset lookup is a plain PK join onto
+# public.ad_asset_map, built nightly by scripts/refresh_ad_asset_map.py.
+#
+# It used to be a union subquery over three register tables plus a
+# per-row regex LATERAL, resolved at request time on every uncached hit.
+# That had three problems: it cost real latency, nothing outside this one
+# query could read the result, and the register columns it keyed on
+# (`ad_id`, `matched_ad_id`) are hand-filled upstream and drift. The map
+# now matches on ad NAME only -- see that script's docstring for why the
+# two ad_id-pointer tiers were dropped, and for the measurement showing
+# they contributed 2 unique ads out of ~6,900.
 _ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
-    " LEFT JOIN ("
-    "  SELECT DISTINCT ON (ad_id) ad_id, asset_id, media, source"
-    "  FROM ("
-    "    SELECT ad_id, asset_id, 'video'::text AS media, 'direct'::text AS source, 1 AS pri"
-    "      FROM public.content_asset_register WHERE ad_id IS NOT NULL"
-    "    UNION ALL"
-    "    SELECT ad_id, requisition_id, 'graphic'::text, 'direct'::text, 2"
-    "      FROM public.content_graphic_register WHERE ad_id IS NOT NULL"
-    "    UNION ALL"
-    "    SELECT matched_ad_id, asset_id, 'video'::text, 'ctd_matched'::text, 3"
-    "      FROM public.content_asset_register"
-    "      WHERE matched_ad_id IS NOT NULL AND ad_id IS NULL"
-    "    UNION ALL"
-    "    SELECT matched_ad_id, requisition_id, 'graphic'::text, 'ctd_matched'::text, 4"
-    "      FROM public.content_graphic_register"
-    "      WHERE matched_ad_id IS NOT NULL AND ad_id IS NULL"
-    "    UNION ALL"
-    "    SELECT matched_ad_id, id::text, 'influencer'::text, 'ctd_matched'::text, 5"
-    "      FROM public.content_influencer_posts WHERE matched_ad_id IS NOT NULL"
-    "  ) u WHERE ad_id IS NOT NULL"
-    "  ORDER BY ad_id, pri"
-    " ) asset_direct ON asset_direct.ad_id = aps.ad_id"
-    " LEFT JOIN LATERAL ("
-    "   SELECT asset_id, media, source FROM ("
-    "     SELECT car.asset_id, 'video'::text AS media, 'name_parsed'::text AS source, 1 AS pri"
-    "       FROM public.content_asset_register car"
-    "       WHERE car.asset_id = substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})')"
-    "     UNION ALL"
-    "     SELECT cgr.requisition_id, 'graphic'::text, 'name_parsed'::text, 2"
-    "       FROM public.content_graphic_register cgr"
-    "       WHERE cgr.requisition_id = substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)')"
-    "     UNION ALL"
-    "     SELECT substring(aps.ad_name from '([A-Z]{3}[0-9]{3}-[0-9]{4})'), 'video'::text, 'name_synthetic'::text, 3"
-    "       WHERE aps.ad_name ~ '[A-Z]{3}[0-9]{3}-[0-9]{4}'"
-    "     UNION ALL"
-    "     SELECT substring(aps.ad_name from '(GAD-[A-Za-z]{3}-[0-9]+)'), 'graphic'::text, 'name_synthetic'::text, 4"
-    "       WHERE aps.ad_name ~ 'GAD-[A-Za-z]{3}-[0-9]+'"
-    "     UNION ALL"
-    "     SELECT substring(aps.ad_name from '(SIF-[0-9]+-P[0-9]+)'), 'influencer'::text, 'name_synthetic'::text, 5"
-    "       WHERE aps.ad_name ~ 'SIF-[0-9]+-P[0-9]+'"
-    "   ) u ORDER BY pri LIMIT 1"
-    " ) asset_name ON asset_direct.ad_id IS NULL"
+    " LEFT JOIN public.ad_asset_map aam ON aam.ad_id = aps.ad_id"
     # ad_media silver -- per-ad thumbnail / video / landing-URL flatten
     # from raw_dump_meta (via scripts/refresh_ad_media.py). Coverage is
     # 19% today: only ads with an asset_feed_spec resolve. Adding a
@@ -446,10 +420,52 @@ _ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
 )
 
 
+#: Narrow relations the row query needs BEFORE it can pick its page:
+#: `al` when the sort or the created-date filter touches ad_lifecycle,
+#: `fs` when the first_seen filter does.
+_ROWS_PICK_AL = " LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id"
+_ROWS_PICK_FS = (
+    " LEFT JOIN LATERAL ("
+    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai"
+    "  WHERE ai.ad_id = aps.ad_id) fs ON true"
+)
+
+
 def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
+    """Two stages: pick the page's ad_ids off the narrowest possible
+    relation set, then join the wide tables to just those rows.
+
+    Joining first and limiting last is what made this endpoint time out.
+    ad_lifecycle is 205 columns over a 26 MB heap, and the single-stage
+    query hash-joined all of it -- plus an ad_insights probe for every
+    one of ~11k candidate rows -- to return 50. Cold, that measured 90s
+    to over 180s and returned HTTP 500 on the statement timeout; warm it
+    was 0.8s, so the whole cost was reading a table the answer barely
+    touches. Limiting first turns the wide joins into 50 PK lookups.
+
+    The pick stage carries ad_lifecycle / the first_seen LATERAL only
+    when the sort or a filter actually references them -- on the default
+    `spend` sort it reads ad_performance_summary alone.
+    """
+    needs_al = sort_column.startswith("al.") or "al." in where_sql
+    needs_fs = "fs." in where_sql
+    pick_from = "FROM ad_performance_summary aps"
+    if needs_al:
+        pick_from += _ROWS_PICK_AL
+    if needs_fs:
+        pick_from += _ROWS_PICK_FS
     return (
-        f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} {where_sql} "
-        f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
+        # MATERIALIZED is load-bearing. Postgres inlines CTEs by default
+        # since v12, which flattens this straight back into the single
+        # wide join it exists to avoid -- measured 25s inlined against
+        # sub-second materialised.
+        "WITH picked AS MATERIALIZED ("
+        f" SELECT aps.ad_id, {sort_column} AS _sort {pick_from} {where_sql}"
+        f" ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
+        ") "
+        f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} "
+        "JOIN picked ON picked.ad_id = aps.ad_id "
+        "ORDER BY picked._sort DESC NULLS LAST"
     )
 
 
@@ -636,6 +652,8 @@ class AdsAnalyseRow(BaseModel):
     asset_id: str | None
     asset_media: str | None
     asset_match_source: str | None
+    # True when the ad name resolves to more than one registered asset.
+    asset_name_conflict: bool | None = None
     # Per-ad media flatten (from ad_media silver -- built by
     # scripts/refresh_ad_media.py from raw_dump_meta). Coverage ~19% of
     # ads today (only those whose creative has an asset_feed_spec in
@@ -718,98 +736,37 @@ class AdsAnalyseResponse(BaseModel):
     totals: AdsAnalyseTotals
 
 
-# ── /ads-analyse response cache ────────────────────────────────────
-# In-process cache. Keyed on the full sorted-tuple of query params, so
-# any change to filters / date / sort / limit / offset busts it. TTL
-# was 60s originally, extended to 15min on 2026-09-15 because the SQL
-# takes ~135s cold on Render (asyncpg's UUID-suffixed statement names
-# defeat Supabase's plan cache -- every request pays full parse+plan
-# cost) and that blew past Render's 120s HTTP gateway timeout for the
-# unlucky first user. A 15-min window means each filter combo gets
-# pre-warmed once (via warm_ads_analyse_cache at startup) and every
-# subsequent hit inside the window returns in ~200ms. 128-entry LRU
-# keeps the dict bounded.
-from collections import OrderedDict as _OrderedDict
-from time import monotonic as _monotonic
-
-_ADS_ANALYSE_CACHE_TTL_S = 900.0
-_ADS_ANALYSE_CACHE_MAX = 128
-_ads_analyse_cache: "_OrderedDict[tuple, tuple[float, AdsAnalyseResponse]]" = _OrderedDict()
-
-
-def _ads_analyse_cache_key(**kwargs) -> tuple:
-    """Freeze the request into a hashable key. Deliberately explicit so
-    a new query-param is opted in (rather than silently sharing a
-    cached response with old callers)."""
-    return tuple(sorted((k, str(v)) for k, v in kwargs.items()))
-
-
-def _ads_analyse_cache_get(key: tuple) -> "AdsAnalyseResponse | None":
-    entry = _ads_analyse_cache.get(key)
-    if entry is None:
-        return None
-    ts, resp = entry
-    if _monotonic() - ts > _ADS_ANALYSE_CACHE_TTL_S:
-        # Expired -- evict eagerly so the dict stays small.
-        _ads_analyse_cache.pop(key, None)
-        return None
-    # Move-to-end so LRU eviction below drops truly cold entries.
-    _ads_analyse_cache.move_to_end(key)
-    return resp
-
-
-def _ads_analyse_cache_put(key: tuple, resp: "AdsAnalyseResponse") -> None:
-    _ads_analyse_cache[key] = (_monotonic(), resp)
-    _ads_analyse_cache.move_to_end(key)
-    while len(_ads_analyse_cache) > _ADS_ANALYSE_CACHE_MAX:
-        _ads_analyse_cache.popitem(last=False)
-
-
 async def warm_ads_analyse_cache() -> None:
-    """Pre-populate the cache with default Creative Testing filter combos
-    so the first real user hit is a cache HIT (~200ms) instead of a
-    ~135s cold SQL run that exceeds Render's 120s HTTP gateway timeout.
+    """Warm the default ad page and the current asset-based testing page.
 
-    Runs as a background task from the FastAPI lifespan hook -- does not
-    block startup. Each fired combo is one SQL run: takes ~135s cold on
-    Render's cold PG buffer cache, populates the cache for 15 minutes.
-
-    Combos mirror what admin/src/app/user/analytics/CreativeTesting.tsx
-    sends on first load (default preset = Last 30 days) plus one common
-    fallback (Last 7 days). Adding more combos linearly extends startup
-    warmup time; keep the list short.
+    Uses the same parameters and response caches as browser requests.
+    Concurrent visitors share these fills instead of repeating the SQL.
     """
     from datetime import timedelta as _timedelta
 
     from app.database.session import session_scope
 
+    import logging
     today = date.today()
-    windows = [
-        (today - _timedelta(days=29), today),
-        (today - _timedelta(days=6), today),
-    ]
-    for from_d, to_d in windows:
+    try:
+        async with session_scope() as session:
+            # Ads Analyse opens with all dates, no copy filter, 500 rows.
+            # The decorator resolves Query defaults exactly as FastAPI does.
+            await get_ads_analyse(session=session, limit=500)
+    except Exception:
+        logging.getLogger(__name__).exception("ads_analyse_warmer_failed")
+    for days in (30, 7):
         try:
             async with session_scope() as session:
-                await get_ads_analyse(
-                    session=session,
-                    account_name=None, campaign_name=None,
-                    ad_effective_status=None, category=None,
-                    f1_pass=None, f2_pass=None, f3_pass=None, f4_pass=None,
-                    search=None, only_with_shopify_orders=False,
-                    content_type=None, excl_copy=True,
-                    from_date=from_d, to_date=to_d, date_field="created",
-                    sort="spend", limit=100, offset=0,
+                await get_creative_testing(
+                    session=session, from_date=today - _timedelta(days=days - 1), to_date=today,
                 )
         except Exception:
-            import logging as _logging
-            _logging.getLogger(__name__).exception(
-                "ads_analyse_warmer_failed",
-                extra={"from_date": from_d.isoformat(), "to_date": to_d.isoformat()},
-            )
+            logging.getLogger(__name__).exception("creative_testing_warmer_failed")
 
 
 @router.get("/ads-analyse", response_model=AdsAnalyseResponse)
+@cached_analytics(ttl=300.0)
 async def get_ads_analyse(
     session: SessionDep,
     account_name: str | None = Query(default=None),
@@ -835,6 +792,19 @@ async def get_ads_analyse(
             "(Graphic AD), VID (Video), STATIC. Applied as ILIKE '%<token>%' so "
             "'GAD' matches 'GAD01', 'GAD-Sep' etc. Runs against base_where so "
             "KPI tiles + totals reflect the filter."
+        ),
+    ),
+    has_asset_id: bool | None = Query(
+        default=None,
+        description=(
+            "Filter on whether the ad resolves to a creative asset. "
+            "true = only ads whose Asset ID column is populated (any value, by "
+            "any match source -- direct / ctd_matched / name_parsed / "
+            "name_synthetic); false = only ads with an EMPTY Asset ID, i.e. no "
+            "asset code in the ad name and no register row pointing at it; "
+            "omit for all ads. Applied to base_where, so the row count, the "
+            "category tiles and the KPI strip all describe the same filtered "
+            "population as the table."
         ),
     ),
     excl_copy: bool = Query(
@@ -878,23 +848,6 @@ async def get_ads_analyse(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> AdsAnalyseResponse:
-    # Response cache short-circuit -- see _ads_analyse_cache_* above.
-    # Runs before the ~4.5s SQL block so a repeated hit inside the TTL
-    # returns in microseconds. The cache is opt-out via ?nocache=1 if we
-    # ever add one, and evicts on TTL / LRU / restart.
-    _cache_key = _ads_analyse_cache_key(
-        account_name=account_name, campaign_name=campaign_name,
-        ad_effective_status=ad_effective_status, category=category,
-        f1_pass=f1_pass, f2_pass=f2_pass, f3_pass=f3_pass, f4_pass=f4_pass,
-        search=search, only_with_shopify_orders=only_with_shopify_orders,
-        content_type=content_type, excl_copy=excl_copy,
-        from_date=from_date, to_date=to_date, date_field=date_field,
-        sort=sort, limit=limit, offset=offset,
-    )
-    _cached = _ads_analyse_cache_get(_cache_key)
-    if _cached is not None:
-        return _cached
-
     sort_column = _ADS_ANALYSE_SORT_COLUMNS[sort]
 
     # Base predicates apply to BOTH the row query and the category_counts
@@ -929,6 +882,11 @@ async def get_ads_analyse(
         # analyst who pokes a value like '%; DROP TABLE' can't sneak it in.
         base_where.append("aps.ad_name ILIKE :content_type")
         params["content_type"] = f"%{content_type}%"
+    if has_asset_id is not None:
+        # _HAS_ASSET_ID is self-contained over aps, so it drops into
+        # base_where and reaches all four queries -- see its definition
+        # for why it does not reference the resolver's output column.
+        base_where.append(_HAS_ASSET_ID if has_asset_id else f"NOT {_HAS_ASSET_ID}")
     for flag_name, flag_val in (
         ("f1_pass", f1_pass), ("f2_pass", f2_pass), ("f3_pass", f3_pass), ("f4_pass", f4_pass),
     ):
@@ -957,7 +915,7 @@ async def get_ads_analyse(
     # base_where.
     windowed_delivery = False
     if from_date and to_date and date_field == "delivery":
-        windowed_delivery = _daily_mirror_ready()
+        windowed_delivery = await _daily_mirror_ready(session)
         if windowed_delivery:
             base_where.append(_DELIVERED_IN_WINDOW)
             params["from_date"] = from_date
@@ -988,36 +946,32 @@ async def get_ads_analyse(
         # window (see _DELIVERED_IN_WINDOW). What remains is to replace
         # every lifetime metric on those rows with the window's sums, so
         # a row describes the period the user picked and nothing else.
-        import psycopg2
-
         ad_ids = [r.ad_id for r in rows]
         windowed_map: dict[str, dict[str, float | None]] = {}
-        with psycopg2.connect(_sync_db_url(), connect_timeout=15) as sync_conn:
-            with sync_conn.cursor() as cur:
-                cur.execute(_EXTERNAL_DAILY, {
-                    "ad_ids": ad_ids,
-                    "from_str": from_date.isoformat(),
-                    "to_str": to_date.isoformat(),
-                })
-                for (aid, spend, impr, reach, conv, purch, clicks,
-                     ncp, ftewv, s_orders, s_sales) in cur.fetchall():
-                    windowed_map[aid] = {
-                        "spend": float(spend or 0),
-                        "impressions": float(impr or 0),
-                        "reach": float(reach or 0),
-                        "conv_value": float(conv or 0),
-                        "purchases": float(purch or 0),
-                        "link_clicks": float(clicks or 0),
-                        "ncp_count": float(ncp or 0),
-                        "ftewv_count": float(ftewv or 0),
-                        # NULL, not 0: the daily Shopify pair only
-                        # exists inside the rolling 90-day series. A
-                        # zero for an older window would read as "this
-                        # ad sold nothing", which is a claim the data
-                        # cannot support.
-                        "shopify_orders": None if s_orders is None else float(s_orders),
-                        "shopify_revenue": None if s_sales is None else float(s_sales),
-                    }
+        daily_rows = (await session.execute(text(_EXTERNAL_DAILY), {
+            "ad_ids": ad_ids,
+            "from_str": from_date,
+            "to_str": to_date,
+        })).all()
+        for (aid, spend, impr, reach, conv, purch, clicks,
+             ncp, ftewv, s_orders, s_sales) in daily_rows:
+            windowed_map[aid] = {
+                "spend": float(spend or 0),
+                "impressions": float(impr or 0),
+                "reach": float(reach or 0),
+                "conv_value": float(conv or 0),
+                "purchases": float(purch or 0),
+                "link_clicks": float(clicks or 0),
+                "ncp_count": float(ncp or 0),
+                "ftewv_count": float(ftewv or 0),
+                # NULL, not 0: the daily Shopify pair only
+                # exists inside the rolling 90-day series. A
+                # zero for an older window would read as "this
+                # ad sold nothing", which is a claim the data
+                # cannot support.
+                "shopify_orders": None if s_orders is None else float(s_orders),
+                "shopify_revenue": None if s_sales is None else float(s_sales),
+            }
 
         for r in rows:
             w = windowed_map.get(r.ad_id) or {}
@@ -1090,23 +1044,19 @@ async def get_ads_analyse(
         # changing its arithmetic here would make the two paths disagree
         # in a second way on top of the coverage difference they already
         # have.
-        import psycopg2
-
         ad_ids = [r.ad_id for r in rows]
         local_map: dict[str, dict[str, float]] = {}
-        with psycopg2.connect(_sync_db_url(), connect_timeout=15) as sync_conn:
-            with sync_conn.cursor() as cur:
-                cur.execute(_LOCAL_DAILY, {
-                    "ad_ids": ad_ids,
-                    "from_str": from_date.isoformat(),
-                    "to_str": to_date.isoformat(),
-                })
-                for aid, spend, impr, reach in cur.fetchall():
-                    local_map[aid] = {
-                        "spend": float(spend or 0),
-                        "impressions": float(impr or 0),
-                        "reach": float(reach or 0),
-                    }
+        daily_rows = (await session.execute(text(_LOCAL_DAILY), {
+            "ad_ids": ad_ids,
+            "from_str": from_date.isoformat(),
+            "to_str": to_date.isoformat(),
+        })).all()
+        for aid, spend, impr, reach in daily_rows:
+            local_map[aid] = {
+                "spend": float(spend or 0),
+                "impressions": float(impr or 0),
+                "reach": float(reach or 0),
+            }
         for r in rows:
             w = local_map.get(r.ad_id)
             if w is None:
@@ -1176,7 +1126,6 @@ async def get_ads_analyse(
     resp = AdsAnalyseResponse(
         rows=rows, total=total, category_counts=category_counts, totals=totals,
     )
-    _ads_analyse_cache_put(_cache_key, resp)
     return resp
 
 
@@ -2953,19 +2902,21 @@ WITH spend AS (
       FROM public.insights_daily_by_ad
      WHERE day BETWEEN :wf AND :wt AND spend > 0
 ),
-cited AS (
-    SELECT DISTINCT so.utm_content AS ad_id, so.processed_at::date AS d
+orders_in_window AS MATERIALIZED (
+    SELECT so.utm_content AS ad_id, so.processed_at::date AS d,
+           jsonb_typeof(so.line_items->'edges') = 'array' AS has_items
       FROM shopify_orders so
-     WHERE so.processed_at::date BETWEEN :wf AND :wt
+     WHERE so.processed_at >= CAST(:wf AS date)
+       AND so.processed_at < CAST(:wt AS date) + integer '1'
        AND so.utm_content ~ '^[0-9]{10,20}$'
 ),
+cited AS (
+    SELECT DISTINCT ad_id, d FROM orders_in_window
+),
 attributable AS (
-    SELECT DISTINCT so.utm_content AS ad_id, so.processed_at::date AS d
-      FROM shopify_orders so
-     WHERE so.processed_at::date BETWEEN :wf AND :wt
-       AND so.utm_content ~ '^[0-9]{10,20}$'
-       AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
-       AND jsonb_typeof(so.line_items->'edges') = 'array'
+    SELECT DISTINCT o.ad_id, o.d FROM orders_in_window o
+     WHERE o.has_items
+       AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = o.ad_id)
 ),
 converted_ads AS (SELECT DISTINCT ad_id FROM attributable)
 SELECT
@@ -2978,6 +2929,30 @@ LEFT JOIN attributable  a  ON a.ad_id  = s.ad_id AND a.d = s.d
 LEFT JOIN cited         c  ON c.ad_id  = s.ad_id AND c.d = s.d
 LEFT JOIN converted_ads ca ON ca.ad_id = s.ad_id
 """
+
+
+def _cpis_reconciliation_sql(custom: bool) -> str:
+    attributed = (
+        "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_daily WHERE day BETWEEN :wf AND :wt"
+        if custom else
+        "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_utm WHERE window_key = :window"
+    )
+    return (
+        "WITH breakdown AS (" + _CPIS_UNTETHERED_BREAKDOWN + ") "
+        "SELECT b.*, (SELECT COALESCE(SUM(spend), 0) "
+        "FROM public.insights_daily_by_ad WHERE day BETWEEN :wf AND :wt) AS meta_total_spend, "
+        f"({attributed}) AS attributed_spend FROM breakdown b"
+    )
+
+
+@cached_analytics()
+async def _get_cpis_reconciliation(
+    session: AsyncSession, wf: date, wt: date, window: str, custom: bool,
+) -> dict[str, Any]:
+    result = await session.execute(
+        text(_cpis_reconciliation_sql(custom)), {"wf": wf, "wt": wt, "window": window},
+    )
+    return dict(result.mappings().one())
 
 
 class CpisUtmResponse(BaseModel):
@@ -3015,6 +2990,7 @@ class CpisUtmResponse(BaseModel):
 
 
 @router.get("/cpis-utm", response_model=CpisUtmResponse)
+@cached_analytics(ttl=60.0)
 async def get_cpis_utm(
     session: SessionDep,
     window: Literal["7d", "30d", "90d"] = Query(default="30d"),
@@ -3741,51 +3717,15 @@ async def get_cpis_utm(
     untethered_lag: float | None = None
     untethered_no_conversion: float | None = None
     if wf and wt:
-        meta_row = (
-            await session.execute(
-                text(
-                    "SELECT COALESCE(SUM(spend), 0) FROM public.insights_daily_by_ad "
-                    "WHERE day BETWEEN :wf AND :wt"
-                ),
-                {"wf": wf, "wt": wt},
-            )
-        ).scalar_one()
-        meta_total_spend = float(meta_row or 0)
-
-        # Attributed = SUM(ad_spend) across ALL SKUs in the window (not
-        # just the paginated page). For custom range aggregate
-        # cpis_by_sku_daily; for pre-computed use cpis_by_sku_utm.
-        if from_date and to_date:
-            attr_row = (
-                await session.execute(
-                    text(
-                        "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_daily "
-                        "WHERE day BETWEEN :wf AND :wt"
-                    ),
-                    {"wf": wf, "wt": wt},
-                )
-            ).scalar_one()
-        else:
-            attr_row = (
-                await session.execute(
-                    text(
-                        "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_utm "
-                        "WHERE window_key = :window"
-                    ),
-                    {"window": window},
-                )
-            ).scalar_one()
-        attributed_spend = float(attr_row or 0)
+        # The reconciliation strip is independent of pagination/search.
+        # Cache its complete, original population by allocation mode + dates.
+        rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
+        meta_total_spend = float(rec["meta_total_spend"] or 0)
+        attributed_spend = float(rec["attributed_spend"] or 0)
         untethered_spend = max(0.0, meta_total_spend - attributed_spend)
-
-        brk = (
-            await session.execute(
-                text(_CPIS_UNTETHERED_BREAKDOWN), {"wf": wf, "wt": wt}
-            )
-        ).one()
-        untethered_ad_unknown = min(float(brk.ad_unknown or 0), untethered_spend)
+        untethered_ad_unknown = min(float(rec["ad_unknown"] or 0), untethered_spend)
         untethered_no_conversion = min(
-            float(brk.no_conversion or 0), untethered_spend - untethered_ad_unknown
+            float(rec["no_conversion"] or 0), untethered_spend - untethered_ad_unknown
         )
         # Lag by subtraction, so the three always sum to untethered_spend
         # whichever attribution rule the active view used. The pre-computed
@@ -3817,6 +3757,34 @@ class CpisSpendTrendResponse(BaseModel):
     spend_trend_prev_total: float | None
 
 
+class CpisSpendTrendsRequest(BaseModel):
+    master_skus: list[str] = Field(min_length=1, max_length=100)
+    window: Literal["7d", "30d", "90d"] = "30d"
+    from_date: date | None = None
+    to_date: date | None = None
+
+
+class CpisSpendTrendsResponse(BaseModel):
+    rows: list[CpisSpendTrendResponse]
+
+
+@router.post("/cpis-utm/spend-trends", response_model=CpisSpendTrendsResponse)
+@cached_analytics()
+async def get_cpis_utm_spend_trends(
+    session: SessionDep, body: CpisSpendTrendsRequest,
+) -> CpisSpendTrendsResponse:
+    try:
+        rows = await get_cpis_spend_trends(
+            session, body.master_skus, window=body.window,
+            from_date=body.from_date, to_date=body.to_date,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except SpendTrendWindowNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return CpisSpendTrendsResponse(rows=rows)
+
+
 class CpisDataFreshnessResponse(BaseModel):
     """Latest date available in each of the underlying tables the CPIS
     endpoint consumes. Frontend uses `max_day` (the newer of the two)
@@ -3830,6 +3798,7 @@ class CpisDataFreshnessResponse(BaseModel):
 
 
 @router.get("/cpis-utm/data-freshness", response_model=CpisDataFreshnessResponse)
+@cached_analytics(ttl=60.0)
 async def get_cpis_utm_data_freshness(session: SessionDep) -> CpisDataFreshnessResponse:
     """Cheap freshness probe. Frontend calls this once on mount to set
     the default to_date on the date-range picker to whatever's actually
@@ -4020,6 +3989,14 @@ class UntestedAssetsResponse(BaseModel):
     computed_at: datetime
 
 
+# "Untested" now means: no ad in ad_asset_map ever resolved to this
+# asset. It used to mean "the register's own ad_id / computed_is_tested
+# column is unset" -- which reported an asset as untested whenever the
+# content workflow simply never wrote the link back, even when the
+# asset's code appears verbatim in a live ad's name. Measured 2026-09-15
+# against the old rule: 26 of 269 video and 9 of 203 graphic assets were
+# called untested despite demonstrably having run.
+#
 # Per-media SQL fragments producing a common column set. Each SELECT
 # yields: id, title, nomenclature, kind, sub_kind, link, thumbnail,
 # date_produced, created_at, candidate_master_sku (already NULLIF'd).
@@ -4038,7 +4015,8 @@ _UNTESTED_SQL: dict[str, str] = {
           NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '')
                                                                 AS candidate_master_sku
         FROM public.content_asset_register car
-        WHERE car.ad_id IS NULL
+        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                           WHERE m.asset_id = car.asset_id)
     """,
     "graphic": """
         SELECT
@@ -4057,7 +4035,8 @@ _UNTESTED_SQL: dict[str, str] = {
             NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
           )                                                     AS candidate_master_sku
         FROM public.content_graphic_register cgr
-        WHERE COALESCE(cgr.computed_is_tested, false) = false
+        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                           WHERE m.asset_id = cgr.requisition_id)
     """,
     "influencer": """
         SELECT
@@ -4072,7 +4051,10 @@ _UNTESTED_SQL: dict[str, str] = {
           cip.created_at                                        AS created_at,
           NULL::text                                            AS candidate_master_sku
         FROM public.content_influencer_posts cip
-        WHERE COALESCE(cip.computed_is_tested, false) = false
+        -- Join on post_id, NOT the bigint PK: the map is keyed on the
+        -- identifier that actually appears in ad names (SIF-15233-P1).
+        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                           WHERE m.asset_id = cip.post_id)
     """,
 }
 
@@ -4526,6 +4508,7 @@ class KpisResponse(BaseModel):
 # should fan out to these instead.
 # ------------------------------------------------------------------
 @router.get("/dashboard/kpis", response_model=KpisResponse)
+@cached_analytics(ttl=60.0)
 async def get_dashboard_kpis(session: SessionDep) -> KpisResponse:
     totals = (await session.execute(text(
         "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0), "
@@ -4541,6 +4524,7 @@ async def get_dashboard_kpis(session: SessionDep) -> KpisResponse:
 
 
 @router.get("/dashboard/category-breakdown", response_model=list[BreakdownItem])
+@cached_analytics(ttl=60.0)
 async def get_dashboard_category_breakdown(session: SessionDep) -> list[BreakdownItem]:
     rows = (await session.execute(text(
         "SELECT COALESCE(category,'Uncategorized'), SUM(spend) "
@@ -4550,6 +4534,7 @@ async def get_dashboard_category_breakdown(session: SessionDep) -> list[Breakdow
 
 
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
+@cached_analytics(ttl=60.0)
 async def get_dashboard_channel_breakdown(session: SessionDep) -> list[BreakdownItem]:
     # Aggregate in SQL first (340k rows -> ~200 distinct sources),
     # THEN apply _classify_channel in Python. The branching logic
@@ -4567,6 +4552,7 @@ async def get_dashboard_channel_breakdown(session: SessionDep) -> list[Breakdown
 
 
 @router.get("/dashboard/top-landing-pages", response_model=list[TopLandingPage])
+@cached_analytics(ttl=60.0)
 async def get_dashboard_top_landing_pages(session: SessionDep) -> list[TopLandingPage]:
     rows = (await session.execute(text(
         "SELECT landing_page_path, sessions, ad_spend "
@@ -4576,6 +4562,7 @@ async def get_dashboard_top_landing_pages(session: SessionDep) -> list[TopLandin
 
 
 @router.get("/dashboard/top-cpis-skus", response_model=list[TopCpisSku])
+@cached_analytics(ttl=60.0)
 async def get_dashboard_top_cpis_skus(session: SessionDep) -> list[TopCpisSku]:
     rows = (await session.execute(text(
         "SELECT master_sku, ad_spend, cost_per_ncp FROM cpis_by_sku "
@@ -4611,4 +4598,457 @@ async def get_overview_summary(session: SessionDep) -> OverviewSummaryResponse:
         channel_breakdown=chan,
         top_landing_pages=lp,
         top_cpis_skus=cpis,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Creative Testing -- ASSET grain, not ad grain
+# ══════════════════════════════════════════════════════════════════════
+#
+# Creative Testing answers "which creatives did we test in this window,
+# and how did they do?". The unit is therefore the ASSET, counted once,
+# not the ad -- one asset routinely runs in several ads and would
+# otherwise be counted several times.
+#
+# NEW vs ITERATION is decided by the ASSET's own creation date in its
+# register, NOT by the ad's date:
+#
+#     asset created inside the window   -> counter 0  -> New Creative
+#     asset created before the window   -> counter >=1 -> Iteration
+#     ad name contains "copy"           -> always       Iteration
+#     asset has no creation date        -> always       Iteration
+#
+# The copy rule is load-bearing, not a detail. Measured 2026-09-15:
+# 1,833 of 3,911 mapped ads (46%) carry "copy" in the name, and 604 of
+# 1,219 assets (50%) appear in at least one. Meta's duplication flow
+# appends "- Copy" to the child ad, so a creative first tested in March
+# and duplicated in September would otherwise read as a brand-new
+# September test. Dating off the asset register instead of the ad makes
+# that impossible by construction.
+#
+# Copy ads still contribute their spend and conversions -- the same
+# creative really did deliver through them -- they just never make an
+# asset count as new.
+
+_CT_ASSET_DATES = (
+    "SELECT asset_id AS asset_id, date_of_production AS asset_created,"
+    "       'video'::text AS reg_media,"
+    "       NULLIF(btrim(link_to_asset), '') AS preview_url,"
+    "       NULL::text AS thumbnail_url FROM public.content_asset_register"
+    " UNION ALL "
+    "SELECT requisition_id, asset_date, 'graphic',"
+    "       COALESCE(NULLIF(btrim(link_1), ''), NULLIF(btrim(link_2), ''),"
+    "                NULLIF(btrim(link_3), ''), NULLIF(btrim(creative), '')),"
+    "       NULL::text FROM public.content_graphic_register"
+    " UNION ALL "
+    "SELECT post_id, post_date, 'influencer',"
+    "       COALESCE(NULLIF(btrim(post_link), ''), NULLIF(btrim(download_link), '')),"
+    "       NULLIF(btrim(post_thumbnail), '') FROM public.content_influencer_posts"
+)
+
+#: Per-asset rollup across every ad whose name carries the asset's id.
+#: `ads_in_window` is what puts an asset in scope; the metric sums are
+#: the asset's lifetime totals, matching how the ad-grain view has always
+#: behaved (it filters on ad_created_date but shows lifetime figures).
+_CT_AGG = (
+    "WITH asset_dates AS (" + _CT_ASSET_DATES + "), "
+    "agg AS ("
+    "  SELECT m.asset_id, m.media,"
+    "         count(*)                                                   AS ads,"
+    "         count(*) FILTER (WHERE m.ad_name ILIKE '%copy%')            AS copy_ads,"
+    "         count(*) FILTER (WHERE m.ad_created_date"
+    "                                 BETWEEN :from_date AND :to_date)    AS ads_in_window,"
+    "         count(*) FILTER (WHERE m.ad_name NOT ILIKE '%copy%')        AS original_ads,"
+    "         min(m.ad_created_date)                                      AS first_ad_date,"
+    "         max(m.ad_created_date)                                      AS last_ad_date,"
+    "         min(m.account_name)                                         AS account_name,"
+    "         bool_or(m.name_conflict)                                    AS name_conflict,"
+    "         sum(m.spend)                                                AS spend,"
+    "         sum(m.impressions)                                          AS impressions,"
+    "         sum(m.purchases)                                            AS purchases,"
+    "         sum(m.conv_value)                                           AS conv_value,"
+    "         sum(m.ncp_count)                                            AS ncp_count,"
+    "         sum(m.ftewv_count)                                          AS ftewv_count,"
+    "         sum(m.link_clicks)                                          AS link_clicks,"
+    # Best verdict any ad of this asset reached. An asset that produced a
+    # Winner in one ad and a Discarded in another is a Winner -- the
+    # creative proved itself at least once. min() over the rank because
+    # rank 1 is the strongest.
+    "         min(CASE m.category"
+    "              WHEN 'Incremental Winner' THEN 1 WHEN 'Winner' THEN 2"
+    "              WHEN 'P0 analysis' THEN 3 WHEN 'P1 analysis' THEN 4"
+    "              WHEN 'P2 analysis' THEN 5 WHEN 'Result Awaited' THEN 6"
+    "              ELSE 7 END)                                             AS cat_rank,"
+    "         max(m.ad_name)                                              AS sample_ad_name,"
+    "         sum(m.thruplays)                                            AS thruplays,"
+    "         sum(m.three_sec_plays)                                      AS three_sec_plays,"
+    "         sum(m.outbound_clicks)                                      AS outbound_clicks,"
+    "         sum(m.post_engagements)                                     AS post_engagements,"
+    # Keep both outbound links tied to one real ad. Lifetime spend matches
+    # the metrics shown for this asset; ad_id breaks equal-spend ties.
+    "         (array_agg(m.ad_id ORDER BY m.spend DESC NULLS LAST, m.ad_id))[1]"
+    "                                                                     AS preview_ad_id"
+    "    FROM public.ad_asset_map m"
+    "   GROUP BY m.asset_id, m.media"
+    ") "
+)
+
+#: Everything downstream reads this shape, so the row query, the count
+#: and the totals cannot describe different populations.
+_CT_BASE = (
+    "FROM agg a LEFT JOIN asset_dates d ON d.asset_id = a.asset_id "
+    "WHERE a.ads_in_window > 0"
+)
+
+#: An asset is NEW only if its register creation date falls inside the
+#: window AND at least one non-copy ad carries it. Everything else --
+#: created earlier, only ever copied, or no creation date recorded -- is
+#: an iteration.
+_CT_CATEGORY = (
+    "CASE a.cat_rank WHEN 1 THEN 'Incremental Winner' WHEN 2 THEN 'Winner'"
+    " WHEN 3 THEN 'P0 analysis' WHEN 4 THEN 'P1 analysis' WHEN 5 THEN 'P2 analysis'"
+    " WHEN 6 THEN 'Result Awaited' ELSE 'Discarded' END"
+)
+
+_CT_IS_NEW = (
+    "(d.asset_created BETWEEN :from_date AND :to_date AND a.original_ads > 0)"
+)
+
+
+def _ct_http_url(column: str) -> str:
+    """Normalize a recorded HTTP(S) URL from a fixed SQL column expression."""
+    return (
+        f"CASE WHEN btrim({column}) ~* '^https?://[^[:space:]]+$' "
+        f"THEN btrim({column}) END"
+    )
+
+
+# Both the asset summary and per-ad drill-down use these source priorities.
+# Never replace a missing ad link with the original asset or a generic website.
+_CT_AD_PREVIEW_URL = (
+    "COALESCE("
+    + _ct_http_url("at.instagram_permalink") + ", "
+    + _ct_http_url("at.fb_permalink") + ", "
+    "CASE WHEN btrim(am.effective_object_story_id) ~ '^[0-9]+_[0-9]+$' "
+    "THEN 'https://www.facebook.com/' "
+    "|| split_part(btrim(am.effective_object_story_id), '_', 1) "
+    "|| '/posts/' || split_part(btrim(am.effective_object_story_id), '_', 2) END)"
+)
+_CT_DESTINATION_URL = (
+    "COALESCE(" + _ct_http_url("at.destination_url") + ", "
+    + _ct_http_url("am.landing_page_url") + ")"
+)
+
+
+class CreativeTestingRow(BaseModel):
+    """One ASSET, counted once, with its performance rolled up across
+    every ad that named it."""
+    asset_id: str
+    media: str | None
+    asset_created: date | None
+    #: Original asset/post link from its register; null when unavailable.
+    preview_url: str | None = None
+    #: Register thumbnail when available; loading the preview stays opt-in.
+    thumbnail_url: str | None = None
+    #: Social post preview and website destination for the same highest-spend ad.
+    ad_preview_url: str | None = None
+    destination_url: str | None = None
+    preview_ad_id: str | None = None
+    #: Best verdict any ad of this asset reached.
+    category: str | None
+    #: One of the asset's ad names -- the client derives Product Focus
+    #: (CLP/CTP/VRP/PDP prefix) from it, same as CTD's strip.
+    sample_ad_name: str | None
+    #: "new" when the asset was created inside the window, else "iteration".
+    kind: str
+    #: Times this asset was reused beyond its first outing. 0 = new.
+    iteration_count: int
+    ads: int
+    copy_ads: int
+    ads_in_window: int
+    first_ad_date: date | None
+    last_ad_date: date | None
+    account_name: str | None
+    #: The asset's id appears in an ad that also names another asset.
+    name_conflict: bool | None
+    spend: float | None
+    impressions: float | None
+    purchases: float | None
+    conv_value: float | None
+    ncp_count: float | None
+    ftewv_count: float | None
+    roas: float | None
+    cost_per_ncp: float | None
+    cost_per_ftewv: float | None
+    ctr_pct: float | None
+
+
+class CreativeTestingTotals(BaseModel):
+    assets: int
+    new_creatives: int
+    iterations: int
+    spend: float
+    impressions: float
+    purchases: float
+    conv_value: float
+    ncp_count: float
+    ftewv_count: float
+    #: Blended (sum/sum), not a mean of per-asset ratios -- these sit
+    #: beside the spend and revenue tiles and have to divide out to them.
+    roas: float | None
+    cost_per_ncp: float | None
+    cost_per_ftewv: float | None
+    #: Overview-Performance strip. Blended (sum/sum) so every tile
+    #: divides out to the spend and impressions printed beside it.
+    thruplays: float
+    three_sec_plays: float
+    outbound_clicks: float
+    post_engagements: float
+
+
+class CreativeTestingResponse(BaseModel):
+    rows: list[CreativeTestingRow]
+    total: int
+    totals: CreativeTestingTotals
+    #: Per-category asset counts under the same filters as `rows` minus
+    #: `category` itself, so the Winner/P0/P1/P2 tiles keep their real
+    #: sizes while one of them is selected.
+    category_counts: dict[str, int]
+    #: {"new": n, "iteration": n} under the same filters as `rows` minus
+    #: `kind` itself, so both tabs show their true size whichever is open.
+    kind_counts: dict[str, int]
+
+
+_CT_SORT_COLUMNS: dict[str, str] = {
+    "spend": "a.spend",
+    "impressions": "a.impressions",
+    "purchases": "a.purchases",
+    "roas": "CASE WHEN a.spend > 0 THEN a.conv_value / a.spend END",
+    "cost_per_ncp": "CASE WHEN a.ncp_count > 0 THEN a.spend / a.ncp_count END",
+    "cost_per_ftewv": "CASE WHEN a.ftewv_count > 0 THEN a.spend / a.ftewv_count END",
+    "asset_created": "d.asset_created",
+    "last_ad_date": "a.last_ad_date",
+    "ads": "a.ads",
+}
+
+
+@router.get("/creative-testing", response_model=CreativeTestingResponse)
+@cached_analytics(ttl=300.0)
+async def get_creative_testing(
+    session: SessionDep,
+    from_date: date = Query(..., description="Window start (required)."),
+    to_date: date = Query(..., description="Window end (required)."),
+    kind: Literal["new", "iteration"] | None = Query(
+        default=None,
+        description="Filter to New Creatives or Iterations. Omit for both. "
+                    "Does not affect `kind_counts`.",
+    ),
+    media: Literal["video", "graphic", "influencer"] | None = Query(default=None),
+    category: str | None = Query(
+        default=None,
+        description="Filter to one verdict bucket (Winner / P0 analysis / ...). "
+                    "Does not affect `category_counts`.",
+    ),
+    account_name: str | None = Query(default=None),
+    search: str | None = Query(default=None, description="Substring of asset_id."),
+    sort: Literal[
+        "spend", "impressions", "purchases", "roas",
+        "cost_per_ncp", "cost_per_ftewv", "asset_created", "last_ad_date", "ads",
+    ] = Query(default="spend"),
+    # Cap is high on purpose. The funnel, the Product-Focus and the
+    # Creative-Focus strips are all derived client-side from the row set
+    # (verbatim ports of CTD's detectCtype / detectProductFocus), so the
+    # client pulls every asset in the window once and paginates the
+    # table locally. Worst case today is 1,219 assets over lifetime.
+    limit: int = Query(default=2000, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> CreativeTestingResponse:
+    """Uniquely-tested creative assets in a window, split New vs Iteration.
+
+    Grain is the asset, so an asset running in six ads is one row, not
+    six. See the block comment above _CT_ASSET_DATES for why New vs
+    Iteration is decided by the asset register's creation date rather
+    than by any ad date.
+    """
+    params: dict[str, object] = {"from_date": from_date, "to_date": to_date}
+    where: list[str] = []
+    if media:
+        where.append("a.media = :media")
+        params["media"] = media
+    if account_name:
+        where.append("a.account_name = :account_name")
+        params["account_name"] = account_name
+    if search:
+        where.append("a.asset_id ILIKE :search")
+        params["search"] = f"%{search}%"
+
+    base_where = (" AND " + " AND ".join(where)) if where else ""
+    # category rides with kind_where, not base_where -- the tiles must
+    # keep showing every bucket while one of them is selected.
+    cat_where = ""
+    if category:
+        cat_where = f" AND {_CT_CATEGORY} = :category"
+        params["category"] = category
+    kind_where = ""
+    if kind == "new":
+        kind_where = f" AND {_CT_IS_NEW}"
+    elif kind == "iteration":
+        kind_where = f" AND NOT {_CT_IS_NEW}"
+
+    select_cols = (
+        "a.asset_id, a.media, d.asset_created, d.preview_url, d.thumbnail_url, "
+        "a.preview_ad_id, "
+        f"{_CT_CATEGORY} AS category, a.sample_ad_name, "
+        f"CASE WHEN {_CT_IS_NEW} THEN 'new' ELSE 'iteration' END AS kind, "
+        "GREATEST(a.ads - 1, 0) AS iteration_count, "
+        "a.ads, a.copy_ads, a.ads_in_window, a.first_ad_date, a.last_ad_date, "
+        "a.account_name, a.name_conflict, "
+        "a.spend, a.impressions, a.purchases, a.conv_value, a.ncp_count, a.ftewv_count, "
+        "CASE WHEN a.spend > 0 THEN a.conv_value / a.spend END AS roas, "
+        "CASE WHEN a.ncp_count > 0 THEN a.spend / a.ncp_count END AS cost_per_ncp, "
+        "CASE WHEN a.ftewv_count > 0 THEN a.spend / a.ftewv_count END AS cost_per_ftewv, "
+        "CASE WHEN a.impressions > 0 THEN a.link_clicks::numeric / a.impressions * 100 END AS ctr_pct"
+    )
+
+    # Aggregate the ad/asset relation once for the entire response. Each
+    # panel retains its original filter scope, but reads this shared result.
+    totals_sql = (
+            "SELECT COUNT(*) AS assets, "
+            f"COUNT(*) FILTER (WHERE {_CT_IS_NEW}) AS new_creatives, "
+            f"COUNT(*) FILTER (WHERE NOT {_CT_IS_NEW}) AS iterations, "
+            "COALESCE(SUM(a.spend),0) AS spend, COALESCE(SUM(a.impressions),0) AS impressions, "
+            "COALESCE(SUM(a.purchases),0) AS purchases, COALESCE(SUM(a.conv_value),0) AS conv_value, "
+            "COALESCE(SUM(a.ncp_count),0) AS ncp_count, COALESCE(SUM(a.ftewv_count),0) AS ftewv_count, "
+            "CASE WHEN SUM(a.spend) > 0 THEN SUM(a.conv_value)/SUM(a.spend) END AS roas, "
+            "CASE WHEN SUM(a.ncp_count) > 0 THEN SUM(a.spend)/SUM(a.ncp_count) END AS cost_per_ncp, "
+            "CASE WHEN SUM(a.ftewv_count) > 0 THEN SUM(a.spend)/SUM(a.ftewv_count) END AS cost_per_ftewv, "
+            "COALESCE(SUM(a.thruplays),0) AS thruplays, "
+            "COALESCE(SUM(a.three_sec_plays),0) AS three_sec_plays, "
+            "COALESCE(SUM(a.outbound_clicks),0) AS outbound_clicks, "
+            "COALESCE(SUM(a.post_engagements),0) AS post_engagements "
+            f"{_CT_BASE}{base_where}{kind_where}{cat_where}"
+    )
+    aggregate_sql = _CT_AGG.replace("agg AS (", "agg AS MATERIALIZED (")
+    sql = (
+        aggregate_sql + " SELECT "
+        "COALESCE((SELECT jsonb_agg(to_jsonb(page) || jsonb_build_object("
+        f"'ad_preview_url', {_CT_AD_PREVIEW_URL}, "
+        f"'destination_url', {_CT_DESTINATION_URL}) "
+        f"ORDER BY page.{sort} DESC NULLS LAST, page.asset_id) FROM ("
+        f"SELECT {select_cols} {_CT_BASE}{base_where}{kind_where}{cat_where} "
+        f"ORDER BY {_CT_SORT_COLUMNS[sort]} DESC NULLS LAST, a.asset_id "
+        # Resolve links only after pagination, using unique ad_id lookups.
+        # These joins cannot multiply the ad/asset aggregate or its totals.
+        "LIMIT :limit OFFSET :offset) page "
+        "LEFT JOIN public.ad_thumbnails at ON at.ad_id = page.preview_ad_id "
+        "LEFT JOIN public.ad_media am ON am.ad_id = page.preview_ad_id"
+        "), '[]'::jsonb) AS rows, "
+        "COALESCE((SELECT jsonb_object_agg(k, n) FROM ("
+        f"SELECT CASE WHEN {_CT_IS_NEW} THEN 'new' ELSE 'iteration' END AS k, "
+        f"COUNT(*) AS n {_CT_BASE}{base_where} GROUP BY 1"
+        ") kinds), '{}'::jsonb) AS kind_counts, "
+        "COALESCE((SELECT jsonb_object_agg(c, n) FROM ("
+        f"SELECT {_CT_CATEGORY} AS c, COUNT(*) AS n "
+        f"{_CT_BASE}{base_where}{kind_where} GROUP BY 1"
+        ") categories), '{}'::jsonb) AS category_counts, "
+        f"(SELECT to_jsonb(t) FROM ({totals_sql}) t) AS totals"
+    )
+    result = (await session.execute(
+        text(sql), {**params, "limit": limit, "offset": offset},
+    )).mappings().one()
+    # Raw SQL JSONB can be decoded by the driver or returned as text.
+    import json
+    values = {k: json.loads(v) if isinstance(v, str) else v for k, v in result.items()}
+    totals = CreativeTestingTotals(**values["totals"])
+    return CreativeTestingResponse(
+        rows=values["rows"], total=totals.assets, totals=totals,
+        category_counts=values["category_counts"],
+        kind_counts={"new": 0, "iteration": 0, **values["kind_counts"]},
+    )
+
+
+class CreativeTestingAdRow(BaseModel):
+    """One ad that named this asset, in launch order."""
+    ad_id: str
+    ad_name: str | None
+    ad_status: str | None
+    category: str | None
+    ad_created_date: date | None
+    ad_preview_url: str | None = None
+    destination_url: str | None = None
+    is_copy: bool
+    #: 0 = the original outing, 1 = 1st iteration, 2 = 2nd, ...
+    iteration_index: int
+    spend: float | None
+    impressions: float | None
+    purchases: float | None
+    conv_value: float | None
+    ncp_count: float | None
+    ftewv_count: float | None
+    roas: float | None
+    cost_per_ncp: float | None
+    cost_per_ftewv: float | None
+    ctr_pct: float | None
+    f1_pass: bool | None
+    f2_pass: bool | None
+    f3_pass: bool | None
+    f4_pass: bool | None
+
+
+class CreativeTestingAdsResponse(BaseModel):
+    asset_id: str
+    media: str | None
+    ads: list[CreativeTestingAdRow]
+
+
+#: Per-ad drill-down for one asset. Joins ad_lifecycle for the handful
+#: of fields the map does not denormalise (ad_status, F1-F4) -- a PK
+#: lookup over ~10 rows, so the wide-table cost that made the asset-grain
+#: rollup unusable does not apply here.
+#:
+#: iteration_index is launch order, so the UI can step through "how did
+#: this creative do the 1st time, the 2nd time, ...". The original is 0.
+_CT_ADS_SQL = (
+    "SELECT m.ad_id, m.ad_name, al.ad_status, m.category, m.ad_created_date, "
+    f"       {_CT_AD_PREVIEW_URL} AS ad_preview_url, "
+    f"       {_CT_DESTINATION_URL} AS destination_url, "
+    "       (m.ad_name ILIKE '%copy%') AS is_copy, "
+    "       (row_number() OVER (ORDER BY m.ad_created_date NULLS LAST, m.ad_id) - 1)::int "
+    "           AS iteration_index, "
+    "       m.spend, m.impressions, m.purchases, m.conv_value, "
+    "       m.ncp_count, m.ftewv_count, "
+    "       CASE WHEN m.spend > 0 THEN m.conv_value / m.spend END AS roas, "
+    "       CASE WHEN m.ncp_count > 0 THEN m.spend / m.ncp_count END AS cost_per_ncp, "
+    "       CASE WHEN m.ftewv_count > 0 THEN m.spend / m.ftewv_count END AS cost_per_ftewv, "
+    "       CASE WHEN m.impressions > 0 "
+    "            THEN m.link_clicks::numeric / m.impressions * 100 END AS ctr_pct, "
+    "       al.f1_pass, al.f2_pass, al.f3_pass, al.f4_pass "
+    "FROM public.ad_asset_map m "
+    "LEFT JOIN ad_lifecycle al ON al.ad_id = m.ad_id "
+    "LEFT JOIN public.ad_thumbnails at ON at.ad_id = m.ad_id "
+    "LEFT JOIN public.ad_media am ON am.ad_id = m.ad_id "
+    "WHERE m.asset_id = :asset_id "
+    "ORDER BY m.ad_created_date NULLS LAST, m.ad_id"
+)
+
+
+@router.get("/creative-testing/{asset_id}/ads", response_model=CreativeTestingAdsResponse)
+async def get_creative_testing_ads(
+    session: SessionDep,
+    asset_id: str,
+) -> CreativeTestingAdsResponse:
+    """Every ad that named this asset, oldest first.
+
+    A "new" asset normally has one; an iterated one has several, and the
+    client steps through them so a merchant can see how the same creative
+    performed each time it was put back in market.
+    """
+    result = await session.execute(text(_CT_ADS_SQL), {"asset_id": asset_id})
+    ads = [CreativeTestingAdRow(**dict(r._mapping)) for r in result]
+    media_result = await session.execute(
+        text("SELECT media FROM public.ad_asset_map WHERE asset_id = :asset_id LIMIT 1"),
+        {"asset_id": asset_id},
+    )
+    return CreativeTestingAdsResponse(
+        asset_id=asset_id, media=media_result.scalar(), ads=ads
     )

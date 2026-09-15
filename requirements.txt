@@ -17,6 +17,16 @@ python-pptx==1.0.2
 python-multipart==0.0.12
 anthropic==0.120.2
 
+# Google APIs.
+# google-cloud-bigquery was MISSING, and that is why the `bq_inventory`
+# and `silver_returns` steps have failed on every nightly run
+# (ModuleNotFoundError: google.cloud.bigquery) -- not a credentials
+# problem, as it looked. google-api-python-client reads the graphics
+# requisition sheet in scripts/ingest_asset_sources.py.
+google-cloud-bigquery==3.27.0
+google-api-python-client==2.149.0
+google-auth==2.35.0
+
 # dev / test
 pytest==8.3.3
 pytest-asyncio==0.24.0

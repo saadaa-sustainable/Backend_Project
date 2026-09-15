@@ -97,12 +97,26 @@ AD_FIELDS = [
     "id", "account_id", "campaign_id", "adset_id", "name", "status",
     "effective_status", "created_time", "updated_time",
 ]
-INSIGHTS_FIELDS = [
-    "ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name",
+#: Metric fields are identical at every level; only the identity columns
+#: differ. Meta rejects a breakdown field that is below the requested
+#: level (asking for ad_id at level=campaign returns an error, not a
+#: null), so each level gets exactly the identity columns it owns.
+_INSIGHTS_METRICS = [
     "account_id", "date_start", "date_stop", "spend", "impressions", "reach",
     "frequency", "clicks", "unique_clicks", "ctr", "cpc", "cpm", "actions",
     "action_values", "conversions", "purchase_roas",
 ]
+INSIGHTS_FIELDS_BY_LEVEL = {
+    "campaign": ["campaign_id", "campaign_name"] + _INSIGHTS_METRICS,
+    "adset": ["adset_id", "adset_name", "campaign_id", "campaign_name"] + _INSIGHTS_METRICS,
+    "ad": ["ad_id", "ad_name", "adset_id", "adset_name", "campaign_id", "campaign_name"]
+          + _INSIGHTS_METRICS,
+}
+#: The id that identifies one row at each level -- becomes raw_dump_meta.meta_id.
+INSIGHTS_ID_FIELD = {"campaign": "campaign_id", "adset": "adset_id", "ad": "ad_id"}
+
+# Back-compat for any caller still importing the flat list.
+INSIGHTS_FIELDS = INSIGHTS_FIELDS_BY_LEVEL["ad"]
 
 # Mirrors the exact default `effective_status` filters used by
 # app/services/meta/{campaigns,adsets,ads}.py, for 1:1 parity with what a
@@ -319,6 +333,9 @@ class FetchResult:
     items: list[dict[str, Any]] = field(default_factory=list)
     duration_seconds: float = 0.0
     request_params: dict[str, Any] = field(default_factory=dict)
+    #: Insights level this result came from ("campaign"/"adset"/"ad").
+    #: None for roster fetches.
+    level: str | None = None
     error: str | None = None
 
 
@@ -328,8 +345,31 @@ def _build_rows(
     rows = []
     for item in result.items:
         if result.object_type == "insights":
-            meta_id = item.get("ad_id")
+            level = result.level or "ad"
+            meta_id = item.get(INSIGHTS_ID_FIELD[level])
+            # `level` is what app/services/silver/insights_flatten.py
+            # filters on (`WHERE parent_ids ->> 'level' = :level`), so it
+            # decides whether a row reaches ad_insights / adset_insights /
+            # campaign_insights at all.
+            #
+            # It is tagged ONLY on lifetime (all_days) fetches, and that
+            # is deliberate. Those three tables are lifetime grain -- the
+            # primary key is the bare entity id (ad_id / adset_id /
+            # campaign_id). A time_increment=1 fetch returns one row per
+            # entity PER DAY, so tagging those would feed 15 rows per
+            # campaign into a one-row-per-campaign table: confirmed live,
+            # `duplicate key value violates unique constraint
+            # campaign_insights_pkey`.
+            #
+            # Daily rows still land in Bronze and are still consumed --
+            # refresh_insights_daily_by_ad.py reads raw_payload directly
+            # and does its own (ad_id, date_start) dedup, ignoring `level`
+            # entirely. Leaving them untagged keeps that path working
+            # exactly as it did while letting the lifetime tables be
+            # populated from the right grain.
+            is_lifetime = result.request_params.get("time_increment") == "all_days"
             parent_ids = {
+                **({"level": level} if is_lifetime else {}),
                 "account_key": result.account.key,
                 "account_name": result.account.name,
                 "account_id": item.get("account_id"),
@@ -433,16 +473,17 @@ async def _fetch_insights(
     since: date,
     until: date,
     time_increment: str,
+    level: str = "ad",
 ) -> FetchResult:
     params = {
         "access_token": access_token,
-        "level": "ad",
-        "fields": ",".join(INSIGHTS_FIELDS),
+        "level": level,
+        "fields": ",".join(INSIGHTS_FIELDS_BY_LEVEL[level]),
         "time_range": json.dumps({"since": since.isoformat(), "until": until.isoformat()}),
         "time_increment": time_increment,
     }
     t0 = time.monotonic()
-    result = FetchResult(account=account, object_type="insights", api_endpoint="insights", request_params={k: v for k, v in params.items() if k != "access_token"})
+    result = FetchResult(account=account, object_type="insights", api_endpoint="insights", level=level, request_params={k: v for k, v in params.items() if k != "access_token"})
     try:
         result.items = await _paginate(client, f"{base_url}/act_{account.account_id}/insights", params)
     except RuntimeError as exc:
@@ -577,7 +618,44 @@ def _insert_batch_row(conn, *, batch_id: uuid.UUID, endpoint: str, account: Acco
     conn.commit()
 
 
-def _bulk_insert_rows(conn, rows: list[dict[str, Any]], *, chunk_size: int = 500) -> int:
+def _connect_with_retry(dsn: str, *, attempts: int = 8):
+    """Open a connection, retrying pool-checkout / auth timeouts.
+
+    The Supabase pooler on this project intermittently refuses new
+    sessions ("ECHECKOUTTIMEOUT ... in Session mode", or auth not
+    completing inside 15s). A bare connect() turns that into a lost run:
+    measured 2026-09-15, a campaign+adset fetch that had already spent
+    ~200s against Meta's rate-limited API threw all 3,811 fetched rows
+    away because the write could not get a connection. The fetch is the
+    expensive half; it must not be forfeited by the cheap half.
+    """
+    delay = 5.0
+    for attempt in range(1, attempts + 1):
+        try:
+            return psycopg2.connect(dsn, connect_timeout=30)
+        except psycopg2.OperationalError as exc:
+            if attempt == attempts:
+                raise
+            print(f"  [warn] connect attempt {attempt}/{attempts} failed "
+                  f"({str(exc).strip().splitlines()[-1][:70]}); retrying in {delay:.0f}s",
+                  flush=True)
+            time.sleep(delay)
+            delay = min(delay * 1.6, 60.0)
+
+
+def _bulk_insert_rows(conn, rows: list[dict[str, Any]], *, chunk_size: int = 100) -> int:
+    """Chunked insert with per-chunk retry and halving backoff.
+
+    raw_dump_meta carries ten indexes, one of them a GIN over raw_payload,
+    so every insert pays a real index-maintenance cost. On a loaded
+    instance that is enough to blow a statement timeout: measured
+    2026-09-15, a 500-row chunk exceeded 600s and took the whole run with
+    it AFTER all the Meta fetching had already succeeded -- the expensive
+    half of the job was thrown away because the cheap half failed.
+
+    Chunks are small, each commits on its own, and a timeout halves the
+    chunk and retries rather than aborting. Partial progress is kept.
+    """
     if not rows:
         return 0
     columns = [
@@ -586,19 +664,31 @@ def _bulk_insert_rows(conn, rows: list[dict[str, Any]], *, chunk_size: int = 500
         "processing_status", "object_type", "parent_ids", "is_nested",
     ]
     inserted = 0
-    with conn.cursor() as cur:
-        for start in range(0, len(rows), chunk_size):
-            chunk = rows[start:start + chunk_size]
-            values = [tuple(row[col] for col in columns) for row in chunk]
-            psycopg2.extras.execute_values(
-                cur,
-                f"INSERT INTO raw_dump_meta ({', '.join(columns)}) VALUES %s",
-                values,
-                template=None,
-                page_size=chunk_size,
-            )
-            inserted += len(chunk)
+    pending = list(rows)
+    size = chunk_size
+    while pending:
+        chunk, rest = pending[:size], pending[size:]
+        values = [tuple(row[col] for col in columns) for row in chunk]
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = '1800s'")
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"INSERT INTO raw_dump_meta ({', '.join(columns)}) VALUES %s",
+                    values, template=None, page_size=len(chunk),
+                )
             conn.commit()
+            inserted += len(chunk)
+            pending = rest
+        except psycopg2.errors.QueryCanceled:
+            conn.rollback()
+            if size == 1:
+                print("  [warn] single-row insert timed out; skipping one row", flush=True)
+                pending = rest[0:] if not rest else rest
+                pending = rest
+                continue
+            size = max(1, size // 2)
+            print(f"  [warn] insert timed out, halving chunk to {size}", flush=True)
     return inserted
 
 
@@ -607,7 +697,7 @@ def _bulk_insert_rows(conn, rows: list[dict[str, Any]], *, chunk_size: int = 500
 # ----------------------------------------------------------------------
 
 
-async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: str, since: date, until: date, time_increment: str, include_roster: bool) -> list[FetchResult]:
+async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: str, since: date, until: date, time_increment: str, include_roster: bool, levels: list[str] | None = None) -> list[FetchResult]:
     limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
     async with httpx.AsyncClient(limits=limits) as client:
         tasks = []
@@ -616,12 +706,14 @@ async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: st
                 tasks.append(_fetch_campaigns(client, base_url, account, access_token))
                 tasks.append(_fetch_adsets(client, base_url, account, access_token))
                 tasks.append(_fetch_ads(client, base_url, account, access_token))
-            tasks.append(
-                _fetch_insights(
-                    client, base_url, account, access_token,
-                    since=since, until=until, time_increment=time_increment,
+            for level in (levels or ["ad"]):
+                tasks.append(
+                    _fetch_insights(
+                        client, base_url, account, access_token,
+                        since=since, until=until, time_increment=time_increment,
+                        level=level,
+                    )
                 )
-            )
         return await asyncio.gather(*tasks)
 
 
@@ -634,7 +726,7 @@ def _write_results(dsn: str, results, *, api_version: str) -> int:
     run that got throttled at hour two had nothing to show for it.
     """
     write_start = time.monotonic()
-    conn = psycopg2.connect(dsn)
+    conn = _connect_with_retry(dsn)
     try:
         _ensure_schema(conn)
 
@@ -700,6 +792,11 @@ def main() -> int:
                              "AND WRITING each before starting the next. 0 (default) = one request "
                              "per account for the whole window, which is fine for 15 days and wrong "
                              "for 250 -- see the module docstring.")
+    parser.add_argument("--levels", default="ad",
+                        help="Comma-separated insights levels to fetch: campaign,adset,ad. "
+                             "Default 'ad' -- the historical behaviour. campaign_insights / "
+                             "adset_insights stay empty unless those levels are requested, "
+                             "because the silver flatten keys off parent_ids->>'level'.")
     parser.add_argument("--include-roster", action="store_true", help="Also fetch campaigns/adsets/ads (current-state rosters, not time-windowed — off by default, see module docstring).")
     args = parser.parse_args()
 
@@ -756,6 +853,13 @@ def main() -> int:
     fetch_start = time.monotonic()
     any_error = False
     failed_windows: list[tuple] = []
+    levels = [x.strip() for x in args.levels.split(",") if x.strip()]
+    unknown = [x for x in levels if x not in INSIGHTS_FIELDS_BY_LEVEL]
+    if unknown:
+        raise SystemExit(f"Unknown --levels value(s) {unknown}. "
+                         f"Valid: {sorted(INSIGHTS_FIELDS_BY_LEVEL)}")
+    print(f"insights levels: {', '.join(levels)}", flush=True)
+
     grand_total_rows = 0
     grand_total_inserted = 0
 
@@ -767,11 +871,13 @@ def main() -> int:
                 accounts, base_url=base_url, access_token=access_token,
                 since=w_since, until=w_until,
                 time_increment=args.time_increment, include_roster=args.include_roster,
+                levels=levels,
             )
         )
         for r in results:
             status = "OK" if not r.error else "FAILED"
-            print(f"  [{r.account.key}] {r.account.name:<24} {r.object_type:<10} "
+            kind = f"{r.object_type}:{r.level}" if r.level else r.object_type
+            print(f"  [{r.account.key}] {r.account.name:<24} {kind:<18} "
                   f"{status:<7} {len(r.items):>6} rows  {r.duration_seconds:6.2f}s", flush=True)
             if r.error:
                 any_error = True
