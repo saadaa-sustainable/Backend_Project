@@ -5052,3 +5052,126 @@ async def get_creative_testing_ads(
     return CreativeTestingAdsResponse(
         asset_id=asset_id, media=media_result.scalar(), ads=ads
     )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Ads Analyse -- adset / campaign rollup
+# ══════════════════════════════════════════════════════════════════════
+#
+# The Ads Analyse "Ads / Ad Sets / Campaigns" toggle and the Group By
+# dropdown were built disabled, labelled "needs backend adset/campaign
+# rollup RPCs -- Phase 2". This is that.
+#
+# Source is adset_insights / campaign_insights, NOT a SUM() over
+# ad_lifecycle, and that distinction is the whole point. Spend and
+# impressions would roll up fine, but REACH would not: Meta dedupes a
+# person per entity, so adding ad-level reach counts the same human once
+# per ad they saw. CTD measured that overstatement at 30-75% and the
+# legacy refresh_ae_table.py carries the same warning. These tables hold
+# Meta's own deduplicated figure for the entity, which is the only
+# correct source for reach and frequency at this grain.
+#
+# `ads` is still counted from ad_lifecycle -- that genuinely is a count,
+# and it is the one thing the level tables cannot tell you.
+#
+# HONEST CAVEAT, same one ad_insights carries: these are one row per
+# entity holding whatever window that entity was MOST RECENTLY FETCHED
+# with, not a true all-time total. Measured 2026-09-15 the rows spanned
+# date_start 2026-01-01 .. date_stop 2026-09-14, so two entities are not
+# necessarily comparable over the same period. date_start/date_stop are
+# returned per row so the UI can show what each figure actually covers.
+
+_ROLLUP_CFG = {
+    "campaign": ("campaign_insights", "campaign_id", "campaign_name"),
+    "adset": ("adset_insights", "adset_id", "adset_name"),
+}
+
+#: Pull one action_type's value out of Meta's JSONB action array.
+def _action_sql(column: str, *types: str) -> str:
+    wanted = ", ".join(f"'{t}'" for t in types)
+    return (
+        f"(SELECT MAX((x ->> 'value')::numeric) FROM jsonb_array_elements(i.{column}) x "
+        f"WHERE x ->> 'action_type' IN ({wanted}))"
+    )
+
+
+class RollupRow(BaseModel):
+    entity_id: str
+    entity_name: str | None
+    account_name: str | None
+    #: Ads belonging to this entity, counted from ad_lifecycle.
+    ads: int
+    #: The window these figures actually cover -- see the caveat above.
+    date_start: date | None
+    date_stop: date | None
+    spend: float | None
+    impressions: float | None
+    #: Meta-deduplicated. Never a SUM of ad-level reach.
+    reach: float | None
+    frequency: float | None
+    clicks: float | None
+    ctr: float | None
+    cpm: float | None
+    purchases: float | None
+    conv_value: float | None
+    roas: float | None
+    cost_per_purchase: float | None
+    cpr_1000: float | None
+
+
+class RollupResponse(BaseModel):
+    level: str
+    rows: list[RollupRow]
+    total: int
+
+
+@router.get("/ads-analyse/rollup", response_model=RollupResponse)
+async def get_ads_analyse_rollup(
+    session: SessionDep,
+    level: Literal["adset", "campaign"] = Query(...),
+    account_name: str | None = Query(default=None),
+    search: str | None = Query(default=None, description="Substring of the entity name."),
+    sort: Literal["spend", "impressions", "reach", "roas", "ads"] = Query(default="spend"),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> RollupResponse:
+    """Ad set / campaign rollup for the Ads Analyse level toggle."""
+    table, id_col, name_col = _ROLLUP_CFG[level]
+    purchases = _action_sql("actions", "omni_purchase", "purchase")
+    conv_value = _action_sql("action_values", "omni_purchase", "purchase")
+
+    where = [f"i.{id_col} IS NOT NULL"]
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+    if account_name:
+        where.append("i.account_name = :account_name")
+        params["account_name"] = account_name
+    if search:
+        where.append(f"i.{name_col} ILIKE :search")
+        params["search"] = f"%{search}%"
+    where_sql = "WHERE " + " AND ".join(where)
+
+    sort_sql = {
+        "spend": "i.spend", "impressions": "i.impressions", "reach": "i.reach",
+        "roas": "roas", "ads": "ads",
+    }[sort]
+
+    sql = (
+        f"SELECT i.{id_col} AS entity_id, i.{name_col} AS entity_name, i.account_name, "
+        f"       COALESCE(c.ads, 0)::int AS ads, i.date_start, i.date_stop, "
+        "        i.spend, i.impressions, i.reach, i.frequency, i.clicks, i.ctr, i.cpm, "
+        f"       {purchases} AS purchases, {conv_value} AS conv_value, "
+        f"       CASE WHEN i.spend > 0 THEN {conv_value} / i.spend END AS roas, "
+        f"       CASE WHEN {purchases} > 0 THEN i.spend / {purchases} END AS cost_per_purchase, "
+        "        CASE WHEN i.reach > 0 THEN i.spend * 1000.0 / i.reach END AS cpr_1000 "
+        f"FROM public.{table} i "
+        f"LEFT JOIN (SELECT {id_col}, COUNT(*) AS ads FROM ad_lifecycle "
+        f"            WHERE {id_col} IS NOT NULL GROUP BY {id_col}) c "
+        f"       ON c.{id_col} = i.{id_col} "
+        f"{where_sql} "
+        f"ORDER BY {sort_sql} DESC NULLS LAST LIMIT :limit OFFSET :offset"
+    )
+    rows = [RollupRow(**dict(r._mapping)) for r in await session.execute(text(sql), params)]
+
+    count_sql = f"SELECT COUNT(*) FROM public.{table} i {where_sql}"
+    total = int((await session.execute(text(count_sql), params)).scalar() or 0)
+    return RollupResponse(level=level, rows=rows, total=total)

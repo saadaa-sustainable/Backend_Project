@@ -38,6 +38,7 @@ import { KwikTile } from "./KwikTile";
 import { AdsAnalyseCharts } from "./AdsAnalyseCharts";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
+import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────
 // Category definitions — mirrors CTD dashboard.js:5874-5896 (aeCategorise)
@@ -722,6 +723,15 @@ export function AdsAnalyse() {
 
   // ── filters ──────────────────────────────────────────────────
   const [levelToggle, setLevelToggle] = useState<"ad" | "adset" | "campaign">("ad");
+  // Ad Sets / Campaigns read adset_insights / campaign_insights via the
+  // rollup endpoint. Reach there is Meta's own per-entity figure -- it
+  // is NOT summable from the ad rows, which is exactly why this needs a
+  // separate call rather than a client-side group-by.
+  const [rollupRows, setRollupRows] = useState<RollupRow[]>([]);
+  const [rollupTotal, setRollupTotal] = useState(0);
+  const [rollupLoading, setRollupLoading] = useState(false);
+  const [rollupError, setRollupError] = useState<string | null>(null);
+
   const [account, setAccount] = useState("");
   const [groupBy, setGroupBy] = useState<"ad" | "ad_name" | "adset" | "campaign">("ad");
   const [categoryFilter, setCategoryFilter] = useState<CategoryKey | "">("");
@@ -787,6 +797,29 @@ export function AdsAnalyse() {
   const [page, setPage] = useState(0);
 
   // ── fetch data ──────────────────────────────────────────────
+  useEffect(() => {
+    if (levelToggle === "ad") return;
+    let cancelled = false;
+    setRollupLoading(true);
+    setRollupError(null);
+    fetchAdsAnalyseRollup({
+      level: levelToggle,
+      account_name: account || undefined,
+      search: search || undefined,
+      limit: 500,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        setRollupRows(res.rows);
+        setRollupTotal(res.total);
+      })
+      .catch(() => !cancelled && setRollupError("Could not load the rollup."))
+      .finally(() => !cancelled && setRollupLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [levelToggle, account, search]);
+
   const filters = useMemo(
     () => ({
       account_name: account || undefined,
@@ -984,15 +1017,16 @@ export function AdsAnalyse() {
             <button
               key={lv}
               onClick={() => setLevelToggle(lv)}
-              disabled={lv !== "ad"}
-              title={lv === "ad" ? "Ad level" : `${lv} rollup needs backend RPCs — Phase 2`}
+              title={
+                lv === "ad"
+                  ? "Ad level"
+                  : `${lv} rollup — Meta-deduplicated reach from ${lv}_insights`
+              }
               className={
                 "px-3 py-1 text-xs first:rounded-l-md last:rounded-r-md " +
                 (levelToggle === lv
                   ? "bg-slate-900 text-white"
-                  : lv === "ad"
-                    ? "text-text-primary hover:bg-bg-muted"
-                    : "text-text-tertiary cursor-not-allowed")
+                  : "text-text-primary hover:bg-bg-muted")
               }
             >
               {lv === "ad" ? "Ads" : lv === "adset" ? "Ad Sets" : "Campaigns"}
@@ -1000,9 +1034,107 @@ export function AdsAnalyse() {
           ))}
         </div>
         <span className="ml-auto text-xs text-text-tertiary">
-          {loading ? "loading…" : `${derived.filtered.length.toLocaleString()} of ${total.toLocaleString()} ads`}
+          {levelToggle !== "ad"
+            ? rollupLoading
+              ? "loading…"
+              : `${rollupRows.length.toLocaleString()} of ${rollupTotal.toLocaleString()} ${levelToggle === "adset" ? "ad sets" : "campaigns"}`
+            : loading
+              ? "loading…"
+              : `${derived.filtered.length.toLocaleString()} of ${total.toLocaleString()} ads`}
         </span>
       </div>
+
+      {/* ═══════════════════════════════════════════════════════════
+          Ad Set / Campaign rollup. Replaces the ad table entirely when a
+          level is picked -- the columns differ (reach and frequency are
+          Meta's own per-entity figures, not summable from ads) and the
+          F1-F4 verdicts are an ad-level concept that does not apply here.
+         ═══════════════════════════════════════════════════════════ */}
+      {levelToggle !== "ad" && (
+        <div className="space-y-2">
+          {rollupError && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+              {rollupError}
+            </div>
+          )}
+          <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
+            <table className="w-full min-w-[980px] text-sm">
+              <thead className="bg-bg-muted text-left text-[11px] uppercase tracking-wide text-text-tertiary">
+                <tr>
+                  <th className="px-3 py-2">{levelToggle === "adset" ? "Ad set" : "Campaign"}</th>
+                  <th className="px-3 py-2">Account</th>
+                  <th className="px-3 py-2 text-right">Ads</th>
+                  <th className="px-3 py-2 text-right">Spend</th>
+                  <th className="px-3 py-2 text-right">Impressions</th>
+                  <th className="px-3 py-2 text-right" title="Meta-deduplicated — not a sum of ad reach">
+                    Reach
+                  </th>
+                  <th className="px-3 py-2 text-right">Freq.</th>
+                  <th className="px-3 py-2 text-right">₹/1k reach</th>
+                  <th className="px-3 py-2 text-right">Purch.</th>
+                  <th className="px-3 py-2 text-right">ROAS</th>
+                  <th className="px-3 py-2 text-right">Window</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rollupLoading && (
+                  <tr>
+                    <td colSpan={11} className="px-3 py-6 text-center text-text-tertiary">
+                      Loading…
+                    </td>
+                  </tr>
+                )}
+                {!rollupLoading && rollupRows.length === 0 && (
+                  <tr>
+                    <td colSpan={11} className="px-3 py-6 text-center text-text-tertiary">
+                      No {levelToggle === "adset" ? "ad sets" : "campaigns"} found.
+                    </td>
+                  </tr>
+                )}
+                {!rollupLoading &&
+                  rollupRows.map((r) => (
+                    <tr key={r.entity_id} className="border-t border-border-primary hover:bg-bg-muted">
+                      <td className="px-3 py-2">{r.entity_name ?? r.entity_id}</td>
+                      <td className="px-3 py-2 text-text-tertiary">{r.account_name ?? "—"}</td>
+                      <td className="px-3 py-2 text-right">{r.ads.toLocaleString("en-IN")}</td>
+                      <td className="px-3 py-2 text-right">
+                        {r.spend === null ? "—" : "₹" + Math.round(r.spend).toLocaleString("en-IN")}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.impressions === null ? "—" : Math.round(r.impressions).toLocaleString("en-IN")}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.reach === null ? "—" : Math.round(r.reach).toLocaleString("en-IN")}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.frequency === null ? "—" : r.frequency.toFixed(2)}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.cpr_1000 === null ? "—" : "₹" + Math.round(r.cpr_1000).toLocaleString("en-IN")}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.purchases === null ? "—" : Math.round(r.purchases).toLocaleString("en-IN")}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {r.roas === null ? "—" : r.roas.toFixed(2)}
+                      </td>
+                      <td className="px-3 py-2 text-right text-[11px] text-text-tertiary">
+                        {r.date_start ?? "—"} → {r.date_stop ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] leading-relaxed text-text-tertiary">
+            Reach and frequency are Meta&rsquo;s own per-{levelToggle} figures, not a sum of the
+            ads underneath — Meta dedupes a person per entity, so adding ad-level reach counts the
+            same person once per ad they saw. Each row&rsquo;s <b>Window</b> shows the period its
+            figures actually cover; rows are refreshed independently, so they are not all the same
+            period.
+          </p>
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════════════════════
           Filter row 1: Account / Group / Category / Status / Date field / Date range
