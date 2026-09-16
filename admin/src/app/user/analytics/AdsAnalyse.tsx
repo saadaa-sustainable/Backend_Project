@@ -131,7 +131,25 @@ function evaluateFlags(row: AdsAnalyseRow, t: FThresholds) {
   return { p1, p2, p3, p4 };
 }
 
-function categorise(row: AdsAnalyseRow, t: FThresholds): CategoryKey {
+/** The ad's verdict.
+ *
+ *  At DEFAULT thresholds the server's stored `category` is authoritative
+ *  and is what the tile counts (`category_counts`) are computed from, so
+ *  we use it verbatim. Re-deriving it here would let the two disagree --
+ *  and because the server has already filtered the rows by category, a
+ *  client-side disagreement can only ever DROP rows the tiles counted,
+ *  never add any. That is what made the P2 analysis and Discarded tiles
+ *  look empty: the tile showed the server's count while the table
+ *  re-filtered on a locally recomputed verdict.
+ *
+ *  Once the user edits a threshold the server's verdict no longer
+ *  describes these rows, so we fall through to the local calculation --
+ *  which is the entire point of the threshold panel. `filters` stops
+ *  sending `category` to the server in that mode, so only one filter is
+ *  ever applied.
+ */
+function categorise(row: AdsAnalyseRow, t: FThresholds, useServer = false): CategoryKey {
+  if (useServer && row.category) return row.category as CategoryKey;
   const { p1, p2, p3, p4 } = evaluateFlags(row, t);
   if (p1 && (p2 || p3) && p4) return "Incremental Winner";
   if (p1 && (p2 || p3)) return "Winner";
@@ -824,7 +842,9 @@ export function AdsAnalyse() {
     () => ({
       account_name: account || undefined,
       search: debouncedSearch || undefined,
-      category: categoryFilter || undefined,
+      // With custom thresholds the server's stored category is the wrong
+      // answer, so we fetch unfiltered and narrow it client-side instead.
+      category: thresholdsChanged ? undefined : categoryFilter || undefined,
       ad_effective_status: adStatus || undefined,
       only_with_shopify_orders: onlyWithOrders,
       has_asset_id: assetFilter === "" ? undefined : assetFilter === "yes",
@@ -834,7 +854,7 @@ export function AdsAnalyse() {
       to_date: fromDate && toDate ? toDate : undefined,
       date_field: fromDate && toDate ? dateField : undefined,
     }),
-    [account, debouncedSearch, categoryFilter, adStatus, onlyWithOrders, assetFilter, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, fromDate, toDate, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -938,7 +958,7 @@ export function AdsAnalyse() {
 
   // ── client-side recategorise + numeric filter + sort ─────────
   const derived = useMemo(() => {
-    const withCat = rows.map((r) => ({ row: r, cat: categorise(r, thresholds) }));
+    const withCat = rows.map((r) => ({ row: r, cat: categorise(r, thresholds, !thresholdsChanged) }));
     // Category tile counts — from the client-side recategorisation
     // (so the F1..F4 threshold sliders update the tile numbers live).
     const tileCounts: Record<CategoryKey, number> = {
@@ -953,7 +973,10 @@ export function AdsAnalyse() {
     withCat.forEach((rc) => (tileCounts[rc.cat] += 1));
     // Apply numeric filters
     const filtered = withCat.filter((rc) => {
-      if (categoryFilter && rc.cat !== categoryFilter) return false;
+      // Only filter here when the server could NOT -- i.e. custom
+      // thresholds. At defaults the server already returned exactly this
+      // category and filtering again can only lose rows.
+      if (thresholdsChanged && categoryFilter && rc.cat !== categoryFilter) return false;
       for (const nf of numericFilters) {
         const v = (rc.row as unknown as Record<string, number | null>)[nf.field];
         if (v === null || v === undefined || Number.isNaN(v)) return false;
@@ -969,7 +992,7 @@ export function AdsAnalyse() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return { withCat, tileCounts, filtered: sorted };
-  }, [rows, thresholds, categoryFilter, numericFilters, sortKey, sortDir]);
+  }, [rows, thresholds, thresholdsChanged, categoryFilter, numericFilters, sortKey, sortDir]);
 
   // ── pagination window ───────────────────────────────────────
   const pageRows = derived.filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -1365,68 +1388,12 @@ export function AdsAnalyse() {
         />
       </div>
 
-      {/* ═══════════════════════════════════════════════════════════
-          Aggregate KPI strip — 8 tiles mirroring kwikengage's
-          Marketing Insights row (Total Orders / Total Sales / Total
-          Buyers / etc.). Reflects the current filter set from the
-          server-side totals payload.
-         ═══════════════════════════════════════════════════════════ */}
-      {totals && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-          <KwikTile
-            icon={<span className="text-base">◱</span>}
-            iconColor="slate"
-            label="Ads"
-            value={totals.ad_count.toLocaleString()}
-            subLine={`of ${total.toLocaleString()} in DB`}
-          />
-          <KwikTile
-            icon={<span className="text-base">₹</span>}
-            iconColor="sky"
-            label="Spend"
-            value={fmtMoney(totals.spend)}
-          />
-          <KwikTile
-            icon={<span className="text-base">👁</span>}
-            iconColor="purple"
-            label="Impressions"
-            value={fmtCompact(totals.impressions)}
-          />
-          <KwikTile
-            icon={<span className="text-base">◉</span>}
-            iconColor="teal"
-            label="Reach"
-            value={fmtCompact(totals.reach)}
-          />
-          <KwikTile
-            icon={<span className="text-base">🛒</span>}
-            iconColor="emerald"
-            label="Purchases"
-            value={fmtCompact(totals.purchases)}
-            subLine={`${fmtCompact(totals.ncp_count)} NCP`}
-          />
-          <KwikTile
-            icon={<span className="text-base">✦</span>}
-            iconColor="amber"
-            label="Meta ROAS"
-            value={totals.avg_meta_roas !== null ? totals.avg_meta_roas.toFixed(2) : "—"}
-            subLine={`${totals.avg_ctr_pct !== null ? totals.avg_ctr_pct.toFixed(2) + "% CTR" : ""}`}
-          />
-          <KwikTile
-            icon={<span className="text-base">🛍</span>}
-            iconColor="emerald"
-            label="Shop orders"
-            value={fmtCompact(totals.shopify_orders)}
-            subLine={fmtMoney(totals.shopify_revenue)}
-          />
-          <KwikTile
-            icon={<span className="text-base">◈</span>}
-            iconColor="amber"
-            label="Shop ROAS"
-            value={totals.avg_shopify_roas !== null ? totals.avg_shopify_roas.toFixed(2) : "—"}
-          />
-        </div>
-      )}
+      {/* The 8-tile aggregate strip (Ads / Spend / Impressions / Reach /
+          Purchases / Meta ROAS / Shop orders / Shop ROAS) was removed
+          2026-09-16: the original CTD Ads Analyse leads with the F1-F4
+          verdict buckets and the threshold controls, not a second
+          summary row above them. The same figures remain available in
+          the table's own columns and in Creative Testing's Overview. */}
 
       {/* ═══════════════════════════════════════════════════════════
           7 KPI category tiles — click to filter
@@ -1436,7 +1403,17 @@ export function AdsAnalyse() {
          ═══════════════════════════════════════════════════════════ */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
         {CATEGORY_ORDER.map((cat) => {
-          const count = derived.tileCounts[cat];
+          // Counts come from the SERVER (`category_counts`), which covers
+          // every matching ad. derived.tileCounts only ever sees the rows
+          // currently paged in, so it showed "P2 analysis 3" against a
+          // real 1,768. The client figure is used only with custom
+          // thresholds, where the server's counts no longer apply.
+          const count = thresholdsChanged
+            ? derived.tileCounts[cat]
+            : (categoryCountsFromApi[cat] ?? 0);
+          // Spend stays page-scoped either way -- the totals payload is
+          // for the whole filter set, not per category -- so it is
+          // labelled as such rather than implying a full-dataset figure.
           const spend = derived.withCat
             .filter((rc) => rc.cat === cat)
             .reduce((acc, rc) => acc + (rc.row.spend ?? 0), 0);
