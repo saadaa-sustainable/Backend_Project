@@ -5175,3 +5175,100 @@ async def get_ads_analyse_rollup(
     count_sql = f"SELECT COUNT(*) FROM public.{table} i {where_sql}"
     total = int((await session.execute(text(count_sql), params)).scalar() or 0)
     return RollupResponse(level=level, rows=rows, total=total)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Ads Analyse -- ads launched per day
+# ══════════════════════════════════════════════════════════════════════
+#
+# Replaces the three client-side charts that used to sit here (spend by
+# category, top-10 by spend, category donut). Those were computed from
+# the rows already loaded, which is one PAGE -- so they described 50-100
+# ads while claiming to describe the filter set, the same defect that
+# made the category tiles read "P2 analysis 3" against a real 1,768.
+#
+# This is a server-side aggregate over every matching ad, so the bars
+# mean what they say regardless of paging.
+#
+# "Launched" is deliberately selectable, because the two readings differ:
+#   created     -- the day the ad was built (ad_lifecycle.ad_created_time)
+#   first_seen  -- the day it first actually delivered an impression
+# An ad can be created and never run, so `created` counts intent and
+# `first_seen` counts activity. The section's own date_field selector
+# already makes that distinction for the table; this follows it.
+
+_LAUNCH_SOURCE = {
+    "created": "al.ad_created_time::date",
+    "first_seen": "fs.first_seen_date",
+}
+
+
+class LaunchPoint(BaseModel):
+    day: date
+    ads: int
+
+
+class LaunchesResponse(BaseModel):
+    #: "created" or "first_seen" -- what the counts actually measure.
+    basis: str
+    points: list[LaunchPoint]
+    total_ads: int
+
+
+@router.get("/ads-analyse/launches", response_model=LaunchesResponse)
+async def get_ads_analyse_launches(
+    session: SessionDep,
+    from_date: date = Query(...),
+    to_date: date = Query(...),
+    basis: Literal["created", "first_seen"] = Query(default="created"),
+    account_name: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    ad_effective_status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    excl_copy: bool = Query(default=False),
+) -> LaunchesResponse:
+    """Ads launched per day across the window, over the whole filter set."""
+    params: dict[str, object] = {"from_date": from_date, "to_date": to_date}
+    where = [f"{_LAUNCH_SOURCE[basis]} BETWEEN :from_date AND :to_date"]
+    if account_name:
+        where.append("aps.account_name = :account_name")
+        params["account_name"] = account_name
+    if category:
+        where.append("aps.category = :category")
+        params["category"] = category
+    if ad_effective_status:
+        where.append("aps.ad_effective_status = :ad_effective_status")
+        params["ad_effective_status"] = ad_effective_status
+    if search:
+        where.append("aps.ad_name ILIKE :search")
+        params["search"] = f"%{search}%"
+    if excl_copy:
+        where.append("aps.ad_name NOT ILIKE '%copy%'")
+
+    # first_seen comes from insights_daily_by_ad, NOT ad_insights.
+    # ad_insights is one lifetime row per ad whose date_start is just the
+    # window it was last fetched with -- since the all_days change that is
+    # the same date for nearly every ad, so MIN(date_start) over it is not
+    # a first-delivery date at all. Confirmed: it put 1,441 of 1,469 ads
+    # on a single day. insights_daily_by_ad is true (ad_id, day) grain, so
+    # MIN(day) is the genuine first day the ad delivered.
+    #
+    # Grouped once rather than probed per row -- a single scan, not the
+    # per-row LATERAL that made the main row query time out.
+    join_fs = (
+        " JOIN (SELECT ad_id, MIN(day) AS first_seen_date"
+        "         FROM insights_daily_by_ad GROUP BY ad_id) fs ON fs.ad_id = aps.ad_id"
+        if basis == "first_seen" else ""
+    )
+    sql = (
+        f"SELECT {_LAUNCH_SOURCE[basis]} AS day, COUNT(*)::int AS ads "
+        "FROM ad_performance_summary aps "
+        "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id"
+        f"{join_fs} "
+        f"WHERE {' AND '.join(where)} "
+        "GROUP BY 1 ORDER BY 1"
+    )
+    points = [LaunchPoint(**dict(r._mapping)) for r in await session.execute(text(sql), params)]
+    return LaunchesResponse(
+        basis=basis, points=points, total_ads=sum(p.ads for p in points)
+    )

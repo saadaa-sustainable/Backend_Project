@@ -2017,3 +2017,45 @@ export function fetchAdsAnalyseRollup(params: {
   if (params.limit) qs.set("limit", String(params.limit));
   return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`);
 }
+
+// ---------------------------------------------------------------------
+// Ads Analyse -- ads launched per day
+// ---------------------------------------------------------------------
+// Server-side aggregate over every matching ad. Deliberately NOT derived
+// from the loaded rows: those are one page, and charts built from them
+// describe 50-100 ads while appearing to describe the whole filter set.
+
+export interface LaunchPoint {
+  day: string;
+  ads: number;
+}
+
+export interface LaunchesResponse {
+  /** "created" (ad was built) or "first_seen" (ad first delivered). */
+  basis: "created" | "first_seen";
+  points: LaunchPoint[];
+  total_ads: number;
+}
+
+export function fetchAdsAnalyseLaunches(params: {
+  from_date: string;
+  to_date: string;
+  basis?: "created" | "first_seen";
+  account_name?: string;
+  category?: string;
+  ad_effective_status?: string;
+  search?: string;
+  excl_copy?: boolean;
+}): Promise<LaunchesResponse> {
+  const qs = new URLSearchParams({
+    from_date: params.from_date,
+    to_date: params.to_date,
+  });
+  if (params.basis) qs.set("basis", params.basis);
+  if (params.account_name) qs.set("account_name", params.account_name);
+  if (params.category) qs.set("category", params.category);
+  if (params.ad_effective_status) qs.set("ad_effective_status", params.ad_effective_status);
+  if (params.search) qs.set("search", params.search);
+  if (params.excl_copy) qs.set("excl_copy", "true");
+  return request<LaunchesResponse>(`/admin/analytics/ads-analyse/launches?${qs}`);
+}

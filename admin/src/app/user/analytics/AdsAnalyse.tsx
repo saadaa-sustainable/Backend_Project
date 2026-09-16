@@ -35,7 +35,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/lib/api";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
-import { AdsAnalyseCharts } from "./AdsAnalyseCharts";
+import { AdsLaunchChart } from "./AdsLaunchChart";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
@@ -1433,11 +1433,18 @@ export function AdsAnalyse() {
         })}
       </div>
 
-      {/* Analytical view — 3 charts anchor the section the way kwikengage's
-          Marketing Insights row does. Re-computes from `derived.filtered`
-          so filters, category selection, and threshold changes all
-          propagate live without extra fetches. */}
-      <AdsAnalyseCharts rows={derived.filtered} />
+      {/* Ads launched per day. Replaces the three client-side charts
+          that were computed from derived.filtered -- i.e. one page of
+          rows -- while presenting themselves as a view of the whole
+          filter set. This one aggregates server-side. */}
+      <AdsLaunchChart
+        fromDate={fromDate}
+        toDate={toDate}
+        accountName={account || undefined}
+        category={categoryFilter || undefined}
+        adStatus={adStatus || undefined}
+        search={debouncedSearch || undefined}
+      />
 
       {/* Total ads bar */}
       <div className="rounded-lg border border-border-primary bg-white px-3 py-1.5 text-xs text-text-secondary shadow-sm">
