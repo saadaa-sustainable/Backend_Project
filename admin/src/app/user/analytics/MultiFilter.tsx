@@ -23,7 +23,7 @@
 import { useState } from "react";
 import { theme } from "@/lib/theme";
 
-export type MultiFilterJoin = "and" | "or" | "nand";
+export type MultiFilterJoin = "and" | "or" | "nand" | "nor";
 
 export interface MultiFilterRule {
   field: string;
@@ -56,11 +56,39 @@ const OPS: { key: string; label: string; keywordy: boolean }[] = [
   { key: "ends_with", label: "ends with", keywordy: false },
 ];
 
-const JOINS: { key: MultiFilterJoin; label: string; hint: string }[] = [
-  { key: "and", label: "AND", hint: "Every rule must match" },
-  { key: "or", label: "OR", hint: "At least one rule must match" },
-  { key: "nand", label: "NAND", hint: "Everything EXCEPT ads matching all rules" },
-];
+/** The connector is picked BETWEEN rules, not from a toggle above them.
+ *  Choosing the join before writing the rules is backwards -- you only
+ *  know you meant "or" once you are adding the second thing to look for.
+ *
+ *  One connector governs the whole set, and changing any of them changes
+ *  all. That is on purpose: mixed connectors need precedence rules, and
+ *  "a AND b OR c" silently means different things to different people.
+ *  Airtable and Notion make the same trade.
+ *
+ *  Excluding is a separate axis from combining, so it is a checkbox
+ *  rather than a third connector value. The four combinations map to the
+ *  four server joins:
+ *      and              or
+ *      and + exclude  = nand      or + exclude = nor
+ */
+type JoinMode = "and" | "or";
+
+function toJoin(mode: JoinMode, negate: boolean): MultiFilterJoin {
+  if (!negate) return mode;
+  return mode === "and" ? "nand" : "nor";
+}
+function fromJoin(join: MultiFilterJoin): { mode: JoinMode; negate: boolean } {
+  if (join === "nand") return { mode: "and", negate: true };
+  if (join === "nor") return { mode: "or", negate: true };
+  return { mode: join, negate: false };
+}
+
+const JOIN_HINT: Record<MultiFilterJoin, string> = {
+  and: "Ads matching every rule",
+  or: "Ads matching at least one rule",
+  nand: "Everything except ads matching every rule",
+  nor: "Ads matching none of the rules",
+};
 
 /** App tokens. This started on the legacy dashboard's cream/gold, which
  *  made Ads Analyse the only tab not matching the rest of the panel. */
@@ -81,7 +109,10 @@ export function MultiFilter({
   applied: MultiFilterState | null;
   onApply: (state: MultiFilterState | null) => void;
 }) {
-  const [join, setJoin] = useState<MultiFilterJoin>(applied?.join ?? "and");
+  const initial = fromJoin(applied?.join ?? "and");
+  const [mode, setMode] = useState<JoinMode>(initial.mode);
+  const [negate, setNegate] = useState(initial.negate);
+  const join = toJoin(mode, negate);
   const [rules, setRules] = useState<MultiFilterRule[]>(
     applied?.rules?.length ? applied.rules : [{ ...EMPTY_RULE }],
   );
@@ -108,22 +139,14 @@ export function MultiFilter({
               {appliedCount} rule{appliedCount === 1 ? "" : "s"} active
             </span>
           )}
-          <div className="inline-flex overflow-hidden rounded-md border" style={{ borderColor: AE.border }}>
-            {JOINS.map((j) => (
-              <button
-                key={j.key}
-                onClick={() => setJoin(j.key)}
-                title={j.hint}
-                className="px-2.5 py-1 text-[11px] font-medium"
-                style={{
-                  backgroundColor: join === j.key ? AE.ink : "#FFFFFF",
-                  color: join === j.key ? "#FFFFFF" : AE.ink,
-                }}
-              >
-                {j.label}
-              </button>
-            ))}
-          </div>
+          <label className="flex items-center gap-1.5 text-[11px]" style={{ color: AE.ink }}>
+            <input
+              type="checkbox"
+              checked={negate}
+              onChange={(e) => setNegate(e.target.checked)}
+            />
+            Exclude matches
+          </label>
         </div>
         <div className="flex gap-2">
           <button
@@ -136,7 +159,8 @@ export function MultiFilter({
           <button
             onClick={() => {
               setRules([{ ...EMPTY_RULE }]);
-              setJoin("and");
+              setMode("and");
+              setNegate(false);
               onApply(null);
             }}
             className="rounded-md border bg-white px-4 py-1.5 text-sm"
@@ -151,7 +175,25 @@ export function MultiFilter({
         {rules.map((r, i) => {
           const op = OPS.find((o) => o.key === r.op);
           return (
-            <div key={i} className="flex flex-wrap items-center gap-2">
+            <div key={i}>
+              {i > 0 && (
+                <div className="flex items-center gap-2 py-1 pl-1">
+                  <select
+                    value={mode}
+                    onChange={(e) => setMode(e.target.value as JoinMode)}
+                    title="Applies to every rule in this group"
+                    className="rounded-md border bg-white px-2 py-1 text-[11px] font-semibold"
+                    style={{ borderColor: AE.border, color: AE.ink }}
+                  >
+                    <option value="and">AND</option>
+                    <option value="or">OR</option>
+                  </select>
+                  <span className="text-[10px]" style={{ color: AE.muted }}>
+                    applies to all rules
+                  </span>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
               <select
                 value={r.field}
                 onChange={(e) => update(i, { field: e.target.value })}
@@ -194,6 +236,7 @@ export function MultiFilter({
               >
                 ×
               </button>
+              </div>
             </div>
           );
         })}
@@ -210,8 +253,10 @@ export function MultiFilter({
       </div>
 
       <p className="mt-2 text-[11px]" style={{ color: AE.muted }}>
-        {JOINS.find((j) => j.key === join)?.hint}. Keyword operators split the value on spaces.
-        Rules are evaluated server-side across every matching ad, not just the rows in view.
+        {JOIN_HINT[join]}. Keyword operators split the value on spaces — to look for
+        several different ads in one go, <b>contains any of</b> on a single rule is usually
+        simpler than several OR-ed rules. Rules are evaluated server-side across every
+        matching ad, not just the rows in view.
       </p>
     </div>
   );

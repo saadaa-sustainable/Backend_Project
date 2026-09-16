@@ -5332,8 +5332,13 @@ def _multi_filter_sql(
     `join` is how the rules combine:
         and   every rule must hold
         or    at least one must hold
-        nand  NOT (every rule holds) -- the complement of `and`, which is
-              how you ask for "anything except this combination"
+        nand  NOT (every rule holds)  -- complement of `and`
+        nor   NOT (any rule holds)    -- complement of `or`
+
+    The negated pair exists because "exclude" is a separate axis from
+    "combine": the UI offers AND/OR between rules plus an exclude
+    checkbox, and the four combinations land here. nor is the useful one
+    for "none of these keywords", which `and`+exclude cannot express.
 
     Returns None when there is nothing to apply, so the caller can leave
     its WHERE untouched rather than appending a vacuous TRUE.
@@ -5385,4 +5390,6 @@ def _multi_filter_sql(
         return "(" + " OR ".join(clauses) + ")"
     if join == "nand":
         return "NOT (" + " AND ".join(clauses) + ")"
+    if join == "nor":
+        return "NOT (" + " OR ".join(clauses) + ")"
     return "(" + " AND ".join(clauses) + ")"
