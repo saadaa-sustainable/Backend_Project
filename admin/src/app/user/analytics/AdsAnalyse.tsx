@@ -622,13 +622,19 @@ const COLUMNS: ColDef[] = [
   { key: "ad_name", header: "Ad Name", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.ad_name ?? ""}>{r.ad_name ?? "—"}</span> },
   { key: "ad_id", header: "Ad ID", kind: "text", group: "Identity", defaultVisible: true,
-    render: (r) => <span className="num">{r.ad_id.slice(0, 12)}…</span> },
+    // Full id. These were sliced to 12 chars with an ellipsis, which made
+    // every Meta id look alike (120215851600… / 120215866514…) and left
+    // the one thing you need an id column FOR -- copying it into Ads
+    // Manager or a query -- impossible without opening the inspector.
+    render: (r) => <span className="num whitespace-nowrap">{r.ad_id}</span> },
   { key: "asset_id", header: "Asset ID", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <AssetIdCell row={r} /> },
   { key: "campaign_name", header: "Campaign", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.campaign_name ?? ""}>{r.campaign_name ?? "—"}</span> },
   { key: "adset_id", header: "Ad Set ID", kind: "text", group: "Identity",
-    render: (r) => <span className="num">{r.adset_id?.slice(0, 12) ?? "—"}…</span> },
+    // Also fixes a null bug: the old form put the ellipsis outside the
+    // ?? fallback, so a missing adset rendered as "—…".
+    render: (r) => <span className="num whitespace-nowrap">{r.adset_id ?? "—"}</span> },
   { key: "attribution", header: "Attribution", kind: "link", group: "Identity",
     render: () => <Placeholder reason="Daily attribution drill-down needs new /admin/analytics/ad-daily endpoint" /> },
   { key: "account_name", header: "Account", kind: "text", group: "Identity", defaultVisible: true,
