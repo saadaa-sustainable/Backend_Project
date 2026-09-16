@@ -11,6 +11,7 @@ entirely).
 
 from __future__ import annotations
 
+import json as _json
 import math
 import os
 import re as _re
@@ -794,6 +795,14 @@ async def get_ads_analyse(
             "KPI tiles + totals reflect the filter."
         ),
     ),
+    multi_filter: str | None = Query(
+        default=None,
+        description='JSON rule list for the Multi-Filter builder, e.g. '
+                    '{"join":"and","rules":[{"field":"ad_name",'
+                    '"op":"contains_all","value":"BST IFAD"}]}. '
+                    'join is and | or | nand. Fields and operators are '
+                    'whitelisted server-side; values are always bound.',
+    ),
     has_asset_id: bool | None = Query(
         default=None,
         description=(
@@ -882,6 +891,19 @@ async def get_ads_analyse(
         # analyst who pokes a value like '%; DROP TABLE' can't sneak it in.
         base_where.append("aps.ad_name ILIKE :content_type")
         params["content_type"] = f"%{content_type}%"
+    if multi_filter:
+        try:
+            parsed = _json.loads(multi_filter)
+            clause = _multi_filter_sql(
+                parsed.get("rules") or [], str(parsed.get("join", "and")), params
+            )
+        except (ValueError, TypeError, AttributeError):
+            # Malformed JSON is the client's bug, not a reason to serve a
+            # silently unfiltered table that looks correct.
+            raise HTTPException(status_code=400, detail="multi_filter is not valid JSON")
+        if clause:
+            base_where.append(clause)
+
     if has_asset_id is not None:
         # _HAS_ASSET_ID is self-contained over aps, so it drops into
         # base_where and reaches all four queries -- see its definition
@@ -5272,3 +5294,95 @@ async def get_ads_analyse_launches(
     return LaunchesResponse(
         basis=basis, points=points, total_ads=sum(p.ads for p in points)
     )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Ads Analyse -- multi-filter rule builder
+# ══════════════════════════════════════════════════════════════════════
+#
+# Server-side on purpose. Evaluating these rules against the loaded rows
+# would filter one PAGE while appearing to filter the dataset -- the same
+# defect that had the category tiles reading "P2 analysis 3" against a
+# real 1,768, and the old charts describing 50 ads as if they were 19,784.
+#
+# Fields and operators are whitelists mapping to fixed SQL. Values are
+# always bound parameters, never interpolated, so a rule cannot reach
+# past the column it names.
+
+#: Rule field -> the column it filters. Anything absent is rejected.
+_MF_FIELDS: dict[str, str] = {
+    "ad_name": "aps.ad_name",
+    "campaign_name": "aps.campaign_name",
+    "adset_id": "aps.adset_id",
+    "ad_id": "aps.ad_id",
+    "category": "aps.category",
+    "status": "aps.ad_effective_status",
+    "account_name": "aps.account_name",
+}
+
+#: Operators that split their value on whitespace into keywords.
+_MF_KEYWORD_OPS = {"contains_all", "contains_any", "contains_none"}
+
+
+def _multi_filter_sql(
+    rules: list[dict], join: str, params: dict[str, object]
+) -> str | None:
+    """Compile the rule list into one boolean SQL expression.
+
+    `join` is how the rules combine:
+        and   every rule must hold
+        or    at least one must hold
+        nand  NOT (every rule holds) -- the complement of `and`, which is
+              how you ask for "anything except this combination"
+
+    Returns None when there is nothing to apply, so the caller can leave
+    its WHERE untouched rather than appending a vacuous TRUE.
+    """
+    clauses: list[str] = []
+    for i, rule in enumerate(rules):
+        col = _MF_FIELDS.get(str(rule.get("field", "")))
+        op = str(rule.get("op", ""))
+        raw = str(rule.get("value", "") or "").strip()
+        if not col or not raw:
+            continue
+
+        if op in _MF_KEYWORD_OPS:
+            words = [w for w in raw.split() if w]
+            if not words:
+                continue
+            parts = []
+            for j, w in enumerate(words):
+                key = f"mf_{i}_{j}"
+                params[key] = f"%{w}%"
+                parts.append(f"{col} ILIKE :{key}")
+            if op == "contains_all":
+                clauses.append("(" + " AND ".join(parts) + ")")
+            elif op == "contains_any":
+                clauses.append("(" + " OR ".join(parts) + ")")
+            else:  # contains_none
+                clauses.append("NOT (" + " OR ".join(parts) + ")")
+            continue
+
+        key = f"mf_{i}"
+        if op == "equals":
+            params[key] = raw
+            clauses.append(f"{col} = :{key}")
+        elif op == "not_equals":
+            params[key] = raw
+            # IS DISTINCT FROM, not <>: a NULL column must count as
+            # "not equal to X" here, and <> would drop those rows.
+            clauses.append(f"{col} IS DISTINCT FROM :{key}")
+        elif op == "starts_with":
+            params[key] = f"{raw}%"
+            clauses.append(f"{col} ILIKE :{key}")
+        elif op == "ends_with":
+            params[key] = f"%{raw}"
+            clauses.append(f"{col} ILIKE :{key}")
+
+    if not clauses:
+        return None
+    if join == "or":
+        return "(" + " OR ".join(clauses) + ")"
+    if join == "nand":
+        return "NOT (" + " AND ".join(clauses) + ")"
+    return "(" + " AND ".join(clauses) + ")"

@@ -37,6 +37,7 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
 import { DateRangePicker } from "@/components/DateRangePicker";
+import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
@@ -882,6 +883,7 @@ export function AdsAnalyse() {
   const visibleCols = COLUMNS.filter((c) => !hiddenCols.has(c.key));
 
   // ── inspector drawer ─────────────────────────────────────────
+  const [multiFilter, setMultiFilter] = useState<MultiFilterState | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<"metrics" | "filters">("metrics");
   const [numericFilters, setNumericFilters] = useState<NumericFilter[]>([]);
@@ -927,13 +929,14 @@ export function AdsAnalyse() {
       ad_effective_status: adStatus || undefined,
       only_with_shopify_orders: onlyWithOrders,
       has_asset_id: assetFilter === "" ? undefined : assetFilter === "yes",
+      multi_filter: multiFilter ? JSON.stringify(multiFilter) : undefined,
       // Only send both together -- one without the other has no meaning
       // on the server side (the overlay/filter branch keys on both being set).
       from_date: fromDate && toDate ? fromDate : undefined,
       to_date: fromDate && toDate ? toDate : undefined,
       date_field: fromDate && toDate ? dateField : undefined,
     }),
-    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, multiFilter, fromDate, toDate, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -1311,6 +1314,8 @@ export function AdsAnalyse() {
         </FilterCard>
       </div>
 
+      <MultiFilter applied={multiFilter} onApply={setMultiFilter} />
+
       {/* F1–F4 thresholds, same card treatment. */}
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-5">
         <FilterCard label="F1 — Impressions">
@@ -1350,57 +1355,6 @@ export function AdsAnalyse() {
         </FilterCard>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search ad name…"
-          className="w-64 rounded-md border bg-white px-3 py-2 text-sm"
-          style={{ borderColor: AE.border }}
-        />
-        <label className="flex items-center gap-1.5 text-xs">
-          <input
-            type="checkbox"
-            checked={onlyWithOrders}
-            onChange={(e) => setOnlyWithOrders(e.target.checked)}
-          />
-          Has Shopify orders
-        </label>
-        <label className="flex items-center gap-1.5 text-xs">
-          Asset ID
-          <select
-            value={assetFilter}
-            onChange={(e) => setAssetFilter(e.target.value as "" | "yes" | "no")}
-            className="rounded-md border px-2 py-1 text-xs"
-            style={{ borderColor: AE.border }}
-          >
-            <option value="">All ads</option>
-            <option value="yes">Has asset ID</option>
-            <option value="no">No asset ID</option>
-          </select>
-        </label>
-        <button
-          onClick={clearAllFilters}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
-        >
-          Clear Filters
-        </button>
-        <button
-          onClick={() => setColPickerOpen((v) => !v)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
-          title="Show/hide columns"
-        >
-          ▤ Columns ({visibleCols.length}/{COLUMNS.length})
-        </button>
-        <button
-          onClick={() => setInspectorOpen((v) => !v)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
-          title="Inspector: Metrics + numeric Filters"
-        >
-          ⚙ Inspector {numericFilters.length > 0 && <span className="ml-1 rounded bg-yellow-200 px-1 text-yellow-900">{numericFilters.length}</span>}
-        </button>
-      </div>
-
       {/* ═══════════════════════════════════════════════════════════
           Search + shop-orders toggle + collapsed thresholds button.
           Thresholds were previously in a 5-input row above the KPI
@@ -1438,7 +1392,32 @@ export function AdsAnalyse() {
             the legacy layout. Two editors bound to the same state would
             only drift. `bufferDays` moved with them -- it is still used
             by categorise() for the Result Awaited grace window. */}
-        <div className="ml-auto" />
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={clearAllFilters}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted"
+          >
+            Clear Filters
+          </button>
+          <button
+            onClick={() => setColPickerOpen((v) => !v)}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted"
+          >
+            ▤ Columns ({visibleCols.length}/{COLUMNS.length})
+          </button>
+          <button
+            onClick={() => setInspectorOpen((v) => !v)}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted"
+            title="Inspector: Metrics + numeric Filters"
+          >
+            ⚙ Inspector
+            {numericFilters.length > 0 && (
+              <span className="ml-1 rounded bg-yellow-200 px-1 text-yellow-900">
+                {numericFilters.length}
+              </span>
+            )}
+          </button>
+        </div>
         <ExportButton
           rows={rows as unknown as Record<string, unknown>[]}
           filename="ads_analyse"

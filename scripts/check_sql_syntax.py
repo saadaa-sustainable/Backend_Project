@@ -120,6 +120,20 @@ def _composed() -> dict[str, str]:
         "analytics:cpis_trends_batch": str(_TRENDS_SQL),
         "analytics:creative_testing_response": asyncio.run(creative_query()),
         "analytics:_CT_ADS_SQL": analytics._CT_ADS_SQL,
+        # Multi-Filter compiles to a boolean expression spliced into
+        # base_where, so parse it inside a real statement for each join.
+        **{
+            f"analytics:multi_filter[{j}]": (
+                "SELECT 1 FROM ad_performance_summary aps WHERE "
+                + (analytics._multi_filter_sql(
+                    [{"field": "ad_name", "op": "contains_all", "value": "BST IFAD"},
+                     {"field": "category", "op": "equals", "value": "Winner"},
+                     {"field": "status", "op": "not_equals", "value": "ACTIVE"},
+                     {"field": "campaign_name", "op": "starts_with", "value": "NCP"}],
+                    j, {}) or "TRUE")
+            )
+            for j in ("and", "or", "nand")
+        },
         # Ads launched per day, both bases -- the first_seen variant
         # carries an extra grouped join, so parse each shape.
         **{

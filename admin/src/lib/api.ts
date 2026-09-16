@@ -749,6 +749,9 @@ export interface AdsAnalyseParams {
    * undefined = no filter. Applied server-side to base_where, so the
    * count, category tiles and KPI strip move with the table. */
   has_asset_id?: boolean;
+  /** Multi-Filter rules, JSON-encoded. Compiled and evaluated
+   *  server-side -- fields and operators are whitelisted there. */
+  multi_filter?: string;
   /** When both from_date and to_date are set, the window is applied
    * per date_field: 'created' filters rows by ad_created_date;
    * 'first_seen' filters by first_seen_date; 'delivery' keeps every
@@ -778,6 +781,7 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   // Explicit undefined check: `false` is a real filter value here
   // (show only ads with an EMPTY Asset ID), not "unset".
   if (params.has_asset_id !== undefined) qs.set("has_asset_id", String(params.has_asset_id));
+  if (params.multi_filter) qs.set("multi_filter", params.multi_filter);
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
   if (params.date_field) qs.set("date_field", params.date_field);
