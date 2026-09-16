@@ -70,6 +70,9 @@ function SaturationCurveSection({ masterSkuFilter }: { masterSkuFilter: string |
     };
   }, [yMetric, masterSku]);
 
+  // Chart AXIS labels only -- these stay abbreviated on purpose, since a
+  // y-axis tick reading "₹1,27,11,045" does not fit. Every table cell and
+  // tile now shows the full figure.
   const fmtINR = (n: number) => {
     const abs = Math.abs(n);
     if (abs >= 1e7) return `₹${(n / 1e7).toFixed(2)}Cr`;
@@ -249,22 +252,15 @@ export function Cpis() {
 
 /** Money formatting for INR — compact (₹1.2L / ₹3.4Cr) so tiles/columns
  *  stay narrow enough to fit 5+ across without wrapping. */
+/** Kept for its call sites but no longer abbreviates -- see fmtINRFull.
+ *  Cr / L / K hid the differences these columns exist to compare. */
 function fmtINRCompact(n: number | null | undefined): string {
-  if (n === null || n === undefined || !isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `₹${(n / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `₹${(n / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `₹${(n / 1e3).toFixed(1)}K`;
-  return `₹${Math.round(n)}`;
+  return fmtINRFull(n);
 }
 
+/** Kept for its call sites but no longer abbreviates -- see fmtNumFull. */
 function fmtNumCompact(n: number | null | undefined): string {
-  if (n === null || n === undefined || !isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return `${n.toLocaleString()}`;
+  return fmtNumFull(n);
 }
 
 /** Full-precision Indian-format numbers for wide layouts (drill-down
@@ -1293,7 +1289,7 @@ function CpisView() {
                           : "text-text-primary"
                   }`}
                   title={row.refund_value !== null && row.return_units !== null
-                    ? `${row.return_units} units, ₹${Math.round(row.refund_value/1e5)}L refunded`
+                    ? `${row.return_units} units, ₹${Math.round(row.refund_value).toLocaleString("en-IN")} refunded`
                     : undefined}>
                     {row.return_rate_pct !== null ? `${row.return_rate_pct.toFixed(1)}%` : "—"}
                   </td>
@@ -1501,7 +1497,6 @@ function CpisView() {
     </>
   );
 }
-
 
 /** Accordion-style section header with a chevron toggle. Used to fold
  *  the KPI strip / saturation curve / main table so the CPIS page stops

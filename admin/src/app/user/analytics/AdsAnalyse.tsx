@@ -276,11 +276,12 @@ function pct(n: number | null | undefined) {
 }
 function fmtCompact(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return Math.round(n).toLocaleString();
+  // Full figures, Indian grouping. These used to abbreviate to Cr / L / K,
+  // which reads fine in a headline and badly everywhere else: 1.27Cr hides
+  // the difference between 1,27,11,045 and 1,27,49,980, and those are the
+  // comparisons this table exists to make. Charts pass their own axis
+  // formatter, so nothing here widens an axis label.
+  return Math.round(n).toLocaleString("en-IN");
 }
 function fmtMoney(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
