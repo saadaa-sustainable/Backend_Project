@@ -21,6 +21,7 @@
  */
 
 import { useState } from "react";
+import { theme } from "@/lib/theme";
 
 export type MultiFilterJoin = "and" | "or" | "nand";
 
@@ -61,12 +62,14 @@ const JOINS: { key: MultiFilterJoin; label: string; hint: string }[] = [
   { key: "nand", label: "NAND", hint: "Everything EXCEPT ads matching all rules" },
 ];
 
+/** App tokens. This started on the legacy dashboard's cream/gold, which
+ *  made Ads Analyse the only tab not matching the rest of the panel. */
 const AE = {
-  cream: "#FAF8F3",
-  border: "#E8E2D5",
-  muted: "#9A9384",
-  ink: "#3A362E",
-  brick: "#B4573A",
+  cream: theme.bgMuted,
+  border: theme.borderPrimary,
+  muted: theme.textTertiary,
+  ink: theme.textPrimary,
+  brick: theme.accentYellow,
 };
 
 const EMPTY_RULE: MultiFilterRule = { field: "ad_name", op: "contains_all", value: "" };
@@ -100,7 +103,7 @@ export function MultiFilter({
           {appliedCount > 0 && (
             <span
               className="rounded-full px-2 py-0.5 text-[10px] font-medium"
-              style={{ backgroundColor: "#FBF3DC", color: "#B07E12" }}
+              style={{ backgroundColor: theme.infoBg, color: theme.infoText }}
             >
               {appliedCount} rule{appliedCount === 1 ? "" : "s"} active
             </span>

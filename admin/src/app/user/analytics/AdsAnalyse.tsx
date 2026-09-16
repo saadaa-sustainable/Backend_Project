@@ -40,6 +40,7 @@ import { DateRangePicker } from "@/components/DateRangePicker";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
+import { theme } from "@/lib/theme";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -125,14 +126,15 @@ const DEFAULT_THRESHOLDS: FThresholds = {
   bufferDays: 14,
 };
 
-/** Legacy Ads Analyse palette -- cream cards, tan borders, gold accent.
- *  Scoped here rather than pushed into the app tokens, which are
- *  blue-based for every other tab. */
+/** The app's own tokens, mirrored for the few inline styles that cannot
+ *  take a Tailwind class. An earlier pass gave this section a cream/gold
+ *  scheme borrowed from the legacy dashboard, which left Ads Analyse the
+ *  only blue-less tab in the panel. */
 const AE = {
-  cream: "#FAF8F3",
-  border: "#E8E2D5",
-  muted: "#9A9384",
-  ink: "#3A362E",
+  cream: theme.bgMuted,
+  border: theme.borderPrimary,
+  muted: theme.textTertiary,
+  ink: theme.textPrimary,
 };
 
 /** One labelled filter cell: uppercase caption above, control below,
@@ -1356,7 +1358,11 @@ export function AdsAnalyse() {
       </div>
 
       {/* ═══════════════════════════════════════════════════════════
-          Search + shop-orders toggle + collapsed thresholds button.
+          Row controls. The standalone "Search ad name" box was removed
+          2026-09-16: Multi-Filter's Ad Name + "contains all of" does the
+          same job and six other fields besides, so the two were just
+          competing ways to type the same query.
+          Shop-orders toggle + collapsed thresholds button.
           Thresholds were previously in a 5-input row above the KPI
           tiles which visually competed with everything else -- moved
           to a popover so the primary flow (KPIs → filters → table)
@@ -1364,12 +1370,6 @@ export function AdsAnalyse() {
           diverged from CTD's defaults (2026-08-29 declutter pass).
          ═══════════════════════════════════════════════════════════ */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search ad name…"
-          className="w-64 rounded-md border border-border-primary px-2 py-1 text-sm"
-        />
         <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" checked={onlyWithOrders} onChange={(e) => setOnlyWithOrders(e.target.checked)} />
           Has Shopify orders

@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { theme } from "@/lib/theme";
 
 export interface DateRange {
   from: string; // YYYY-MM-DD, "" = unbounded
@@ -40,14 +41,16 @@ const PRESETS: { key: PresetKey; label: string }[] = [
   { key: "custom", label: "Custom Range" },
 ];
 
+/** App tokens. `gold`/`goldSoft` keep their names for readability but
+ *  now carry the app's primary accent and its tint, so the calendar
+ *  matches every other control in the panel. */
 const CT = {
-  border: "#E8E2D5",
-  muted: "#9A9384",
-  gold: "#C9A227",
-  goldSoft: "#FBF3DC",
-  goldMid: "#F4E4B8",
-  ink: "#3A362E",
-  brick: "#B4573A",
+  border: theme.borderPrimary,
+  muted: theme.textTertiary,
+  gold: theme.accentYellow,
+  goldSoft: theme.infoBg,
+  ink: theme.textPrimary,
+  brick: theme.accentYellow,
 };
 
 function iso(d: Date) {
@@ -151,7 +154,7 @@ function MonthGrid({
               onMouseEnter={() => onHover(s)}
               className="relative h-8 text-[12px] tabular-nums transition-colors"
               style={{
-                color: isEnd ? CT.ink : outside ? "#CFC8B8" : inRange ? CT.gold : CT.ink,
+                color: isEnd ? "#FFFFFF" : outside ? CT.muted : inRange ? CT.gold : CT.ink,
                 backgroundColor: isEnd ? CT.gold : inRange ? CT.goldSoft : "transparent",
                 fontWeight: isEnd ? 700 : 400,
                 borderRadius: isEnd ? 999 : 0,
@@ -243,7 +246,7 @@ export function DateRangePicker({
           style={{ borderColor: CT.border }}
         >
           {/* presets */}
-          <div className="w-44 shrink-0 border-r py-2" style={{ borderColor: CT.border, backgroundColor: "#FCFAF5" }}>
+          <div className="w-44 shrink-0 border-r py-2" style={{ borderColor: CT.border, backgroundColor: theme.bgMuted }}>
             {PRESETS.map((p) => {
               const active = draftPreset === p.key;
               return (
