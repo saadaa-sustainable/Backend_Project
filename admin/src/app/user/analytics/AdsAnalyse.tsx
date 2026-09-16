@@ -36,6 +36,7 @@ import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/li
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
+import { DateRangePicker } from "@/components/DateRangePicker";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
@@ -122,6 +123,84 @@ const DEFAULT_THRESHOLDS: FThresholds = {
   f4CostPerFtewv: 12,
   bufferDays: 14,
 };
+
+/** Legacy Ads Analyse palette -- cream cards, tan borders, gold accent.
+ *  Scoped here rather than pushed into the app tokens, which are
+ *  blue-based for every other tab. */
+const AE = {
+  cream: "#FAF8F3",
+  border: "#E8E2D5",
+  muted: "#9A9384",
+  ink: "#3A362E",
+};
+
+/** One labelled filter cell: uppercase caption above, control below,
+ *  boxed. Matches the legacy layout, where every filter is its own card
+ *  rather than a bare select floating in a strip. */
+function FilterCard({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div
+      className="rounded-lg border p-2.5"
+      style={{ backgroundColor: AE.cream, borderColor: AE.border }}
+    >
+      <div
+        className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
+        style={{ color: AE.muted }}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function CardSelect({
+  value,
+  onChange,
+  children,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full rounded-md border bg-white px-3 py-2 text-sm"
+      style={{ borderColor: AE.border, color: AE.ink }}
+    >
+      {children}
+    </select>
+  );
+}
+
+function CardNumber({
+  value,
+  onChange,
+  step = 1,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  step?: number;
+}) {
+  return (
+    <input
+      type="number"
+      step={step}
+      value={value}
+      onChange={(e) => {
+        const n = Number(e.target.value);
+        // Reject NaN rather than writing it into a threshold -- every
+        // comparison against NaN is false, which would silently empty
+        // the table instead of showing an invalid-input state.
+        if (!Number.isNaN(n)) onChange(n);
+      }}
+      className="w-full rounded-md border bg-white px-3 py-2 text-sm tabular-nums"
+      style={{ borderColor: AE.border, color: AE.ink }}
+    />
+  );
+}
 
 function evaluateFlags(row: AdsAnalyseRow, t: FThresholds) {
   const p1 = (row.impressions ?? 0) >= t.f1Imp;
@@ -771,7 +850,7 @@ export function AdsAnalyse() {
   // with values summed from Bronze raw_dump_meta within the window.
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
-  const [datePreset, setDatePreset] = useState<string>("all");
+  const [datePreset, setDatePreset] = useState<string>("lifetime");
 
   // ── F1..F4 thresholds ────────────────────────────────────────
   const [thresholds, setThresholds] = useState<FThresholds>(DEFAULT_THRESHOLDS);
@@ -1019,7 +1098,7 @@ export function AdsAnalyse() {
     setThresholds(DEFAULT_THRESHOLDS);
     setFromDate("");
     setToDate("");
-    setDatePreset("all");
+    setDatePreset("lifetime");
   }
 
   return (
@@ -1160,127 +1239,146 @@ export function AdsAnalyse() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════
-          Filter row 1: Account / Group / Category / Status / Date field / Date range
+          Filter cards — ACCOUNT / GROUP BY / CATEGORY / AD STATUS /
+          DATE FIELD / DATE RANGE. Six labelled cards on one row, matching
+          the legacy Ads Analyse layout: uppercase label above, control
+          below, each in its own bordered card rather than a loose strip
+          of bare selects.
          ═══════════════════════════════════════════════════════════ */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-        <select
-          value={account}
-          onChange={(e) => setAccount(e.target.value)}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">Account: All</option>
-          {[...accountOptions].sort().map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
-        <select
-          value={groupBy}
-          onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
-          disabled
-          title="Group By needs backend adset/campaign rollup RPCs — Phase 2"
-          className="rounded-md border border-border-primary px-2 py-1 text-sm text-text-tertiary"
-        >
-          <option value="ad">Group by: Ad</option>
-          <option value="ad_name">Group by: Ad Name</option>
-          <option value="adset">Group by: Adset</option>
-          <option value="campaign">Group by: Campaign</option>
-        </select>
-        <select
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value as CategoryKey | "")}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">Category: All</option>
-          {CATEGORY_ORDER.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <select
-          value={adStatus}
-          onChange={(e) => setAdStatus(e.target.value)}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">Status: All</option>
-          {[...statusOptions].sort().map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <select
-          value={dateField}
-          onChange={(e) => setDateField(e.target.value as typeof dateField)}
-          title={
-            "Applies to the [from, to] window: " +
-            "Created hides ads outside the window (default); " +
-            "First Seen filters by first_seen_date; " +
-            "Delivery keeps every ad but overlays windowed spend/impressions/reach."
-          }
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-        >
-          <option value="created">Date: Created</option>
-          <option value="first_seen">Date: First Seen</option>
-          <option value="delivery">Date: Delivery</option>
-        </select>
-        {/* Date range window -- when both bounds are set, backend
-            overwrites spend/impressions/reach/purchases/conv_value/roas
-            with values summed from Bronze insights in that window. */}
-        <select
-          value={datePreset}
-          onChange={(e) => {
-            const v = e.target.value;
-            setDatePreset(v);
-            const today = new Date().toISOString().slice(0, 10);
-            const daysAgo = (n: number) => {
-              const d = new Date();
-              d.setDate(d.getDate() - n);
-              return d.toISOString().slice(0, 10);
-            };
-            if (v === "all") { setFromDate(""); setToDate(""); }
-            else if (v === "today") { setFromDate(today); setToDate(today); }
-            else if (v === "7d") { setFromDate(daysAgo(6)); setToDate(today); }
-            else if (v === "14d") { setFromDate(daysAgo(13)); setToDate(today); }
-            else if (v === "30d") { setFromDate(daysAgo(29)); setToDate(today); }
-            else if (v === "90d") { setFromDate(daysAgo(89)); setToDate(today); }
-          }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          title="Date-range window applied to spend/impressions/reach/purchases/conv_value/roas"
-        >
-          <option value="all">All time</option>
-          <option value="today">Today</option>
-          <option value="7d">Last 7 days</option>
-          <option value="14d">Last 14 days</option>
-          <option value="30d">Last 30 days</option>
-          <option value="90d">Last 90 days</option>
-          <option value="custom">Custom…</option>
-        </select>
-        <input
-          type="date"
-          value={fromDate}
-          onChange={(e) => { setFromDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          title="Window start (YYYY-MM-DD)"
-        />
-        <span className="text-xs text-text-secondary">→</span>
-        <input
-          type="date"
-          value={toDate}
-          onChange={(e) => { setToDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          title="Window end (YYYY-MM-DD)"
-        />
-        {fromDate && toDate && (
-          <span
-            className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
-            title="Spend / impressions / reach / purchases / conv_value / ROAS reflect this window; other columns stay lifetime"
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+        <FilterCard label="Account">
+          <CardSelect value={account} onChange={setAccount}>
+            <option value="">All Accounts</option>
+            {[...accountOptions].sort().map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Group by">
+          <CardSelect
+            value={levelToggle}
+            onChange={(v) => setLevelToggle(v as typeof levelToggle)}
           >
-            windowed
-          </span>
-        )}
+            <option value="ad">Ad Level</option>
+            <option value="adset">Ad Set</option>
+            <option value="campaign">Campaign</option>
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Category">
+          <CardSelect
+            value={categoryFilter}
+            onChange={(v) => setCategoryFilter(v as CategoryKey | "")}
+          >
+            <option value="">All Categories</option>
+            {CATEGORY_ORDER.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Ad status">
+          <CardSelect value={adStatus} onChange={setAdStatus}>
+            <option value="">All Statuses</option>
+            {[...statusOptions].sort().map((s2) => (
+              <option key={s2} value={s2}>{s2}</option>
+            ))}
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Date field">
+          <CardSelect
+            value={dateField}
+            onChange={(v) => setDateField(v as typeof dateField)}
+          >
+            <option value="delivery">Delivery Date</option>
+            <option value="created">Ad Created</option>
+            <option value="first_seen">First Seen</option>
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Date range">
+          <DateRangePicker
+            value={{ from: fromDate, to: toDate }}
+            preset={datePreset}
+            onApply={(r, pk) => {
+              setFromDate(r.from);
+              setToDate(r.to);
+              setDatePreset(pk);
+            }}
+          />
+        </FilterCard>
+      </div>
+
+      {/* F1–F4 thresholds, same card treatment. */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-5">
+        <FilterCard label="F1 — Impressions">
+          <CardNumber
+            value={thresholds.f1Imp}
+            onChange={(n) => setThresholds({ ...thresholds, f1Imp: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F2 — ROAS">
+          <CardNumber
+            value={thresholds.f2Roas}
+            step={0.1}
+            onChange={(n) => setThresholds({ ...thresholds, f2Roas: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F3 — Cost / NCP">
+          <CardNumber
+            value={thresholds.f3CostPerNcp}
+            onChange={(n) => setThresholds({ ...thresholds, f3CostPerNcp: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F4 — Cost / FTEWV">
+          <CardNumber
+            value={thresholds.f4CostPerFtewv}
+            onChange={(n) => setThresholds({ ...thresholds, f4CostPerFtewv: n })}
+          />
+        </FilterCard>
+        <FilterCard label="Reset">
+          <button
+            onClick={() => setThresholds(DEFAULT_THRESHOLDS)}
+            disabled={!thresholdsChanged}
+            className="w-full rounded-md border bg-white px-3 py-2 text-sm disabled:opacity-40"
+            style={{ borderColor: AE.border }}
+          >
+            Defaults
+          </button>
+        </FilterCard>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search ad name…"
+          className="w-64 rounded-md border bg-white px-3 py-2 text-sm"
+          style={{ borderColor: AE.border }}
+        />
+        <label className="flex items-center gap-1.5 text-xs">
+          <input
+            type="checkbox"
+            checked={onlyWithOrders}
+            onChange={(e) => setOnlyWithOrders(e.target.checked)}
+          />
+          Has Shopify orders
+        </label>
+        <label className="flex items-center gap-1.5 text-xs">
+          Asset ID
+          <select
+            value={assetFilter}
+            onChange={(e) => setAssetFilter(e.target.value as "" | "yes" | "no")}
+            className="rounded-md border px-2 py-1 text-xs"
+            style={{ borderColor: AE.border }}
+          >
+            <option value="">All ads</option>
+            <option value="yes">Has asset ID</option>
+            <option value="no">No asset ID</option>
+          </select>
+        </label>
         <button
           onClick={clearAllFilters}
           className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
@@ -1335,51 +1433,12 @@ export function AdsAnalyse() {
             <option value="no">No asset ID</option>
           </select>
         </label>
-        <div className="relative ml-auto">
-          <button
-            onClick={() => setThresholdsOpen((v) => !v)}
-            className={
-              "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors " +
-              (thresholdsChanged
-                ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
-                : "border-border-primary bg-white text-text-primary hover:bg-bg-muted")
-            }
-          >
-            <span>F1..F4 thresholds</span>
-            {thresholdsChanged && (
-              <span className="rounded-full bg-amber-200 px-1.5 py-0.5 text-[9px] font-semibold">
-                modified
-              </span>
-            )}
-            <span className="text-text-tertiary">{thresholdsOpen ? "▴" : "▾"}</span>
-          </button>
-          {thresholdsOpen && (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full z-30 mt-1 w-80 rounded-lg border border-border-primary bg-white p-3 shadow-lg"
-            >
-              <div className="mb-2 flex items-center justify-between">
-                <h4 className="text-sm font-semibold">F1..F4 thresholds</h4>
-                <button
-                  onClick={() => setThresholds(DEFAULT_THRESHOLDS)}
-                  className="rounded border border-border-primary bg-white px-2 py-0.5 text-[10px] hover:bg-bg-muted"
-                >
-                  Reset defaults
-                </button>
-              </div>
-              <p className="mb-2 text-[10px] text-text-tertiary">
-                Client-side recategorises rows on every keystroke — no round-trip.
-              </p>
-              <div className="flex flex-col gap-1.5">
-                <NumInput label="F1 Imp ≥" value={thresholds.f1Imp} onChange={(v) => setThresholds({ ...thresholds, f1Imp: v })} />
-                <NumInput label="F2 ROAS ≥" value={thresholds.f2Roas} onChange={(v) => setThresholds({ ...thresholds, f2Roas: v })} step={0.1} />
-                <NumInput label="F3 C/NCP ≤" value={thresholds.f3CostPerNcp} onChange={(v) => setThresholds({ ...thresholds, f3CostPerNcp: v })} />
-                <NumInput label="F4 C/FTEWV ≤" value={thresholds.f4CostPerFtewv} onChange={(v) => setThresholds({ ...thresholds, f4CostPerFtewv: v })} step={0.5} />
-                <NumInput label="Result buffer (days)" value={thresholds.bufferDays} onChange={(v) => setThresholds({ ...thresholds, bufferDays: v })} />
-              </div>
-            </div>
-          )}
-        </div>
+        {/* The F1-F4 threshold popover was removed 2026-09-16: those
+            controls now sit in their own labelled cards above, matching
+            the legacy layout. Two editors bound to the same state would
+            only drift. `bufferDays` moved with them -- it is still used
+            by categorise() for the Result Awaited grace window. */}
+        <div className="ml-auto" />
         <ExportButton
           rows={rows as unknown as Record<string, unknown>[]}
           filename="ads_analyse"
