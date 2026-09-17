@@ -74,8 +74,19 @@ def _sep_key(s: str | None) -> str:
 def _value_candidates(value: str | None) -> tuple[str, ...]:
     """Preserve the raw signal and at most two valid percent-decoding layers.
 
-    A literal '+' remains '+': these fields are already parameter values,
-    and plus signs are part of this account's ad and campaign names.
+    A literal '+' stays '+': these fields are already parameter values, and
+    plus signs are part of this account's ad names -- 40% of them carry one.
+
+    But some capture path DID decode it the query-string way, turning the
+    '+' into a space, and those values arrive unmatchable:
+
+        utm_content   SDPL_AD FLATLAY
+        ad_name       SDPL_AD+FLATLAY - Copy
+
+    So a space-to-'+' form is offered as an EXTRA candidate, never as a
+    replacement -- undoing a known decoding, exactly as the percent layers
+    above do. It can only widen what a strict, uniqueness-checked match
+    considers; it cannot change what the raw value already resolved to.
     """
     current = (value or "").strip()
     if not current:
@@ -92,6 +103,11 @@ def _value_candidates(value: str | None) -> tuple[str, ...]:
             break
         candidates.append(decoded)
         current = decoded
+    for candidate in list(candidates):
+        if " " in candidate:
+            restored = candidate.replace(" ", "+")
+            if restored not in candidates:
+                candidates.append(restored)
     return tuple(candidates)
 
 
