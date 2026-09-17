@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging.setup import get_logger
@@ -30,9 +30,19 @@ logger = get_logger(__name__)
 
 # Name equality may ignore Meta duplicate suffixes and separator differences,
 # but it must still identify one ad. Two copies are two ads, even with one name.
-_SUFFIX_RE = re.compile(r"(?:[\s_\-]+(?:copy(?:\s*\d+)?|[hc]\d+))+\s*$", re.IGNORECASE)
-_SEP_RE = re.compile(r"[+\-_/\.\s,]+")
-_CAMPAIGN_SUFFIX_RE = re.compile(r"[\s_\-]*campaign\s*$", re.IGNORECASE)
+#
+# DASHES: Meta's own "Duplicate" writes an EN DASH -- "Name – Copy" -- while a
+# hand-typed duplicate uses a hyphen. Both spellings exist side by side in
+# this account, sometimes for the same ad. A separator class of [\s_\-]
+# stripped "Copy" off the en-dash form but left the dash stranded, so
+# "TW_onseventhsky_IFAD_230425" and "TW_onseventhsky_IFAD_230425 – Copy"
+# normalised to different strings and failed to match each other.
+_DASHES = r"\-‐‑‒–—―−"
+_SUFFIX_RE = re.compile(
+    rf"(?:[\s_{_DASHES}]+(?:copy(?:\s*\d+)?|[hc]\d+))+[\s_{_DASHES}]*$", re.IGNORECASE
+)
+_SEP_RE = re.compile(rf"[+_/\.\s,{_DASHES}]+")
+_CAMPAIGN_SUFFIX_RE = re.compile(rf"[\s_{_DASHES}]*campaign\s*$", re.IGNORECASE)
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 SUBSTRING_MIN_LEN = 10
 TOKEN_SUBSET_MIN_TOKENS = 3
@@ -113,6 +123,14 @@ class AdUniverse:
     # both constrain matching and make a duplicated campaign name ambiguous.
     campaign_name_ids: dict[str, set[str]] = field(default_factory=dict)
     campaign_fuzzy_ids: dict[str, set[str]] = field(default_factory=dict)
+    #: Historical ad names -> the ad that used to carry them. Meta writes
+    #: the ad name into the UTM at CLICK time, so an ad renamed afterwards
+    #: leaves every older order naming something that no longer exists.
+    #: Populated from `ad_name_alias` (see refresh_ad_name_aliases.py);
+    #: only unambiguous aliases are loaded, so resolving one identifies a
+    #: single ad by id rather than guessing between two.
+    alias_ads: dict[str, AdMeta] = field(default_factory=dict)
+    alias_fuzzy: dict[str, AdMeta] = field(default_factory=dict)
 
 
 # Use both entity rosters, including direct IDs for ads without a usable name.
@@ -147,6 +165,7 @@ def _build_ad_universe(
     ads: Iterable[AdMeta], *,
     adsets: Iterable[tuple[str, str | None, str | None]] = (),
     campaigns: Iterable[tuple[str, str | None]] = (),
+    aliases: Iterable[tuple[str, str]] = (),
 ) -> AdUniverse:
     """Build the same pure matching indexes for database loads and audit replays."""
     universe = AdUniverse()
@@ -189,7 +208,30 @@ def _build_ad_universe(
         if len(ids) == 1:
             cid = next(iter(ids))
             universe.roster_campaign_names[norm] = (cid, universe.roster_campaigns.get(cid))
+
+    # Historical names last, and never over a live one: a name that some
+    # ad answers to TODAY must resolve to that ad, not to whoever used to
+    # be called it.
+    for name, ad_id in aliases:
+        ad = universe.by_id.get(ad_id)
+        if ad is None or not name:
+            continue
+        if name not in universe.by_name:
+            universe.alias_ads.setdefault(name, ad)
+        norm = _norm_name(name)
+        if norm and norm not in universe.by_fuzzy:
+            universe.alias_fuzzy.setdefault(norm, ad)
     return universe
+
+
+#: Only unambiguous aliases: a name that has belonged to two ads cannot
+#: identify one. The table keeps those rows so the refusal is auditable,
+#: and this is where they are refused.
+_AD_ALIAS_SQL = """
+SELECT ad_name_lower, ad_id
+  FROM public.ad_name_alias
+ WHERE NOT ambiguous
+"""
 
 
 async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
@@ -205,7 +247,18 @@ async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
     ]
     adsets = [tuple(row) for row in await session.execute(text(_ADSET_ROSTER_SQL))]
     campaigns = [tuple(row) for row in await session.execute(text(_CAMPAIGN_ROSTER_SQL))]
-    return _build_ad_universe(ads, adsets=adsets, campaigns=campaigns)
+    try:
+        aliases = [
+            (row[0], row[1])
+            for row in await session.execute(text(_AD_ALIAS_SQL))
+        ]
+    except (ProgrammingError, OperationalError):
+        # The table is built by a separate script; attribution must still
+        # run on an installation that has never run it.
+        await session.rollback()
+        logger.warning("ad_name_alias_unavailable")
+        aliases = []
+    return _build_ad_universe(ads, adsets=adsets, campaigns=campaigns, aliases=aliases)
 
 
 def _unique_ad(candidates: Iterable[AdMeta]) -> AdMeta | None:
@@ -323,6 +376,26 @@ def _global_name_match(utm_content: str, universe: AdUniverse) -> AdMeta | None:
     return _unique_ad(hits)
 
 
+def _alias_match(value: str, universe: AdUniverse) -> AdMeta | None:
+    """Resolve a name the ad universe no longer knows, via rename history.
+
+    Exact spelling first, then the same normalisation live matching uses
+    (so a " - Copy" / " – Copy" difference does not defeat it). Only
+    unambiguous aliases are in the index, so a hit is one ad.
+    """
+    for candidate in _value_candidates(value):
+        ad = universe.alias_ads.get(candidate.lower())
+        if ad is not None:
+            return ad
+    for candidate in _value_candidates(value):
+        norm = _norm_name(candidate)
+        if norm:
+            ad = universe.alias_fuzzy.get(norm)
+            if ad is not None:
+                return ad
+    return None
+
+
 def _attribute_order(
     utm_content: str, utm_term: str, utm_campaign: str, universe: AdUniverse,
 ) -> AttributionResult:
@@ -361,6 +434,15 @@ def _attribute_order(
         ad = _scoped_match(ads, utm_content, strict=True)
         if ad:
             return matched("adset_scoped", ad)
+        # Nothing in the ad set answers to that name TODAY. Before
+        # giving up, ask whether anything in it used to: Meta stamps the
+        # name into the UTM at click time, so a rename since the click
+        # leaves the order naming an ad that no longer exists under that
+        # name. An alias names one ad id outright, so confirming it sits
+        # in this very ad set is corroboration, not a guess.
+        renamed = _alias_match(utm_content, universe)
+        if renamed is not None and renamed.adset_id == adset_id:
+            return matched("adset_renamed", renamed)
         parent = universe.roster_adsets.get(adset_id)
         if parent is None:
             ids = {ad.campaign_id for ad in ads}
@@ -388,7 +470,14 @@ def _attribute_order(
         )
 
     ad = _global_name_match(utm_content, universe) if utm_content else None
-    return matched("ad_name_match", ad) if ad else _UNMATCHED
+    if ad:
+        return matched("ad_name_match", ad)
+    # No parent evidence at all and no live name. A historical name is
+    # still an identification rather than a guess -- it came from a
+    # recorded rename of a specific ad id -- so it is taken, under its
+    # own tier so it stays countable separately.
+    renamed = _alias_match(utm_content, universe) if utm_content else None
+    return matched("ad_renamed", renamed) if renamed else _UNMATCHED
 
 
 # ----------------------------------------------------------------------

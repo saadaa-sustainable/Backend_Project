@@ -97,7 +97,9 @@ const CHANNEL_COLOR: Record<UtmChannel | "Total", string> = {
 const TIER_ORDER = [
   "ad_direct",
   "adset_scoped",
+  "adset_renamed",
   "ad_name_match",
+  "ad_renamed",
   "adset_name_miss",
   "campaign_scoped",
   "campaign_only",
@@ -132,7 +134,9 @@ type TierKey = (typeof TIER_ORDER)[number];
 const TIER_LABEL: Record<TierKey, string> = {
   ad_direct: "Ad Direct",
   adset_scoped: "Adset Scoped",
+  adset_renamed: "Adset · Renamed",
   ad_name_match: "Ad Name Match",
+  ad_renamed: "Ad Renamed",
   adset_name_miss: "Adset · Name Miss",
   campaign_scoped: "Campaign Scoped",
   campaign_only: "Campaign Only",
@@ -151,10 +155,20 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     title: "ADSET-SCOPED NAME",
     hint: "utm_term names a known adset and utm_content matches an ad name inside it exactly (or after stripping Copy/_h0 suffixes). Beats a same-named ad elsewhere in the account. Orders whose adset matched but whose name did not are not a separate step -- they are this step's failures, in the section below.",
   },
-  ad_name_match: {
+  adset_renamed: {
     step: "STEP 3",
+    title: "ADSET · RENAMED AD",
+    hint: "Nothing in the adset answers to that name today, but something in it USED to. Meta stamps the ad name into the UTM at click time, so renaming an ad orphans every order placed before the rename. Resolved through Meta's own rename log, which names the ad id outright — and the ad is confirmed to sit in this very adset, so the name and the adset agree.",
+  },
+  ad_name_match: {
+    step: "STEP 4",
     title: "AD NAME",
     hint: "Global ad-name match: exact, then punctuation-normalised, then substring. Ties broken by spend.",
+  },
+  ad_renamed: {
+    step: "STEP 5",
+    title: "RENAMED AD",
+    hint: "No adset or campaign evidence, and no ad answers to that name today — but Meta's rename log records exactly one ad that used to. An identification from the change log, not a guess between similar names.",
   },
   adset_name_miss: {
     // No step number: this is STEP 2's failure branch, not a test of
@@ -164,12 +178,12 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     hint: "The adset matched, but utm_content matched no ad name inside it under the strict rule. Adset and campaign are attributed; the ad is not. Treat this tile as a worklist -- every order in it is an ad whose utm_content and ad_name have drifted apart.",
   },
   campaign_scoped: {
-    step: "STEP 4",
+    step: "STEP 6",
     title: "CAMPAIGN-SCOPED NAME",
     hint: "utm_campaign names a known campaign and utm_content narrows to one ad inside it.",
   },
   campaign_only: {
-    step: "STEP 5",
+    step: "STEP 7",
     title: "CAMPAIGN ONLY",
     hint: "The campaign is known but no ad could be resolved.",
   },
@@ -187,7 +201,9 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
 const MATCHED_ON: Record<TierKey, string> = {
   ad_direct: "utm_content",
   adset_scoped: "utm_content",
+  adset_renamed: "utm_content (former name)",
   ad_name_match: "utm_content",
+  ad_renamed: "utm_content (former name)",
   adset_name_miss: "utm_term",
   campaign_scoped: "utm_content",
   campaign_only: "utm_campaign",
@@ -198,7 +214,9 @@ const MATCHED_ON: Record<TierKey, string> = {
 const TIER_COLOR: Record<TierKey, string> = {
   ad_direct: theme.successMid,
   adset_scoped: theme.infoMid,
+  adset_renamed: "#0E7490",
   ad_name_match: "#0891B2",
+  ad_renamed: "#155E75",
   adset_name_miss: theme.warningMid,
   campaign_scoped: theme.accentPurple,
   campaign_only: theme.warningText,
@@ -208,7 +226,9 @@ const TIER_COLOR: Record<TierKey, string> = {
 const TIER_CLASS: Record<TierKey, string> = {
   ad_direct: "ai-tier-ad_direct",
   adset_scoped: "ai-tier-adset_scoped",
+  adset_renamed: "ai-tier-adset_scoped",
   ad_name_match: "ai-tier-ad_name_match",
+  ad_renamed: "ai-tier-ad_name_match",
   adset_name_miss: "ai-tier-adset_only",
   campaign_scoped: "ai-tier-adset_scoped",
   campaign_only: "ai-tier-campaign_only",
