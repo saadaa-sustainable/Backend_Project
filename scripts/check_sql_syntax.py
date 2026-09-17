@@ -120,6 +120,34 @@ def _composed() -> dict[str, str]:
         "analytics:cpis_trends_batch": str(_TRENDS_SQL),
         "analytics:creative_testing_response": asyncio.run(creative_query()),
         "analytics:_CT_ADS_SQL": analytics._CT_ADS_SQL,
+        # Multi-Filter compiles to a boolean expression spliced into
+        # base_where, so parse it inside a real statement for each join.
+        **{
+            f"analytics:multi_filter[{j}]": (
+                "SELECT 1 FROM ad_performance_summary aps WHERE "
+                + (analytics._multi_filter_sql(
+                    [{"field": "ad_name", "op": "contains_all", "value": "BST IFAD"},
+                     {"field": "category", "op": "equals", "value": "Winner"},
+                     {"field": "status", "op": "not_equals", "value": "ACTIVE"},
+                     {"field": "campaign_name", "op": "starts_with", "value": "NCP"}],
+                    j, {}) or "TRUE")
+            )
+            for j in ("and", "or", "nand")
+        },
+        # Ads launched per day, both bases -- the first_seen variant
+        # carries an extra grouped join, so parse each shape.
+        **{
+            f"analytics:launches[{b}]": (
+                f"SELECT {analytics._LAUNCH_SOURCE[b]} AS day, COUNT(*)::int AS ads "
+                "FROM ad_performance_summary aps "
+                "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id"
+                + (" JOIN (SELECT ad_id, MIN(day) AS first_seen_date FROM insights_daily_by_ad "
+                   "GROUP BY ad_id) fs ON fs.ad_id = aps.ad_id" if b == "first_seen" else "")
+                + f" WHERE {analytics._LAUNCH_SOURCE[b]} BETWEEN :from_date AND :to_date "
+                "AND aps.ad_name NOT ILIKE '%copy%' GROUP BY 1 ORDER BY 1"
+            )
+            for b in analytics._LAUNCH_SOURCE
+        },
         # The rollup composes its SQL from _ROLLUP_CFG + _action_sql, so
         # parse the real assembled string for both levels.
         **{

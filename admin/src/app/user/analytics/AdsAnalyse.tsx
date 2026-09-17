@@ -35,9 +35,12 @@ import { useEffect, useMemo, useState } from "react";
 import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/lib/api";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
-import { AdsAnalyseCharts } from "./AdsAnalyseCharts";
+import { AdsLaunchChart } from "./AdsLaunchChart";
+import { DateRangePicker } from "@/components/DateRangePicker";
+import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
+import { theme } from "@/lib/theme";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -123,6 +126,85 @@ const DEFAULT_THRESHOLDS: FThresholds = {
   bufferDays: 14,
 };
 
+/** The app's own tokens, mirrored for the few inline styles that cannot
+ *  take a Tailwind class. An earlier pass gave this section a cream/gold
+ *  scheme borrowed from the legacy dashboard, which left Ads Analyse the
+ *  only blue-less tab in the panel. */
+const AE = {
+  cream: theme.bgMuted,
+  border: theme.borderPrimary,
+  muted: theme.textTertiary,
+  ink: theme.textPrimary,
+};
+
+/** One labelled filter cell: uppercase caption above, control below,
+ *  boxed. Matches the legacy layout, where every filter is its own card
+ *  rather than a bare select floating in a strip. */
+function FilterCard({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div
+      className="rounded-lg border p-2.5"
+      style={{ backgroundColor: AE.cream, borderColor: AE.border }}
+    >
+      <div
+        className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
+        style={{ color: AE.muted }}
+      >
+        {label}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function CardSelect({
+  value,
+  onChange,
+  children,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full rounded-md border bg-white px-3 py-2 text-sm"
+      style={{ borderColor: AE.border, color: AE.ink }}
+    >
+      {children}
+    </select>
+  );
+}
+
+function CardNumber({
+  value,
+  onChange,
+  step = 1,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  step?: number;
+}) {
+  return (
+    <input
+      type="number"
+      step={step}
+      value={value}
+      onChange={(e) => {
+        const n = Number(e.target.value);
+        // Reject NaN rather than writing it into a threshold -- every
+        // comparison against NaN is false, which would silently empty
+        // the table instead of showing an invalid-input state.
+        if (!Number.isNaN(n)) onChange(n);
+      }}
+      className="w-full rounded-md border bg-white px-3 py-2 text-sm tabular-nums"
+      style={{ borderColor: AE.border, color: AE.ink }}
+    />
+  );
+}
+
 function evaluateFlags(row: AdsAnalyseRow, t: FThresholds) {
   const p1 = (row.impressions ?? 0) >= t.f1Imp;
   const p2 = (row.roas ?? 0) >= t.f2Roas;
@@ -131,7 +213,25 @@ function evaluateFlags(row: AdsAnalyseRow, t: FThresholds) {
   return { p1, p2, p3, p4 };
 }
 
-function categorise(row: AdsAnalyseRow, t: FThresholds): CategoryKey {
+/** The ad's verdict.
+ *
+ *  At DEFAULT thresholds the server's stored `category` is authoritative
+ *  and is what the tile counts (`category_counts`) are computed from, so
+ *  we use it verbatim. Re-deriving it here would let the two disagree --
+ *  and because the server has already filtered the rows by category, a
+ *  client-side disagreement can only ever DROP rows the tiles counted,
+ *  never add any. That is what made the P2 analysis and Discarded tiles
+ *  look empty: the tile showed the server's count while the table
+ *  re-filtered on a locally recomputed verdict.
+ *
+ *  Once the user edits a threshold the server's verdict no longer
+ *  describes these rows, so we fall through to the local calculation --
+ *  which is the entire point of the threshold panel. `filters` stops
+ *  sending `category` to the server in that mode, so only one filter is
+ *  ever applied.
+ */
+function categorise(row: AdsAnalyseRow, t: FThresholds, useServer = false): CategoryKey {
+  if (useServer && row.category) return row.category as CategoryKey;
   const { p1, p2, p3, p4 } = evaluateFlags(row, t);
   if (p1 && (p2 || p3) && p4) return "Incremental Winner";
   if (p1 && (p2 || p3)) return "Winner";
@@ -176,11 +276,12 @@ function pct(n: number | null | undefined) {
 }
 function fmtCompact(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1e7) return `${(n / 1e7).toFixed(2)}Cr`;
-  if (abs >= 1e5) return `${(n / 1e5).toFixed(2)}L`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return Math.round(n).toLocaleString();
+  // Full figures, Indian grouping. These used to abbreviate to Cr / L / K,
+  // which reads fine in a headline and badly everywhere else: 1.27Cr hides
+  // the difference between 1,27,11,045 and 1,27,49,980, and those are the
+  // comparisons this table exists to make. Charts pass their own axis
+  // formatter, so nothing here widens an axis label.
+  return Math.round(n).toLocaleString("en-IN");
 }
 function fmtMoney(n: number | null | undefined) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -521,13 +622,19 @@ const COLUMNS: ColDef[] = [
   { key: "ad_name", header: "Ad Name", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.ad_name ?? ""}>{r.ad_name ?? "—"}</span> },
   { key: "ad_id", header: "Ad ID", kind: "text", group: "Identity", defaultVisible: true,
-    render: (r) => <span className="num">{r.ad_id.slice(0, 12)}…</span> },
+    // Full id. These were sliced to 12 chars with an ellipsis, which made
+    // every Meta id look alike (120215851600… / 120215866514…) and left
+    // the one thing you need an id column FOR -- copying it into Ads
+    // Manager or a query -- impossible without opening the inspector.
+    render: (r) => <span className="num whitespace-nowrap">{r.ad_id}</span> },
   { key: "asset_id", header: "Asset ID", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <AssetIdCell row={r} /> },
   { key: "campaign_name", header: "Campaign", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.campaign_name ?? ""}>{r.campaign_name ?? "—"}</span> },
   { key: "adset_id", header: "Ad Set ID", kind: "text", group: "Identity",
-    render: (r) => <span className="num">{r.adset_id?.slice(0, 12) ?? "—"}…</span> },
+    // Also fixes a null bug: the old form put the ellipsis outside the
+    // ?? fallback, so a missing adset rendered as "—…".
+    render: (r) => <span className="num whitespace-nowrap">{r.adset_id ?? "—"}</span> },
   { key: "attribution", header: "Attribution", kind: "link", group: "Identity",
     render: () => <Placeholder reason="Daily attribution drill-down needs new /admin/analytics/ad-daily endpoint" /> },
   { key: "account_name", header: "Account", kind: "text", group: "Identity", defaultVisible: true,
@@ -753,7 +860,7 @@ export function AdsAnalyse() {
   // with values summed from Bronze raw_dump_meta within the window.
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
-  const [datePreset, setDatePreset] = useState<string>("all");
+  const [datePreset, setDatePreset] = useState<string>("lifetime");
 
   // ── F1..F4 thresholds ────────────────────────────────────────
   const [thresholds, setThresholds] = useState<FThresholds>(DEFAULT_THRESHOLDS);
@@ -785,6 +892,7 @@ export function AdsAnalyse() {
   const visibleCols = COLUMNS.filter((c) => !hiddenCols.has(c.key));
 
   // ── inspector drawer ─────────────────────────────────────────
+  const [multiFilter, setMultiFilter] = useState<MultiFilterState | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<"metrics" | "filters">("metrics");
   const [numericFilters, setNumericFilters] = useState<NumericFilter[]>([]);
@@ -824,17 +932,20 @@ export function AdsAnalyse() {
     () => ({
       account_name: account || undefined,
       search: debouncedSearch || undefined,
-      category: categoryFilter || undefined,
+      // With custom thresholds the server's stored category is the wrong
+      // answer, so we fetch unfiltered and narrow it client-side instead.
+      category: thresholdsChanged ? undefined : categoryFilter || undefined,
       ad_effective_status: adStatus || undefined,
       only_with_shopify_orders: onlyWithOrders,
       has_asset_id: assetFilter === "" ? undefined : assetFilter === "yes",
+      multi_filter: multiFilter ? JSON.stringify(multiFilter) : undefined,
       // Only send both together -- one without the other has no meaning
       // on the server side (the overlay/filter branch keys on both being set).
       from_date: fromDate && toDate ? fromDate : undefined,
       to_date: fromDate && toDate ? toDate : undefined,
       date_field: fromDate && toDate ? dateField : undefined,
     }),
-    [account, debouncedSearch, categoryFilter, adStatus, onlyWithOrders, assetFilter, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, multiFilter, fromDate, toDate, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -938,7 +1049,7 @@ export function AdsAnalyse() {
 
   // ── client-side recategorise + numeric filter + sort ─────────
   const derived = useMemo(() => {
-    const withCat = rows.map((r) => ({ row: r, cat: categorise(r, thresholds) }));
+    const withCat = rows.map((r) => ({ row: r, cat: categorise(r, thresholds, !thresholdsChanged) }));
     // Category tile counts — from the client-side recategorisation
     // (so the F1..F4 threshold sliders update the tile numbers live).
     const tileCounts: Record<CategoryKey, number> = {
@@ -953,7 +1064,10 @@ export function AdsAnalyse() {
     withCat.forEach((rc) => (tileCounts[rc.cat] += 1));
     // Apply numeric filters
     const filtered = withCat.filter((rc) => {
-      if (categoryFilter && rc.cat !== categoryFilter) return false;
+      // Only filter here when the server could NOT -- i.e. custom
+      // thresholds. At defaults the server already returned exactly this
+      // category and filtering again can only lose rows.
+      if (thresholdsChanged && categoryFilter && rc.cat !== categoryFilter) return false;
       for (const nf of numericFilters) {
         const v = (rc.row as unknown as Record<string, number | null>)[nf.field];
         if (v === null || v === undefined || Number.isNaN(v)) return false;
@@ -969,7 +1083,7 @@ export function AdsAnalyse() {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return { withCat, tileCounts, filtered: sorted };
-  }, [rows, thresholds, categoryFilter, numericFilters, sortKey, sortDir]);
+  }, [rows, thresholds, thresholdsChanged, categoryFilter, numericFilters, sortKey, sortDir]);
 
   // ── pagination window ───────────────────────────────────────
   const pageRows = derived.filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -996,7 +1110,7 @@ export function AdsAnalyse() {
     setThresholds(DEFAULT_THRESHOLDS);
     setFromDate("");
     setToDate("");
-    setDatePreset("all");
+    setDatePreset("lifetime");
   }
 
   return (
@@ -1137,151 +1251,125 @@ export function AdsAnalyse() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════
-          Filter row 1: Account / Group / Category / Status / Date field / Date range
+          Filter cards — ACCOUNT / GROUP BY / CATEGORY / AD STATUS /
+          DATE FIELD / DATE RANGE. Six labelled cards on one row, matching
+          the legacy Ads Analyse layout: uppercase label above, control
+          below, each in its own bordered card rather than a loose strip
+          of bare selects.
          ═══════════════════════════════════════════════════════════ */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-        <select
-          value={account}
-          onChange={(e) => setAccount(e.target.value)}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">Account: All</option>
-          {[...accountOptions].sort().map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
-        <select
-          value={groupBy}
-          onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
-          disabled
-          title="Group By needs backend adset/campaign rollup RPCs — Phase 2"
-          className="rounded-md border border-border-primary px-2 py-1 text-sm text-text-tertiary"
-        >
-          <option value="ad">Group by: Ad</option>
-          <option value="ad_name">Group by: Ad Name</option>
-          <option value="adset">Group by: Adset</option>
-          <option value="campaign">Group by: Campaign</option>
-        </select>
-        <select
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value as CategoryKey | "")}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">Category: All</option>
-          {CATEGORY_ORDER.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-        <select
-          value={adStatus}
-          onChange={(e) => setAdStatus(e.target.value)}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">Status: All</option>
-          {[...statusOptions].sort().map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <select
-          value={dateField}
-          onChange={(e) => setDateField(e.target.value as typeof dateField)}
-          title={
-            "Applies to the [from, to] window: " +
-            "Created hides ads outside the window (default); " +
-            "First Seen filters by first_seen_date; " +
-            "Delivery keeps every ad but overlays windowed spend/impressions/reach."
-          }
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-        >
-          <option value="created">Date: Created</option>
-          <option value="first_seen">Date: First Seen</option>
-          <option value="delivery">Date: Delivery</option>
-        </select>
-        {/* Date range window -- when both bounds are set, backend
-            overwrites spend/impressions/reach/purchases/conv_value/roas
-            with values summed from Bronze insights in that window. */}
-        <select
-          value={datePreset}
-          onChange={(e) => {
-            const v = e.target.value;
-            setDatePreset(v);
-            const today = new Date().toISOString().slice(0, 10);
-            const daysAgo = (n: number) => {
-              const d = new Date();
-              d.setDate(d.getDate() - n);
-              return d.toISOString().slice(0, 10);
-            };
-            if (v === "all") { setFromDate(""); setToDate(""); }
-            else if (v === "today") { setFromDate(today); setToDate(today); }
-            else if (v === "7d") { setFromDate(daysAgo(6)); setToDate(today); }
-            else if (v === "14d") { setFromDate(daysAgo(13)); setToDate(today); }
-            else if (v === "30d") { setFromDate(daysAgo(29)); setToDate(today); }
-            else if (v === "90d") { setFromDate(daysAgo(89)); setToDate(today); }
-          }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          title="Date-range window applied to spend/impressions/reach/purchases/conv_value/roas"
-        >
-          <option value="all">All time</option>
-          <option value="today">Today</option>
-          <option value="7d">Last 7 days</option>
-          <option value="14d">Last 14 days</option>
-          <option value="30d">Last 30 days</option>
-          <option value="90d">Last 90 days</option>
-          <option value="custom">Custom…</option>
-        </select>
-        <input
-          type="date"
-          value={fromDate}
-          onChange={(e) => { setFromDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          title="Window start (YYYY-MM-DD)"
-        />
-        <span className="text-xs text-text-secondary">→</span>
-        <input
-          type="date"
-          value={toDate}
-          onChange={(e) => { setToDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-sm"
-          title="Window end (YYYY-MM-DD)"
-        />
-        {fromDate && toDate && (
-          <span
-            className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
-            title="Spend / impressions / reach / purchases / conv_value / ROAS reflect this window; other columns stay lifetime"
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+        <FilterCard label="Account">
+          <CardSelect value={account} onChange={setAccount}>
+            <option value="">All Accounts</option>
+            {[...accountOptions].sort().map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Group by">
+          <CardSelect
+            value={levelToggle}
+            onChange={(v) => setLevelToggle(v as typeof levelToggle)}
           >
-            windowed
-          </span>
-        )}
-        <button
-          onClick={clearAllFilters}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
-        >
-          Clear Filters
-        </button>
-        <button
-          onClick={() => setColPickerOpen((v) => !v)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
-          title="Show/hide columns"
-        >
-          ▤ Columns ({visibleCols.length}/{COLUMNS.length})
-        </button>
-        <button
-          onClick={() => setInspectorOpen((v) => !v)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
-          title="Inspector: Metrics + numeric Filters"
-        >
-          ⚙ Inspector {numericFilters.length > 0 && <span className="ml-1 rounded bg-yellow-200 px-1 text-yellow-900">{numericFilters.length}</span>}
-        </button>
+            <option value="ad">Ad Level</option>
+            <option value="adset">Ad Set</option>
+            <option value="campaign">Campaign</option>
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Category">
+          <CardSelect
+            value={categoryFilter}
+            onChange={(v) => setCategoryFilter(v as CategoryKey | "")}
+          >
+            <option value="">All Categories</option>
+            {CATEGORY_ORDER.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Ad status">
+          <CardSelect value={adStatus} onChange={setAdStatus}>
+            <option value="">All Statuses</option>
+            {[...statusOptions].sort().map((s2) => (
+              <option key={s2} value={s2}>{s2}</option>
+            ))}
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Date field">
+          <CardSelect
+            value={dateField}
+            onChange={(v) => setDateField(v as typeof dateField)}
+          >
+            <option value="delivery">Delivery Date</option>
+            <option value="created">Ad Created</option>
+            <option value="first_seen">First Seen</option>
+          </CardSelect>
+        </FilterCard>
+
+        <FilterCard label="Date range">
+          <DateRangePicker
+            value={{ from: fromDate, to: toDate }}
+            preset={datePreset}
+            onApply={(r, pk) => {
+              setFromDate(r.from);
+              setToDate(r.to);
+              setDatePreset(pk);
+            }}
+          />
+        </FilterCard>
+      </div>
+
+      <MultiFilter applied={multiFilter} onApply={setMultiFilter} />
+
+      {/* F1–F4 thresholds, same card treatment. */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-5">
+        <FilterCard label="F1 — Impressions">
+          <CardNumber
+            value={thresholds.f1Imp}
+            onChange={(n) => setThresholds({ ...thresholds, f1Imp: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F2 — ROAS">
+          <CardNumber
+            value={thresholds.f2Roas}
+            step={0.1}
+            onChange={(n) => setThresholds({ ...thresholds, f2Roas: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F3 — Cost / NCP">
+          <CardNumber
+            value={thresholds.f3CostPerNcp}
+            onChange={(n) => setThresholds({ ...thresholds, f3CostPerNcp: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F4 — Cost / FTEWV">
+          <CardNumber
+            value={thresholds.f4CostPerFtewv}
+            onChange={(n) => setThresholds({ ...thresholds, f4CostPerFtewv: n })}
+          />
+        </FilterCard>
+        <FilterCard label="Reset">
+          <button
+            onClick={() => setThresholds(DEFAULT_THRESHOLDS)}
+            disabled={!thresholdsChanged}
+            className="w-full rounded-md border bg-white px-3 py-2 text-sm disabled:opacity-40"
+            style={{ borderColor: AE.border }}
+          >
+            Defaults
+          </button>
+        </FilterCard>
       </div>
 
       {/* ═══════════════════════════════════════════════════════════
-          Search + shop-orders toggle + collapsed thresholds button.
+          Row controls. The standalone "Search ad name" box was removed
+          2026-09-16: Multi-Filter's Ad Name + "contains all of" does the
+          same job and six other fields besides, so the two were just
+          competing ways to type the same query.
+          Shop-orders toggle + collapsed thresholds button.
           Thresholds were previously in a 5-input row above the KPI
           tiles which visually competed with everything else -- moved
           to a popover so the primary flow (KPIs → filters → table)
@@ -1289,12 +1377,6 @@ export function AdsAnalyse() {
           diverged from CTD's defaults (2026-08-29 declutter pass).
          ═══════════════════════════════════════════════════════════ */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search ad name…"
-          className="w-64 rounded-md border border-border-primary px-2 py-1 text-sm"
-        />
         <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" checked={onlyWithOrders} onChange={(e) => setOnlyWithOrders(e.target.checked)} />
           Has Shopify orders
@@ -1312,50 +1394,36 @@ export function AdsAnalyse() {
             <option value="no">No asset ID</option>
           </select>
         </label>
-        <div className="relative ml-auto">
+        {/* The F1-F4 threshold popover was removed 2026-09-16: those
+            controls now sit in their own labelled cards above, matching
+            the legacy layout. Two editors bound to the same state would
+            only drift. `bufferDays` moved with them -- it is still used
+            by categorise() for the Result Awaited grace window. */}
+        <div className="ml-auto flex items-center gap-2">
           <button
-            onClick={() => setThresholdsOpen((v) => !v)}
-            className={
-              "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors " +
-              (thresholdsChanged
-                ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
-                : "border-border-primary bg-white text-text-primary hover:bg-bg-muted")
-            }
+            onClick={clearAllFilters}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted"
           >
-            <span>F1..F4 thresholds</span>
-            {thresholdsChanged && (
-              <span className="rounded-full bg-amber-200 px-1.5 py-0.5 text-[9px] font-semibold">
-                modified
+            Clear Filters
+          </button>
+          <button
+            onClick={() => setColPickerOpen((v) => !v)}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted"
+          >
+            ▤ Columns ({visibleCols.length}/{COLUMNS.length})
+          </button>
+          <button
+            onClick={() => setInspectorOpen((v) => !v)}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted"
+            title="Inspector: Metrics + numeric Filters"
+          >
+            ⚙ Inspector
+            {numericFilters.length > 0 && (
+              <span className="ml-1 rounded bg-yellow-200 px-1 text-yellow-900">
+                {numericFilters.length}
               </span>
             )}
-            <span className="text-text-tertiary">{thresholdsOpen ? "▴" : "▾"}</span>
           </button>
-          {thresholdsOpen && (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="absolute right-0 top-full z-30 mt-1 w-80 rounded-lg border border-border-primary bg-white p-3 shadow-lg"
-            >
-              <div className="mb-2 flex items-center justify-between">
-                <h4 className="text-sm font-semibold">F1..F4 thresholds</h4>
-                <button
-                  onClick={() => setThresholds(DEFAULT_THRESHOLDS)}
-                  className="rounded border border-border-primary bg-white px-2 py-0.5 text-[10px] hover:bg-bg-muted"
-                >
-                  Reset defaults
-                </button>
-              </div>
-              <p className="mb-2 text-[10px] text-text-tertiary">
-                Client-side recategorises rows on every keystroke — no round-trip.
-              </p>
-              <div className="flex flex-col gap-1.5">
-                <NumInput label="F1 Imp ≥" value={thresholds.f1Imp} onChange={(v) => setThresholds({ ...thresholds, f1Imp: v })} />
-                <NumInput label="F2 ROAS ≥" value={thresholds.f2Roas} onChange={(v) => setThresholds({ ...thresholds, f2Roas: v })} step={0.1} />
-                <NumInput label="F3 C/NCP ≤" value={thresholds.f3CostPerNcp} onChange={(v) => setThresholds({ ...thresholds, f3CostPerNcp: v })} />
-                <NumInput label="F4 C/FTEWV ≤" value={thresholds.f4CostPerFtewv} onChange={(v) => setThresholds({ ...thresholds, f4CostPerFtewv: v })} step={0.5} />
-                <NumInput label="Result buffer (days)" value={thresholds.bufferDays} onChange={(v) => setThresholds({ ...thresholds, bufferDays: v })} />
-              </div>
-            </div>
-          )}
         </div>
         <ExportButton
           rows={rows as unknown as Record<string, unknown>[]}
@@ -1365,68 +1433,12 @@ export function AdsAnalyse() {
         />
       </div>
 
-      {/* ═══════════════════════════════════════════════════════════
-          Aggregate KPI strip — 8 tiles mirroring kwikengage's
-          Marketing Insights row (Total Orders / Total Sales / Total
-          Buyers / etc.). Reflects the current filter set from the
-          server-side totals payload.
-         ═══════════════════════════════════════════════════════════ */}
-      {totals && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
-          <KwikTile
-            icon={<span className="text-base">◱</span>}
-            iconColor="slate"
-            label="Ads"
-            value={totals.ad_count.toLocaleString()}
-            subLine={`of ${total.toLocaleString()} in DB`}
-          />
-          <KwikTile
-            icon={<span className="text-base">₹</span>}
-            iconColor="sky"
-            label="Spend"
-            value={fmtMoney(totals.spend)}
-          />
-          <KwikTile
-            icon={<span className="text-base">👁</span>}
-            iconColor="purple"
-            label="Impressions"
-            value={fmtCompact(totals.impressions)}
-          />
-          <KwikTile
-            icon={<span className="text-base">◉</span>}
-            iconColor="teal"
-            label="Reach"
-            value={fmtCompact(totals.reach)}
-          />
-          <KwikTile
-            icon={<span className="text-base">🛒</span>}
-            iconColor="emerald"
-            label="Purchases"
-            value={fmtCompact(totals.purchases)}
-            subLine={`${fmtCompact(totals.ncp_count)} NCP`}
-          />
-          <KwikTile
-            icon={<span className="text-base">✦</span>}
-            iconColor="amber"
-            label="Meta ROAS"
-            value={totals.avg_meta_roas !== null ? totals.avg_meta_roas.toFixed(2) : "—"}
-            subLine={`${totals.avg_ctr_pct !== null ? totals.avg_ctr_pct.toFixed(2) + "% CTR" : ""}`}
-          />
-          <KwikTile
-            icon={<span className="text-base">🛍</span>}
-            iconColor="emerald"
-            label="Shop orders"
-            value={fmtCompact(totals.shopify_orders)}
-            subLine={fmtMoney(totals.shopify_revenue)}
-          />
-          <KwikTile
-            icon={<span className="text-base">◈</span>}
-            iconColor="amber"
-            label="Shop ROAS"
-            value={totals.avg_shopify_roas !== null ? totals.avg_shopify_roas.toFixed(2) : "—"}
-          />
-        </div>
-      )}
+      {/* The 8-tile aggregate strip (Ads / Spend / Impressions / Reach /
+          Purchases / Meta ROAS / Shop orders / Shop ROAS) was removed
+          2026-09-16: the original CTD Ads Analyse leads with the F1-F4
+          verdict buckets and the threshold controls, not a second
+          summary row above them. The same figures remain available in
+          the table's own columns and in Creative Testing's Overview. */}
 
       {/* ═══════════════════════════════════════════════════════════
           7 KPI category tiles — click to filter
@@ -1436,7 +1448,17 @@ export function AdsAnalyse() {
          ═══════════════════════════════════════════════════════════ */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
         {CATEGORY_ORDER.map((cat) => {
-          const count = derived.tileCounts[cat];
+          // Counts come from the SERVER (`category_counts`), which covers
+          // every matching ad. derived.tileCounts only ever sees the rows
+          // currently paged in, so it showed "P2 analysis 3" against a
+          // real 1,768. The client figure is used only with custom
+          // thresholds, where the server's counts no longer apply.
+          const count = thresholdsChanged
+            ? derived.tileCounts[cat]
+            : (categoryCountsFromApi[cat] ?? 0);
+          // Spend stays page-scoped either way -- the totals payload is
+          // for the whole filter set, not per category -- so it is
+          // labelled as such rather than implying a full-dataset figure.
           const spend = derived.withCat
             .filter((rc) => rc.cat === cat)
             .reduce((acc, rc) => acc + (rc.row.spend ?? 0), 0);
@@ -1456,11 +1478,18 @@ export function AdsAnalyse() {
         })}
       </div>
 
-      {/* Analytical view — 3 charts anchor the section the way kwikengage's
-          Marketing Insights row does. Re-computes from `derived.filtered`
-          so filters, category selection, and threshold changes all
-          propagate live without extra fetches. */}
-      <AdsAnalyseCharts rows={derived.filtered} />
+      {/* Ads launched per day. Replaces the three client-side charts
+          that were computed from derived.filtered -- i.e. one page of
+          rows -- while presenting themselves as a view of the whole
+          filter set. This one aggregates server-side. */}
+      <AdsLaunchChart
+        fromDate={fromDate}
+        toDate={toDate}
+        accountName={account || undefined}
+        category={categoryFilter || undefined}
+        adStatus={adStatus || undefined}
+        search={debouncedSearch || undefined}
+      />
 
       {/* Total ads bar */}
       <div className="rounded-lg border border-border-primary bg-white px-3 py-1.5 text-xs text-text-secondary shadow-sm">
