@@ -495,12 +495,25 @@ _CUSTOMER_ANALYTICS_DDL, _CUSTOMER_ANALYTICS_INSERT = _build_shopifyql_table_sql
 #: for this store (confirmed live 2026-08-26 -- no per-product cost data
 #: entered in Shopify) -- fetched anyway in case that changes later, not
 #: missing/broken, just genuinely zero today.
+#: PK is `sales_row_id`, the synthetic dimension hash, NOT order_id.
+#:
+#: order_id was the PK until 2026-09-17. It stopped working the moment
+#: ingest_shopify.py started identifying sales rows by their GROUP BY
+#: tuple instead of by order_id (it had to -- keying on order_id alone
+#: was silently merging the rows ShopifyQL returns per order and losing
+#: the metrics on 96.6% of them). This builder fills the PK column from
+#: `a.source_id`, so the change quietly wrote the HASH into order_id:
+#: 41,207 rows reading 'sale_0048e54e...' instead of '6764352110838'.
+#:
+#: Now the hash lives in its own column where it belongs and order_id is
+#: read from the payload like any other field, so it stays the real
+#: Shopify order id and can still be joined on.
 _SALES_DDL, _SALES_INSERT = _build_shopifyql_table_sql(
     table_name="shopify_sales",
     object_type="sales",
-    pk_column="order_id",
+    pk_column="sales_row_id",
     date_columns=["day"],
-    text_columns=["new_or_returning_customer"],
+    text_columns=["order_id", "new_or_returning_customer", "sales_channel"],
     boolean_columns=["is_pos_sale", "cost_is_recorded"],
     numeric_columns=[
         "gross_sales", "net_sales", "total_sales", "discounts", "shipping_charges", "taxes", "duties",
