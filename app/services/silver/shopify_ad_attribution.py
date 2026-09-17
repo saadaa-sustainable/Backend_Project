@@ -1,76 +1,42 @@
-"""Maps Shopify data to Meta ads data -- order attribution and landing-page
-analysis.
+"""Match Shopify last-click signals to known Meta ads and parent entities.
 
-The order-attribution matching engine is a faithful PORT (not a from-scratch
-reimplementation) of the legacy Creative Testing Dashboard's
-`rebuild_attribution_orders.py::attribute_order()` -- re-cloned and read in
-full (2026-08-26) rather than working from summary/memory. The name
-normalization (`_norm_name`/`_sep_key`), the token-subset + ratio-tiebreak
-scoped-match algorithm, the substring length guard (10 chars), and the
-spend/name-length-gap tiebreak are all copied verbatim from that file's
-real logic, not approximated.
+The hierarchy preserves direct ad IDs, then strict terminal adset evidence,
+then terminal campaign evidence, then global name matching. A name identifies
+an ad only when its strongest matching layer yields one distinct ad ID.
+Spend never resolves ambiguity. Current names from both maintained Meta
+rosters are indexed as aliases; no guessed name or historical bronze scan is
+introduced here. Order-source selection is kept separate below.
 
-What's DELIBERATELY not ported, because there's no equivalent data source
-in this project (confirmed live before starting, not assumed):
-- **T0 override ledger** (`ad_attribution_overrides`) -- no such table here.
-- **Asset-id tier** (`ad_asset_ids`, from an external Google Sheet) -- no
-  such data here.
-- **`ad_name_history`** (rename tracking, so an ad's old names still match
-  its current utm tags) -- this project's `meta_ads` only carries each
-  ad's CURRENT name, no history.
-- **Two independent candidates for name/adset/campaign** -- the legacy
-  cascade tries `(attr_ad_name, utm_content)`, `(attr_adset_id, utm_term)`,
-  etc., because their checkout template captured separate custom
-  attributes (`Ad`, `Campaign`, `AdSetID`) IN ADDITION TO standard UTM
-  params. This project's `shopify_orders.customer_journey` (Shopify's
-  modern `customerJourneySummary` field) only has the standard UTM
-  params -- one candidate each (`utm_content` for name, `utm_term` for
-  adset, `utm_campaign` for campaign), not two. This is why order-level
-  match coverage here is much lower than the legacy dashboard's (~5% of
-  orders carry any UTM data at all here, confirmed live) -- a real data
-  gap, not a matching-logic gap.
-
-Two tables:
-- `shopify_order_attribution` -- one row per Shopify order, ALWAYS (no
-  silent drops -- unmatched orders get tier='unmatched', not omitted).
-- `shopify_landing_page_analysis` -- shopify_sessions (already has
-  landing_page_path + UTM + full conversion-funnel metrics, see
-  shopify_flatten.py) rolled up and joined to meta_campaigns on
-  utm_campaign. Unchanged from the prior pass -- the legacy repo has no
-  equivalent script for this (it's this project's own construction from
-  ShopifyQL session aggregates, not a port).
+Every Shopify order remains in shopify_order_attribution, including orders
+whose ad cannot be identified. Parent-only attribution does not credit an ad.
+shopify_landing_page_analysis separately aggregates Shopify session metrics.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging.setup import get_logger
 
 logger = get_logger(__name__)
 
-# ----------------------------------------------------------------------
-# Matching engine -- ported from rebuild_attribution_orders.py
-# ----------------------------------------------------------------------
-
-# Strips trailing "_copy"/"_copy 2"/"-h0"/"_c1" etc (repeatedly -- names can
-# carry more than one suffix), collapses whitespace, lowercases. Verbatim
-# from the legacy `norm_name()`.
+# Name equality may ignore Meta duplicate suffixes and separator differences,
+# but it must still identify one ad. Two copies are two ads, even with one name.
 _SUFFIX_RE = re.compile(r"(?:[\s_\-]+(?:copy(?:\s*\d+)?|[hc]\d+))+\s*$", re.IGNORECASE)
-# Collapses +/-/_/. / space , into a single space -- the legacy `_sep_key()`,
-# used for separator-tolerant substring/token matching (Meta ad names mix
-# separators inconsistently across templates/accounts).
-_SEP_RE = re.compile(r"[+\-_/.\s,]+")
-
+_SEP_RE = re.compile(r"[+\-_/\.\s,]+")
+_CAMPAIGN_SUFFIX_RE = re.compile(r"[\s_\-]*campaign\s*$", re.IGNORECASE)
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-fA-F]{2}")
 SUBSTRING_MIN_LEN = 10
 TOKEN_SUBSET_MIN_TOKENS = 3
 TOKEN_SUBSET_MIN_DISTINCTIVE_LEN = 5
-TOKEN_SUBSET_RATIO_THRESHOLD = 0.6
-TOKEN_SUBSET_MARGIN = 0.15
 
 
 def _norm_name(n: str | None) -> str:
@@ -85,10 +51,38 @@ def _norm_name(n: str | None) -> str:
     return re.sub(r"\s+", " ", n).strip().lower()
 
 
-def _sep_key(s: str | None) -> str:
-    if not s:
+def _norm_campaign_name(n: str | None) -> str:
+    if not n:
         return ""
-    return _SEP_RE.sub(" ", s).strip().lower()
+    return _SEP_RE.sub(" ", _CAMPAIGN_SUFFIX_RE.sub("", n.strip())).strip().lower()
+
+
+def _sep_key(s: str | None) -> str:
+    return _SEP_RE.sub(" ", s).strip().lower() if s else ""
+
+
+def _value_candidates(value: str | None) -> tuple[str, ...]:
+    """Preserve the raw signal and at most two valid percent-decoding layers.
+
+    A literal '+' remains '+': these fields are already parameter values,
+    and plus signs are part of this account's ad and campaign names.
+    """
+    current = (value or "").strip()
+    if not current:
+        return ()
+    candidates = [current]
+    for _ in range(2):
+        if not _PERCENT_ESCAPE_RE.search(current):
+            break
+        try:
+            decoded = unquote(current, errors="strict").strip()
+        except UnicodeDecodeError:
+            break
+        if not decoded or decoded in candidates:
+            break
+        candidates.append(decoded)
+        current = decoded
+    return tuple(candidates)
 
 
 @dataclass(frozen=True)
@@ -99,87 +93,171 @@ class AdMeta:
     campaign_id: str | None
     campaign_name: str | None
     spend: float
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass
 class AdUniverse:
     by_id: dict[str, AdMeta] = field(default_factory=dict)
-    by_name: dict[str, list[AdMeta]] = field(default_factory=dict)      # exact lowercase ad_name
-    by_fuzzy: dict[str, list[AdMeta]] = field(default_factory=dict)     # norm_name, indexed at build time
-    name_index: list[tuple[str, str, int, AdMeta]] = field(default_factory=list)  # (lower, sep_key, len, ad)
+    by_name: dict[str, list[AdMeta]] = field(default_factory=dict)
+    by_fuzzy: dict[str, list[AdMeta]] = field(default_factory=dict)
+    name_index: list[tuple[str, str, int, AdMeta]] = field(default_factory=list)
     adset_ads: dict[str, list[AdMeta]] = field(default_factory=dict)
     campaign_id_ads: dict[str, list[AdMeta]] = field(default_factory=dict)
+    campaign_name_ads: dict[str, list[AdMeta]] = field(default_factory=dict)
+    campaign_fuzzy_ads: dict[str, list[AdMeta]] = field(default_factory=dict)
+    roster_adsets: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
+    roster_campaigns: dict[str, str | None] = field(default_factory=dict)
+    roster_campaign_names: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    # These include campaigns with zero loaded ads, so such a campaign can
+    # both constrain matching and make a duplicated campaign name ambiguous.
+    campaign_name_ids: dict[str, set[str]] = field(default_factory=dict)
+    campaign_fuzzy_ids: dict[str, set[str]] = field(default_factory=dict)
 
 
-async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
-    result = await session.execute(
-        text(
-            "SELECT a.ad_id, a.ad_name, a.adset_id, a.campaign_id, a.campaign_name, COALESCE(al.spend, 0) AS spend "
-            "FROM meta_ads a LEFT JOIN ad_lifecycle al ON al.ad_id = a.ad_id "
-            "WHERE a.ad_name IS NOT NULL"
-        )
-    )
+# Use both entity rosters, including direct IDs for ads without a usable name.
+# Display names retain the existing lifecycle-first preference; alternate
+# current names are matching aliases for the SAME ad, not extra candidates.
+_AD_UNIVERSE_SQL = """
+SELECT COALESCE(al.ad_id, a.ad_id) AS ad_id,
+       COALESCE(NULLIF(BTRIM(al.ad_name), ''), NULLIF(BTRIM(a.ad_name), ''), '') AS ad_name,
+       a.ad_name AS meta_ad_name,
+       al.ad_name AS lifecycle_ad_name,
+       COALESCE(al.adset_id, a.adset_id) AS adset_id,
+       COALESCE(al.campaign_id, a.campaign_id) AS campaign_id,
+       COALESCE(al.campaign_name, a.campaign_name) AS campaign_name,
+       COALESCE(al.spend, 0) AS spend
+FROM ad_lifecycle al
+FULL OUTER JOIN meta_ads a ON a.ad_id = al.ad_id
+WHERE COALESCE(al.ad_id, a.ad_id) IS NOT NULL
+"""
+_ADSET_ROSTER_SQL = (
+    "SELECT adset_id, campaign_id, campaign_name FROM meta_adsets WHERE adset_id IS NOT NULL"
+)
+_CAMPAIGN_ROSTER_SQL = (
+    "SELECT campaign_id, campaign_name FROM meta_campaigns WHERE campaign_id IS NOT NULL"
+)
+
+
+def _ad_names(ad: AdMeta) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(n.strip() for n in (ad.ad_name, *ad.aliases) if n and n.strip()))
+
+
+def _build_ad_universe(
+    ads: Iterable[AdMeta], *,
+    adsets: Iterable[tuple[str, str | None, str | None]] = (),
+    campaigns: Iterable[tuple[str, str | None]] = (),
+) -> AdUniverse:
+    """Build the same pure matching indexes for database loads and audit replays."""
     universe = AdUniverse()
-    for row in result:
-        ad = AdMeta(
-            ad_id=row.ad_id, ad_name=row.ad_name, adset_id=row.adset_id,
-            campaign_id=row.campaign_id, campaign_name=row.campaign_name, spend=float(row.spend or 0),
-        )
-        universe.by_id[ad.ad_id] = ad
-        universe.by_name.setdefault(ad.ad_name.lower(), []).append(ad)
-        universe.by_fuzzy.setdefault(_norm_name(ad.ad_name), []).append(ad)
-        universe.name_index.append((ad.ad_name.lower(), _sep_key(ad.ad_name), len(ad.ad_name), ad))
+    universe.roster_adsets = {aid: (cid, name) for aid, cid, name in adsets}
+    universe.roster_campaigns = dict(campaigns)
+
+    def index_campaign(cid: str | None, name: str | None) -> None:
+        if not cid or not name or not name.strip():
+            return
+        universe.campaign_name_ids.setdefault(name.strip().lower(), set()).add(cid)
+        norm = _norm_campaign_name(name)
+        if norm:
+            universe.campaign_fuzzy_ids.setdefault(norm, set()).add(cid)
+
+    # An alias can appear several times in source data. Index one canonical
+    # object per ad ID so duplicates can never manufacture ambiguity.
+    universe.by_id = {ad.ad_id: ad for ad in ads}
+    for ad in universe.by_id.values():
+        for name in _ad_names(ad):
+            universe.by_name.setdefault(name.lower(), []).append(ad)
+            norm = _norm_name(name)
+            if norm:
+                universe.by_fuzzy.setdefault(norm, []).append(ad)
+            universe.name_index.append((name.lower(), _sep_key(name), len(name), ad))
         if ad.adset_id:
             universe.adset_ads.setdefault(ad.adset_id, []).append(ad)
         if ad.campaign_id:
             universe.campaign_id_ads.setdefault(ad.campaign_id, []).append(ad)
+        if ad.campaign_name:
+            universe.campaign_name_ads.setdefault(ad.campaign_name.strip().lower(), []).append(ad)
+            universe.campaign_fuzzy_ads.setdefault(
+                _norm_campaign_name(ad.campaign_name), [],
+            ).append(ad)
+        index_campaign(ad.campaign_id, ad.campaign_name)
+    for cid, name in universe.roster_campaigns.items():
+        index_campaign(cid, name)
+    for cid, name in universe.roster_adsets.values():
+        index_campaign(cid, name)
+    for norm, ids in universe.campaign_fuzzy_ids.items():
+        if len(ids) == 1:
+            cid = next(iter(ids))
+            universe.roster_campaign_names[norm] = (cid, universe.roster_campaigns.get(cid))
     return universe
 
 
-def _scoped_match(ads: list[AdMeta], name_cand: str) -> AdMeta | None:
-    """Narrows a small ad set (one adset or one campaign) down to a single
-    ad by name -- ported from `_scoped_match()`. Exact -> fuzzy -> raw
-    substring -> separator-tolerant substring (no length guard here,
-    unlike the global Step 2 match -- safe because the candidate set is
-    already small, same as the legacy version) -> token-subset +
-    ratio-tiebreak for the remaining ambiguous cases."""
-    if not name_cand or not ads:
+async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
+    rows = await session.execute(text(_AD_UNIVERSE_SQL))
+    ads = [
+        AdMeta(
+            ad_id=row.ad_id, ad_name=row.ad_name, adset_id=row.adset_id,
+            campaign_id=row.campaign_id, campaign_name=row.campaign_name,
+            spend=float(row.spend or 0),
+            aliases=tuple(n for n in (row.meta_ad_name, row.lifecycle_ad_name) if n),
+        )
+        for row in rows
+    ]
+    adsets = [tuple(row) for row in await session.execute(text(_ADSET_ROSTER_SQL))]
+    campaigns = [tuple(row) for row in await session.execute(text(_CAMPAIGN_ROSTER_SQL))]
+    return _build_ad_universe(ads, adsets=adsets, campaigns=campaigns)
+
+
+def _unique_ad(candidates: Iterable[AdMeta]) -> AdMeta | None:
+    by_id = {ad.ad_id: ad for ad in candidates}
+    return next(iter(by_id.values())) if len(by_id) == 1 else None
+
+
+def _scoped_match(ads: list[AdMeta], name_cand: str, *, strict: bool = False) -> AdMeta | None:
+    """Resolve only a unique ad at the first matching name layer.
+
+    Strict adset matching permits exact, duplicate-suffix-normalized, and
+    separator-equivalent equality. It never uses containment or tokens.
+    Ambiguity at any layer is terminal; a weaker rule cannot pick a winner.
+    Campaign containment/token matching also requires one distinct ad ID.
+    """
+    values = _value_candidates(name_cand)
+    if not values or not ads:
         return None
-    nc_l = name_cand.lower()
-    nc_norm = _norm_name(name_cand)
-    nc_sep = _sep_key(name_cand)
-
-    exact = [a for a in ads if a.ad_name.lower() == nc_l]
-    if len(exact) == 1:
-        return exact[0]
-    fuzzy = [a for a in ads if _norm_name(a.ad_name) == nc_norm]
-    if len(fuzzy) == 1:
-        return fuzzy[0]
-    sub_hits = [a for a in ads if a.ad_name.lower() in nc_l or nc_l in a.ad_name.lower()]
-    if len(sub_hits) == 1:
-        return sub_hits[0]
-    sep_hits = [a for a in ads if _sep_key(a.ad_name) and (_sep_key(a.ad_name) in nc_sep or nc_sep in _sep_key(a.ad_name))]
-    if len(sep_hits) == 1:
-        return sep_hits[0]
-
-    utm_tokens = [t for t in nc_sep.split() if t]
-    if len(utm_tokens) >= TOKEN_SUBSET_MIN_TOKENS:
-        distinctive = [t for t in utm_tokens if len(t) >= TOKEN_SUBSET_MIN_DISTINCTIVE_LEN and not t.isdigit()]
-        if distinctive:
-            utm_tok_set = set(utm_tokens)
-            scored: list[tuple[float, AdMeta]] = []
-            for a in ads:
-                ad_tok_set = set(_sep_key(a.ad_name).split())
-                if ad_tok_set and utm_tok_set.issubset(ad_tok_set):
-                    scored.append((len(utm_tok_set) / len(ad_tok_set), a))
-            if len(scored) == 1:
-                return scored[0][1]
-            if len(scored) >= 2:
-                scored.sort(key=lambda t: -t[0])
-                top_r, runner_r = scored[0][0], scored[1][0]
-                if top_r >= TOKEN_SUBSET_RATIO_THRESHOLD and (top_r - runner_r) >= TOKEN_SUBSET_MARGIN:
-                    return scored[0][1]
-    return None
+    names = [(name, ad) for ad in ads for name in _ad_names(ad)]
+    for normalize in (str.lower, _norm_name, _sep_key):
+        keys = {normalize(value) for value in values} - {""}
+        hits = [ad for name, ad in names if normalize(name) in keys]
+        if hits:
+            return _unique_ad(hits)
+    if strict:
+        return None
+    # A short fragment such as "ad" is not identifying evidence, even if
+    # a campaign currently contains only one ad in the local roster.
+    for normalize in (str.lower, _sep_key):
+        keys = [normalize(value) for value in values]
+        hits = [
+            ad for name, ad in names
+            if any(
+                min(len(normalize(name)), len(key)) >= SUBSTRING_MIN_LEN
+                and (normalize(name) in key or key in normalize(name))
+                for key in keys
+            )
+        ]
+        if hits:
+            return _unique_ad(hits)
+    token_sets = [
+        set(_sep_key(value).split()) for value in values
+        if len(_sep_key(value).split()) >= TOKEN_SUBSET_MIN_TOKENS
+        and any(
+            len(token) >= TOKEN_SUBSET_MIN_DISTINCTIVE_LEN and not token.isdigit()
+            for token in _sep_key(value).split()
+        )
+    ]
+    return _unique_ad(
+        ad for name, ad in names
+        if any(tokens.issubset(set(_sep_key(name).split())) for tokens in token_sets)
+    )
 
 
 @dataclass
@@ -189,78 +267,128 @@ class AttributionResult:
     matched_ad_name: str | None
     matched_campaign_id: str | None
     matched_campaign_name: str | None
+    matched_value: str | None = None
 
 
-_UNMATCHED = AttributionResult("unmatched", None, None, None, None)
+_UNMATCHED = AttributionResult("unmatched", None, None, None, None, None)
 
 
-def _attribute_order(utm_content: str, utm_term: str, utm_campaign: str, universe: AdUniverse) -> AttributionResult:
-    """Port of `attribute_order()`'s Meta cascade, single-candidate version
-    (see module docstring for why). Order matters -- first hit wins:
-    Step 1 (direct id) -> Step 3-early (adset, only if it narrows -- takes
-    priority over Step 2, same as the legacy cascade, so a user-tagged
-    adset beats a same-named archived clone elsewhere in the account) ->
-    Step 2 (global name match) -> Step 3-retry (adset known but never
-    narrowed -> adset_only) -> Step 4 (campaign-scoped, narrowed or
-    campaign_only) -> unmatched."""
+def _campaign_ids(utm_campaign: str, universe: AdUniverse) -> set[str]:
+    """Return IDs from the strongest campaign layer, retaining ambiguity."""
+    values = _value_candidates(utm_campaign)
+    known_ids = set(universe.campaign_id_ads) | set(universe.roster_campaigns)
+    known_ids.update(cid for cid, _ in universe.roster_adsets.values() if cid)
+    direct = {value for value in values if value in known_ids}
+    if direct:
+        return direct
+    for normalize, index in (
+        (str.lower, universe.campaign_name_ids),
+        (_norm_campaign_name, universe.campaign_fuzzy_ids),
+    ):
+        ids = set().union(*(index.get(normalize(value), set()) for value in values))
+        if ids:
+            return ids
+    return set()
+
+
+def _resolve_campaign(utm_campaign: str, universe: AdUniverse) -> list[AdMeta] | None:
+    """Compatibility helper: duplicate campaign names never resolve a scope."""
+    ids = _campaign_ids(utm_campaign, universe)
+    if len(ids) != 1:
+        return None
+    return universe.campaign_id_ads.get(next(iter(ids)), [])
+
+
+def _global_name_match(utm_content: str, universe: AdUniverse) -> AdMeta | None:
+    values = _value_candidates(utm_content)
+    for normalize, index in ((str.lower, universe.by_name), (_norm_name, universe.by_fuzzy)):
+        hits = [ad for value in values for ad in index.get(normalize(value), [])]
+        if hits:
+            return _unique_ad(hits)
+    # A raw/normalized substring is one evidence layer; do not pick a
+    # higher-spend candidate, or retry a weaker layer after an ambiguous hit.
+    hits = []
+    for name_lower, name_sep, _, ad in universe.name_index:
+        for value in values:
+            raw, sep = value.lower(), _sep_key(value)
+            if (
+                min(len(name_lower), len(raw)) >= SUBSTRING_MIN_LEN
+                and (name_lower in raw or raw in name_lower)
+            ) or (
+                min(len(name_sep), len(sep)) >= SUBSTRING_MIN_LEN
+                and (name_sep in sep or sep in name_sep)
+            ):
+                hits.append(ad)
+                break
+    return _unique_ad(hits)
+
+
+def _attribute_order(
+    utm_content: str, utm_term: str, utm_campaign: str, universe: AdUniverse,
+) -> AttributionResult:
+    """Direct ID -> terminal strict adset -> terminal campaign -> global name.
+
+    All returned ad matches identify one distinct ad ID. Known parent
+    evidence cannot be overridden by a same-named ad outside that parent.
+    Original UTM values remain available as the audit token.
+    """
     utm_content = (utm_content or "").strip()
     utm_term = (utm_term or "").strip()
     utm_campaign = (utm_campaign or "").strip()
 
-    if utm_content.isdigit() and utm_content in universe.by_id:
-        ad = universe.by_id[utm_content]
-        return AttributionResult("ad_direct", ad.ad_id, ad.ad_name, ad.campaign_id, ad.campaign_name)
+    def matched(tier: str, ad: AdMeta) -> AttributionResult:
+        return AttributionResult(
+            tier, ad.ad_id, ad.ad_name, ad.campaign_id, ad.campaign_name, utm_content,
+        )
 
-    adset_ads = universe.adset_ads.get(utm_term) if utm_term else None
-    if adset_ads:
-        matched = _scoped_match(adset_ads, utm_content)
-        if matched:
-            return AttributionResult("adset_scoped", matched.ad_id, matched.ad_name, matched.campaign_id, matched.campaign_name)
+    direct = [
+        universe.by_id[value] for value in _value_candidates(utm_content)
+        if value.isdigit() and value in universe.by_id
+    ]
+    if direct:
+        ad = _unique_ad(direct)
+        return matched("ad_direct", ad) if ad else _UNMATCHED
 
-    if utm_content:
-        nc_l = utm_content.lower()
-        candidates = universe.by_name.get(nc_l)
-        if candidates:
-            ad = max(candidates, key=lambda a: a.spend)
-            return AttributionResult("ad_name_match", ad.ad_id, ad.ad_name, ad.campaign_id, ad.campaign_name)
-        nc_norm = _norm_name(utm_content)
-        candidates = universe.by_fuzzy.get(nc_norm) if nc_norm else None
-        if candidates:
-            ad = max(candidates, key=lambda a: a.spend)
-            return AttributionResult("ad_name_match", ad.ad_id, ad.ad_name, ad.campaign_id, ad.campaign_name)
-        if len(nc_l) >= SUBSTRING_MIN_LEN:
-            nc_sep = _sep_key(utm_content)
-            best: AdMeta | None = None
-            best_spend = -1.0
-            best_gap = 10**9
-            for name_lower, name_sep, name_len, ad in universe.name_index:
-                hit = (
-                    min(len(name_lower), len(nc_l)) >= SUBSTRING_MIN_LEN
-                    and (name_lower in nc_l or nc_l in name_lower)
-                ) or (
-                    min(len(name_sep), len(nc_sep)) >= SUBSTRING_MIN_LEN
-                    and (name_sep in nc_sep or nc_sep in name_sep)
-                )
-                if hit:
-                    gap = abs(name_len - len(utm_content))
-                    if (ad.spend > best_spend) or (ad.spend == best_spend and gap < best_gap):
-                        best, best_spend, best_gap = ad, ad.spend, gap
-            if best is not None:
-                return AttributionResult("ad_name_match", best.ad_id, best.ad_name, best.campaign_id, best.campaign_name)
+    adset_ids = {
+        value for value in _value_candidates(utm_term)
+        if value in universe.adset_ads or value in universe.roster_adsets
+    }
+    if adset_ids:
+        if len(adset_ids) != 1:
+            return _UNMATCHED
+        adset_id = next(iter(adset_ids))
+        ads = universe.adset_ads.get(adset_id, [])
+        ad = _scoped_match(ads, utm_content, strict=True)
+        if ad:
+            return matched("adset_scoped", ad)
+        parent = universe.roster_adsets.get(adset_id)
+        if parent is None:
+            ids = {ad.campaign_id for ad in ads}
+            parent = (ads[0].campaign_id, ads[0].campaign_name) if len(ids) == 1 else (None, None)
+        return AttributionResult("adset_name_miss", None, None, *parent, utm_term)
 
-    if adset_ads:
-        first = adset_ads[0]
-        return AttributionResult("adset_only", None, None, first.campaign_id, first.campaign_name)
+    campaign_ids = _campaign_ids(utm_campaign, universe)
+    if campaign_ids:
+        if len(campaign_ids) != 1:
+            return _UNMATCHED
+        campaign_id = next(iter(campaign_ids))
+        ads = universe.campaign_id_ads.get(campaign_id, [])
+        ad = _scoped_match(ads, utm_content)
+        if ad:
+            return matched("campaign_scoped", ad)
+        campaign_name = universe.roster_campaigns.get(campaign_id)
+        if campaign_name is None and ads:
+            campaign_name = ads[0].campaign_name
+        if campaign_name is None:
+            campaign_name = next(
+                (name for cid, name in universe.roster_adsets.values() if cid == campaign_id), None,
+            )
+        return AttributionResult(
+            "campaign_only", None, None, campaign_id, campaign_name, utm_campaign,
+        )
 
-    campaign_ads = universe.campaign_id_ads.get(utm_campaign) if utm_campaign else None
-    if campaign_ads:
-        matched = _scoped_match(campaign_ads, utm_content)
-        if matched:
-            return AttributionResult("campaign_scoped", matched.ad_id, matched.ad_name, matched.campaign_id, matched.campaign_name)
-        first = campaign_ads[0]
-        return AttributionResult("campaign_only", None, None, first.campaign_id, first.campaign_name)
-
-    return _UNMATCHED
+    ad = _global_name_match(utm_content, universe) if utm_content else None
+    return matched("ad_name_match", ad) if ad else _UNMATCHED
 
 
 # ----------------------------------------------------------------------
@@ -284,6 +412,7 @@ CREATE TABLE IF NOT EXISTS shopify_order_attribution (
     matched_ad_name text,
     matched_campaign_id text,
     matched_campaign_name text,
+    matched_value text,
     flattened_at timestamptz
 )
 """
@@ -299,13 +428,15 @@ _ATTRIBUTION_INDEXES = [
 # column growth (see shopify_flatten.py).
 _ATTRIBUTION_COLUMN_MIGRATIONS = [
     "ALTER TABLE IF EXISTS shopify_order_attribution ADD COLUMN IF NOT EXISTS utm_term text",
+    # The token each match fired on -- see AttributionResult.matched_value.
+    "ALTER TABLE IF EXISTS shopify_order_attribution ADD COLUMN IF NOT EXISTS matched_value text",
 ]
 
 _ATTRIBUTION_INSERT_COLUMNS = [
     "order_id", "name", "total_price", "created_at", "customer_id",
     "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
     "tier", "matched_ad_id", "matched_ad_name", "matched_campaign_id", "matched_campaign_name",
-    "flattened_at",
+    "matched_value", "flattened_at",
 ]
 
 #: shopify_orders.utm_* (extracted from customAttributes -- the checkout-
@@ -327,20 +458,81 @@ SELECT
     COALESCE(utm_content, customer_journey -> 'lastVisit' -> 'utmParameters' ->> 'content') AS utm_content,
     COALESCE(utm_term, customer_journey -> 'lastVisit' -> 'utmParameters' ->> 'term') AS utm_term
 FROM shopify_orders
+WHERE order_id > :after
+ORDER BY order_id
+LIMIT :batch
 """
+
+#: Rows per round trip. The unpaged version of this read -- one statement
+#: for all 368,924 orders -- failed with asyncpg's
+#: `ConnectionDoesNotExistError: connection was closed in the middle of
+#: operation` on two of three runs on 2026-09-16, each time after
+#: several minutes of streaming. It is the same shape of failure that
+#: cost two whole Meta fetches in scripts/ingest_last_15_days.py: the
+#: work succeeds and the transport dies under it. A single long-lived
+#: read through the Supabase pooler is the fragile part, so this takes
+#: many short ones instead.
+_ORDER_BATCH = 25_000
+
+#: A dropped connection leaves the session unusable until it is rolled
+#: back; after that, the next execute checks out a fresh connection from
+#: the pool. So a retry has to rollback first -- retrying on the dead
+#: session just re-raises.
+_ORDER_READ_ATTEMPTS = 5
+
+
+async def _load_orders(session: AsyncSession) -> list:
+    """Page through shopify_orders by keyset, retrying a dropped batch.
+
+    Keyset (`order_id > :after`) rather than LIMIT/OFFSET: OFFSET makes
+    Postgres walk and discard the skipped rows, so the last page of a
+    368k-row table costs a full scan, and the cost grows with each page.
+
+    Paging does mean the read is no longer one consistent snapshot -- an
+    order written mid-run can land in a later page. That is acceptable
+    here and nowhere near as bad as it sounds: this job TRUNCATEs and
+    re-derives every order from scratch on every run, so a row that
+    slips through one night is picked up whole the next.
+    """
+    orders: list = []
+    after = ""
+    while True:
+        for attempt in range(1, _ORDER_READ_ATTEMPTS + 1):
+            try:
+                chunk = (
+                    await session.execute(
+                        text(_ORDER_UTM_QUERY), {"after": after, "batch": _ORDER_BATCH}
+                    )
+                ).fetchall()
+                break
+            except DBAPIError as exc:
+                if attempt == _ORDER_READ_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "order_read_batch_failed",
+                    after=after, attempt=attempt, error=str(exc)[:200],
+                )
+                await session.rollback()
+                await asyncio.sleep(2 ** attempt)
+        if not chunk:
+            break
+        orders.extend(chunk)
+        after = chunk[-1].order_id
+        logger.info("order_read_progress", loaded=len(orders))
+    return orders
 
 _ATTRIBUTION_INSERT = (
     f"INSERT INTO shopify_order_attribution ({', '.join(_ATTRIBUTION_INSERT_COLUMNS)}) "
     "VALUES (:order_id, :name, :total_price, :created_at, :customer_id, "
     ":utm_source, :utm_medium, :utm_campaign, :utm_content, :utm_term, "
     ":tier, :matched_ad_id, :matched_ad_name, :matched_campaign_id, :matched_campaign_name, "
-    "now())"
+    ":matched_value, now())"
 )
 
 
 async def _refresh_order_attribution(session: AsyncSession) -> int:
     universe = await _load_ad_universe(session)
-    orders = (await session.execute(text(_ORDER_UTM_QUERY))).fetchall()
+    orders = await _load_orders(session)
 
     rows = []
     for o in orders:
@@ -352,6 +544,7 @@ async def _refresh_order_attribution(session: AsyncSession) -> int:
             "utm_campaign": o.utm_campaign, "utm_content": o.utm_content, "utm_term": o.utm_term,
             "tier": result.tier, "matched_ad_id": result.matched_ad_id,
             "matched_ad_name": result.matched_ad_name,
+            "matched_value": result.matched_value,
             "matched_campaign_id": result.matched_campaign_id,
             "matched_campaign_name": result.matched_campaign_name,
         })
