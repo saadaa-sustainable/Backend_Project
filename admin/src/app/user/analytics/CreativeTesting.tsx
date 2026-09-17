@@ -64,6 +64,114 @@ const CT = {
   ink: "#3A362E",
 };
 
+/** The category matrix, exactly as `ad_lifecycle`'s CASE evaluates it
+ *  (app/services/silver/ad_lifecycle.py). Rows are tried top-down and the
+ *  FIRST match wins, which is why a "-" can mean "not checked" rather
+ *  than "must fail": by the time P0 is reached, the Winner rows have
+ *  already been ruled out.
+ *
+ *  Presented as 3 filters, matching the legacy dashboard, while the
+ *  backend stores 4 -- the legacy F2 is the OR of the backend's F2
+ *  (ROAS) and F3 (Cost/NCP), and the legacy F3 is the backend's F4
+ *  (Cost/FTEWV). Same logic, different numbering.
+ *
+ *  One row genuinely differs from the legacy dashboard and is marked:
+ *  P2 is reached on ROAS ALONE here. Cost/NCP does not qualify an asset
+ *  for P2, because the backend's P2 branch tests F2 only, not (F2 OR
+ *  F3). Rendering it as the full OR would describe a rule this project
+ *  does not run. */
+type Mark = "pass" | "either" | "unchecked";
+
+const CAT_MATRIX: {
+  cat: CategoryKey;
+  f1: Mark;
+  f2: Mark;
+  f3: Mark;
+  f2Note?: string;
+  action: string;
+}[] = [
+  {
+    cat: "Incremental Winner", f1: "pass", f2: "pass", f3: "pass",
+    action: "Scale aggressively. Top-tier proven creative.",
+  },
+  {
+    cat: "Winner", f1: "pass", f2: "pass", f3: "either",
+    action: "Scale. F3 close-second; iterate on cost-per-FTEWV.",
+  },
+  {
+    cat: "P0 analysis", f1: "pass", f2: "unchecked", f3: "pass",
+    action: "Impressions met and FTEWV cheap, but neither ROAS nor cost/NCP cleared. Iteration target.",
+  },
+  {
+    cat: "P1 analysis", f1: "pass", f2: "unchecked", f3: "unchecked",
+    action: "Impressions met, nothing else cleared. The creative itself is the lever.",
+  },
+  {
+    cat: "P2 analysis", f1: "unchecked", f2: "pass", f3: "either",
+    f2Note: "ROAS only",
+    action: "ROAS cleared without the impressions to prove it. Give it volume before judging.",
+  },
+  {
+    cat: "Result Awaited", f1: "unchecked", f2: "unchecked", f3: "unchecked",
+    action: "Inside the 14-day buffer and matched no filter yet. Too early to call.",
+  },
+  {
+    cat: "Discarded", f1: "unchecked", f2: "unchecked", f3: "unchecked",
+    action: "Past day 14 having lit no filter. Stop spending.",
+  },
+];
+
+/** One ✓ / ~ / — cell of the matrix. */
+function MarkCell({ mark, note }: { mark: Mark; note?: string }) {
+  const style =
+    mark === "pass"
+      ? { bg: "#EAF3EC", fg: "#2E7755", border: "#CBE3D3", glyph: "\u2713" }
+      : mark === "either"
+        ? { bg: "#FDF6E3", fg: "#B07E12", border: "#EBDCB4", glyph: "~" }
+        : { bg: "transparent", fg: "#B8B2A4", border: "transparent", glyph: "\u2014" };
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span
+        className="inline-flex h-7 w-7 items-center justify-center rounded-md border text-sm font-semibold"
+        style={{ backgroundColor: style.bg, color: style.fg, borderColor: style.border }}
+      >
+        {style.glyph}
+      </span>
+      {note && (
+        <span className="text-[9px] font-medium uppercase tracking-wide" style={{ color: CT.muted }}>
+          {note}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Centred section rule, as on the legacy dashboard. */
+function SectionRule({ label }: { label: string }) {
+  return (
+    <div className="my-4 flex items-center gap-3">
+      <span className="h-px flex-1" style={{ backgroundColor: CT.border }} />
+      <span className="text-[11px] font-semibold uppercase tracking-[0.12em]" style={{ color: CT.muted }}>
+        {label}
+      </span>
+      <span className="h-px flex-1" style={{ backgroundColor: CT.border }} />
+    </div>
+  );
+}
+
+/** One amber call-out. */
+function Callout({ icon, children }: { icon: string; children: React.ReactNode }) {
+  return (
+    <div
+      className="mb-2 flex gap-3 rounded-lg border p-3 text-sm leading-relaxed"
+      style={{ backgroundColor: "#FDF9EC", borderColor: "#EBDCB4", color: CT.ink }}
+    >
+      <span className="shrink-0" style={{ color: CT.goldDeep }}>{icon}</span>
+      <div>{children}</div>
+    </div>
+  );
+}
+
 const PAGE_SIZE = 50;
 
 type KindTab = "all" | "new" | "iteration";
@@ -888,62 +996,194 @@ export function CreativeTesting() {
         <AssetAdsModal assetId={openAsset} onClose={() => setOpenAsset(null)} />
       )}
 
-      {/* ── definitions ───────────────────────────────────────── */}
+      {/* ── category definitions ─────────────────────── */}
       {defsOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:p-8"
           onClick={() => setDefsOpen(false)}
         >
           <div
-            className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-4 shadow-xl"
+            className="w-full max-w-5xl rounded-xl bg-white shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-base font-semibold">Definitions</h3>
-              <button onClick={() => setDefsOpen(false)} className="text-text-tertiary">
+            {/* header */}
+            <div
+              className="flex items-start justify-between border-b px-6 py-4"
+              style={{ borderColor: CT.border }}
+            >
+              <div>
+                <h3 className="text-lg font-bold" style={{ color: CT.ink }}>
+                  Category Definitions — 3-Filter Logic
+                </h3>
+                <p className="mt-0.5 text-sm" style={{ color: CT.muted }}>
+                  F1 Impressions · F2 (ROAS <b>or</b> Cost/NCP) · F3 Cost/FTEWV
+                </p>
+              </div>
+              <button
+                onClick={() => setDefsOpen(false)}
+                aria-label="Close"
+                className="text-2xl leading-none"
+                style={{ color: CT.muted }}
+              >
                 ✕
               </button>
             </div>
-            <div className="space-y-3 text-sm">
-              <div>
-                <div className="font-medium">New creative vs Iteration</div>
-                <p className="text-text-tertiary">
-                  Decided by the asset&rsquo;s own creation date in its register, never by an ad
-                  date. Created inside the window &rarr; <b>New</b>. Created earlier, or only ever
-                  run as a duplicated (&ldquo;copy&rdquo;) ad, or no creation date on record &rarr;{" "}
-                  <b>Iteration</b>. 46% of mapped ads carry &ldquo;copy&rdquo; in the name, so
-                  dating off ads would make every duplicated creative look newly tested.
-                </p>
+
+            <div className="px-6 pb-6">
+              <SectionRule label="Evaluation thresholds" />
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-lg border p-4" style={{ backgroundColor: CT.cream, borderColor: CT.border }}>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: CT.ink }}>
+                    F1 — Min impressions
+                  </div>
+                  <div className="mt-1 text-3xl font-bold" style={{ color: CT.ink }}>50,000</div>
+                  <p className="mt-1 text-xs leading-relaxed" style={{ color: CT.muted }}>
+                    Must pass before evaluation is considered valid.
+                  </p>
+                </div>
+
+                <div className="rounded-lg border p-4" style={{ backgroundColor: CT.cream, borderColor: CT.border }}>
+                  <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider" style={{ color: CT.ink }}>
+                    F2 — ROAS
+                    <span
+                      className="rounded px-1.5 py-0.5 text-[10px] font-bold"
+                      style={{ backgroundColor: "#EBDCB4", color: CT.goldDeep }}
+                    >
+                      OR
+                    </span>
+                    Cost/NCP
+                  </div>
+                  <div className="mt-1 flex items-end gap-6">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide" style={{ color: CT.muted }}>ROAS</div>
+                      <div className="text-2xl font-bold" style={{ color: CT.ink }}>&ge; 3&times;</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide" style={{ color: CT.muted }}>Cost/NCP</div>
+                      <div className="text-2xl font-bold" style={{ color: CT.ink }}>&le; &#8377;525</div>
+                    </div>
+                  </div>
+                  <p className="mt-1 text-xs leading-relaxed" style={{ color: CT.muted }}>
+                    Passes when <b>either</b> ROAS or Cost/NCP clears its bar.
+                  </p>
+                </div>
+
+                <div className="rounded-lg border p-4" style={{ backgroundColor: CT.cream, borderColor: CT.border }}>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: CT.ink }}>
+                    F3 — Cost / FTEWV
+                  </div>
+                  <div className="mt-1 text-3xl font-bold" style={{ color: CT.ink }}>&le; &#8377;12</div>
+                  <p className="mt-1 text-xs leading-relaxed" style={{ color: CT.muted }}>
+                    First-time engaged-view-purchase cost.
+                  </p>
+                </div>
               </div>
-              <div>
-                <div className="font-medium">Thresholds</div>
-                <ul className="list-disc pl-5 text-text-tertiary">
-                  <li>F1 — min impressions: 50,000</li>
-                  <li>F2 — ROAS &ge; 3.0</li>
-                  <li>F3 — Cost / NCP &le; ₹525</li>
-                  <li>F4 — Cost / FTEWV &le; ₹12</li>
-                </ul>
+
+              <SectionRule label="Categorisation matrix" />
+
+              <p className="text-sm leading-relaxed" style={{ color: CT.ink }}>
+                Each ad is evaluated against the three filters. A <b>✓</b> means the filter must
+                pass for that category; a <b>—</b> means it isn&rsquo;t checked; a <b>~</b> means
+                either state is fine. Categories are matched top-down — the first matching row
+                wins, which is why a &ldquo;—&rdquo; can mean &ldquo;already ruled out above&rdquo;.
+              </p>
+
+              <div className="mt-3">
+                <Callout icon="◆">
+                  <b style={{ color: CT.goldDeep }}>F3 (Cost/FTEWV) is a universal quality metric</b>{" "}
+                  — it is evaluated for every ad and acts as the upgrade gate across categories
+                  (F1-only &rarr; P1; F1+F3 &rarr; P0; F1+F2 &rarr; Winner; F1+F2+F3 &rarr;
+                  Incremental Winner). P2 stays P2 whether F3 passes or not — ROAS clearing with
+                  no F1 is the deciding signal.
+                </Callout>
+                <Callout icon="⌛">
+                  <b style={{ color: CT.goldDeep }}>14-day evaluation buffer</b> — ads within
+                  their first 14 days of <code>ad_created</code> that hit no filter drop into{" "}
+                  <b style={{ color: CT.goldDeep }}>Result Awaited</b> instead of Discarded. Once an
+                  ad crosses day 14 without lighting any filter, it falls through to Discarded.
+                  Categories that DO match a filter (Winner / P0 / P1 / P2) are unaffected.
+                </Callout>
               </div>
-              <div>
-                <div className="font-medium">Verdict buckets</div>
-                <ul className="list-disc pl-5 text-text-tertiary">
-                  <li>Incremental Winner — F1 and (F2 or F3) and F4</li>
-                  <li>Winner — F1 and (F2 or F3)</li>
-                  <li>P0 analysis — F1 and F4</li>
-                  <li>P1 analysis — F1 only</li>
-                  <li>P2 analysis — F2 only</li>
-                  <li>Result Awaited — created less than 14 days ago</li>
-                  <li>Discarded — none of the above</li>
-                </ul>
-                <p className="mt-1 text-text-tertiary">
-                  An asset takes the <b>best</b> verdict any of its ads reached — a creative that
-                  produced one Winner is a Winner, even if another ad using it was discarded.
-                </p>
+
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr style={{ backgroundColor: CT.cream }}>
+                      <th className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider" style={{ color: CT.muted }}>
+                        Category
+                      </th>
+                      <th className="px-2 py-2 text-center text-[11px] font-semibold" style={{ color: CT.muted }}>F1</th>
+                      <th className="px-2 py-2 text-center text-[11px] font-semibold leading-tight" style={{ color: CT.muted }}>
+                        F2<br /><span className="text-[9px] font-normal">(ROAS or Cost/NCP)</span>
+                      </th>
+                      <th className="px-2 py-2 text-center text-[11px] font-semibold leading-tight" style={{ color: CT.muted }}>
+                        F3<br /><span className="text-[9px] font-normal">(Cost/FTEWV)</span>
+                      </th>
+                      <th className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider" style={{ color: CT.muted }}>
+                        Action
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {CAT_MATRIX.map((r) => (
+                      <tr key={r.cat} className="border-t" style={{ borderColor: CT.border }}>
+                        <td className="px-3 py-2.5">
+                          <span
+                            className="inline-block whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide"
+                            style={{
+                              color: CAT_ACCENT[r.cat],
+                              borderColor: CAT_ACCENT[r.cat] + "55",
+                              backgroundColor: CAT_ACCENT[r.cat] + "10",
+                            }}
+                          >
+                            {r.cat}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2.5"><MarkCell mark={r.f1} /></td>
+                        <td className="px-2 py-2.5"><MarkCell mark={r.f2} note={r.f2Note} /></td>
+                        <td className="px-2 py-2.5"><MarkCell mark={r.f3} /></td>
+                        <td className="px-3 py-2.5" style={{ color: CT.ink }}>{r.action}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <p className="mt-2 text-xs leading-relaxed" style={{ color: CT.muted }}>
+                <b>P2 differs from the legacy dashboard.</b> Here P2 is reached on <b>ROAS alone</b>
+                — Cost/NCP clearing does not qualify an asset for P2, because the backend&rsquo;s
+                P2 branch tests ROAS only, not the full F2 OR. Every other row matches.
+              </p>
+
+              <SectionRule label="Asset-level rules" />
+
+              <div className="grid gap-4 text-sm md:grid-cols-2">
+                <div>
+                  <div className="font-semibold" style={{ color: CT.ink }}>New creative vs Iteration</div>
+                  <p className="mt-1 leading-relaxed" style={{ color: CT.muted }}>
+                    Decided by the asset&rsquo;s own creation date in its register, never by an ad
+                    date. Created inside the window &rarr; <b>New</b>. Created earlier, only ever run
+                    as a duplicated (&ldquo;copy&rdquo;) ad, or with no creation date on record
+                    &rarr; <b>Iteration</b>. 46% of mapped ads carry &ldquo;copy&rdquo; in the name,
+                    so dating off ads would make every duplicated creative look newly tested.
+                  </p>
+                </div>
+                <div>
+                  <div className="font-semibold" style={{ color: CT.ink }}>One verdict per asset</div>
+                  <p className="mt-1 leading-relaxed" style={{ color: CT.muted }}>
+                    The matrix above categorises an <b>ad</b>. An asset takes the <b>best</b> verdict
+                    any of its ads reached — a creative that produced one Winner is a Winner,
+                    even if another ad using it was discarded. The creative proved itself at least
+                    once, and that is what the section is asking.
+                  </p>
+                </div>
               </div>
             </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }

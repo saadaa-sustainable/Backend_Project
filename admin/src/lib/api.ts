@@ -637,17 +637,20 @@ export interface AdsAnalyseRow {
   ltv_frequency: number | null;
   first_seen_date: string | null;
   // Asset resolution from content_asset_register /
-  // content_graphic_register / content_influencer_posts. asset_match_source
-  // is one of:
-  //   'direct'           -- workflow-optimiser wrote a direct ad_id link
-  //   'ctd_matched'      -- CTD's substring matcher found the ad_name
-  //   'name_parsed'      -- regex-extracted from ad_name AND the code exists in a register table
-  //   'name_synthetic'   -- regex-extracted from ad_name, code not yet in a register table
+  // content_iterated_register / content_graphic_register /
+  // content_influencer_posts.
   asset_id: string | null;
   asset_media: "video" | "graphic" | "influencer" | null;
-  /** Always "asset_id" -- matching is strictly the register identifier
-   * (asset_id / requisition_id / post_id) found inside ad_name. */
-  asset_match_source: "asset_id" | null;
+  /** How the register identifier was reached:
+   *   'asset_id'   -- the id (asset_id / requisition_id / post_id) appears
+   *                   VERBATIM inside ad_name. Always preferred.
+   *   'recovered'  -- the ad name spells a real id differently
+   *                   ('ITE_Feb19' for 'ITE-Feb-19', 'SIF-0791-P1' for
+   *                   'SIF-791-P1'). Re-spelled by
+   *                   scripts/recover_asset_ids.py and only kept because
+   *                   the canonical id was confirmed to exist in a
+   *                   register -- never an invented asset. */
+  asset_match_source: "asset_id" | "recovered" | null;
   /** true when the ad name resolves to MORE THAN ONE registered asset
    * (e.g. CPL010-0785-0736 carries two codes). A winner was picked
    * deterministically; the row is flagged for a human to adjudicate. */
@@ -824,6 +827,10 @@ export interface UtmOrderRow {
   matched_adset_id: string | null;
   matched_campaign_id: string | null;
   matched_campaign_name: string | null;
+  /** The value the cascade matched ON -- utm_content, utm_term or
+   *  utm_campaign depending on the step. The tier names the rule that
+   *  fired; this names the input it fired on. */
+  matched_value: string | null;
   contact_email: string | null;
   customer_num_orders: number | null;
   channel: UtmChannel;
@@ -845,8 +852,59 @@ export interface UtmOrderResponse {
   rows: UtmOrderRow[];
   total: number;
   channel_counts: Record<UtmChannel, ChannelSummary>;
-  tier_counts: Record<string, number>;
+  /** Cascade step -> {orders, sales}. */
+  tier_summary: Record<string, ChannelSummary>;
+  /** channel -> step -> {count, sales}. Lets the step tiles be scoped to
+   *  Meta or Google, which is the only honest way to read a match rate:
+   *  "unmatched" across ALL orders is mostly organic traffic that was
+   *  never a candidate for an ad match. */
+  tier_by_channel: Record<UtmChannel, Record<string, ChannelSummary>>;
   channel_sources: Record<UtmChannel, SourceBreakdown[]>;
+}
+
+/** One distinct (utm_content, adset) naming mismatch -- the grain
+ *  someone fixing ad names actually works at, not one row per order. */
+export interface NameMissRow {
+  utm_content: string | null;
+  utm_term: string | null;
+  adset_name: string | null;
+  campaign_name: string | null;
+  orders: number;
+  sales: number;
+  /** Ads that DO live in that adset -- what utm_content could have hit.
+   *  Empty means the adset holds no ads at all, which is a different
+   *  problem (missing ads, not drifted names). */
+  candidate_ad_names: string[];
+  ads_in_adset: number;
+}
+
+export interface NameMissResponse {
+  rows: NameMissRow[];
+  /** Totals are over the WHOLE window, not over `rows` (which `limit`
+   *  caps) -- a KPI that silently means "of the first 200" is the same
+   *  defect as a tile computed from the loaded page. */
+  total_rows: number;
+  total_orders: number;
+  total_sales: number;
+  adsets_affected: number;
+  /** Mismatches whose adset holds no ads at all -- missing ads, not
+   *  drifted names, and not something a rename would fix. */
+  rows_without_ads: number;
+}
+
+export function fetchNameMisses(params: {
+  from_date?: string;
+  to_date?: string;
+  limit?: number;
+} = {}): Promise<NameMissResponse> {
+  const qs = new URLSearchParams();
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const s = qs.toString();
+  return request<NameMissResponse>(
+    `/admin/analytics/last-click-utm/name-misses${s ? `?${s}` : ""}`,
+  );
 }
 
 export interface LastClickUtmParams {
@@ -2062,4 +2120,77 @@ export function fetchAdsAnalyseLaunches(params: {
   if (params.search) qs.set("search", params.search);
   if (params.excl_copy) qs.set("excl_copy", "true");
   return request<LaunchesResponse>(`/admin/analytics/ads-analyse/launches?${qs}`);
+}
+
+// ---------------------------------------------------------------------
+// Shopify Analytics -- customer acquisition
+// ---------------------------------------------------------------------
+
+export interface ShopifyDayRow {
+  day: string;
+  orders: number;
+  /** Distinct buyers. Null, or understated, when the order mirror has
+   *  not caught up -- `customers_coverage_pct` is the share of that
+   *  day's orders it actually holds, and below ~99 the figure is a
+   *  fraction of the day rather than the day. */
+  customers: number | null;
+  customers_coverage_pct: number | null;
+  total_sales: number;
+  average_order_value: number | null;
+  units: number;
+  units_per_order: number | null;
+  new_customers: number;
+  returning_customers: number;
+  returning_customer_rate: number | null;
+  total_sales_first_time: number;
+  total_sales_returning: number;
+  gross_sales: number;
+  discounts: number;
+  net_sales: number;
+}
+
+/** Same fields, except `customers`, which is distinct across the whole
+ *  window rather than summed from the days -- a repeat shopper is one
+ *  customer, not one per day they ordered. */
+export type ShopifyTotals = Omit<ShopifyDayRow, "day">;
+
+export interface ShopifyChannelRow {
+  sales_channel: string;
+  orders: number;
+  total_sales: number;
+  share_pct: number;
+}
+
+export interface ShopifyAnalyticsResponse {
+  rows: ShopifyDayRow[];
+  /** How far each source reaches. `sales` and `orders` are fetched by
+   *  different jobs, so one is routinely hours ahead of the other and
+   *  the newest day is partial in whichever lags. */
+  sales_through: string | null;
+  /** The last day the order mirror COVERS, not the last day it holds a
+   *  row for: one straggling order should not certify a whole day. */
+  orders_through: string | null;
+  totals: ShopifyTotals;
+  /** Same window shifted back 364 days -- 52 weeks, so the weekday lines
+   *  up. Retail demand is weekday-shaped, so a 365-day shift would
+   *  compare a Saturday to a Friday and read as a swing that never
+   *  happened. */
+  previous: ShopifyTotals;
+  channels: ShopifyChannelRow[];
+  excluded_channels: string[];
+}
+
+export function fetchShopifyAnalytics(params: {
+  from_date: string;
+  to_date: string;
+  include_returns?: boolean;
+}): Promise<ShopifyAnalyticsResponse> {
+  const qs = new URLSearchParams({
+    from_date: params.from_date,
+    to_date: params.to_date,
+  });
+  if (params.include_returns) qs.set("include_returns", "true");
+  return request<ShopifyAnalyticsResponse>(
+    `/admin/analytics/shopify-analytics?${qs.toString()}`,
+  );
 }

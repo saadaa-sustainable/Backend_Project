@@ -56,9 +56,13 @@ SQL_SOURCES: dict[str, tuple[str, ...]] = {
     "scripts/refresh_ad_history_milestones.py": ("DDL", "REFRESH"),
     "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL"),
     "scripts/ingest_asset_sources.py":          ("DDL",),
+    "scripts/recover_asset_ids.py":             ("DDL", "UNMAPPED_ADS"),
     "scripts/refresh_ad_asset_map.py":          ("DDL", "CANDIDATES_SQL", "INSERT_SQL", "CONFLICT_SQL",
                                                 "SUMMARY_SQL", "COVERAGE_SQL",
                                                 "UNTESTED_SQL"),
+    "app/services/silver/shopify_ad_attribution.py": ("_AD_UNIVERSE_SQL", "_ORDER_UTM_QUERY",
+                                                "_ATTRIBUTION_INSERT", "_ADSET_ROSTER_SQL",
+                                                "_CAMPAIGN_ROSTER_SQL"),
     "app/services/silver/ad_lifecycle.py":      ("_INSERT", "_RESULT_AWAITED_FIX", "_EXTERNAL_OVERLAY_UPDATE",
                                                 "_EXTERNAL_OVERLAY_INSERT",
                                                 "_EXTERNAL_TABLE_EXISTS"),
@@ -120,6 +124,11 @@ def _composed() -> dict[str, str]:
         "analytics:cpis_trends_batch": str(_TRENDS_SQL),
         "analytics:creative_testing_response": asyncio.run(creative_query()),
         "analytics:_CT_ADS_SQL": analytics._CT_ADS_SQL,
+        "analytics:_NAME_MISS_SQL": analytics._NAME_MISS_SQL,
+        "analytics:_SHOPIFY_DAY_SQL": analytics._SHOPIFY_DAY_SQL,
+        "analytics:_SHOPIFY_CHANNEL_SQL": analytics._SHOPIFY_CHANNEL_SQL,
+        "analytics:_SHOPIFY_CUSTOMERS_SQL": analytics._SHOPIFY_CUSTOMERS_SQL,
+        "analytics:_NAME_MISS_SUMMARY_SQL": analytics._NAME_MISS_SUMMARY_SQL,
         # Multi-Filter compiles to a boolean expression spliced into
         # base_where, so parse it inside a real statement for each join.
         **{

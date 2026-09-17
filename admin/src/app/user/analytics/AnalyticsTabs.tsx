@@ -19,6 +19,7 @@ const MetaExplorer = dynamic(() => import("./MetaExplorer").then((m) => m.MetaEx
 const Cpis = dynamic(() => import("./Cpis").then((m) => m.Cpis), { loading: TabLoading });
 const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), { loading: TabLoading });
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
+const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
 
 type Tab =
   | "dashboard"
@@ -30,6 +31,7 @@ type Tab =
   | "cpis"
   | "untested-assets"
   | "instagram"
+  | "shopify-analytics"
   | "shopify-explorer"
   | "meta-explorer";
 
@@ -50,6 +52,7 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   cpis: { label: "CPIS", render: () => <Cpis /> },
   "untested-assets": { label: "Untested Assets", render: () => <UntestedAssets /> },
   instagram: { label: "Instagram", render: () => <Instagram /> },
+  "shopify-analytics": { label: "Shopify Analytics", render: () => <ShopifyAnalytics /> },
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },
   "meta-explorer": { label: "Meta Explorer", render: () => <MetaExplorer /> },
 };
@@ -64,6 +67,7 @@ const DEFAULT_TAB_ORDER: Tab[] = [
   "cpis",
   "untested-assets",
   "instagram",
+  "shopify-analytics",
   "shopify-explorer",
   "meta-explorer",
 ];

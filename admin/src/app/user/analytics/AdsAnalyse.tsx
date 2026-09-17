@@ -31,7 +31,7 @@
  * immediately without re-hitting the backend.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/lib/api";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
@@ -407,6 +407,93 @@ function AssetIdCell({ row }: { row: AdsAnalyseRow }) {
 //   2. Video <video controls autoplay> if is_video + video_url set
 //   3. Full-size image
 //   4. Grey placeholder (no data at all)
+/** Geometry for cropping a social embed down to a thumbnail.
+ *
+ *  The IG and FB embeds are whole post CARDS -- avatar row, then media,
+ *  then caption. Scaled naively into a 40px box that reads as a grey
+ *  smear with a sliver of username. So the iframe is rendered at its
+ *  natural width (the embeds reflow badly below these) and then scaled
+ *  and pushed up so the MEDIA band alone fills the square.
+ *
+ *  `headerPx` is the card chrome above the media at that width, measured
+ *  against the live embeds. Tune these two numbers if Meta restyles the
+ *  cards -- nothing else here depends on them. */
+/** Preview cell edge, px. The embeds are scaled against this, so the
+ *  cell size and the crop maths cannot drift apart. */
+const PREVIEW_PX = 40;
+
+const EMBED_CROP = {
+  ig: { width: 320, headerPx: 54 },
+  fb: { width: 500, headerPx: 74 },
+} as const;
+
+/** A social embed cropped to its media and rendered as a thumbnail.
+ *
+ *  Mounted only once the row is actually near the viewport. Without
+ *  that, paging the table would fire 50-100 third-party iframes at once
+ *  -- slow, and enough traffic for Meta to start refusing embeds. The
+ *  observer disconnects after the first hit, so a row that scrolls away
+ *  keeps what it already loaded.
+ *
+ *  `pointer-events-none` matters: the iframe would otherwise swallow the
+ *  click that opens the full-size lightbox. */
+function MiniEmbed({
+  src,
+  kind,
+  size,
+  title,
+}: {
+  src: string;
+  kind: "ig" | "fb";
+  size: number;
+  title: string;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el || visible) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisible(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "300px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [visible]);
+
+  const geom = EMBED_CROP[kind];
+  const scale = size / geom.width;
+
+  return (
+    <div ref={box} className="relative h-full w-full overflow-hidden bg-slate-100">
+      {visible && (
+        <iframe
+          src={src}
+          title={title}
+          scrolling="no"
+          loading="lazy"
+          tabIndex={-1}
+          aria-hidden
+          className="pointer-events-none absolute left-0 top-0 origin-top-left border-0"
+          style={{
+            width: geom.width,
+            // Tall enough that the media band is inside the frame before
+            // the crop; the wrapper clips the rest.
+            height: geom.width + geom.headerPx,
+            transform: `scale(${scale}) translateY(-${geom.headerPx}px)`,
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
   const [open, setOpen] = useState(false);
   const hasThumb = !!row.thumbnail_url;
@@ -439,7 +526,8 @@ function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
   if (!hasAnyPreview) {
     return (
       <div
-        className="flex h-10 w-10 items-center justify-center rounded bg-slate-100 text-[9px] text-slate-400"
+        style={{ width: PREVIEW_PX, height: PREVIEW_PX }}
+        className="flex items-center justify-center rounded bg-slate-100 text-[9px] text-slate-400"
         title="No preview available — ad has no IG permalink, no FB story_id, and no cached thumbnail"
       >
         —
@@ -451,7 +539,8 @@ function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
     <>
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(true); }}
-        className="group relative h-10 w-10 overflow-hidden rounded ring-1 ring-slate-200 hover:ring-slate-400"
+        style={{ width: PREVIEW_PX, height: PREVIEW_PX }}
+        className="group relative overflow-hidden rounded ring-1 ring-slate-200 hover:ring-slate-400"
         title={
           igEmbedUrl
             ? "Instagram post — click for iframe preview"
@@ -478,14 +567,27 @@ function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
             )}
           </>
         ) : igEmbedUrl ? (
-          // Instagram gradient tile as the fallback when we have the IG
-          // permalink but no cached thumbnail image.
-          <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[#833AB4] via-[#FD1D1D] to-[#FCB045] text-[13px] font-bold text-white">
-            IG
-          </div>
+          // The real post, cropped to its media. This used to be a flat
+          // "IG" gradient tile -- it told you a preview EXISTED but
+          // nothing about the creative, which is the one thing a preview
+          // column is for. 68% of rows land here rather than on a cached
+          // thumbnail, so it was most of the column.
+          <MiniEmbed
+            src={igEmbedUrl}
+            kind="ig"
+            size={PREVIEW_PX}
+            title={row.ad_name ?? "Instagram post preview"}
+          />
+        ) : fbIframeUrl ? (
+          <MiniEmbed
+            src={fbIframeUrl}
+            kind="fb"
+            size={PREVIEW_PX}
+            title={row.ad_name ?? "Facebook post preview"}
+          />
         ) : (
-          <div className="flex h-full w-full items-center justify-center bg-[#1877F2] text-[11px] font-bold text-white">
-            f
+          <div className="flex h-full w-full items-center justify-center bg-slate-100 text-[9px] text-slate-400">
+            —
           </div>
         )}
       </button>
