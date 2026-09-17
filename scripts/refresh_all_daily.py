@@ -88,7 +88,22 @@ SHOPIFY_INGEST_TIMEOUT_S = 5400
 #: Deliberately omits customers/sessions/fulfillments/sales/discounts/
 #: customer_analytics: ~2.9M rows no CPIS column reads. Pass
 #: --shopify-object-types (or 'all') to widen it.
-DEFAULT_SHOPIFY_OBJECT_TYPES = "products,inventory,orders"
+#: What the nightly fetches from Shopify.
+#:
+#: Was "products,inventory,orders" -- which is why every ShopifyQL dataset
+#: sat 21 days stale (bronze `sales`, `discounts`, `fulfillments` and
+#: `customer_analytics` all stopped at 2026-08-27 while `orders` stayed
+#: current). Nothing was broken; they simply were not being asked for.
+#:
+#: `sales` and `customer_analytics` are what the customer-acquisition
+#: reporting reads -- new vs returning split, first-time vs returning
+#: revenue, units per order. `fulfillments` and `discounts` are added for
+#: the same reason: they are ShopifyQL tables this project already
+#: flattens into silver, so leaving them out of the nightly just means
+#: they rot.
+DEFAULT_SHOPIFY_OBJECT_TYPES = (
+    "products,inventory,orders,sales,customer_analytics,discounts,fulfillments"
+)
 
 #: --incremental makes orders/customers/products resume from the newest
 #: row already in bronze (minus a 1-day overlap) on updated_at, instead
@@ -122,6 +137,20 @@ PHASE_INGEST = [
     # Until 2026-09-15 the ingest hardcoded level=ad and never tagged
     # level at all, so campaign_insights / adset_insights sat at 488 and
     # 1,171 rows against 523 campaigns and 3,126 adsets.
+    # Current-state rosters (campaigns / adsets / ads). NOT time-windowed,
+    # so it is not part of either insights fetch -- and deliberately its
+    # own step rather than `--include-roster` bolted onto one of them:
+    # the roster pull is what tripped Meta's app-level rate limiter on
+    # this script's first trial run, and as a separate step a throttle
+    # there costs the roster, not the night's insights.
+    #
+    # Nothing in this pipeline fetched entities before (2026-09-16).
+    # Bronze's newest `ad` row was 2026-09-04 and meta_ads' newest ad was
+    # 2026-08-24, so the ad universe the order-attribution cascade runs
+    # against was three weeks behind -- see scripts/refresh_meta_entities.py
+    # for what that cost in unattributed orders.
+    ("meta_roster",           ["scripts/ingest_last_15_days.py",
+                               "--roster-only"],                            1800),
     ("meta_insights_15d",     ["scripts/ingest_last_15_days.py",
                                "--levels", "ad"],                           2700),
     ("meta_insights_lifetime",["scripts/ingest_last_15_days.py",
@@ -141,6 +170,15 @@ PHASE_INGEST = [
 
 PHASE_SILVER = [
     ("silver_raw_dump_meta",  ["scripts/refresh_raw_dump_meta_daily.py"],   1200),
+    # meta_campaigns / meta_adsets / meta_ads. Registry-only job number
+    # three, and the one that silently cost the most -- the Last Click
+    # UTM cascade builds its ad universe from meta_ads, so a stale
+    # meta_ads means orders whose utm_content names a real, known ad get
+    # written down as `unmatched`. Measured against the legacy dashboard
+    # on 2026-09-16: 2,797 orders / Rs 33.3L in a single 30-day window.
+    # Must precede ad_lifecycle (reads meta_ads for ad_name/status) and
+    # silver_shopify (re-derives the whole attribution table each run).
+    ("silver_meta_entities",  ["scripts/refresh_meta_entities.py"],          900),
     ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],   900),
     # ad_lifecycle was NEVER in this pipeline. It was registered only as
     # a FlattenJob in app/services/silver/registry.py, so the in-process
@@ -180,6 +218,12 @@ PHASE_SILVER = [
     # inline on every request; also the input the Untested Assets view
     # needs to stop calling an asset untested purely because the register's
     # own ad_id column was never written back.
+    # Re-spellings of register ids that ad names write differently
+    # ('ITE_Feb19' for 'ITE-Feb-19'). Writes ad_asset_recovered, which
+    # the map unions in at its lowest priority, so it MUST run first.
+    # Every id it emits was checked to exist in a register -- it widens
+    # how an asset can be reached, never what assets exist.
+    ("asset_id_recovery",     ["scripts/recover_asset_ids.py"],              600),
     ("ad_asset_map",          ["scripts/refresh_ad_asset_map.py"],           600),
     # 900 -> 3600 (2026-09-04). refresh_shopify_silver.py TRUNCATEs and
     # re-INSERTs all EIGHT silver tables from ~4.9M bronze rows every
