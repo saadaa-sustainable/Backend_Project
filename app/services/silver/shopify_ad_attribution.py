@@ -147,6 +147,11 @@ class AdUniverse:
     #: single ad by id rather than guessing between two.
     alias_ads: dict[str, AdMeta] = field(default_factory=dict)
     alias_fuzzy: dict[str, AdMeta] = field(default_factory=dict)
+    #: (utm_content lowered, adset_id or '*') -> the ad a PERSON says it
+    #: is. From `ad_name_override`; see scripts/load_ad_name_overrides.py
+    #: for why hand-supplied evidence gets its own table rather than
+    #: being approximated by loosening a rule.
+    overrides: dict[tuple[str, str], AdMeta] = field(default_factory=dict)
 
 
 # Use both entity rosters, including direct IDs for ads without a usable name.
@@ -182,6 +187,7 @@ def _build_ad_universe(
     adsets: Iterable[tuple[str, str | None, str | None]] = (),
     campaigns: Iterable[tuple[str, str | None]] = (),
     aliases: Iterable[tuple[str, str]] = (),
+    overrides: Iterable[tuple[str, str, str]] = (),
 ) -> AdUniverse:
     """Build the same pure matching indexes for database loads and audit replays."""
     universe = AdUniverse()
@@ -237,6 +243,14 @@ def _build_ad_universe(
         norm = _norm_name(name)
         if norm and norm not in universe.by_fuzzy:
             universe.alias_fuzzy.setdefault(norm, ad)
+
+    # A mapping naming an ad the universe does not hold is dropped here
+    # rather than at load time: the override table outlives any single
+    # roster refresh, and an ad missing today may be back tomorrow.
+    for utm_content, adset_id, ad_id in overrides:
+        ad = universe.by_id.get(ad_id)
+        if ad is not None and utm_content:
+            universe.overrides[(utm_content.lower(), adset_id or "*")] = ad
     return universe
 
 
@@ -247,6 +261,14 @@ _AD_ALIAS_SQL = """
 SELECT ad_name_lower, ad_id
   FROM public.ad_name_alias
  WHERE NOT ambiguous
+"""
+
+
+#: Hand-supplied mappings. Loaded whole -- there are tens of these, not
+#: thousands, and each one is a deliberate human statement.
+_AD_OVERRIDE_SQL = """
+SELECT utm_content_lower, adset_id, ad_id
+  FROM public.ad_name_override
 """
 
 
@@ -274,7 +296,18 @@ async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
         await session.rollback()
         logger.warning("ad_name_alias_unavailable")
         aliases = []
-    return _build_ad_universe(ads, adsets=adsets, campaigns=campaigns, aliases=aliases)
+    try:
+        overrides = [
+            (row[0], row[1], row[2])
+            for row in await session.execute(text(_AD_OVERRIDE_SQL))
+        ]
+    except (ProgrammingError, OperationalError):
+        await session.rollback()
+        logger.warning("ad_name_override_unavailable")
+        overrides = []
+    return _build_ad_universe(
+        ads, adsets=adsets, campaigns=campaigns, aliases=aliases, overrides=overrides,
+    )
 
 
 def _unique_ad(candidates: Iterable[AdMeta]) -> AdMeta | None:
@@ -392,6 +425,33 @@ def _global_name_match(utm_content: str, universe: AdUniverse) -> AdMeta | None:
     return _unique_ad(hits)
 
 
+def _override_match(
+    utm_content: str, utm_term: str, universe: AdUniverse,
+) -> AdMeta | None:
+    """A hand-supplied mapping for this utm_content, if one applies.
+
+    An ad-set-scoped mapping is tried before an account-wide one: it was
+    written precisely because the name means different things in
+    different ad sets, so it must win where both could apply.
+    """
+    if not universe.overrides or not utm_content:
+        return None
+    adset_ids = [
+        value for value in _value_candidates(utm_term)
+        if value in universe.adset_ads or value in universe.roster_adsets
+    ]
+    for candidate in _value_candidates(utm_content):
+        key = candidate.lower()
+        for adset_id in adset_ids:
+            ad = universe.overrides.get((key, adset_id))
+            if ad is not None:
+                return ad
+        ad = universe.overrides.get((key, "*"))
+        if ad is not None:
+            return ad
+    return None
+
+
 def _alias_match(value: str, universe: AdUniverse) -> AdMeta | None:
     """Resolve a name the ad universe no longer knows, via rename history.
 
@@ -437,6 +497,13 @@ def _attribute_order(
     if direct:
         ad = _unique_ad(direct)
         return matched("ad_direct", ad) if ad else _UNMATCHED
+
+    # A person's mapping outranks every inference below it, but not an
+    # explicit ad id above it: the id is already unambiguous, so there is
+    # nothing for a human to correct there.
+    override = _override_match(utm_content, utm_term, universe)
+    if override is not None:
+        return matched("manual_map", override)
 
     adset_ids = {
         value for value in _value_candidates(utm_term)

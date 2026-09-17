@@ -96,6 +96,7 @@ const CHANNEL_COLOR: Record<UtmChannel | "Total", string> = {
  *  rather than silently swallowing rows if it ever fires. */
 const TIER_ORDER = [
   "ad_direct",
+  "manual_map",
   "adset_scoped",
   "adset_renamed",
   "ad_name_match",
@@ -133,6 +134,7 @@ type TierKey = (typeof TIER_ORDER)[number];
 /** Short label for the tier badge inside the order table. */
 const TIER_LABEL: Record<TierKey, string> = {
   ad_direct: "Ad Direct",
+  manual_map: "Manual Map",
   adset_scoped: "Adset Scoped",
   adset_renamed: "Adset · Renamed",
   ad_name_match: "Ad Name Match",
@@ -150,23 +152,28 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     title: "UTM = AD ID",
     hint: "utm_content is a numeric ad id that exists in the ad universe. The only exact match in the cascade.",
   },
-  adset_scoped: {
+  manual_map: {
     step: "STEP 2",
+    title: "MANUAL MAP",
+    hint: "Someone stated outright which ad this utm_content is. Used where no rule can decide — a name that belongs to seven different ads across seven ad sets cannot be resolved by evidence the data carries, but a person who knows which ad ran can say so. Loaded from ad_name_override; every row names a real ad, and a mapping given with an ad set applies only inside it.",
+  },
+  adset_scoped: {
+    step: "STEP 3",
     title: "ADSET-SCOPED NAME",
     hint: "utm_term names a known adset and utm_content matches an ad name inside it exactly (or after stripping Copy/_h0 suffixes). Beats a same-named ad elsewhere in the account. Orders whose adset matched but whose name did not are not a separate step -- they are this step's failures, in the section below.",
   },
   adset_renamed: {
-    step: "STEP 3",
+    step: "STEP 4",
     title: "ADSET · RENAMED AD",
     hint: "Nothing in the adset answers to that name today, but something in it USED to. Meta stamps the ad name into the UTM at click time, so renaming an ad orphans every order placed before the rename. Resolved through Meta's own rename log, which names the ad id outright — and the ad is confirmed to sit in this very adset, so the name and the adset agree.",
   },
   ad_name_match: {
-    step: "STEP 4",
+    step: "STEP 5",
     title: "AD NAME",
     hint: "Global ad-name match: exact, then punctuation-normalised, then substring. Ties broken by spend.",
   },
   ad_renamed: {
-    step: "STEP 5",
+    step: "STEP 6",
     title: "RENAMED AD",
     hint: "No adset or campaign evidence, and no ad answers to that name today — but Meta's rename log records exactly one ad that used to. An identification from the change log, not a guess between similar names.",
   },
@@ -178,12 +185,12 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     hint: "The adset matched, but utm_content matched no ad name inside it under the strict rule. Adset and campaign are attributed; the ad is not. Treat this tile as a worklist -- every order in it is an ad whose utm_content and ad_name have drifted apart.",
   },
   campaign_scoped: {
-    step: "STEP 6",
+    step: "STEP 7",
     title: "CAMPAIGN-SCOPED NAME",
     hint: "utm_campaign names a known campaign and utm_content narrows to one ad inside it.",
   },
   campaign_only: {
-    step: "STEP 7",
+    step: "STEP 8",
     title: "CAMPAIGN ONLY",
     hint: "The campaign is known but no ad could be resolved.",
   },
@@ -200,6 +207,7 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
  *  all they had left. */
 const MATCHED_ON: Record<TierKey, string> = {
   ad_direct: "utm_content",
+  manual_map: "utm_content (stated by hand)",
   adset_scoped: "utm_content",
   adset_renamed: "utm_content (former name)",
   ad_name_match: "utm_content",
@@ -213,6 +221,7 @@ const MATCHED_ON: Record<TierKey, string> = {
 /** Step accent -- strongest evidence green, weakest grey. */
 const TIER_COLOR: Record<TierKey, string> = {
   ad_direct: theme.successMid,
+  manual_map: theme.accentIndigo,
   adset_scoped: theme.infoMid,
   adset_renamed: "#0E7490",
   ad_name_match: "#0891B2",
@@ -225,6 +234,7 @@ const TIER_COLOR: Record<TierKey, string> = {
 
 const TIER_CLASS: Record<TierKey, string> = {
   ad_direct: "ai-tier-ad_direct",
+  manual_map: "ai-tier-ad_direct",
   adset_scoped: "ai-tier-adset_scoped",
   adset_renamed: "ai-tier-adset_scoped",
   ad_name_match: "ai-tier-ad_name_match",
