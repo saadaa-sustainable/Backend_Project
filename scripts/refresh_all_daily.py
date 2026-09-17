@@ -102,7 +102,11 @@ SHOPIFY_INGEST_TIMEOUT_S = 5400
 #: flattens into silver, so leaving them out of the nightly just means
 #: they rot.
 DEFAULT_SHOPIFY_OBJECT_TYPES = (
-    "products,inventory,orders,sales,customer_analytics,discounts,fulfillments"
+    # `sales_daily` is the store's own customer-acquisition report at day
+    # grain -- one query for the whole range, and the only source of the
+    # distinct-customer counts and net_items_sold, which cannot be
+    # derived from `sales` (see ingest_shopify.py's SALES_DAILY_*).
+    "products,inventory,orders,sales,sales_daily,customer_analytics,discounts,fulfillments"
 )
 
 #: --incremental makes orders/customers/products resume from the newest

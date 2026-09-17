@@ -5776,18 +5776,19 @@ _RETURN_CHANNELS = ("Return Prime: Order Return",)
 class ShopifyDayRow(BaseModel):
     day: date
     orders: int
-    #: None when no order row backs the day at all. Read it together
-    #: with `customers_coverage_pct` -- a day the order fetch has only
-    #: half-reached reports half the buyers, and the coverage figure is
-    #: the only thing that says so.
+    #: Distinct buyers, Shopify's own count. None only on the derived
+    #: fallback (include_returns), where the order grain cannot express it.
     customers: int | None
-    customers_coverage_pct: float | None
     total_sales: float
     average_order_value: float | None
+    #: net_items_sold -- NET of returns, as the original report asked.
     units: int
+    #: quantity_ordered -- GROSS. Kept because it is the figure the
+    #: ad-side metrics divide by, so the two are comparable side by side.
+    units_gross: int
     units_per_order: float | None
-    new_customers: int
-    returning_customers: int
+    new_customers: int | None
+    returning_customers: int | None
     returning_customer_rate: float | None
     total_sales_first_time: float
     total_sales_returning: float
@@ -5798,17 +5799,27 @@ class ShopifyDayRow(BaseModel):
 
 class ShopifyTotals(BaseModel):
     orders: int
-    #: DISTINCT over the whole window, not the sum of the daily figures
-    #: -- a shopper who ordered on Monday and Thursday is one customer,
-    #: and summing days would make them two.
+    #: DISTINCT over the whole window. The daily figures are Shopify's
+    #: and exact, but distinct counts do NOT sum -- adding the 31 days of
+    #: this window gives 38,220 buyers where the window itself has about
+    #: 36,100, because a shopper who ordered twice in the window is
+    #: counted on both days. So these two come from our own order mirror,
+    #: which can be de-duplicated across the window, and
+    #: `customers_coverage_pct` says how much of the window that mirror
+    #: actually holds.
     customers: int | None
+    returning_customers: int | None
     customers_coverage_pct: float | None
     total_sales: float
     average_order_value: float | None
     units: int
+    units_gross: int
     units_per_order: float | None
-    new_customers: int
-    returning_customers: int
+    #: This one DOES sum: a shopper is new exactly once, ever, so no day
+    #: can double-count them. Verified against the window figure --
+    #: 26,005 summed vs 25,980 reported, the gap being today still
+    #: growing after the mirror was taken.
+    new_customers: int | None
     returning_customer_rate: float | None
     total_sales_first_time: float
     total_sales_returning: float
@@ -5839,6 +5850,11 @@ class ShopifyAnalyticsResponse(BaseModel):
     #: row for -- one straggling order should not certify a whole day.
     sales_through: date | None
     orders_through: date | None
+    #: "shopify_daily" -- every day figure is Shopify's own, mirrored
+    #: from the store's report. "derived" -- include_returns was set, so
+    #: the day rows are aggregated from the order grain instead and the
+    #: distinct-customer metrics are unavailable.
+    source: str
     totals: ShopifyTotals
     #: Same shape over the comparison window (day - 364), so the UI can
     #: show a percent change without a second round trip.
@@ -5847,85 +5863,74 @@ class ShopifyAnalyticsResponse(BaseModel):
     excluded_channels: list[str]
 
 
-#: One row per day. `customers` comes from shopify_orders because the
-#: sales dataset has no customer id; everything else is a straight
-#: aggregate of the mirrored ShopifyQL metrics.
+#: The store's own report, read back verbatim from the day-grain mirror
+#: (ingest_shopify.py's SALES_DAILY_* -- see its comment for why three of
+#: these metrics cannot be derived from the order-grain table). Every
+#: figure here is Shopify's own, so the section reconciles with Shopify
+#: Analytics by construction rather than by a matching derivation.
+#:
+#: `units` is net_items_sold, NET of returns, which is what the original
+#: report asked for. The gross figure is kept alongside as units_gross
+#: rather than dropped -- it is the one the ad-side metrics divide by.
 _SHOPIFY_DAY_SQL = """
-WITH s AS (
-    SELECT day::date AS day,
-           order_id,
-           new_or_returning_customer AS kind,
-           COALESCE(orders, 0)            AS orders,
-           COALESCE(total_sales, 0)       AS total_sales,
-           COALESCE(quantity_ordered, 0)  AS units,
-           COALESCE(gross_sales, 0)       AS gross_sales,
-           COALESCE(discounts, 0)         AS discounts,
-           COALESCE(net_sales, 0)         AS net_sales
-      FROM shopify_sales
-     WHERE day::date BETWEEN :from_date AND :to_date
-       AND (sales_channel IS NULL OR NOT (sales_channel = ANY(:excluded)))
-), agg AS (
-    SELECT day,
-           SUM(orders)::int                                          AS orders,
-           SUM(total_sales)::float                                   AS total_sales,
-           SUM(units)::int                                           AS units,
-           SUM(gross_sales)::float                                   AS gross_sales,
-           SUM(discounts)::float                                     AS discounts,
-           SUM(net_sales)::float                                     AS net_sales,
-           SUM(orders) FILTER (WHERE kind = 'New')::int              AS new_customers,
-           SUM(orders) FILTER (WHERE kind = 'Returning')::int        AS returning_customers,
-           SUM(total_sales) FILTER (WHERE kind = 'New')::float       AS total_sales_first_time,
-           SUM(total_sales) FILTER (WHERE kind = 'Returning')::float AS total_sales_returning
-      FROM s GROUP BY day
-), so AS (
-    SELECT DISTINCT day, order_id FROM s WHERE order_id IS NOT NULL
-), cust AS (
-    -- Distinct buyers, which the sales dataset cannot express: it has
-    -- no customer id, so the buyer has to come from shopify_orders.
-    --
-    -- Joined on ORDER ID and never on date. shopify_sales.day is the
-    -- shop's local day and shopify_orders.created_at is UTC, so a date
-    -- join silently drops every order placed after 18:30 UTC -- it cost
-    -- ~8% of a day when measured.
-    --
-    -- Scoped to `so`, the same orders every other metric here is built
-    -- from, so the channel exclusion applies to buyers too. Counting
-    -- shopify_orders directly instead pulled in the Return Prime refund
-    -- records and reported more customers than orders.
-    --
-    -- Orders with no customer_id (guest checkout) count as one buyer
-    -- each rather than collapsing into a single NULL bucket. An order
-    -- with no shopify_orders row YET is not counted at all -- it is
-    -- unknown, not absent -- and coverage_pct beside it says how much
-    -- of the day is actually known.
-    SELECT so.day,
-           (COUNT(DISTINCT o.customer_id)
-            + COUNT(*) FILTER (WHERE o.order_id IS NOT NULL
-                               AND o.customer_id IS NULL))::int  AS customers,
-           COUNT(o.order_id)::float / NULLIF(COUNT(*), 0) * 100   AS customers_coverage_pct
-      FROM so
-      LEFT JOIN shopify_orders o
-        ON o.order_id = 'gid://shopify/Order/' || so.order_id
-     GROUP BY so.day
-)
-SELECT a.day,
-       a.orders,
-       c.customers,
-       c.customers_coverage_pct,
-       a.total_sales,
-       CASE WHEN a.orders > 0 THEN a.total_sales / a.orders END AS average_order_value,
-       a.units,
-       CASE WHEN a.orders > 0 THEN a.units::float / a.orders END AS units_per_order,
-       a.new_customers,
-       a.returning_customers,
-       CASE WHEN (a.new_customers + a.returning_customers) > 0
-            THEN a.returning_customers::float
-                 / (a.new_customers + a.returning_customers) * 100 END AS returning_customer_rate,
-       a.total_sales_first_time,
-       a.total_sales_returning,
-       a.gross_sales, a.discounts, a.net_sales
-  FROM agg a LEFT JOIN cust c ON c.day = a.day
- ORDER BY a.day ASC
+SELECT day,
+       orders::int                             AS orders,
+       customers::int                          AS customers,
+       total_sales::float                      AS total_sales,
+       average_order_value::float              AS average_order_value,
+       net_items_sold::int                     AS units,
+       quantity_ordered::int                   AS units_gross,
+       quantity_ordered_per_order::float       AS units_per_order,
+       new_customers::int                      AS new_customers,
+       returning_customers::int                AS returning_customers,
+       -- Shopify reports this as a fraction; the UI wants percent.
+       (returning_customer_rate * 100)::float  AS returning_customer_rate,
+       total_sales_first_time::float           AS total_sales_first_time,
+       total_sales_returning::float            AS total_sales_returning,
+       gross_sales::float                      AS gross_sales,
+       discounts::float                        AS discounts,
+       net_sales::float                        AS net_sales
+  FROM shopify_sales_daily
+ WHERE day BETWEEN :from_date AND :to_date
+ ORDER BY day ASC
+"""
+
+#: Fallback for include_returns=true. The day-grain mirror bakes in the
+#: report's own `WHERE sales_channel != 'Return Prime: Order Return'`, so
+#: asking to see the refund rows means leaving Shopify's numbers behind
+#: and aggregating the order-grain table instead. The response says so
+#: via `source` rather than quietly serving different definitions under
+#: the same labels:
+#:   * units becomes GROSS quantity_ordered -- there is no net figure at
+#:     order grain.
+#:   * customers/new/returning would become ORDER counts, not distinct
+#:     buyers. That is the error this table exists to avoid, so they come
+#:     back NULL rather than wrong.
+_SHOPIFY_DAY_DERIVED_SQL = """
+SELECT day::date                                              AS day,
+       SUM(COALESCE(orders, 0))::int                          AS orders,
+       NULL::int                                              AS customers,
+       SUM(COALESCE(total_sales, 0))::float                   AS total_sales,
+       AVG(average_order_value)::float                        AS average_order_value,
+       SUM(COALESCE(quantity_ordered, 0))::int                AS units,
+       SUM(COALESCE(quantity_ordered, 0))::int                AS units_gross,
+       CASE WHEN SUM(COALESCE(orders, 0)) > 0
+            THEN SUM(COALESCE(quantity_ordered, 0))::float
+                 / SUM(COALESCE(orders, 0)) END               AS units_per_order,
+       NULL::int                                              AS new_customers,
+       NULL::int                                              AS returning_customers,
+       NULL::float                                            AS returning_customer_rate,
+       SUM(COALESCE(total_sales, 0)) FILTER
+           (WHERE new_or_returning_customer = 'New')::float   AS total_sales_first_time,
+       SUM(COALESCE(total_sales, 0)) FILTER
+           (WHERE new_or_returning_customer = 'Returning')::float AS total_sales_returning,
+       SUM(COALESCE(gross_sales, 0))::float                   AS gross_sales,
+       SUM(COALESCE(discounts, 0))::float                     AS discounts,
+       SUM(COALESCE(net_sales, 0))::float                     AS net_sales
+  FROM shopify_sales
+ WHERE day::date BETWEEN :from_date AND :to_date
+ GROUP BY day::date
+ ORDER BY 1 ASC
 """
 
 #: Sales by channel over the window -- what the exclusion is filtering,
@@ -5947,18 +5952,22 @@ SELECT COALESCE(sales_channel, '(none)') AS sales_channel,
 #: is on order id.
 _SHOPIFY_CUSTOMERS_SQL = """
 WITH so AS (
-    SELECT DISTINCT order_id
+    SELECT DISTINCT order_id, new_or_returning_customer AS kind
       FROM shopify_sales
      WHERE day::date BETWEEN :from_date AND :to_date
        AND order_id IS NOT NULL
        AND (sales_channel IS NULL OR NOT (sales_channel = ANY(:excluded)))
 ), j AS (
-    SELECT o.order_id AS found, o.customer_id
+    SELECT o.order_id AS found, o.customer_id, so.kind
       FROM so LEFT JOIN shopify_orders o
         ON o.order_id = 'gid://shopify/Order/' || so.order_id
 )
 SELECT (COUNT(DISTINCT customer_id)
         + COUNT(*) FILTER (WHERE found IS NOT NULL AND customer_id IS NULL))::int AS customers,
+       (COUNT(DISTINCT customer_id) FILTER (WHERE kind = 'Returning')
+        + COUNT(*) FILTER (WHERE kind = 'Returning'
+                             AND found IS NOT NULL
+                             AND customer_id IS NULL))::int AS returning_customers,
        COUNT(found)::float / NULLIF(COUNT(*), 0) * 100 AS coverage_pct
   FROM j
 """
@@ -5967,31 +5976,49 @@ SELECT (COUNT(DISTINCT customer_id)
 def _shopify_totals(
     rows: list[ShopifyDayRow],
     customers: int | None = None,
+    returning_customers: int | None = None,
     customers_coverage_pct: float | None = None,
 ) -> ShopifyTotals:
-    """Totals are re-derived from the day rows, never summed from the
-    per-day ratios: averaging an average would weight a 3-order day the
-    same as a 3,000-order one.
+    """Roll the day rows up the way each metric actually reduces.
 
-    `customers` is the one figure that cannot be derived from the rows
-    at all -- it is distinct over the window -- so it is passed in from
-    its own query."""
+    Sums where sums are valid, a weighted mean where they are not
+    (averaging an average would weight a 3-order day the same as a
+    3,000-order one), and NOT AT ALL for the two distinct counts --
+    `customers` and `returning_customers` are passed in from a query
+    that de-duplicates across the window, because adding up daily
+    distinct counts counts a repeat shopper once per day they ordered.
+    """
     orders = sum(r.orders for r in rows)
     units = sum(r.units for r in rows)
-    new = sum(r.new_customers for r in rows)
-    ret = sum(r.returning_customers for r in rows)
+    units_gross = sum(r.units_gross for r in rows)
     sales = sum(r.total_sales for r in rows)
+    # A shopper is new exactly once, ever, so this one is safe to sum.
+    new = sum(r.new_customers or 0 for r in rows) if any(
+        r.new_customers is not None for r in rows) else None
+
+    # Shopify's AOV is the mean of the per-ORDER values, so the window
+    # figure is the daily means weighted by the orders behind each.
+    aov_num = sum((r.average_order_value or 0) * r.orders for r in rows)
+    aov = (aov_num / orders) if orders else None
+
+    rate = None
+    if customers and returning_customers is not None:
+        # Shopify's own definition: returning buyers over all buyers,
+        # NOT returning orders over all orders.
+        rate = returning_customers / customers * 100
+
     return ShopifyTotals(
         orders=orders,
         customers=customers,
+        returning_customers=returning_customers,
         customers_coverage_pct=customers_coverage_pct,
         total_sales=sales,
-        average_order_value=(sales / orders) if orders else None,
+        average_order_value=aov,
         units=units,
-        units_per_order=(units / orders) if orders else None,
+        units_gross=units_gross,
+        units_per_order=(units_gross / orders) if orders else None,
         new_customers=new,
-        returning_customers=ret,
-        returning_customer_rate=(ret / (new + ret) * 100) if (new + ret) else None,
+        returning_customer_rate=rate,
         total_sales_first_time=sum(r.total_sales_first_time for r in rows),
         total_sales_returning=sum(r.total_sales_returning for r in rows),
         gross_sales=sum(r.gross_sales for r in rows),
@@ -6015,42 +6042,45 @@ async def get_shopify_analytics(
     excluded: list[str] = [] if include_returns else list(_RETURN_CHANNELS)
     params = {"from_date": from_date, "to_date": to_date, "excluded": excluded}
 
+    # The mirrored report already has the exclusion baked in, so it can
+    # only serve the default view; asking to see the refund rows drops
+    # to aggregating the order grain, with three metrics unavailable.
+    day_sql = _SHOPIFY_DAY_DERIVED_SQL if include_returns else _SHOPIFY_DAY_SQL
+    source = "derived" if include_returns else "shopify_daily"
+
     rows = [
         ShopifyDayRow(**dict(r._mapping))
-        for r in (await session.execute(text(_SHOPIFY_DAY_SQL), params))
+        for r in (await session.execute(text(day_sql), params))
     ]
 
     # 364 days, not 365: keeps the weekday aligned.
     span = (to_date - from_date).days
     prev_to = to_date - timedelta(days=364)
     prev_from = prev_to - timedelta(days=span)
+    prev_params = {"from_date": prev_from, "to_date": prev_to, "excluded": excluded}
     prev_rows = [
         ShopifyDayRow(**dict(r._mapping))
-        for r in (await session.execute(
-            text(_SHOPIFY_DAY_SQL),
-            {"from_date": prev_from, "to_date": prev_to, "excluded": excluded},
-        ))
+        for r in (await session.execute(text(day_sql), prev_params))
     ]
 
     cust = (await session.execute(text(_SHOPIFY_CUSTOMERS_SQL), params)).one()
     prev_cust = (await session.execute(
-        text(_SHOPIFY_CUSTOMERS_SQL),
-        {"from_date": prev_from, "to_date": prev_to, "excluded": excluded},
+        text(_SHOPIFY_CUSTOMERS_SQL), prev_params
     )).one()
 
-    sales_through = (await session.execute(text(
-        "SELECT MAX(day)::date FROM shopify_sales"
-    ))).scalar()
-    # NOT max(created_at): the order fetch runs hours before the sales
-    # fetch, so on 2026-09-17 shopify_orders held 47 of the day's 718
-    # orders and still reported the 17th as its latest day. The last day
-    # the order mirror actually COVERS is the honest answer, and it is
-    # what makes the Customers figure trustworthy or not.
-    orders_through = next(
-        (r.day for r in reversed(rows)
-         if (r.customers_coverage_pct or 0) >= 99.0),
-        None,
-    )
+    through = (await session.execute(text(
+        "SELECT (SELECT MAX(day)::date FROM shopify_sales_daily) AS sales_through, "
+        "       (SELECT MAX(created_at)::date FROM shopify_orders) AS orders_through"
+    ))).one()
+    sales_through = through.sales_through
+    # The order mirror only matters for the two window-level distinct
+    # counts now -- the day rows are Shopify's own. Report the last day
+    # it actually COVERS rather than the last day it holds any row for:
+    # on 2026-09-17 it held 127 of the day's 718 orders and would
+    # otherwise have certified the day as complete.
+    orders_through = through.orders_through
+    if (cust.coverage_pct or 0) < 99.0 and orders_through:
+        orders_through = min(orders_through, to_date - timedelta(days=1))
 
     channel_rows = (await session.execute(
         text(_SHOPIFY_CHANNEL_SQL), {"from_date": from_date, "to_date": to_date}
@@ -6070,8 +6100,12 @@ async def get_shopify_analytics(
         rows=rows,
         sales_through=sales_through,
         orders_through=orders_through,
-        totals=_shopify_totals(rows, cust.customers, cust.coverage_pct),
-        previous=_shopify_totals(prev_rows, prev_cust.customers, prev_cust.coverage_pct),
+        source=source,
+        totals=_shopify_totals(
+            rows, cust.customers, cust.returning_customers, cust.coverage_pct),
+        previous=_shopify_totals(
+            prev_rows, prev_cust.customers, prev_cust.returning_customers,
+            prev_cust.coverage_pct),
         channels=channels,
         excluded_channels=excluded,
     )

@@ -521,6 +521,29 @@ _SALES_DDL, _SALES_INSERT = _build_shopifyql_table_sql(
     ],
 )
 
+#: Mirrors ingest_shopify.py's SALES_DAILY_GROUP_BY/METRICS -- the
+#: store's own customer-acquisition report at day grain, carrying the
+#: three families of metric the order-grain table cannot express:
+#: distinct customer counts, net (not gross) items sold, and Shopify's
+#: own average_order_value. One row per day, so `day` is the natural key.
+_SALES_DAILY_DDL, _SALES_DAILY_INSERT = _build_shopifyql_table_sql(
+    table_name="shopify_sales_daily",
+    object_type="sales_daily",
+    #: NOT "day". The PK column is always filled from source_id, which is
+    #: the row-key HASH -- naming the natural key here would overwrite it
+    #: with that hash, exactly the way shopify_sales once lost order_id.
+    #: `day` is read back out of the payload like any other column.
+    pk_column="sales_day_id",
+    date_columns=["day"],
+    text_columns=[],
+    numeric_columns=[
+        "customers", "average_order_value", "total_sales", "quantity_ordered_per_order",
+        "orders", "new_customers", "returning_customers", "returning_customer_rate",
+        "total_sales_returning", "total_sales_first_time", "net_items_sold",
+        "quantity_ordered", "gross_sales", "net_sales", "discounts",
+    ],
+)
+
 #: Mirrors ingest_shopify.py's DISCOUNTS_GROUP_BY/METRICS. No single
 #: natural key (an order can carry more than one discount line) -- PK is
 #: the synthetic (day, order_id, discount_code, ...) hash ingest_shopify.py
@@ -582,6 +605,7 @@ _TABLES = [
     _Table("shopify_fulfillments", "fulfillments", _FULFILLMENTS_DDL, "TRUNCATE shopify_fulfillments", _FULFILLMENTS_INSERT),
     _Table("shopify_customer_analytics", "customer_analytics", _CUSTOMER_ANALYTICS_DDL, "TRUNCATE shopify_customer_analytics", _CUSTOMER_ANALYTICS_INSERT),
     _Table("shopify_sales", "sales", _SALES_DDL, "TRUNCATE shopify_sales", _SALES_INSERT),
+    _Table("shopify_sales_daily", "sales_daily", _SALES_DAILY_DDL, "TRUNCATE shopify_sales_daily", _SALES_DAILY_INSERT),
     _Table("shopify_discounts", "discounts", _DISCOUNTS_DDL, "TRUNCATE shopify_discounts", _DISCOUNTS_INSERT),
     _Table("shopify_inventory", "inventory", _INVENTORY_DDL, "TRUNCATE shopify_inventory", _INVENTORY_INSERT),
 ]

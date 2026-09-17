@@ -123,7 +123,7 @@ ERROR_LOG_PATH = REPO_ROOT / "logs" / "shopify_ingest_errors.log"
 DEFAULT_PAGE_SIZE = 250
 DEFAULT_OBJECT_TYPES = [
     "shop", "products", "orders", "customers", "sessions", "fulfillments",
-    "customer_analytics", "sales", "discounts", "inventory",
+    "customer_analytics", "sales", "sales_daily", "discounts", "inventory",
 ]
 #: ShopifyQL has no cursor pagination for a date range -- chunk large
 #: ranges the same way app/services/meta/insights.py chunks Insights date
@@ -562,6 +562,56 @@ SALES_METRICS = [
 SALES_CHUNK_DAYS = 1
 SALES_LIMIT_PER_CHUNK = 10_000
 
+#: The store's own customer-acquisition report, mirrored verbatim:
+#:
+#:   FROM sales SHOW customers, average_order_value, total_sales,
+#:        quantity_ordered_per_order, orders, new_customers,
+#:        returning_customers, returning_customer_rate,
+#:        total_sales_returning, total_sales_first_time, net_items_sold
+#:   WHERE sales_channel != 'Return Prime: Order Return'
+#:   GROUP BY day
+#:
+#: WHY THIS EXISTS ALONGSIDE `sales`
+#: --------------------------------
+#: Three of these metrics cannot be derived from the order-grain `sales`
+#: table, and deriving them anyway is what made the dashboard disagree
+#: with Shopify:
+#:
+#:   customers, new_customers, returning_customers
+#:       Distinct COUNTS. They do not sum. At order grain each row is
+#:       one order, so adding them up yields order counts: measured
+#:       2026-08-30, 635 returning ORDERS against 601 returning
+#:       CUSTOMERS. `returning_customer_rate` is returning_customers /
+#:       customers, so it inherited the same error.
+#:
+#:   net_items_sold
+#:       NET of returns. `sales` carries only `quantity_ordered`, which
+#:       is gross -- 2,074 against 1,889 on 2026-08-18.
+#:
+#:   average_order_value
+#:       Shopify's is the MEAN of the per-order values, not
+#:       total_sales / orders. Those differ because some rows carry
+#:       sales without carrying an order (1,298 rows vs 1,239 orders on
+#:       2026-08-18), giving 1,227.60 against a derived 1,158.40.
+#:
+#: Day grain means the whole mirrored range fits in one query, so this
+#: costs a single request per run rather than one per day.
+#:
+#: The WHERE is part of the report's definition, not a display option:
+#: Return Prime rows are refund records that carry orders but no
+#: revenue. Including them would not change total_sales and would
+#: inflate the order count by ~11%.
+SALES_DAILY_GROUP_BY = ["day"]
+SALES_DAILY_METRICS = [
+    "customers", "average_order_value", "total_sales", "quantity_ordered_per_order",
+    "orders", "new_customers", "returning_customers", "returning_customer_rate",
+    "total_sales_returning", "total_sales_first_time", "net_items_sold",
+    "quantity_ordered", "gross_sales", "net_sales", "discounts",
+]
+SALES_DAILY_WHERE = "sales_channel != 'Return Prime: Order Return'"
+SALES_DAILY_CHUNK_DAYS = 365
+SALES_DAILY_LIMIT_PER_CHUNK = 1_000
+
 #: ShopifyQL `discounts` table -- shopify.dev/docs/api/shopifyql/2026-10/
 #: schemas/sales_revenue/discounts. Confirmed live: ~890 rows/day at
 #: (day, order_id, discount_code, discount_type) grain -- some orders carry
@@ -832,6 +882,11 @@ _SHOPIFYQL_TABLE_CONFIG: dict[str, dict[str, Any]] = {
         "table": "sales", "group_by": SALES_GROUP_BY, "metrics": SALES_METRICS,
         "chunk_days": SALES_CHUNK_DAYS, "limit_per_chunk": SALES_LIMIT_PER_CHUNK, "order_by": None,
     },
+    "sales_daily": {
+        "table": "sales", "group_by": SALES_DAILY_GROUP_BY, "metrics": SALES_DAILY_METRICS,
+        "chunk_days": SALES_DAILY_CHUNK_DAYS, "limit_per_chunk": SALES_DAILY_LIMIT_PER_CHUNK,
+        "order_by": "day", "where": SALES_DAILY_WHERE,
+    },
     "discounts": {
         "table": "discounts", "group_by": DISCOUNTS_GROUP_BY, "metrics": DISCOUNTS_METRICS,
         "chunk_days": DISCOUNTS_CHUNK_DAYS, "limit_per_chunk": DISCOUNTS_LIMIT_PER_CHUNK, "order_by": None,
@@ -862,10 +917,12 @@ async def _fetch_shopifyql_table(
     show_cols = ", ".join(cfg["group_by"] + cfg["metrics"])
     group_by = ", ".join(cfg["group_by"])
     order_by_clause = f" ORDER BY {cfg['order_by']}" if cfg["order_by"] else ""
+    where_clause = f"WHERE {cfg['where']} " if cfg.get("where") else ""
     try:
         for chunk_start, chunk_end in _date_chunks(date_start, date_end, cfg["chunk_days"]):
             q = (
                 f"FROM {cfg['table']} SHOW {show_cols} "
+                f"{where_clause}"
                 f"SINCE {chunk_start.isoformat()} UNTIL {chunk_end.isoformat()} "
                 f"GROUP BY {group_by}{order_by_clause} LIMIT {cfg['limit_per_chunk']}"
             )
@@ -1139,6 +1196,7 @@ _GROUP_BY_ROW_KEY_FIELDS: dict[str, tuple[str, list[str]]] = {
     # legitimately appear on more than one day, which order_id alone
     # cannot express.
     "sales": ("sale", SALES_GROUP_BY),
+    "sales_daily": ("sale_daily", SALES_DAILY_GROUP_BY),
 }
 
 

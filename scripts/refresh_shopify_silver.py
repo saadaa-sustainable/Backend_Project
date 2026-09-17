@@ -97,11 +97,11 @@ if __name__ == "__main__":
                          "Use after editing the flatten SQL -- the freshness check "
                          "watches bronze, so a code change alone never triggers it.")
     ap.add_argument("--skip-attribution", action="store_true",
-                    help="Run only the eight-table Shopify flatten and skip the "
+                    help="Run only the nine-table Shopify flatten and skip the "
                          "order-attribution rebuild. The inverse of "
                          "--only-attribution; use after a ShopifyQL backfill.")
     ap.add_argument("--only-attribution", action="store_true",
-                    help="Skip the eight-table Shopify flatten and run only the "
+                    help="Skip the nine-table Shopify flatten and run only the "
                          "order-attribution + landing-page rebuild. Use when the AD side "
                          "moved (roster refresh, meta_entities flatten, cascade change) "
                          "and the Shopify side did not.")

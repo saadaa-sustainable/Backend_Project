@@ -128,6 +128,7 @@ def _composed() -> dict[str, str]:
         "analytics:_SHOPIFY_DAY_SQL": analytics._SHOPIFY_DAY_SQL,
         "analytics:_SHOPIFY_CHANNEL_SQL": analytics._SHOPIFY_CHANNEL_SQL,
         "analytics:_SHOPIFY_CUSTOMERS_SQL": analytics._SHOPIFY_CUSTOMERS_SQL,
+        "analytics:_SHOPIFY_DAY_DERIVED_SQL": analytics._SHOPIFY_DAY_DERIVED_SQL,
         "analytics:_NAME_MISS_SUMMARY_SQL": analytics._NAME_MISS_SUMMARY_SQL,
         # Multi-Filter compiles to a boolean expression spliced into
         # base_where, so parse it inside a real statement for each join.

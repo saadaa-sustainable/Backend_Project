@@ -3,30 +3,43 @@
 /**
  * Shopify Analytics -- customer acquisition, day by day.
  *
- * Port of the store's own ShopifyQL report (FROM sales ... GROUP BY day
- * WITH TOTALS, PERCENT_CHANGE, COMPARE TO
- * previous_year_match_day_of_week), served from the mirrored
- * `shopify_sales` table rather than a live ShopifyQL call.
+ * The store's own ShopifyQL report (FROM sales ... GROUP BY day WITH
+ * TOTALS, PERCENT_CHANGE, COMPARE TO previous_year_match_day_of_week),
+ * mirrored at day grain into `shopify_sales_daily` and read back
+ * verbatim. Every daily figure is Shopify's own, so the section
+ * reconciles with Shopify Analytics by construction -- verified metric
+ * by metric against the store's report for Aug 18 - Sep 17 2026.
  *
- * Three things the UI states rather than hides, because each one is a
- * place the port is NOT a literal translation:
+ * An earlier build derived these from the order-grain `shopify_sales`
+ * table instead, and three families of metric came out wrong, which is
+ * why the day-grain mirror exists:
  *
- *   * "New" and "Returning" are ORDER counts split by whether the buyer
- *     was new. ShopifyQL's sales table has no distinct-customer metric
- *     at this grain, so the separate Customers tile comes from
- *     shopify_orders and will not equal new + returning.
+ *   * customers / new_customers / returning_customers are DISTINCT
+ *     counts and do not sum. Adding order-grain rows gave 635 returning
+ *     "customers" on 2026-08-30 where Shopify counts 601 buyers.
  *
- *   * Units is `quantity_ordered`, which is GROSS of returns. The
- *     original asked for net_items_sold; the mirrored dataset has no
- *     such column, so the tile is labelled for what it actually is.
+ *   * Units must be net_items_sold, NET of returns -- 1,889 against a
+ *     gross quantity_ordered of 2,074 on 2026-08-18. Both are shown.
+ *
+ *   * average_order_value is the MEAN of per-order values, not
+ *     total_sales / orders: 1,227.60 against a derived 1,158.40.
+ *
+ * Two places the port still is not a literal translation, both stated
+ * in the UI rather than hidden:
+ *
+ *   * Window totals for Customers and Returning customers cannot come
+ *     from the day rows, because distinct counts do not sum. They come
+ *     from our own order mirror, which can de-duplicate across the
+ *     window but runs hours behind the sales fetch.
  *
  *   * The comparison is 364 days back, not 365 -- 52 whole weeks, so the
  *     weekday lines up. Retail demand is weekday-shaped.
  *
- * The Return Prime channel is excluded by default. Those rows are
- * refunds, and including them makes a day's revenue read low or
- * negative -- which is exactly what the store's own report guards
- * against with `WHERE sales_channel != 'Return Prime: Order Return'`.
+ * The Return Prime channel is excluded, exactly as the store's report
+ * does with `WHERE sales_channel != 'Return Prime: Order Return'`.
+ * Those rows are refund records carrying orders but no revenue.
+ * Including them means leaving Shopify's own numbers behind, so that
+ * toggle switches to a derived fallback and says so.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -77,8 +90,8 @@ type Metric = "total_sales" | "orders" | "new_customers" | "units";
 const METRICS: { key: Metric; label: string; money?: boolean }[] = [
   { key: "total_sales", label: "Total sales", money: true },
   { key: "orders", label: "Orders" },
-  { key: "new_customers", label: "New (orders)" },
-  { key: "units", label: "Units" },
+  { key: "new_customers", label: "New customers" },
+  { key: "units", label: "Net items" },
 ];
 
 export function ShopifyAnalytics() {
@@ -186,20 +199,26 @@ export function ShopifyAnalytics() {
 
       {!loading && !error && data && t && p && (
         <>
-          {/* Say which days are partial, and why. The Customers tile
-              reads from shopify_orders while everything else reads from
-              shopify_sales; the two are fetched by different jobs, so on
-              any given morning one is hours behind the other. Left
-              unsaid, that looks like customers collapsing. */}
+          {/* The day rows are Shopify's own and need no caveat. The two
+              window-level distinct counts do: they are de-duplicated
+              across the window from our order mirror, which is fetched
+              by a different job and runs hours behind. Left unsaid,
+              a morning's lag reads as customers collapsing. */}
           {(() => {
             const notes: string[] = [];
             if (data.sales_through && data.sales_through < range.to)
-              notes.push(`sales data ends ${data.sales_through}`);
-            if (data.orders_through && data.orders_through < range.to)
-              notes.push(`order data (Customers) ends ${data.orders_through}`);
-            const lastDay = data.rows.at(-1)?.day;
-            if (lastDay && data.orders_through && lastDay >= data.orders_through)
-              notes.push(`${lastDay} is a partial day`);
+              notes.push(`Shopify's data ends ${data.sales_through}`);
+            if ((t.customers_coverage_pct ?? 100) < COVERAGE_OK)
+              notes.push(
+                `the order mirror behind Customers covers ${pct(t.customers_coverage_pct, 0)} `
+                + `of the window${data.orders_through ? ` (through ${data.orders_through})` : ""}`,
+              );
+            if (data.source === "derived")
+              notes.push(
+                "returns are included, so these are aggregated from order grain rather than "
+                + "mirrored from Shopify: per-day customer counts and New customers are blank, "
+                + "and Net items falls back to gross",
+              );
             if (!notes.length) return null;
             return (
               <div
@@ -207,9 +226,9 @@ export function ShopifyAnalytics() {
                 style={{ backgroundColor: theme.warningBg, borderColor: theme.warningMid,
                          color: theme.warningText }}
               >
-                <b>Partial window.</b> {notes.join(" \u00b7 ")}. Sales metrics and the Customers
-                tile come from two separately-fetched tables, so the newest day can be
-                incomplete in one but not the other.
+                <b>Partial window.</b> {notes.join(" \u00b7 ")}. Every per-day figure below is
+                Shopify&rsquo;s own; only the Customers and Returning customers totals are
+                computed here, and they understate the window by roughly the shortfall.
               </div>
             );
           })()}
@@ -240,41 +259,41 @@ export function ShopifyAnalytics() {
                   <Delta now={t.customers} before={p.customers} />
                 )
               }
-              title="Distinct buyers over the whole window -- a repeat shopper counts once, so this is NOT the sum of the daily figures. Taken from shopify_orders for the same orders every other metric here uses; guest checkouts count as one buyer each. Will NOT equal new + returning, which are order counts."
+              title="Distinct buyers over the whole window -- a repeat shopper counts once, so this is NOT the sum of the daily figures (which would give ~38,200 for a window holding ~36,100). The per-day figures in the table are Shopify's own; this total is de-duplicated across the window from our order mirror."
             />
             <StatTile
               label="Avg order value" color={theme.accentPurple}
               value={rs(t.average_order_value)}
               sub={<Delta now={t.average_order_value} before={p.average_order_value} />}
-              title="Total sales / orders, computed over the whole window -- not an average of the daily averages."
+              title="Shopify's own average_order_value: the mean of the per-ORDER values, not total sales / orders. The two differ because some rows carry sales without carrying an order. The window figure weights each day's mean by the orders behind it."
             />
             <StatTile
-              label="Units" color={theme.warningMid}
+              label="Net items sold" color={theme.warningMid}
               value={num(t.units)}
-              sub={`${dec(t.units_per_order)} per order`}
-              title="quantity_ordered -- GROSS of returns. The original report asked for net_items_sold, which the mirrored dataset does not carry."
+              sub={`${dec(t.units_per_order)} per order \u00b7 ${num(t.units_gross)} gross`}
+              title="net_items_sold -- NET of returns, as the report asks for. The gross figure beside it is quantity_ordered, which is what the ad-side metrics divide by."
             />
           </div>
 
           {/* acquisition split */}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <StatTile
-              label="New (orders)" color={theme.successMid}
+              label="New customers" color={theme.successMid}
               value={num(t.new_customers)}
               sub={rs(t.total_sales_first_time)}
-              title="Orders placed by a first-time buyer, and the revenue from them."
+              title="First-time buyers, and the revenue from them. Safe to sum across days: a shopper is new exactly once, ever, so no day can double-count them."
             />
             <StatTile
-              label="Returning (orders)" color={theme.infoMid}
+              label="Returning customers" color={theme.infoMid}
               value={num(t.returning_customers)}
               sub={rs(t.total_sales_returning)}
-              title="Orders placed by a returning buyer, and the revenue from them."
+              title="Distinct returning buyers, and the revenue from them. Like Customers, this total is de-duplicated across the window rather than summed from the days."
             />
             <StatTile
               label="Returning rate" color={theme.accentPink}
               value={pct(t.returning_customer_rate)}
               sub={<Delta now={t.returning_customer_rate} before={p.returning_customer_rate} />}
-              title="Returning orders / (new + returning). Share of ORDERS, not of customers."
+              title="Shopify's definition: returning customers / all customers. A share of BUYERS, not of orders."
             />
             <StatTile
               label="Discounts" color={theme.errorMid}
@@ -369,7 +388,7 @@ export function ShopifyAnalytics() {
             <table className="w-full text-left text-xs">
               <thead className="sticky top-0 bg-white">
                 <tr className="border-b border-border-primary text-[11px] text-text-secondary">
-                  {["Day", "Orders", "Customers", "Total sales", "AOV", "Units", "Units/order",
+                  {["Day", "Orders", "Customers", "Total sales", "AOV", "Net items", "Units/order",
                     "New", "Returning", "Returning %", "First-time ₹", "Returning ₹", "Discounts"].map((h, i) => (
                     <th key={h} className={"px-2 py-2 font-medium " + (i === 0 ? "" : "text-right")}>{h}</th>
                   ))}
@@ -380,17 +399,7 @@ export function ShopifyAnalytics() {
                   <tr key={r.day} className="border-b border-border-soft hover:bg-bg-surface">
                     <td className="px-2 py-1.5 font-mono">{r.day}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{num(r.orders)}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums"
-                        style={(r.customers_coverage_pct ?? 100) < COVERAGE_OK
-                                 ? { color: theme.warningText }
-                                 : undefined}
-                        title={(r.customers_coverage_pct ?? 100) < COVERAGE_OK
-                                 ? `Partial: the order mirror holds ${pct(r.customers_coverage_pct, 0)} `
-                                   + "of this day's orders, so the buyer count is that fraction of the day."
-                                 : undefined}>
-                      {num(r.customers)}
-                      {(r.customers_coverage_pct ?? 100) < COVERAGE_OK ? " *" : ""}
-                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{num(r.customers)}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{rs(r.total_sales)}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{rs(r.average_order_value)}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{num(r.units)}</td>
@@ -415,10 +424,11 @@ export function ShopifyAnalytics() {
           </div>
 
           <p className="text-[11px] leading-relaxed text-text-tertiary">
-            <b>New</b> and <b>Returning</b> count <b>orders</b> split by whether the buyer was
-            new — ShopifyQL&rsquo;s sales dataset has no distinct-customer metric at this grain, so
-            they will not sum to <b>Customers</b>, which comes from the order table.
-            <b> Units</b> is <code>quantity_ordered</code>, gross of returns. Changes compare
+            Every per-day figure is Shopify&rsquo;s own, mirrored from the store&rsquo;s report at
+            day grain. <b>New</b> and <b>Returning</b> are distinct <b>buyers</b>, so they will not
+            sum to <b>Orders</b>, and a shopper who was new and then returned inside the window is
+            counted in both. <b>Net items</b> is <code>net_items_sold</code>, net of returns.
+            Changes compare
             against the same window <b>364 days</b> back — 52 whole weeks, so the weekday lines up. They are blank where that window predates the mirrored data, which starts 2026-01-01.
           </p>
         </>

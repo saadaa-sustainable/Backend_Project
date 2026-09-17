@@ -2126,21 +2126,23 @@ export function fetchAdsAnalyseLaunches(params: {
 // Shopify Analytics -- customer acquisition
 // ---------------------------------------------------------------------
 
+/** One day of the store's own report, mirrored verbatim -- every figure
+ *  is Shopify's own. The three customer fields are null only on the
+ *  derived fallback (include_returns), where order grain cannot express
+ *  a distinct count. */
 export interface ShopifyDayRow {
   day: string;
   orders: number;
-  /** Distinct buyers. Null, or understated, when the order mirror has
-   *  not caught up -- `customers_coverage_pct` is the share of that
-   *  day's orders it actually holds, and below ~99 the figure is a
-   *  fraction of the day rather than the day. */
   customers: number | null;
-  customers_coverage_pct: number | null;
   total_sales: number;
   average_order_value: number | null;
+  /** net_items_sold -- NET of returns, as the report asks. */
   units: number;
+  /** quantity_ordered -- GROSS. The figure ad-side metrics divide by. */
+  units_gross: number;
   units_per_order: number | null;
-  new_customers: number;
-  returning_customers: number;
+  new_customers: number | null;
+  returning_customers: number | null;
   returning_customer_rate: number | null;
   total_sales_first_time: number;
   total_sales_returning: number;
@@ -2149,10 +2151,13 @@ export interface ShopifyDayRow {
   net_sales: number;
 }
 
-/** Same fields, except `customers`, which is distinct across the whole
- *  window rather than summed from the days -- a repeat shopper is one
- *  customer, not one per day they ordered. */
-export type ShopifyTotals = Omit<ShopifyDayRow, "day">;
+export type ShopifyTotals = Omit<ShopifyDayRow, "day"> & {
+  /** How much of the window our order mirror holds. `customers` and
+   *  `returning_customers` are distinct counts, which do not sum, so
+   *  they come from that mirror rather than from the day rows; below
+   *  ~99 they understate the window by roughly the shortfall. */
+  customers_coverage_pct: number | null;
+};
 
 export interface ShopifyChannelRow {
   sales_channel: string;
@@ -2178,6 +2183,10 @@ export interface ShopifyAnalyticsResponse {
   previous: ShopifyTotals;
   channels: ShopifyChannelRow[];
   excluded_channels: string[];
+  /** "shopify_daily": day figures are Shopify's own. "derived": the
+   *  returns-included fallback, aggregated from order grain, with the
+   *  distinct-customer metrics unavailable. */
+  source: "shopify_daily" | "derived";
 }
 
 export function fetchShopifyAnalytics(params: {
