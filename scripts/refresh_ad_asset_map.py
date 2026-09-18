@@ -33,9 +33,16 @@ STRICT MATCHING: ONE IDENTIFIER PER MEDIA, AGAINST ad_name
 An asset is tied to an ad if and only if that asset's own identifier
 appears inside the ad's name. One column per media, nothing else:
 
-    video       content_asset_register.asset_id        CPL012-0963
-    graphic     content_graphic_register.requisition_id GAD-Sep-1493
-    influencer  content_influencer_posts.post_id       SIF-15233-P1
+    video       content_asset_register.asset_id          CPL012-0963
+    video       content_iterated_register.requisition_id ITE-Sep-273
+    graphic     content_graphic_register.requisition_id  GAD-Sep-1493
+    influencer  content_influencer_posts.post_id         SIF-15233-P1
+
+    Two registers report as `video`. content_asset_register is keyed on
+    the asset itself; content_iterated_register on the requisition an
+    iteration was cut under. An ad name can carry both, so the asset
+    code wins (media_pri 1 vs 2) -- it identifies the creative, while the
+    requisition only identifies the batch.
 
 Nothing else is consulted. Not nomenclature, not the creator username,
 not the register's own ad_id / matched_ad_id / computed_is_tested
@@ -222,7 +229,7 @@ CREATE INDEX IF NOT EXISTS ix_ad_asset_map_media_source
 CANDIDATES_SQL = """
 CREATE TEMP TABLE _asset_cand ON COMMIT DROP AS
 SELECT al.ad_id, al.ad_name, car.asset_id AS asset_id,
-       'video'::text AS media, 1 AS media_pri,
+       'video'::text AS media, 1 AS media_pri, 'asset_id'::text AS match_src,
        al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
        al.spend, al.impressions, al.purchases, al.conv_value,
        al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
@@ -234,7 +241,26 @@ SELECT al.ad_id, al.ad_name, car.asset_id AS asset_id,
     ON length(car.asset_id) >= 6
    AND al.ad_name ~* ('(^|[^0-9A-Za-z])' || car.asset_id || '([^0-9]|$)')
 UNION ALL
-SELECT al.ad_id, al.ad_name, cgr.requisition_id, 'graphic'::text, 2,
+-- Iterated video: a requisition id ('ITE-Sep-273'), not an asset_id.
+-- Reports as media='video' because that is what it is, and because the
+-- media column is a Literal["video","graphic","influencer"] all the way
+-- out to the UI. Ranked BELOW the main video register: when an ad name
+-- carries both a CPL asset code and an ITE requisition, the asset code
+-- names the creative itself and the requisition only names the batch it
+-- was cut in, so the asset code is the better answer.
+SELECT al.ad_id, al.ad_name, cir.requisition_id, 'video'::text, 2, 'asset_id',
+       al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
+       al.spend, al.impressions, al.purchases, al.conv_value,
+       al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
+       al.thruplays, al.three_sec_video_plays AS three_sec_plays,
+       ((al.outbound_clicks->0)->>'value')::numeric AS outbound_clicks,
+       al.post_engagements
+  FROM ad_lifecycle al
+  JOIN (SELECT DISTINCT requisition_id FROM public.content_iterated_register) cir
+    ON length(cir.requisition_id) >= 6
+   AND al.ad_name ~* ('(^|[^0-9A-Za-z])' || cir.requisition_id || '([^0-9]|$)')
+UNION ALL
+SELECT al.ad_id, al.ad_name, cgr.requisition_id, 'graphic'::text, 3, 'asset_id',
        al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
        al.spend, al.impressions, al.purchases, al.conv_value,
        al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
@@ -246,7 +272,7 @@ SELECT al.ad_id, al.ad_name, cgr.requisition_id, 'graphic'::text, 2,
     ON length(cgr.requisition_id) >= 6
    AND al.ad_name ~* ('(^|[^0-9A-Za-z])' || cgr.requisition_id || '([^0-9]|$)')
 UNION ALL
-SELECT al.ad_id, al.ad_name, cip.post_id, 'influencer'::text, 3,
+SELECT al.ad_id, al.ad_name, cip.post_id, 'influencer'::text, 4, 'asset_id',
        al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
        al.spend, al.impressions, al.purchases, al.conv_value,
        al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
@@ -257,6 +283,25 @@ SELECT al.ad_id, al.ad_name, cip.post_id, 'influencer'::text, 3,
   JOIN public.content_influencer_posts cip
     ON length(cip.post_id) >= 6
    AND al.ad_name ~* ('(^|[^0-9A-Za-z])' || cip.post_id || '([^0-9]|$)')
+UNION ALL
+-- Re-spellings, from scripts/recover_asset_ids.py: ids the ad name
+-- writes with different separators or zero-padding ('ITE_Feb19' for
+-- 'ITE-Feb-19'). Every row there was already checked to exist in a
+-- register, so this join adds no new asset -- only a new way of
+-- reaching one.
+--
+-- media_pri 5, the lowest: a VERBATIM id in the same ad name always
+-- wins. A re-spelling is only ever the answer when nothing was spelled
+-- correctly.
+SELECT al.ad_id, al.ad_name, r.asset_id, r.media, 5, 'recovered',
+       al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
+       al.spend, al.impressions, al.purchases, al.conv_value,
+       al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
+       al.thruplays, al.three_sec_video_plays AS three_sec_plays,
+       ((al.outbound_clicks->0)->>'value')::numeric AS outbound_clicks,
+       al.post_engagements
+  FROM ad_lifecycle al
+  JOIN public.ad_asset_recovered r ON r.ad_id = al.ad_id
 """
 
 
@@ -269,7 +314,7 @@ INSERT INTO public.ad_asset_map
      thruplays, three_sec_plays, outbound_clicks, post_engagements)
 SELECT DISTINCT ON (ad_id)
        ad_id, ad_name, asset_id, media,
-       'asset_id'::text AS match_source, 1::smallint AS match_rank,
+       match_src AS match_source, 1::smallint AS match_rank,
        true AS asset_in_register,
        ad_created_date, account_name, category, spend, impressions, purchases,
        conv_value, ncp_count, ftewv_count, link_clicks,
@@ -322,6 +367,10 @@ SELECT
   (SELECT COUNT(*) FROM public.content_asset_register car
     WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
                        WHERE m.asset_id = car.asset_id))       AS video_untested,
+  (SELECT COUNT(*) FROM (SELECT DISTINCT requisition_id
+                           FROM public.content_iterated_register) cir
+    WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                       WHERE m.asset_id = cir.requisition_id)) AS iterated_untested,
   (SELECT COUNT(*) FROM public.content_graphic_register cgr
     WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
                        WHERE m.asset_id = cgr.requisition_id)) AS graphic_untested,
@@ -374,7 +423,8 @@ def main() -> int:
             cur.execute(SUMMARY_SQL)
             by_source = cur.fetchall()
             cur.execute(UNTESTED_SQL)
-            video_untested, graphic_untested, influencer_untested = cur.fetchone()
+            (video_untested, iterated_untested, graphic_untested,
+             influencer_untested) = cur.fetchone()
 
             if args.dry_run:
                 conn.rollback()
@@ -400,6 +450,7 @@ def main() -> int:
     print("")
     print("    register assets never linked to an ad (genuinely untested):")
     print(f"      video      : {video_untested:,}")
+    print(f"      iterated   : {iterated_untested:,}")
     print(f"      graphic    : {graphic_untested:,}")
     print(f"      influencer : {influencer_untested:,}")
     if conflicts:

@@ -45,16 +45,38 @@ from app.services.silver.shopify_flatten import refresh_shopify_tables  # noqa: 
 from app.services.silver.shopify_ad_attribution import refresh_attribution_tables  # noqa: E402
 
 
-async def main(force: bool) -> None:
+async def main(force: bool, only_attribution: bool, skip_attribution: bool) -> None:
     t0 = datetime.utcnow()
     print(f"[{t0.isoformat(timespec='seconds')}Z] Shopify silver refresh: start", flush=True)
 
-    mode = "rebuilding EVERY table (--force)" if force else "rebuilding only tables whose bronze moved"
-    print(f"  [1/2] refresh_shopify_tables -- {mode}...", flush=True)
-    async with session_scope() as session:
-        counts_a = await refresh_shopify_tables(session, force=force)
-    for k, v in counts_a.items():
-        print(f"        {k:35s} {v:,} rows", flush=True)
+    if only_attribution:
+        # Step 1 re-derives eight tables from ~4.9M bronze rows and takes
+        # the better part of an hour. Attribution does not read any of
+        # its output that step 1 changes here -- it reads shopify_orders,
+        # which is already current -- so when the thing that moved is the
+        # AD side (a roster refresh, a meta_entities flatten, a change to
+        # the cascade), re-deriving Shopify silver first buys nothing and
+        # puts an hour of avoidable load on the database.
+        print("  [1/2] refresh_shopify_tables -- SKIPPED (--only-attribution)", flush=True)
+    else:
+        mode = "rebuilding EVERY table (--force)" if force else "rebuilding only tables whose bronze moved"
+        print(f"  [1/2] refresh_shopify_tables -- {mode}...", flush=True)
+        async with session_scope() as session:
+            counts_a = await refresh_shopify_tables(session, force=force)
+        for k, v in counts_a.items():
+            print(f"        {k:35s} {v:,} rows", flush=True)
+
+    if skip_attribution:
+        # The attribution rebuild re-derives 368k orders and takes ~20
+        # minutes. When only the ShopifyQL flatten matters -- a sales or
+        # customer_analytics backfill, say -- there is nothing for it to
+        # do, because it reads shopify_orders, which that backfill does
+        # not touch.
+        print("  [2/2] refresh_attribution_tables -- SKIPPED (--skip-attribution)", flush=True)
+        dt = (datetime.utcnow() - t0).total_seconds()
+        print(f"\n[OK] Shopify silver refresh complete in {dt:.1f}s", flush=True)
+        await dispose_engine()
+        return
 
     print("  [2/2] refresh_attribution_tables (order_attribution + landing_page)...", flush=True)
     async with session_scope() as session:
@@ -74,4 +96,14 @@ if __name__ == "__main__":
                     help="Rebuild every silver table even if its bronze is unchanged. "
                          "Use after editing the flatten SQL -- the freshness check "
                          "watches bronze, so a code change alone never triggers it.")
-    asyncio.run(main(ap.parse_args().force))
+    ap.add_argument("--skip-attribution", action="store_true",
+                    help="Run only the nine-table Shopify flatten and skip the "
+                         "order-attribution rebuild. The inverse of "
+                         "--only-attribution; use after a ShopifyQL backfill.")
+    ap.add_argument("--only-attribution", action="store_true",
+                    help="Skip the nine-table Shopify flatten and run only the "
+                         "order-attribution + landing-page rebuild. Use when the AD side "
+                         "moved (roster refresh, meta_entities flatten, cascade change) "
+                         "and the Shopify side did not.")
+    _args = ap.parse_args()
+    asyncio.run(main(_args.force, _args.only_attribution, _args.skip_attribution))

@@ -279,6 +279,14 @@ body {
   top: 0;
   background: #f8fafc;
   z-index: 1;
+  /* Headers never wrap. The nowrap rule below only covered tbody, so
+     while every DATA cell stayed on one line the headers broke across
+     two and three ("Ad Name", "50k Imp. Date", "Reach Weight %"),
+     giving a ragged three-line header band over a one-line table. */
+  white-space: nowrap;
+  padding-left: 0.625rem;
+  padding-right: 0.625rem;
+  vertical-align: bottom;
 }
 .ae-table tbody td {
   white-space: nowrap;
@@ -358,3 +366,15 @@ body {
 
 .ai-in-pill  { background: #dbeafe; color: #1e40af; }
 .ai-ex-pill  { background: #fee2e2; color: #991b1b; }
+
+/* Creative Testing asset inspector.
+   The table is column-driven and can carry 65 columns, so it must size
+   to its CONTENT and let the wrapper scroll. Without nowrap the browser
+   compresses cells to fit the container and every extra column squeezes
+   the rest -- asset ids wrapped across three lines and category labels
+   broke mid-phrase. Cells that hold free text set their own max-width
+   and truncate instead. */
+.ct-asset-table thead th,
+.ct-asset-table tbody td {
+  white-space: nowrap;
+}

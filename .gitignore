@@ -52,3 +52,15 @@ admin/out/
 # from 2026-09-15). The .xlsx files already tracked here are schema/field
 # references, not performance data; keep it that way.
 exports/*.csv
+
+# Nested ad-level exports. The rule above only covers exports/*.csv; the
+# dated run directories (exports/mapping_<date>/preview/*.csv) carry the
+# same real ad names, spend and revenue and must not be published either.
+exports/**/*.csv
+exports/**/*.json
+
+# Manual exports pulled out of creatorhub so the loaders have something
+# to read (scripts/load_cleaned_data_posts.py names the expected paths).
+# They are lists of creator handles and the campaigns they ran, which is
+# not something this PUBLIC repo should carry.
+data/

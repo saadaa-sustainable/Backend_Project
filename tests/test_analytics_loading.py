@@ -40,7 +40,8 @@ def _creative_payload(*, empty_page: bool = False) -> dict:
         copy_ads=1, ads_in_window=2, asset_created="2026-09-01", spend=100,
     )
     totals = {name: 0 for name in analytics.CreativeTestingTotals.model_fields}
-    totals.update(assets=42, new_creatives=30, iterations=12, spend=10000,
+    totals.update(assets=42, new_creatives=30, historical_discarded=8,
+                  refresh_discarded=4, spend=10000,
                   roas=2.5, cost_per_ncp=None, cost_per_ftewv=None)
     return {
         "rows": [] if empty_page else [row], "totals": totals,
@@ -151,7 +152,11 @@ async def test_creative_testing_decodes_json_and_defaults_without_losing_empty_p
     assert params == {"from_date": date(2026, 9, 1), "to_date": date(2026, 9, 15),
                       "limit": 2000, "offset": 0}
     assert response.total == 42
-    assert response.kind_counts == {"new": 30, "iteration": 0}
+    # Every bucket is seeded, so an empty one renders its tab at zero
+    # instead of disappearing from the strip.
+    assert response.kind_counts == {
+        "new": 30, "historical_discarded": 0, "refresh_discarded": 0,
+    }
     assert response.category_counts == {"Winner": 20, "Discarded": 22}
     assert response.totals.cost_per_ncp is None
     if empty_page:
@@ -237,7 +242,14 @@ async def test_creative_testing_ad_links_keep_asset_preview_and_metrics(ad_field
     aggregate = next(cte for cte in statement.withClause.ctes if cte.ctename == "agg")
     representative = next(target for target in aggregate.ctequery.targetList
                           if target.name == "preview_ad_id")
-    assert "array_agg(m.ad_id ORDER BY m.spend DESC NULLS LAST, m.ad_id)" in RawStream()(representative)
+    # Window spend first, lifetime only as the tie-break. The panel is
+    # scoped to the selected dates, so the ad it links out to has to be
+    # the one that actually ran then -- ordering by lifetime spend alone
+    # could open an ad that spent nothing in the window being viewed.
+    assert (
+        "array_agg(m.ad_id ORDER BY COALESCE(w.spend, 0) DESC NULLS LAST, "
+        "m.spend DESC NULLS LAST, m.ad_id)"
+    ) in RawStream()(representative)
 
 
 @pytest.mark.parametrize("ad_fields", [

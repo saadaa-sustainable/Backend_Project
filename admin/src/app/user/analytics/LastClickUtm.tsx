@@ -12,7 +12,7 @@
  *   3. Channel drill-down row (only when a channel is selected) — top-N
  *      utm_source × count × sales for the picked channel.
  *   4. Tier KPI cards (Backend_Project's 6 tiers: ad_direct, ad_name_match,
- *      adset_scoped, adset_only, campaign_only, unmatched) — styled with
+ *      adset_scoped, adset_name_miss, campaign_only, unmatched) — styled with
  *      CTD's colour intent (ad_direct → green, adset → blue, weaker →
  *      amber, unmatched → gray). Click a tier card to filter.
  *   5. Filter row — utm_source (multi-select popover), utm_medium,
@@ -39,9 +39,11 @@ import {
   UtmOrderRow,
   fetchLastClickUtm,
 } from "@/lib/api";
-import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
+import { NameMissPanel } from "./NameMissPanel";
+import { StatTile } from "./StatTile";
 import { ExportButton } from "@/components/ExportButton";
+import { theme } from "@/lib/theme";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -59,75 +61,165 @@ const CHANNEL_ORDER: UtmChannel[] = [
   "Other",
 ];
 
-const CHANNEL_CLASS: Record<UtmChannel, string> = {
-  Meta: "ai-ch-meta",
-  Google: "ai-ch-google",
-  "Organic (IG)": "ai-ch-ig",
-  Retention: "ai-ch-retention",
-  "Brand Collab": "ai-ch-collab",
-  AI: "ai-ch-ai",
-  "Organic (Direct)": "ai-ch-direct",
-  Loyalty: "ai-ch-loyalty",
-  Other: "ai-ch-other",
+/** Accent carried on each tile's top border -- the one piece of colour
+ *  on an otherwise plain card, so a channel is findable at a glance
+ *  without nine differently-tinted backgrounds fighting each other.
+ *  Values come from the app palette (lib/theme.ts), not Meta's or
+ *  Google's brand blues: this panel sits next to Ads Analyse and
+ *  Creative Testing and has to read as the same application. */
+const CHANNEL_COLOR: Record<UtmChannel | "Total", string> = {
+  Total: theme.textPrimary,
+  Meta: theme.infoMid,
+  Google: theme.successMid,
+  "Organic (IG)": theme.accentPink,
+  Retention: theme.accentPurple,
+  "Brand Collab": theme.warningMid,
+  AI: "#0891B2",
+  "Organic (Direct)": theme.accentIndigo,
+  Loyalty: theme.errorMid,
+  Other: theme.textTertiary,
 };
 
-// KwikTile icon-square colour per channel (matches kwikengage's
-// coloured icon container -- meta blue, google green, retention
-// purple, etc.). Icons are unicode glyphs so no external dep.
-const CHANNEL_ICON_COLOR: Record<UtmChannel | "Total", "slate" | "sky" | "emerald" | "amber" | "rose" | "purple" | "teal"> = {
-  Total: "slate",
-  Meta: "sky",
-  Google: "emerald",
-  "Organic (IG)": "rose",
-  Retention: "purple",
-  "Brand Collab": "amber",
-  AI: "teal",
-  "Organic (Direct)": "teal",
-  Loyalty: "rose",
-  Other: "slate",
-};
-const CHANNEL_ICON: Record<UtmChannel | "Total", string> = {
-  Total: "Σ",
-  Meta: "M",
-  Google: "G",
-  "Organic (IG)": "IG",
-  Retention: "R",
-  "Brand Collab": "B",
-  AI: "AI",
-  "Organic (Direct)": "D",
-  Loyalty: "L",
-  Other: "?",
-};
-
-/** Backend's tier values (verified live 2026-08-29 in shopify_order_attribution).
- * Order matches attribution strength: strongest first, unmatched last. */
+/** The attribution cascade, in the order `_attribute_order()` actually
+ *  tries it (app/services/silver/shopify_ad_attribution.py:195-265).
+ *  First hit wins, so the steps are mutually exclusive and sum to the
+ *  order count -- which is what makes a step tile meaningful.
+ *
+ *  These are Backend_Project's own steps, deliberately NOT CTD's
+ *  labels. CTD's cascade has a "sep-normalised" and a "multi-attribute"
+ *  step that this pipeline does not compute; borrowing those names
+ *  would put a number under a heading that never produced it. Each
+ *  label below names the identifier the step actually resolved on.
+ *
+ *  `campaign_scoped` currently has 0 rows live, but the branch is
+ *  reachable, so it stays in the cascade and renders dimmed at zero
+ *  rather than silently swallowing rows if it ever fires. */
 const TIER_ORDER = [
   "ad_direct",
-  "ad_name_match",
   "adset_scoped",
-  "adset_only",
+  "ad_name_match",
+  "adset_name_miss",
+  "campaign_scoped",
   "campaign_only",
   "unmatched",
 ] as const;
+
+/** Steps that get a numbered tile.
+ *
+ *  Two tiers are deliberately excluded, for different reasons.
+ *
+ *  `adset_name_miss` is not a step at all -- it is STEP 2's failure
+ *  branch. Same inputs, same rule (adset + ad name); the only difference
+ *  is that the name did not match. Numbering it as its own step implied
+ *  a separate test that does not exist, and read as though the cascade
+ *  tried something new. It lives in the "Adset matched, ad name failed"
+ *  section below, where the utm_content can be shown against the names
+ *  actually in that adset -- which is the only view that lets anyone act
+ *  on it.
+ *
+ *  `campaign_only` was excluded too, while it read 0 in every recent
+ *  window. It is back: once the cascade learned to resolve utm_campaign
+ *  by NAME and not only by id (2026-09-16), the branch started firing
+ *  again -- 276 orders all-time, 22 in a 30-day window. A step that can
+ *  fire gets a tile; the empty-tile case is handled by `dim` instead.
+ *
+ *  `adset_name_miss` stays in TIER_ORDER so the tier badge in the order
+ *  table still renders and no row is silently dropped. */
+const STEP_TILES = TIER_ORDER.filter((t) => t !== "adset_name_miss");
 type TierKey = (typeof TIER_ORDER)[number];
 
+/** Short label for the tier badge inside the order table. */
 const TIER_LABEL: Record<TierKey, string> = {
   ad_direct: "Ad Direct",
-  ad_name_match: "Ad Name Match",
   adset_scoped: "Adset Scoped",
-  adset_only: "Adset Only",
+  ad_name_match: "Ad Name Match",
+  adset_name_miss: "Adset · Name Miss",
+  campaign_scoped: "Campaign Scoped",
   campaign_only: "Campaign Only",
   unmatched: "Unmatched",
 };
 
+/** Step tile heading + the one-line explanation of what was matched. */
+const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> = {
+  ad_direct: {
+    step: "STEP 1",
+    title: "UTM = AD ID",
+    hint: "utm_content is a numeric ad id that exists in the ad universe. The only exact match in the cascade.",
+  },
+  adset_scoped: {
+    step: "STEP 2",
+    title: "ADSET-SCOPED NAME",
+    hint: "utm_term names a known adset and utm_content matches an ad name inside it exactly (or after stripping Copy/_h0 suffixes). Beats a same-named ad elsewhere in the account. Orders whose adset matched but whose name did not are not a separate step -- they are this step's failures, in the section below.",
+  },
+  ad_name_match: {
+    step: "STEP 3",
+    title: "AD NAME",
+    hint: "Global ad-name match: exact, then punctuation-normalised, then substring. Ties broken by spend.",
+  },
+  adset_name_miss: {
+    // No step number: this is STEP 2's failure branch, not a test of
+    // its own. Rendered only in the section below, never in the strip.
+    step: "—",
+    title: "ADSET · NAME MISS",
+    hint: "The adset matched, but utm_content matched no ad name inside it under the strict rule. Adset and campaign are attributed; the ad is not. Treat this tile as a worklist -- every order in it is an ad whose utm_content and ad_name have drifted apart.",
+  },
+  campaign_scoped: {
+    step: "STEP 4",
+    title: "CAMPAIGN-SCOPED NAME",
+    hint: "utm_campaign names a known campaign and utm_content narrows to one ad inside it.",
+  },
+  campaign_only: {
+    step: "STEP 5",
+    title: "CAMPAIGN ONLY",
+    hint: "The campaign is known but no ad could be resolved.",
+  },
+  unmatched: {
+    step: "\u2014",
+    title: "UNMATCHED",
+    hint: "No step resolved. Scope to Meta or Google to read this as a real miss rate -- across all orders it is mostly organic traffic that never carried a click id.",
+  },
+};
+
+/** Which UTM field each step matched on -- mirrors the `matched_value`
+ *  assignments in `_attribute_order`. Steps that resolve a specific ad
+ *  all key off utm_content; the two fallbacks key off the field that was
+ *  all they had left. */
+const MATCHED_ON: Record<TierKey, string> = {
+  ad_direct: "utm_content",
+  adset_scoped: "utm_content",
+  ad_name_match: "utm_content",
+  adset_name_miss: "utm_term",
+  campaign_scoped: "utm_content",
+  campaign_only: "utm_campaign",
+  unmatched: "nothing",
+};
+
+/** Step accent -- strongest evidence green, weakest grey. */
+const TIER_COLOR: Record<TierKey, string> = {
+  ad_direct: theme.successMid,
+  adset_scoped: theme.infoMid,
+  ad_name_match: "#0891B2",
+  adset_name_miss: theme.warningMid,
+  campaign_scoped: theme.accentPurple,
+  campaign_only: theme.warningText,
+  unmatched: theme.textTertiary,
+};
+
 const TIER_CLASS: Record<TierKey, string> = {
   ad_direct: "ai-tier-ad_direct",
-  ad_name_match: "ai-tier-ad_name_match",
   adset_scoped: "ai-tier-adset_scoped",
-  adset_only: "ai-tier-adset_only",
+  ad_name_match: "ai-tier-ad_name_match",
+  adset_name_miss: "ai-tier-adset_only",
+  campaign_scoped: "ai-tier-adset_scoped",
   campaign_only: "ai-tier-campaign_only",
   unmatched: "ai-tier-unmatched",
 };
+
+/** The cascade only ever runs against paid click ids, so a match rate
+ *  computed over every order is meaningless -- Organic/Direct orders
+ *  were never candidates. These are the channels worth scoping to. */
+const STEP_SCOPES = ["All", "Meta", "Google"] as const;
+type StepScope = (typeof STEP_SCOPES)[number];
 
 // ─────────────────────────────────────────────────────────────────────
 // Formatters
@@ -253,6 +345,29 @@ const COLS: ColDef[] = [
       return <span className={`ai-tier ${cls}`}>{label}</span>;
     },
   },
+  {
+    // The tier says WHICH RULE matched; this says WHAT IT MATCHED ON.
+    // Both are needed to audit a row by eye -- "adset_scoped" tells you
+    // the adset narrowed the candidates, not which string did it. Which
+    // UTM field this came from depends on the step, so the tooltip names
+    // it rather than the header claiming a single source.
+    key: "matched_value",
+    header: "Matched Term",
+    kind: "text",
+    extract: (r) => r.matched_value,
+    render: (r) => {
+      if (!r.matched_value) return <span className="text-text-tertiary">—</span>;
+      const field = MATCHED_ON[(r.tier ?? "") as TierKey] ?? "utm field";
+      return (
+        <span
+          className="inline-block max-w-[260px] truncate font-mono text-[11px]"
+          title={`matched on ${field}: ${r.matched_value}`}
+        >
+          {r.matched_value}
+        </span>
+      );
+    },
+  },
   { key: "utm_source", header: "utm_source", kind: "text", extract: (r) => r.utm_source, render: (r) => <span>{r.utm_source ?? "—"}</span> },
   { key: "utm_medium", header: "utm_medium", kind: "text", extract: (r) => r.utm_medium, render: (r) => <span>{r.utm_medium ?? "—"}</span> },
   {
@@ -338,7 +453,9 @@ export function LastClickUtm() {
   const [rows, setRows] = useState<UtmOrderRow[]>([]);
   const [total, setTotal] = useState(0);
   const [channelCounts, setChannelCounts] = useState<Record<UtmChannel, ChannelSummary> | null>(null);
-  const [tierCounts, setTierCounts] = useState<Record<string, number>>({});
+  const [tierSummary, setTierSummary] = useState<Record<string, ChannelSummary>>({});
+  const [tierByChannel, setTierByChannel] =
+    useState<Record<string, Record<string, ChannelSummary>>>({});
   const [channelSources, setChannelSources] = useState<Record<UtmChannel, SourceBreakdown[]> | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -363,6 +480,16 @@ export function LastClickUtm() {
   const [onlyMatched, setOnlyMatched] = useState(false);
   const [onlyUnmatched, setOnlyUnmatched] = useState(false);
   const [search, setSearch] = useState("");
+
+  // Step-tile display controls. Scope decides WHICH orders the cascade
+  // is read over (see STEP_SCOPES); mode decides whether a tile leads
+  // with the order count or its share of that scope.
+  const [stepScope, setStepScope] = useState<StepScope>("Meta");
+  const [stepMode, setStepMode] = useState<"#" | "%">("#");
+  //: bumped by Refresh -- the tiles are a live read of a table the
+  //: nightly cascade rewrites, so re-running the same query is a real
+  //: action, not a no-op.
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Table state
   const [sortKey, setSortKey] = useState<string>("created_at");
@@ -403,7 +530,8 @@ export function LastClickUtm() {
         setRows(res.rows);
         setTotal(res.total);
         setChannelCounts(res.channel_counts);
-        setTierCounts(res.tier_counts);
+        setTierSummary(res.tier_summary ?? {});
+        setTierByChannel(res.tier_by_channel ?? {});
         setChannelSources(res.channel_sources);
         setPage(0);
         // Discover filter options from the response
@@ -426,7 +554,7 @@ export function LastClickUtm() {
     return () => {
       cancelled = true;
     };
-  }, [filters]);
+  }, [filters, reloadKey]);
 
   async function loadMore() {
     setLoadingMore(true);
@@ -497,9 +625,26 @@ export function LastClickUtm() {
   const totalOrders = channelCounts ? Object.values(channelCounts).reduce((a, s) => a + s.count, 0) : 0;
   const totalSales = channelCounts ? Object.values(channelCounts).reduce((a, s) => a + s.sales, 0) : 0;
 
+  // ── stepwise cascade, scoped ────────────────────────────────────
+  // The steps are mutually exclusive (first hit wins in
+  // `_attribute_order`), so within a scope they sum to that scope's
+  // order count -- which is what lets a share be quoted at all. The
+  // denominator is that sum rather than `totalOrders`, otherwise the
+  // Meta-scoped percentages would silently be shares of every order in
+  // the window including the ones the cascade never looked at.
+  const stepSummary: Record<string, ChannelSummary> =
+    stepScope === "All" ? tierSummary : (tierByChannel[stepScope] ?? {});
+  const scopeOrders = Object.values(stepSummary).reduce((a, v) => a + v.count, 0);
+  const scopeSales = Object.values(stepSummary).reduce((a, v) => a + v.sales, 0);
+  const matchedOrders = TIER_ORDER.filter((t) => t !== "unmatched").reduce(
+    (a, t) => a + (stepSummary[t]?.count ?? 0),
+    0,
+  );
+  const matchRate = scopeOrders > 0 ? (matchedOrders / scopeOrders) * 100 : 0;
+
   function exportCsv() {
     const cols = COLS.filter((c) => c.key !== "customer_num_orders"); // include everything
-    const headers = ["Order Date", "Order ID", "Customer ID", "Contact Email", "Orders", "Total", "Tier", "Channel", "Has Match", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "Ad ID", "Adset ID", "Ad Name", "Campaign"];
+    const headers = ["Order Date", "Order ID", "Customer ID", "Contact Email", "Orders", "Total", "Tier", "Matched Term", "Matched On", "Channel", "Has Match", "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "Ad ID", "Adset ID", "Ad Name", "Campaign"];
     const lines = [headers.join(",")];
     sorted.forEach((r) => {
       const csv = [
@@ -510,6 +655,8 @@ export function LastClickUtm() {
         String(r.customer_num_orders ?? ""),
         String(r.total_price ?? ""),
         r.tier ?? "",
+        r.matched_value ?? "",
+        r.matched_value ? (MATCHED_ON[(r.tier ?? "") as TierKey] ?? "") : "",
         r.channel,
         String(r.has_match),
         r.utm_source ?? "",
@@ -586,35 +733,42 @@ export function LastClickUtm() {
       </div>
 
       {/* ═══════════════════════════════════════════════════════════════
-          Channel tiles — kwikengage-style, 2 rows of 5 instead of one
-          cramped row of 10 (2026-08-29). At sm/md breakpoints wraps to
-          2 rows of 5; at lg+ stays 2 rows of 5 (never a single-line 10
-          which is unreadable on any typical screen). Total is the
-          first tile; the 9 channels follow in size order (Meta first).
+          Channel KPI tiles -- one accented card per channel: share
+          badge, order count, attributed sales. Ten tiles on a 5-column
+          grid (2 rows) rather than one unreadable row of ten.
+
+          Every number here is the SERVER's windowed aggregate over the
+          whole period -- the tile query ignores every filter except the
+          date range on purpose, so the tiles keep meaning "everything in
+          this period" while the table below narrows. They are never
+          computed from the rows paged in.
+
+          First click selects the channel and opens its utm_source
+          breakdown; clicking the selected tile again toggles that
+          breakdown shut.
          ═══════════════════════════════════════════════════════════════ */}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
-        <KwikTile
-          icon={<span className="text-sm font-bold">{CHANNEL_ICON.Total}</span>}
-          iconColor={CHANNEL_ICON_COLOR.Total}
+        <StatTile
           label="Total Orders"
-          value={totalOrders.toLocaleString()}
-          subLine={fmtRs(totalSales)}
-          active={channel === ""}
+          color={CHANNEL_COLOR.Total}
+          value={totalOrders.toLocaleString("en-IN")}
+          sub={fmtRs(totalSales)}
+          badge={totalOrders > 0 ? "100.0%" : undefined}
+          selected={channel === ""}
           onClick={() => { setChannel(""); setDrillOpen(false); }}
         />
         {CHANNEL_ORDER.map((ch) => {
-          const s = channelCounts?.[ch] ?? { count: 0, sales: 0 };
+          const sum = channelCounts?.[ch] ?? { count: 0, sales: 0 };
           const selected = channel === ch;
-          const sharePct = totalOrders > 0 ? (s.count / totalOrders) * 100 : 0;
           return (
-            <KwikTile
+            <StatTile
               key={ch}
-              icon={<span className="text-xs font-bold">{CHANNEL_ICON[ch]}</span>}
-              iconColor={CHANNEL_ICON_COLOR[ch]}
               label={ch}
-              value={s.count.toLocaleString()}
-              subLine={`${fmtRs(s.sales)} · ${sharePct.toFixed(1)}%`}
-              active={selected}
+              color={CHANNEL_COLOR[ch]}
+              value={sum.count.toLocaleString("en-IN")}
+              sub={fmtRs(sum.sales)}
+              badge={`${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`}
+              selected={selected}
               onClick={() => {
                 if (selected) {
                   setDrillOpen((d) => !d);
@@ -683,35 +837,110 @@ export function LastClickUtm() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════════
-          Compact tier chip strip -- 6 rounded chips inline. Replaces
-          the previous 6 KPI cards which took a lot of vertical space
-          for what's really just a click-to-filter control. Selected
-          chip gets a dark ring so the filter state is obvious.
+          Stepwise matching -- the attribution cascade as tiles.
+
+          Two controls carry the meaning here:
+
+          Scope   the cascade only runs against paid click ids, so
+                  reading it over every order is misleading: "unmatched"
+                  across All is dominated by Organic/Direct orders that
+                  never carried one. Scoped to Meta it is a real miss
+                  rate, which is why Meta is the default.
+
+          # / %   percentages are shares of the SCOPE, not of the window.
+                  The steps are exclusive (first hit wins in
+                  `_attribute_order`), so within a scope they sum to
+                  100%.
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-        <span className="text-xs font-medium text-text-secondary">Tiers:</span>
-        {TIER_ORDER.map((t) => {
-          const count = tierCounts[t] ?? 0;
-          const selected = tier === t;
-          return (
+      <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
+        <div className="mb-2.5 flex flex-wrap items-end gap-3">
+          <div className="min-w-[220px]">
+            <h3 className="text-sm font-semibold">Stepwise matching</h3>
+            <p className="text-[11px] text-text-tertiary">
+              {scopeOrders.toLocaleString()} {stepScope === "All" ? "orders" : `${stepScope} orders`} in
+              range · <strong className="text-text-secondary">{matchRate.toFixed(1)}%</strong> resolved to
+              a campaign or better · {fmtRs(scopeSales)}
+            </p>
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Segmented
+              options={STEP_SCOPES.map((sc) => ({ key: sc, label: sc }))}
+              value={stepScope}
+              onChange={(v) => setStepScope(v as StepScope)}
+              title="Which orders the cascade is read over"
+            />
+            <Segmented
+              options={[
+                { key: "#", label: "#" },
+                { key: "%", label: "%" },
+              ]}
+              value={stepMode}
+              onChange={(v) => setStepMode(v as "#" | "%")}
+              title="Lead with the order count, or its share of the scope"
+            />
             <button
-              key={t}
-              onClick={() => setTier(selected ? "" : t)}
-              className={
-                `inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs transition-all ` +
-                (selected
-                  ? "border-slate-900 bg-slate-900 text-white"
-                  : "border-border-primary bg-white hover:border-slate-400")
-              }
+              onClick={() => setReloadKey((k) => k + 1)}
+              disabled={loading}
+              title="Re-read the cascade from shopify_order_attribution"
+              className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted disabled:opacity-40"
             >
-              <span>{TIER_LABEL[t]}</span>
-              <span className={"font-mono " + (selected ? "text-white/90" : "text-text-secondary")}>
-                {count.toLocaleString()}
-              </span>
+              {loading ? "Refreshing\u2026" : "\u21bb Refresh"}
             </button>
-          );
-        })}
+          </div>
+        </div>
+
+        {/* A scope where nothing resolves is not an empty state -- it
+            is a finding, and one worth spelling out rather than leaving
+            the reader to wonder whether the tiles failed to load.
+            Verified live 2026-09-16: all 4,257 Google orders in a 30d
+            window sit at `unmatched`, because the cascade indexes the
+            Meta ad universe only (shopify_ad_attribution builds
+            AdUniverse from ad_lifecycle's Meta ads). */}
+        {scopeOrders > 0 && matchedOrders === 0 && (
+          <div className="mb-2 rounded-md border border-warning-mid/40 bg-warning-bg px-2.5 py-1.5 text-[11px] text-warning-text">
+            No {stepScope} order resolves to an ad. The cascade only indexes the <b>Meta</b> ad
+            universe, so {stepScope} traffic has nothing to match against and lands at{" "}
+            <b>Unmatched</b> by construction — not because the match failed.
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {STEP_TILES.map((t) => {
+            const sum = stepSummary[t] ?? { count: 0, sales: 0 };
+            const pct = scopeOrders > 0 ? (sum.count / scopeOrders) * 100 : 0;
+            const meta = TIER_STEP[t];
+            const selected = tier === t;
+            return (
+              <StatTile
+                key={t}
+                eyebrow={meta.step}
+                label={meta.title}
+                color={TIER_COLOR[t]}
+                value={stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
+                sub={`${stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} \u00b7 ${fmtRs(sum.sales)}`}
+                title={meta.hint}
+                dim={sum.count === 0}
+                selected={selected}
+                onClick={() => {
+                  if (selected) {
+                    setTier("");
+                    return;
+                  }
+                  setTier(t);
+                  // Keep the table honest about what the tile counted:
+                  // a Meta-scoped step tile means Meta rows at that step.
+                  if (stepScope !== "All") {
+                    setChannel(stepScope as UtmChannel);
+                    setDrillOpen(false);
+                  }
+                }}
+              />
+            );
+          })}
+        </div>
       </div>
+
+      <NameMissPanel fromDate={fromDate} toDate={toDate} reloadKey={reloadKey} />
 
       {/* ═══════════════════════════════════════════════════════════════
           Simplified filter row -- primary controls only. All the
@@ -903,6 +1132,42 @@ export function LastClickUtm() {
     </div>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Segmented — small pill toggle (step scope, # / %)
+// ─────────────────────────────────────────────────────────────────────
+
+function Segmented({
+  options,
+  value,
+  onChange,
+  title,
+}: {
+  options: { key: string; label: string }[];
+  value: string;
+  onChange: (v: string) => void;
+  title?: string;
+}) {
+  return (
+    <div title={title} className="inline-flex overflow-hidden rounded-md border border-border-primary">
+      {options.map((o) => (
+        <button
+          key={o.key}
+          onClick={() => onChange(o.key)}
+          className={
+            "px-2.5 py-1 text-xs transition-colors " +
+            (value === o.key
+              ? "bg-slate-900 text-white"
+              : "bg-white text-text-primary hover:bg-bg-muted")
+          }
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 
 // ─────────────────────────────────────────────────────────────────────
 // TextFilter — CTD's IN/EX pill pattern condensed into one input

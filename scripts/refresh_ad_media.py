@@ -87,6 +87,21 @@ WITH dedup AS (
     FROM raw_dump_meta
     WHERE object_type IN ('ad', 'asset_feed_spec', 'image', 'video')
       AND meta_id IS NOT NULL
+      -- "Newest snapshot that is USABLE", not simply "newest snapshot".
+      --
+      -- Bronze holds snapshots from several fetchers, and they do not
+      -- all request the same fields. The nightly roster fetch asks for
+      -- id/name/status and not `creative`; the moment it ran it became
+      -- the newest row for all 20,189 ads, every one of them missing
+      -- the only key this rebuild keys off. ad_media went to ZERO rows
+      -- -- every thumbnail in the dashboard gone in one night, with no
+      -- error anywhere, because a LEFT JOIN that matches nothing and a
+      -- WHERE that filters everything both look like success.
+      --
+      -- Ordering the ad rows so creative-bearing snapshots sort first
+      -- makes the rebuild depend on the data it needs existing SOMEWHERE
+      -- in bronze, rather than on it happening to be in the latest row.
+      AND (object_type <> 'ad' OR raw_payload ? 'creative')
     ORDER BY object_type, meta_id, ingested_at DESC
 ),
 -- Meta trimmed effective_object_story_id from its API response at some
@@ -177,6 +192,14 @@ def main() -> None:
     dt = time.time() - t0
     print(f"\n[OK] ad_media refreshed in {dt:.1f}s")
     print(f"    ads              : {n:,}")
+    if not n:
+        # Louder than a traceback and far louder than the silence this
+        # replaced: a rebuild that produces nothing is a failure, not a
+        # successful refresh of an empty table.
+        print("    [FAIL] 0 ads -- bronze has no 'ad' snapshot carrying a "
+              "creative.id. Check that the roster fetch requests "
+              "creative{id,effective_object_story_id}.", flush=True)
+        raise SystemExit(1)
     print(f"    with thumbnail   : {has_thumb:,}  ({has_thumb*100/n:.0f}%)")
     print(f"    with landing URL : {has_landing:,}  ({has_landing*100/n:.0f}%)")
     print(f"    video ads        : {is_video:,}  ({is_video*100/n:.0f}%)")

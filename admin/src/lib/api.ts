@@ -637,17 +637,20 @@ export interface AdsAnalyseRow {
   ltv_frequency: number | null;
   first_seen_date: string | null;
   // Asset resolution from content_asset_register /
-  // content_graphic_register / content_influencer_posts. asset_match_source
-  // is one of:
-  //   'direct'           -- workflow-optimiser wrote a direct ad_id link
-  //   'ctd_matched'      -- CTD's substring matcher found the ad_name
-  //   'name_parsed'      -- regex-extracted from ad_name AND the code exists in a register table
-  //   'name_synthetic'   -- regex-extracted from ad_name, code not yet in a register table
+  // content_iterated_register / content_graphic_register /
+  // content_influencer_posts.
   asset_id: string | null;
   asset_media: "video" | "graphic" | "influencer" | null;
-  /** Always "asset_id" -- matching is strictly the register identifier
-   * (asset_id / requisition_id / post_id) found inside ad_name. */
-  asset_match_source: "asset_id" | null;
+  /** How the register identifier was reached:
+   *   'asset_id'   -- the id (asset_id / requisition_id / post_id) appears
+   *                   VERBATIM inside ad_name. Always preferred.
+   *   'recovered'  -- the ad name spells a real id differently
+   *                   ('ITE_Feb19' for 'ITE-Feb-19', 'SIF-0791-P1' for
+   *                   'SIF-791-P1'). Re-spelled by
+   *                   scripts/recover_asset_ids.py and only kept because
+   *                   the canonical id was confirmed to exist in a
+   *                   register -- never an invented asset. */
+  asset_match_source: "asset_id" | "recovered" | null;
   /** true when the ad name resolves to MORE THAN ONE registered asset
    * (e.g. CPL010-0785-0736 carries two codes). A winner was picked
    * deterministically; the row is flagged for a human to adjudicate. */
@@ -824,6 +827,10 @@ export interface UtmOrderRow {
   matched_adset_id: string | null;
   matched_campaign_id: string | null;
   matched_campaign_name: string | null;
+  /** The value the cascade matched ON -- utm_content, utm_term or
+   *  utm_campaign depending on the step. The tier names the rule that
+   *  fired; this names the input it fired on. */
+  matched_value: string | null;
   contact_email: string | null;
   customer_num_orders: number | null;
   channel: UtmChannel;
@@ -845,8 +852,59 @@ export interface UtmOrderResponse {
   rows: UtmOrderRow[];
   total: number;
   channel_counts: Record<UtmChannel, ChannelSummary>;
-  tier_counts: Record<string, number>;
+  /** Cascade step -> {orders, sales}. */
+  tier_summary: Record<string, ChannelSummary>;
+  /** channel -> step -> {count, sales}. Lets the step tiles be scoped to
+   *  Meta or Google, which is the only honest way to read a match rate:
+   *  "unmatched" across ALL orders is mostly organic traffic that was
+   *  never a candidate for an ad match. */
+  tier_by_channel: Record<UtmChannel, Record<string, ChannelSummary>>;
   channel_sources: Record<UtmChannel, SourceBreakdown[]>;
+}
+
+/** One distinct (utm_content, adset) naming mismatch -- the grain
+ *  someone fixing ad names actually works at, not one row per order. */
+export interface NameMissRow {
+  utm_content: string | null;
+  utm_term: string | null;
+  adset_name: string | null;
+  campaign_name: string | null;
+  orders: number;
+  sales: number;
+  /** Ads that DO live in that adset -- what utm_content could have hit.
+   *  Empty means the adset holds no ads at all, which is a different
+   *  problem (missing ads, not drifted names). */
+  candidate_ad_names: string[];
+  ads_in_adset: number;
+}
+
+export interface NameMissResponse {
+  rows: NameMissRow[];
+  /** Totals are over the WHOLE window, not over `rows` (which `limit`
+   *  caps) -- a KPI that silently means "of the first 200" is the same
+   *  defect as a tile computed from the loaded page. */
+  total_rows: number;
+  total_orders: number;
+  total_sales: number;
+  adsets_affected: number;
+  /** Mismatches whose adset holds no ads at all -- missing ads, not
+   *  drifted names, and not something a rename would fix. */
+  rows_without_ads: number;
+}
+
+export function fetchNameMisses(params: {
+  from_date?: string;
+  to_date?: string;
+  limit?: number;
+} = {}): Promise<NameMissResponse> {
+  const qs = new URLSearchParams();
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const s = qs.toString();
+  return request<NameMissResponse>(
+    `/admin/analytics/last-click-utm/name-misses${s ? `?${s}` : ""}`,
+  );
 }
 
 export interface LastClickUtmParams {
@@ -1732,6 +1790,18 @@ export interface UntestedAssetRow {
   thumbnail: string | null;
   date_produced: string | null;
   created_at: string | null;
+  /** Where the RECORD came from — "database" (a live Supabase register
+   *  the team maintains today) or "historical" (a Google Sheet from
+   *  before those registers existed). Different things to act on: a
+   *  database asset that never ran is a live backlog item; a sheet asset
+   *  that never ran is mostly archive. */
+  /** Ads whose name carries this asset's id. 0 IS "untested". */
+  matched_ads: number;
+  origin: "database" | "historical";
+  source_system: string;
+  /** Every link the register holds, labelled, in column order. Graphics
+   *  carries up to five (link_1..3, creative, reference_links). */
+  links: { label: string; url: string }[];
   candidate_master_sku: string | null;
   matched_master_sku: string | null;
   sku_attributed_orders: number | null;
@@ -1744,12 +1814,21 @@ export interface UntestedAssetsResponse {
   total_rows: number;
   with_sku_match: number;
   without_sku_match: number;
+  from_database: number;
+  from_historical: number;
+  /** The whole register, so "untested" has a denominator. */
+  register_total: number;
+  matched_assets: number;
+  matched_ads: number;
   rows: UntestedAssetRow[];
   computed_at: string;
 }
 
 export interface UntestedAssetsParams {
   media?: UntestedMedia;
+  /** untested (default) / matched / all. "all" is what makes the
+   *  matched_ads column worth reading. */
+  match_state?: "untested" | "matched" | "all";
   has_sku?: boolean;
 }
 
@@ -1757,6 +1836,7 @@ export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<
   const q = new URLSearchParams();
   if (params.media) q.set("media", params.media);
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
+  if (params.match_state) q.set("match_state", params.match_state);
   const qs = q.toString();
   return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
 }
@@ -1870,12 +1950,65 @@ export interface CreativeTestingRow {
   cost_per_ncp: number | null;
   cost_per_ftewv: number | null;
   ctr_pct: number | null;
+
+  // --- inspector columns, asset grain --------------------------------
+  // Ratios are recomputed from the SUMS server-side, never averaged from
+  // per-ad ratios. Fields marked LIFETIME cannot follow the date filter:
+  // insights_daily_by_ad has no usable daily source for them.
+  link_clicks: number | null;          // LIFETIME
+  spend_lifetime: number | null;       // LIFETIME
+  purchases_lifetime: number | null;   // LIFETIME
+  impressions_lifetime: number | null; // LIFETIME
+  /** Distinct campaigns / ad sets the asset ran across. An asset has no
+   *  single campaign or ad set, so there are no id columns for these. */
+  campaigns: number | null;
+  adsets: number | null;
+  any_active: boolean | null;
+  f1_pass: boolean | null;
+  f2_pass: boolean | null;
+  f3_pass: boolean | null;
+  f4_pass: boolean | null;
+  sample_campaign_name: string | null;
+  /** UPPER BOUND -- reach does not de-duplicate people across ads of the
+   *  same asset. frequency_upper is therefore a LOWER bound. */
+  reach_upper: number | null;
+  frequency_upper: number | null;
+  pct_reach_ftewv: number | null;
+  atc_count: number | null;
+  ci_count: number | null;
+  engagement_count: number | null;     // LIFETIME
+  shopify_orders: number | null;       // LIFETIME
+  shopify_revenue: number | null;      // LIFETIME
+  shopify_roas: number | null;         // LIFETIME
+  cost_per_shopify_order: number | null;
+  meta_shop_diff_pct: number | null;
+  thruplays: number | null;            // LIFETIME
+  three_sec_plays: number | null;
+  outbound_clicks: number | null;      // LIFETIME
+  post_engagements: number | null;     // LIFETIME
+  cost_per_1000: number | null;
+  cpc_link: number | null;             // LIFETIME
+  atc_lc_pct: number | null;           // LIFETIME
+  ci_atc_pct: number | null;
+  checkout_compl_pct: number | null;   // LIFETIME
+  cr_lc_pct: number | null;            // LIFETIME
+  profit_efficiency: number | null;
+  contrib_margin_pct: number | null;
 }
 
 export interface CreativeTestingTotals {
   assets: number;
   new_creatives: number;
-  iterations: number;
+  /** Retested and STILL under 50,000 lifetime impressions across every ad
+   *  that ever carried the asset. Lifetime, not the selected window: the
+   *  question is whether the creative has ever had a fair run, and a
+   *  single month cannot answer that. */
+  historical_discarded: number;
+  /** Retested and over the 50,000 floor — it cleared the bare minimum, so
+   *  its performance figures carry weight. */
+  refresh_discarded: number;
+  /** Scoped to the selected window, so it reconciles with what Meta
+   *  charged over those dates. */
   spend: number;
   impressions: number;
   purchases: number;
@@ -1885,10 +2018,15 @@ export interface CreativeTestingTotals {
   roas: number | null;
   cost_per_ncp: number | null;
   cost_per_ftewv: number | null;
+  /** Windowed, like everything else, since the daily insights fetch
+   *  started carrying video_thruplay_watched_actions / outbound_clicks /
+   *  inline_post_engagement on 2026-09-17. */
   thruplays: number;
   three_sec_plays: number;
   outbound_clicks: number;
   post_engagements: number;
+  /** Lifetime impressions, kept for reference. No rate divides by it. */
+  impressions_lifetime: number;
 }
 
 export interface CreativeTestingResponse {
@@ -1902,11 +2040,15 @@ export interface CreativeTestingResponse {
 export interface CreativeTestingParams {
   from_date: string;
   to_date: string;
-  kind?: "new" | "iteration";
+  kind?: "new" | "historical_discarded" | "refresh_discarded" | "iteration";
   media?: "video" | "graphic" | "influencer";
   category?: string;
   account_name?: string;
   search?: string;
+  /** JSON MultiFilterState. Asset grain -- see _CT_MF_FIELDS on the API
+   *  for the fields it accepts; an unknown field is skipped, not an
+   *  error, so the two lists must agree. */
+  multi_filter?: string;
   sort?: string;
   limit?: number;
   offset?: number;
@@ -1923,6 +2065,7 @@ export function fetchCreativeTesting(
   if (params.category) qs.set("category", params.category);
   if (params.account_name) qs.set("account_name", params.account_name);
   if (params.search) qs.set("search", params.search);
+  if (params.multi_filter) qs.set("multi_filter", params.multi_filter);
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
@@ -2062,4 +2205,86 @@ export function fetchAdsAnalyseLaunches(params: {
   if (params.search) qs.set("search", params.search);
   if (params.excl_copy) qs.set("excl_copy", "true");
   return request<LaunchesResponse>(`/admin/analytics/ads-analyse/launches?${qs}`);
+}
+
+// ---------------------------------------------------------------------
+// Shopify Analytics -- customer acquisition
+// ---------------------------------------------------------------------
+
+/** One day of the store's own report, mirrored verbatim -- every figure
+ *  is Shopify's own. The three customer fields are null only on the
+ *  derived fallback (include_returns), where order grain cannot express
+ *  a distinct count. */
+export interface ShopifyDayRow {
+  day: string;
+  orders: number;
+  customers: number | null;
+  total_sales: number;
+  average_order_value: number | null;
+  /** net_items_sold -- NET of returns, as the report asks. */
+  units: number;
+  /** quantity_ordered -- GROSS. The figure ad-side metrics divide by. */
+  units_gross: number;
+  units_per_order: number | null;
+  new_customers: number | null;
+  returning_customers: number | null;
+  returning_customer_rate: number | null;
+  total_sales_first_time: number;
+  total_sales_returning: number;
+  gross_sales: number;
+  discounts: number;
+  net_sales: number;
+}
+
+export type ShopifyTotals = Omit<ShopifyDayRow, "day"> & {
+  /** How much of the window our order mirror holds. `customers` and
+   *  `returning_customers` are distinct counts, which do not sum, so
+   *  they come from that mirror rather than from the day rows; below
+   *  ~99 they understate the window by roughly the shortfall. */
+  customers_coverage_pct: number | null;
+};
+
+export interface ShopifyChannelRow {
+  sales_channel: string;
+  orders: number;
+  total_sales: number;
+  share_pct: number;
+}
+
+export interface ShopifyAnalyticsResponse {
+  rows: ShopifyDayRow[];
+  /** How far each source reaches. `sales` and `orders` are fetched by
+   *  different jobs, so one is routinely hours ahead of the other and
+   *  the newest day is partial in whichever lags. */
+  sales_through: string | null;
+  /** The last day the order mirror COVERS, not the last day it holds a
+   *  row for: one straggling order should not certify a whole day. */
+  orders_through: string | null;
+  totals: ShopifyTotals;
+  /** Same window shifted back 364 days -- 52 weeks, so the weekday lines
+   *  up. Retail demand is weekday-shaped, so a 365-day shift would
+   *  compare a Saturday to a Friday and read as a swing that never
+   *  happened. */
+  previous: ShopifyTotals;
+  channels: ShopifyChannelRow[];
+  excluded_channels: string[];
+  /** "shopify_daily": day figures are Shopify's own. "derived": the
+   *  returns-included fallback, aggregated from order grain, with the
+   *  distinct-customer metrics unavailable. */
+  source: "shopify_daily" | "derived";
+}
+
+export function fetchShopifyAnalytics(params: {
+  from_date: string;
+  to_date: string;
+  include_returns?: boolean;
+}): Promise<ShopifyAnalyticsResponse> {
+  const qs = new URLSearchParams({
+    from_date: params.from_date,
+    to_date: params.to_date,
+  });
+  if (params.include_returns) qs.set("include_returns", "true");
+  return request<ShopifyAnalyticsResponse>(
+    `/admin/analytics/shopify-analytics?${qs.toString()}`,
+  );
 }

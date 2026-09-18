@@ -123,7 +123,7 @@ ERROR_LOG_PATH = REPO_ROOT / "logs" / "shopify_ingest_errors.log"
 DEFAULT_PAGE_SIZE = 250
 DEFAULT_OBJECT_TYPES = [
     "shop", "products", "orders", "customers", "sessions", "fulfillments",
-    "customer_analytics", "sales", "discounts", "inventory",
+    "customer_analytics", "sales", "sales_daily", "discounts", "inventory",
 ]
 #: ShopifyQL has no cursor pagination for a date range -- chunk large
 #: ranges the same way app/services/meta/insights.py chunks Insights date
@@ -525,13 +525,92 @@ CUSTOMER_ANALYTICS_LIMIT_PER_CHUNK = 20_000
 #: order volume (line items within an order are summed into one row at
 #: this grain, which is what's wanted for order-level revenue, not a
 #: line-item breakdown).
-SALES_GROUP_BY = ["day", "order_id", "new_or_returning_customer", "is_pos_sale", "cost_is_recorded"]
+#: Grain: (day, order_id, new_or_returning_customer).
+#:
+#: `is_pos_sale` and `cost_is_recorded` USED to be in this list and had to
+#: come out. ShopifyQL splits an order across those two dimensions, so the
+#: same order came back as ~2 rows -- one carrying the money, one carrying
+#: zeros -- while `_NATURAL_ID_FIELD_BY_TYPE` keyed bronze rows on
+#: `order_id` alone. The two rows collided on insert and the zero row
+#: usually won. Result, measured 2026-09-17 over Jan-Aug: 339,363 bronze
+#: rows of which only 11,611 (3.4%) carried a value, and total_sales
+#: summing to MINUS Rs 6.9 lakh against Rs 42.6 crore of real revenue.
+#:
+#: At this narrower grain order_id is genuinely unique within a day
+#: (verified live: 1,205 rows, 1,205 distinct order_ids for 2026-08-21)
+#: and the totals reconcile: Rs 12,88,774 / 1,192 orders / 1,936 units,
+#: identical to the same query rolled up to GROUP BY day alone.
+#:
+#: Dropping the two dimensions costs nothing real: this store records no
+#: per-product cost (so cost_is_recorded is uniformly false and the margin
+#: metrics read zero) and has no POS channel. Both columns survive on the
+#: silver table and simply arrive NULL.
+#:
+#: `sales_channel` IS carried, because the reporting has to be able to
+#: exclude 'Return Prime: Order Return' -- refund rows that otherwise
+#: make a day's revenue read low or negative. It does not multiply rows:
+#: an order belongs to exactly one channel. Live 2026-09-14 shows gokwik
+#: (1,166 orders), Online Store, Daily Reports, saadaa-app, Tellephant
+#: and Draft Orders. This is the dimension the store's own ShopifyQL
+#: report filters on, so carrying it keeps our numbers reconcilable with
+#: what Shopify Analytics shows.
+SALES_GROUP_BY = ["day", "order_id", "new_or_returning_customer", "sales_channel"]
 SALES_METRICS = [
     "gross_sales", "net_sales", "total_sales", "discounts", "shipping_charges", "taxes", "duties",
     "cost_of_goods_sold", "gross_profit", "gross_margin", "orders", "quantity_ordered", "average_order_value",
 ]
 SALES_CHUNK_DAYS = 1
 SALES_LIMIT_PER_CHUNK = 10_000
+
+#: The store's own customer-acquisition report, mirrored verbatim:
+#:
+#:   FROM sales SHOW customers, average_order_value, total_sales,
+#:        quantity_ordered_per_order, orders, new_customers,
+#:        returning_customers, returning_customer_rate,
+#:        total_sales_returning, total_sales_first_time, net_items_sold
+#:   WHERE sales_channel != 'Return Prime: Order Return'
+#:   GROUP BY day
+#:
+#: WHY THIS EXISTS ALONGSIDE `sales`
+#: --------------------------------
+#: Three of these metrics cannot be derived from the order-grain `sales`
+#: table, and deriving them anyway is what made the dashboard disagree
+#: with Shopify:
+#:
+#:   customers, new_customers, returning_customers
+#:       Distinct COUNTS. They do not sum. At order grain each row is
+#:       one order, so adding them up yields order counts: measured
+#:       2026-08-30, 635 returning ORDERS against 601 returning
+#:       CUSTOMERS. `returning_customer_rate` is returning_customers /
+#:       customers, so it inherited the same error.
+#:
+#:   net_items_sold
+#:       NET of returns. `sales` carries only `quantity_ordered`, which
+#:       is gross -- 2,074 against 1,889 on 2026-08-18.
+#:
+#:   average_order_value
+#:       Shopify's is the MEAN of the per-order values, not
+#:       total_sales / orders. Those differ because some rows carry
+#:       sales without carrying an order (1,298 rows vs 1,239 orders on
+#:       2026-08-18), giving 1,227.60 against a derived 1,158.40.
+#:
+#: Day grain means the whole mirrored range fits in one query, so this
+#: costs a single request per run rather than one per day.
+#:
+#: The WHERE is part of the report's definition, not a display option:
+#: Return Prime rows are refund records that carry orders but no
+#: revenue. Including them would not change total_sales and would
+#: inflate the order count by ~11%.
+SALES_DAILY_GROUP_BY = ["day"]
+SALES_DAILY_METRICS = [
+    "customers", "average_order_value", "total_sales", "quantity_ordered_per_order",
+    "orders", "new_customers", "returning_customers", "returning_customer_rate",
+    "total_sales_returning", "total_sales_first_time", "net_items_sold",
+    "quantity_ordered", "gross_sales", "net_sales", "discounts",
+]
+SALES_DAILY_WHERE = "sales_channel != 'Return Prime: Order Return'"
+SALES_DAILY_CHUNK_DAYS = 365
+SALES_DAILY_LIMIT_PER_CHUNK = 1_000
 
 #: ShopifyQL `discounts` table -- shopify.dev/docs/api/shopifyql/2026-10/
 #: schemas/sales_revenue/discounts. Confirmed live: ~890 rows/day at
@@ -803,6 +882,11 @@ _SHOPIFYQL_TABLE_CONFIG: dict[str, dict[str, Any]] = {
         "table": "sales", "group_by": SALES_GROUP_BY, "metrics": SALES_METRICS,
         "chunk_days": SALES_CHUNK_DAYS, "limit_per_chunk": SALES_LIMIT_PER_CHUNK, "order_by": None,
     },
+    "sales_daily": {
+        "table": "sales", "group_by": SALES_DAILY_GROUP_BY, "metrics": SALES_DAILY_METRICS,
+        "chunk_days": SALES_DAILY_CHUNK_DAYS, "limit_per_chunk": SALES_DAILY_LIMIT_PER_CHUNK,
+        "order_by": "day", "where": SALES_DAILY_WHERE,
+    },
     "discounts": {
         "table": "discounts", "group_by": DISCOUNTS_GROUP_BY, "metrics": DISCOUNTS_METRICS,
         "chunk_days": DISCOUNTS_CHUNK_DAYS, "limit_per_chunk": DISCOUNTS_LIMIT_PER_CHUNK, "order_by": None,
@@ -833,10 +917,12 @@ async def _fetch_shopifyql_table(
     show_cols = ", ".join(cfg["group_by"] + cfg["metrics"])
     group_by = ", ".join(cfg["group_by"])
     order_by_clause = f" ORDER BY {cfg['order_by']}" if cfg["order_by"] else ""
+    where_clause = f"WHERE {cfg['where']} " if cfg.get("where") else ""
     try:
         for chunk_start, chunk_end in _date_chunks(date_start, date_end, cfg["chunk_days"]):
             q = (
                 f"FROM {cfg['table']} SHOW {show_cols} "
+                f"{where_clause}"
                 f"SINCE {chunk_start.isoformat()} UNTIL {chunk_end.isoformat()} "
                 f"GROUP BY {group_by}{order_by_clause} LIMIT {cfg['limit_per_chunk']}"
             )
@@ -991,7 +1077,7 @@ async def run_for_admin(
                         batch_result, batch_id=uuid.uuid4(), api_version=api_version,
                         extracted_at=datetime.now(timezone.utc),
                     )
-                    written = await _insert_rows(conn, table, rows)
+                    written = await _insert_rows(conn, table, rows, reconnect=_connect)
                     items_so_far += len(batch_items)
                     inserted_so_far += written
                     if on_progress:
@@ -1104,6 +1190,13 @@ _GROUP_BY_ROW_KEY_FIELDS: dict[str, tuple[str, list[str]]] = {
     "sessions": ("sess", SESSIONS_GROUP_BY),
     "discounts": ("disc", DISCOUNTS_GROUP_BY),
     "inventory": ("inv", INVENTORY_GROUP_BY),
+    # `sales` keyed on order_id alone silently merged rows that ShopifyQL
+    # returns separately, losing the metrics (see SALES_GROUP_BY). Its
+    # identity is the dimension tuple like the others -- an order can also
+    # legitimately appear on more than one day, which order_id alone
+    # cannot express.
+    "sales": ("sale", SALES_GROUP_BY),
+    "sales_daily": ("sale_daily", SALES_DAILY_GROUP_BY),
 }
 
 
@@ -1120,7 +1213,6 @@ def _group_by_row_key(item: dict[str, Any], object_type: str) -> str:
 _NATURAL_ID_FIELD_BY_TYPE = {
     "fulfillments": "fulfillment_id",
     "customer_analytics": "customer_id",
-    "sales": "order_id",
 }
 
 
@@ -1277,7 +1369,13 @@ async def _ensure_unique_index(conn: Any) -> None:
     await conn.execute(_ENSURE_UNIQUE_INDEX_SQL)
 
 
-async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *, chunk_size: int = 500) -> int:
+#: Attempts per write chunk before giving up on it.
+_INSERT_ATTEMPTS = 5
+
+
+async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *,
+                       chunk_size: int = 500,
+                       reconnect: Any = None) -> int:
     """Upserts on (object_type, source_id) -- same target semantics as
     ingest_instagram_chronological.py's `_insert_rows` (order
     financial_status/fulfillment_status, customer amount_spent/
@@ -1292,6 +1390,7 @@ async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *, chu
     which is what actually matters for a Bronze ingestion log."""
     if not rows:
         return 0
+    import asyncpg  # lazy, matching the rest of this module
     columns = list(rows[0].keys())
     placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
     update_cols = [c for c in columns if c not in ("id", "source_id", "object_type")]
@@ -1314,7 +1413,38 @@ async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *, chu
             ]
             for row in chunk
         ]
-        await conn.executemany(sql, values_batch)
+        # Retry the chunk on a dropped connection.
+        #
+        # The fetch is the expensive half -- a 29-day sales backfill is
+        # 41,190 rows and several minutes of API time -- and it was being
+        # thrown away by a transport failure on the write:
+        # `ConnectionResetError: [Errno 54] Connection reset by peer`
+        # partway through, leaving 15,500 of 41,190 rows in bronze and a
+        # traceback instead of a result. The Supabase pooler drops
+        # long-lived writes; that is a fact to absorb, not an error to
+        # surface, because nothing about the data was wrong.
+        #
+        # asyncpg cannot reuse a dead connection, so the caller supplies
+        # `reconnect` to get a fresh one. Without it we can still retry --
+        # a reset that killed only the in-flight statement leaves the
+        # connection usable -- so both paths are attempted.
+        for attempt in range(1, _INSERT_ATTEMPTS + 1):
+            try:
+                await conn.executemany(sql, values_batch)
+                break
+            except (OSError, asyncpg.PostgresConnectionError) as exc:
+                if attempt == _INSERT_ATTEMPTS:
+                    raise
+                print(f"    write chunk failed at row {start} "
+                      f"(attempt {attempt}/{_INSERT_ATTEMPTS}): {str(exc)[:90]} -- retrying",
+                      flush=True)
+                await asyncio.sleep(2 ** attempt)
+                if reconnect is not None:
+                    try:
+                        await conn.close()
+                    except Exception:  # noqa: BLE001 - already broken
+                        pass
+                    conn = await reconnect()
         total += len(chunk)
     return total
 
@@ -1468,10 +1598,13 @@ async def _run_and_report(
     # __asyncpg_stmt_N__ that the next backend has never seen ->
     # "prepared statement does not exist" mid-write, dropping the
     # whole batch. Live-caught 2026-09-02 mid-orders-insert.
-    conn = await asyncpg.connect(
-        _to_asyncpg_dsn(database_url),
-        statement_cache_size=0,
-    )
+    async def _connect():
+        return await asyncpg.connect(
+            _to_asyncpg_dsn(database_url),
+            statement_cache_size=0,
+        )
+
+    conn = await _connect()
     write_start = time.monotonic()
     total_written = 0
     write_any_error = False

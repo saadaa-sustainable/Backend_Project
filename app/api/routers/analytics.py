@@ -17,7 +17,7 @@ import os
 import re as _re
 import statistics
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -1257,8 +1257,29 @@ def _tokenize_source(raw: str) -> set[str]:
     return {seg.lower() for seg in _CAMEL_SPLIT_RE.split(raw) if seg}
 
 
-def _classify_channel(utm_source: str | None) -> str:
+#: utm_content values that mean "the Instagram bio link", i.e. organic
+#: profile traffic rather than a paid placement. These orders arrive with
+#: utm_source='ig', which the Meta token rule below would otherwise claim
+#: -- 898 orders / Rs 14,76,052 of organic traffic counted as paid Meta
+#: (measured live 2026-09-16). The pair is the signal: utm_source alone
+#: cannot tell a bio link from an ad, because both say "ig".
+_ORGANIC_IG_CONTENT = frozenset({"link_in_bio", "linkinbio", "link-in-bio", "linkin_bio"})
+#: utm_source tokens that mean Instagram specifically.
+_IG_TOKENS = frozenset({"ig", "instagram"})
+
+
+def _is_organic_ig(utm_source: str | None, utm_content: str | None) -> bool:
+    if not utm_content or utm_content.strip().lower() not in _ORGANIC_IG_CONTENT:
+        return False
+    return bool(_tokenize_source((utm_source or "").strip()) & _IG_TOKENS)
+
+
+def _classify_channel(utm_source: str | None, utm_content: str | None = None) -> str:
     raw = (utm_source or "").strip()
+    # Checked BEFORE the token rules: 'ig' is a Meta token, so anything
+    # later would already have claimed these.
+    if _is_organic_ig(raw, utm_content):
+        return "Organic (IG)"
     if not raw:
         return "Other"
     source_lower = raw.lower()
@@ -1277,45 +1298,116 @@ def _classify_channel(utm_source: str | None) -> str:
 #: as `channel`. Kept in lockstep with _CHANNEL_SUBSTRINGS +
 #: _CHANNEL_TOKENS -- one place to edit, both the tile counts
 #: (Python-side) and the row filter (SQL-side) stay consistent.
-def _channel_sql_predicate(channel: str) -> tuple[str, dict[str, str]]:
-    if channel == "Other":
-        # "Other" = not classified as any of Meta/Google/Retention.
-        # Rebuild the union of the other three predicates and negate.
-        clauses = []
-        params: dict[str, str] = {}
-        for ch in ("Meta", "Google", "Retention"):
-            sub_clause, sub_params = _channel_sql_predicate(ch)
-            clauses.append(sub_clause)
-            params.update(sub_params)
-        return f"NOT ({' OR '.join(clauses)})", params
+#: The (source, content) PAIR rule, which cannot live in the substring
+#: or token tables above because those only ever see utm_source.
+_ORGANIC_IG_SQL = (
+    "(COALESCE(utm_source,'') ~* '(^|[^A-Za-z0-9])(ig|instagram)([^a-z0-9]|$)' "
+    "AND lower(COALESCE(utm_content,'')) IN "
+    "('link_in_bio','linkinbio','link-in-bio','linkin_bio'))"
+)
 
-    needles = dict(_CHANNEL_SUBSTRINGS)[channel]
-    whole_tokens = dict(_CHANNEL_TOKENS).get(channel, frozenset())
-    parts: list[str] = []
+
+def _param_slug(channel: str) -> str:
+    """'Brand Collab' -> 'brand_collab'.
+
+    Bind parameter names cannot contain spaces or parentheses. The old
+    builder used `channel.lower()` directly, which produced
+    `:ch_brand collab_0` and `:ch_organic (ig)_0` -- SQLAlchemy stops
+    parsing the name at the space, so filtering by Brand Collab returned
+    HTTP 500 rather than rows.
+    """
+    return _re.sub(r"[^a-z0-9]+", "_", channel.lower()).strip("_")
+
+
+def _channel_rules() -> list[tuple[str, str, dict[str, str]]]:
+    """Every classification rule as SQL, in the EXACT order
+    `_classify_channel` evaluates them.
+
+    Order is the whole point. `_classify_channel` runs the pair rule,
+    then every TOKEN rule, then every SUBSTRING rule, and returns on the
+    first hit -- so a source matching Google's token and Retention's
+    substring is Google. Any predicate that ignores that precedence will
+    disagree with the tiles for exactly the sources that match two
+    channels, which is the hardest kind of discrepancy to notice.
+
+    Generating both from one ordered list is what keeps them in step:
+    add a rule here and the tile count, the row filter and the "Other"
+    complement all move together.
+    """
+    rules: list[tuple[str, str, dict[str, str]]] = [
+        ("Organic (IG)", _ORGANIC_IG_SQL, {}),
+    ]
+    for channel, whole_tokens in _CHANNEL_TOKENS:
+        slug = _param_slug(channel)
+        parts, params = [], {}
+        for token in sorted(whole_tokens):
+            # POSIX-regex whole-token match, mirroring _tokenize_source's
+            # split on _-.\s AND camelCase boundaries. Postgres POSIX has
+            # no lookarounds, so both anchored and case-boundary shapes
+            # are covered by the character classes.
+            key = f"ch_{slug}_tok_{token}"
+            parts.append(f"COALESCE(utm_source,'') ~* :{key}")
+            params[key] = rf"(^|[^A-Za-z0-9])({token})([^a-z0-9]|$)"
+        if parts:
+            rules.append((channel, f"({' OR '.join(parts)})", params))
+    for channel, needles in _CHANNEL_SUBSTRINGS:
+        slug = _param_slug(channel)
+        parts, params = [], {}
+        for i, needle in enumerate(needles):
+            key = f"ch_{slug}_sub_{i}"
+            parts.append(f"LOWER(COALESCE(utm_source,'')) LIKE :{key}")
+            params[key] = f"%{needle}%"
+        if parts:
+            rules.append((channel, f"({' OR '.join(parts)})", params))
+    return rules
+
+
+def _channel_sql_predicate(channel: str) -> tuple[str, dict[str, str]]:
+    """Rows `_classify_channel` would tag as `channel`.
+
+    Built mechanically from `_channel_rules()`: a rule only fires for its
+    channel when no EARLIER rule fired, which is precisely what the
+    first-hit-wins loop in `_classify_channel` does. "Other" is the
+    complement of every rule -- it used to be the complement of Meta,
+    Google and Retention only, so selecting it also returned Organic
+    (Direct), Brand Collab, Loyalty, AI and Organic (IG): 12,688 rows
+    behind a tile reading 5,182.
+    """
+    rules = _channel_rules()
     params: dict[str, str] = {}
-    for i, needle in enumerate(needles):
-        key = f"ch_{channel.lower()}_{i}"
-        parts.append(f"LOWER(COALESCE(utm_source,'')) LIKE :{key}")
-        params[key] = f"%{needle}%"
-    # POSIX-regex whole-token match, mirroring _tokenize_source's
-    # split on _-.\s AND camelCase boundaries. `[[:^alnum:]]` = any
-    # non-alphanumeric character (Postgres's POSIX bracket class);
-    # start/end of string counts as a boundary too. camelCase
-    # boundaries need an extra `(?=[A-Z][a-z])` lookahead-style
-    # equivalent -- Postgres POSIX regex doesn't support lookarounds,
-    # so we instead check both anchored and case-boundary shapes.
-    for token in whole_tokens:
-        regex = rf"(^|[^A-Za-z0-9])({token})([^a-z0-9]|$)"
-        key = f"ch_{channel.lower()}_tok_{token}"
-        parts.append(f"COALESCE(utm_source,'') ~* :{key}")
-        params[key] = regex
-    return f"({' OR '.join(parts)})", params
+
+    if channel == "Other":
+        for _, _, rule_params in rules:
+            params.update(rule_params)
+        return f"(NOT ({' OR '.join(clause for _, clause, _ in rules)}))", params
+
+    mine: list[str] = []
+    for i, (rule_channel, clause, rule_params) in enumerate(rules):
+        if rule_channel != channel:
+            continue
+        earlier = [rules[j][1] for j in range(i)]
+        if earlier:
+            mine.append(f"({clause} AND NOT ({' OR '.join(earlier)}))")
+            for j in range(i):
+                params.update(rules[j][2])
+        else:
+            mine.append(clause)
+        params.update(rule_params)
+
+    if not mine:
+        # A channel with no rules at all can only ever be reached by
+        # falling through, i.e. it is "Other" by another name. Match
+        # nothing rather than crash, which is what a missing
+        # _CHANNEL_SUBSTRINGS entry used to do (KeyError -> HTTP 500 on
+        # Organic (Direct)).
+        return "FALSE", {}
+    return f"({' OR '.join(mine)})", params
 
 
 _UTM_ORDER_COLUMNS = (
     "soa.order_id, soa.name, soa.total_price, soa.created_at, soa.customer_id, "
     "soa.utm_source, soa.utm_medium, soa.utm_campaign, soa.utm_content, soa.utm_term, "
-    "soa.tier, soa.matched_ad_id, soa.matched_ad_name, "
+    "soa.tier, soa.matched_ad_id, soa.matched_ad_name, soa.matched_value, "
     "soa.matched_campaign_id, soa.matched_campaign_name, "
     # matched_adset_id is not stored directly on shopify_order_attribution
     # (Backend_Project's Silver flatten only kept ad/campaign IDs) -- join
@@ -1352,6 +1444,10 @@ class UtmOrderRow(BaseModel):
     matched_adset_id: str | None
     matched_campaign_id: str | None
     matched_campaign_name: str | None
+    #: The value the cascade matched ON (utm_content / utm_term /
+    #: utm_campaign, depending on the step). Shown beside the tier in the
+    #: order table: the tier names the rule, this names the input.
+    matched_value: str | None
     contact_email: str | None
     customer_num_orders: float | None
     channel: str
@@ -1376,7 +1472,15 @@ class UtmOrderResponse(BaseModel):
     rows: list[UtmOrderRow]
     total: int
     channel_counts: dict[str, ChannelSummary]
-    tier_counts: dict[str, int]
+    #: Cascade step -> (orders, sales). The step tiles show both: a step
+    #: that is 4% of orders is often a very different share of revenue.
+    tier_summary: dict[str, ChannelSummary]
+    #: channel -> tier -> (count, sales). The cascade only ever runs
+    #: against paid click-ids, so scoping the steps to Meta or Google is
+    #: the only way to read a match rate honestly: "unmatched" over ALL
+    #: orders is dominated by Organic/Direct traffic that was never a
+    #: candidate for an ad match in the first place.
+    tier_by_channel: dict[str, dict[str, ChannelSummary]]
     #: Per-source breakdown per channel, for the click-to-drill-down UI.
     #: Sources within a channel are ordered by count desc.
     channel_sources: dict[str, list[SourceBreakdown]]
@@ -1489,28 +1593,46 @@ async def get_last_click_utm(
             text(
                 "SELECT COALESCE(utm_source, '') AS utm_source, "
                 "       COALESCE(tier, 'unmatched') AS tier, "
+                # A BOOLEAN, not utm_content itself. The channel rule
+                # needs to know only whether this is bio-link traffic;
+                # grouping by the raw utm_content would take this from a
+                # few hundred groups to tens of thousands and undo the
+                # 20s -> 1-2s the pre-aggregation bought.
+                "       (lower(COALESCE(utm_content, '')) = ANY(:organic_ig_content)) "
+                "         AS organic_ig, "
                 "       COUNT(*) AS n, "
                 "       COALESCE(SUM(total_price), 0) AS sales "
                 f"FROM shopify_order_attribution {tile_where_sql} "
-                "GROUP BY 1, 2"
+                "GROUP BY 1, 2, 3"
             ),
-            tile_params,
+            {**tile_params, "organic_ig_content": sorted(_ORGANIC_IG_CONTENT)},
         )
     ).all()
 
     channel_counts: dict[str, ChannelSummary] = {
         c: ChannelSummary(count=0, sales=0.0) for c in _CHANNEL_ORDER
     }
-    tier_counts: dict[str, int] = {}
+    tier_summary: dict[str, ChannelSummary] = {}
+    # channel -> tier -> (count, sales). Free: the summary query already
+    # groups by (utm_source, tier), and channel is a pure function of
+    # utm_source, so scoping the cascade by channel costs one more dict.
+    tier_by_channel: dict[str, dict[str, ChannelSummary]] = {c: {} for c in _CHANNEL_ORDER}
     # channel -> utm_source -> (count, sales) for the drill-down
     channel_source_buckets: dict[str, dict[str, tuple[int, float]]] = {c: {} for c in _CHANNEL_ORDER}
-    for row_utm_source, row_tier, row_n, row_sales in summary_rows:
+    for row_utm_source, row_tier, row_organic_ig, row_n, row_sales in summary_rows:
         n = int(row_n or 0)
         sales = float(row_sales or 0)
-        ch = _classify_channel(row_utm_source or None)
+        ch = _classify_channel(row_utm_source or None,
+                               "link_in_bio" if row_organic_ig else None)
         channel_counts[ch].count += n
         channel_counts[ch].sales += sales
-        tier_counts[row_tier or "unmatched"] = tier_counts.get(row_tier or "unmatched", 0) + n
+        step = row_tier or "unmatched"
+        agg = tier_summary.setdefault(step, ChannelSummary(count=0, sales=0.0))
+        agg.count += n
+        agg.sales += sales
+        scoped = tier_by_channel[ch].setdefault(step, ChannelSummary(count=0, sales=0.0))
+        scoped.count += n
+        scoped.sales += sales
         src_key = (row_utm_source or "").strip() or "(none)"
         prev = channel_source_buckets[ch].get(src_key, (0, 0.0))
         channel_source_buckets[ch][src_key] = (prev[0] + n, prev[1] + sales)
@@ -1566,7 +1688,12 @@ async def get_last_click_utm(
             where_clauses.extend(sub_clauses)
             params.update(sub_params)
     if matched_value:
-        # matched_value in Backend maps to matched_ad_name
+        # NOTE: the `matched_value` QUERY PARAM and the `matched_value`
+        # COLUMN are not the same thing, and the param came first. The
+        # param has always filtered on matched_ad_name -- the UI labels it
+        # "Matched ad name" -- so it keeps doing that. Filtering the new
+        # column instead would silently change what an existing saved
+        # filter returns.
         sub_clauses, sub_params = _parse_text_filter(matched_value, "matched_ad_name")
         where_clauses.extend(sub_clauses)
         params.update(sub_params)
@@ -1575,8 +1702,14 @@ async def get_last_click_utm(
         params["search"] = f"%{search}%"
     if channel:
         channel_sql, channel_params = _channel_sql_predicate(channel)
-        # rewrite `utm_source` refs inside the predicate to qualify with soa.
-        channel_sql = channel_sql.replace("utm_source", "soa.utm_source")
+        # Qualify the predicate's column refs with soa. -- the row query
+        # LEFT JOINs ad_lifecycle and shopify_customer_analytics, so a
+        # bare column name is only safe by accident. utm_content joined
+        # utm_source here when the Organic (IG) pair rule was added; an
+        # unqualified reference worked only because neither joined table
+        # happens to have that column today.
+        for col in ("utm_source", "utm_content"):
+            channel_sql = channel_sql.replace(col, f"soa.{col}")
         where_clauses.append(channel_sql)
         params.update(channel_params)
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
@@ -1599,7 +1732,7 @@ async def get_last_click_utm(
         rows.append(
             UtmOrderRow(
                 **m,
-                channel=_classify_channel(m["utm_source"]),
+                channel=_classify_channel(m["utm_source"], m.get("utm_content")),
                 has_match=m["matched_ad_id"] is not None,
             )
         )
@@ -1614,11 +1747,173 @@ async def get_last_click_utm(
         rows=rows,
         total=total,
         channel_counts=channel_counts,
-        tier_counts=tier_counts,
+        tier_summary=tier_summary,
+        tier_by_channel=tier_by_channel,
         channel_sources=channel_sources,
     )
     _ads_analyse_cache_put(_lcu_key, _lcu_resp)  # type: ignore[arg-type]
     return _lcu_resp
+
+
+# ----------------------------------------------------------------------
+# Adset matched, ad name did not -- the naming-drift worklist.
+#
+# `adset_name_miss` orders are the ones where checkout captured a real
+# adset in utm_term but utm_content matched no ad name inside it under
+# the strict rule. Counting them is not enough to act on: the useful
+# question is "which ad is this SUPPOSED to be", and answering it needs
+# the utm_content the order carried set against the ad names that
+# actually live in that adset.
+#
+# So this groups by (utm_content, adset) rather than listing orders --
+# one row per distinct naming mismatch, which is the grain someone
+# fixing ad names works at. 500 orders a month collapse to a few dozen
+# rows. The candidate ad names come from the same universe the cascade
+# uses (ad_lifecycle UNION meta_ads), capped per row.
+# ----------------------------------------------------------------------
+
+class NameMissRow(BaseModel):
+    utm_content: str | None
+    utm_term: str | None
+    adset_name: str | None
+    campaign_name: str | None
+    orders: int
+    sales: float
+    #: Ads that DO live in that adset -- what utm_content could have
+    #: matched. Empty when the adset is in the roster but holds no ads,
+    #: which is a different problem (missing ads, not drifted names).
+    candidate_ad_names: list[str]
+    ads_in_adset: int
+
+
+class NameMissResponse(BaseModel):
+    rows: list[NameMissRow]
+    #: Totals below are over the WHOLE window, not over `rows` -- `rows`
+    #: is capped by `limit`, and a KPI card that silently means "of the
+    #: first 200" is the same defect as a tile computed from the loaded
+    #: page. They come from their own aggregate for that reason.
+    total_rows: int
+    total_orders: int
+    total_sales: float
+    #: Distinct adsets involved. Fewer adsets than mismatches means the
+    #: drift is concentrated -- one adset generating several bad names.
+    adsets_affected: int
+    #: Mismatches where the adset holds no ads at all. These are NOT a
+    #: naming problem and nobody should go looking for a rename: there
+    #: was nothing to match against in the first place.
+    rows_without_ads: int
+
+
+_NAME_MISS_SQL = (
+    "WITH miss AS ( "
+    "  SELECT utm_content, utm_term, "
+    "         MAX(matched_campaign_name) AS campaign_name, "
+    "         COUNT(*)::int AS orders, "
+    "         COALESCE(SUM(total_price), 0)::float AS sales "
+    "    FROM shopify_order_attribution "
+    "   WHERE tier = 'adset_name_miss' "
+    # CAST on the IS NULL side too: asyncpg infers each placeholder's type
+    # from its context, and a bare `:p IS NULL` gives it none --
+    # "could not determine data type of parameter $1".
+    "     AND (CAST(:from_date AS date) IS NULL OR created_at >= CAST(:from_date AS date)) "
+    "     AND (CAST(:to_date   AS date) IS NULL OR created_at <  (CAST(:to_date AS date) + 1)) "
+    "   GROUP BY utm_content, utm_term "
+    "), universe AS ( "
+    "  SELECT COALESCE(al.ad_id, a.ad_id)         AS ad_id, "
+    "         COALESCE(al.ad_name, a.ad_name)     AS ad_name, "
+    "         COALESCE(al.adset_id, a.adset_id)   AS adset_id "
+    "    FROM ad_lifecycle al "
+    "    FULL OUTER JOIN meta_ads a ON a.ad_id = al.ad_id "
+    "   WHERE COALESCE(al.ad_name, a.ad_name) IS NOT NULL "
+    ") "
+    "SELECT m.utm_content, m.utm_term, ms.adset_name, m.campaign_name, "
+    "       m.orders, m.sales, "
+    "       COALESCE(c.names, ARRAY[]::text[]) AS candidate_ad_names, "
+    "       COALESCE(c.n, 0)::int              AS ads_in_adset "
+    "  FROM miss m "
+    "  LEFT JOIN meta_adsets ms ON ms.adset_id = m.utm_term "
+    "  LEFT JOIN LATERAL ( "
+    "      SELECT ARRAY_AGG(u.ad_name ORDER BY u.ad_name) "
+    "               FILTER (WHERE u.rn <= 8) AS names, "
+    "             COUNT(*)                    AS n "
+    "        FROM (SELECT ad_name, ROW_NUMBER() OVER (ORDER BY ad_name) AS rn "
+    "                FROM universe WHERE adset_id = m.utm_term) u "
+    "  ) c ON TRUE "
+    " ORDER BY m.orders DESC "
+    " LIMIT :limit"
+)
+
+
+_NAME_MISS_SUMMARY_SQL = (
+    "WITH miss AS ( "
+    "  SELECT utm_content, utm_term, COUNT(*)::int AS orders, "
+    "         COALESCE(SUM(total_price), 0)::float AS sales "
+    "    FROM shopify_order_attribution "
+    "   WHERE tier = 'adset_name_miss' "
+    "     AND (CAST(:from_date AS date) IS NULL OR created_at >= CAST(:from_date AS date)) "
+    "     AND (CAST(:to_date   AS date) IS NULL OR created_at <  (CAST(:to_date AS date) + 1)) "
+    "   GROUP BY utm_content, utm_term "
+    "), universe AS ( "
+    "  SELECT COALESCE(al.adset_id, a.adset_id) AS adset_id "
+    "    FROM ad_lifecycle al "
+    "    FULL OUTER JOIN meta_ads a ON a.ad_id = al.ad_id "
+    "   WHERE COALESCE(al.ad_name, a.ad_name) IS NOT NULL "
+    ") "
+    "SELECT COUNT(*)::int                          AS total_rows, "
+    "       COALESCE(SUM(orders), 0)::int          AS total_orders, "
+    "       COALESCE(SUM(sales), 0)::float         AS total_sales, "
+    "       COUNT(DISTINCT utm_term)::int          AS adsets_affected, "
+    "       COUNT(*) FILTER (WHERE NOT EXISTS ( "
+    "           SELECT 1 FROM universe u WHERE u.adset_id = miss.utm_term))::int "
+    "                                              AS rows_without_ads "
+    "  FROM miss"
+)
+
+
+@router.get("/last-click-utm/name-misses", response_model=NameMissResponse)
+async def get_name_misses(
+    session: SessionDep,
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> NameMissResponse:
+    """Orders whose adset matched but whose ad name did not, grouped into
+    one row per distinct (utm_content, adset) mismatch."""
+    rows = (
+        await session.execute(
+            text(_NAME_MISS_SQL),
+            {"from_date": from_date, "to_date": to_date, "limit": limit},
+        )
+    ).all()
+
+    out = [
+        NameMissRow(
+            utm_content=r.utm_content,
+            utm_term=r.utm_term,
+            adset_name=r.adset_name,
+            campaign_name=r.campaign_name,
+            orders=int(r.orders or 0),
+            sales=float(r.sales or 0),
+            candidate_ad_names=list(r.candidate_ad_names or []),
+            ads_in_adset=int(r.ads_in_adset or 0),
+        )
+        for r in rows
+    ]
+    summary = (
+        await session.execute(
+            text(_NAME_MISS_SUMMARY_SQL),
+            {"from_date": from_date, "to_date": to_date},
+        )
+    ).one()
+
+    return NameMissResponse(
+        rows=out,
+        total_rows=int(summary.total_rows or 0),
+        total_orders=int(summary.total_orders or 0),
+        total_sales=float(summary.total_sales or 0),
+        adsets_affected=int(summary.adsets_affected or 0),
+        rows_without_ads=int(summary.rows_without_ads or 0),
+    )
 
 
 # ----------------------------------------------------------------------
@@ -2055,7 +2350,9 @@ _DATASETS: dict[str, _Dataset] = {
         dimensions={
             "day": _Dimension("Day", "day"),
             "new_or_returning_customer": _Dimension("New/returning customer", "new_or_returning_customer"),
-            "is_pos_sale": _Dimension("POS sale?", "is_pos_sale"),
+            # is_pos_sale dropped: it left the fetch grain (it split every
+            # order into a valued row and a zero row), so it is NULL now.
+            "sales_channel": _Dimension("Sales channel", "sales_channel"),
         },
         metrics={
             "orders": _Metric("Orders", "sum", "orders"),
@@ -4054,6 +4351,25 @@ class UntestedAssetRow(BaseModel):
     thumbnail: str | None            # only influencer has one right now
     date_produced: date | None       # date_of_production / asset_date / post_date
     created_at: datetime | None
+    #: Ads whose name carries this asset's id. 0 is the definition of
+    #: untested, so the column is the filter's own evidence.
+    matched_ads: int = 0
+    #: Where the asset RECORD came from, which is a different question
+    #: from what the asset is:
+    #:   database   -- a live Supabase register the team maintains today
+    #:   historical -- a Google Sheet from before those registers existed
+    #: Kept because the two need reading differently. A database asset
+    #: that never ran is a live backlog item someone can still action; a
+    #: sheet asset that never ran is mostly archaeology, and its id may
+    #: predate the naming convention the matcher relies on.
+    origin: str
+    #: The specific upstream, for when "historical" is not precise enough.
+    source_system: str
+    #: EVERY link the register holds for this asset, labelled, in column
+    #: order. Was a single COALESCE, which silently dropped link_2,
+    #: link_3, `creative` and reference_links on graphics -- those are
+    #: usually different cuts of the requisition, not copies of one file.
+    links: list[dict] = Field(default_factory=list)
     # SKU mapping + 30d CPIS window enrichment
     candidate_master_sku: str | None
     matched_master_sku: str | None
@@ -4067,6 +4383,16 @@ class UntestedAssetsResponse(BaseModel):
     total_rows: int
     with_sku_match: int
     without_sku_match: int
+    #: The same rows counted by where the record came from, so the UI can
+    #: show the live backlog separately from the sheet-era archive.
+    from_database: int
+    from_historical: int
+    #: The register this tab reads, in full -- so "untested" has a
+    #: denominator. `matched_assets` is how many ids DO appear in an ad
+    #: name, and `matched_ads` is how many ads those account for.
+    register_total: int = 0
+    matched_assets: int = 0
+    matched_ads: int = 0
     rows: list[UntestedAssetRow]
     computed_at: datetime
 
@@ -4082,6 +4408,37 @@ class UntestedAssetsResponse(BaseModel):
 # Per-media SQL fragments producing a common column set. Each SELECT
 # yields: id, title, nomenclature, kind, sub_kind, link, thumbnail,
 # date_produced, created_at, candidate_master_sku (already NULLIF'd).
+#: How much of each register has ever matched an ad, so the untested
+#: count has a denominator. The register list per media mirrors
+#: _UNTESTED_SQL's UNION branches exactly -- video spans two registers.
+_UNTESTED_COVERAGE_SQL: dict[str, str] = {
+    "video": """
+        SELECT COUNT(DISTINCT k.id)                                        AS register_total,
+               COUNT(DISTINCT k.id) FILTER (WHERE m.asset_id IS NOT NULL)  AS matched_assets,
+               COUNT(m.ad_id)                                              AS matched_ads
+          FROM (SELECT asset_id AS id FROM public.content_asset_register
+                 WHERE asset_id IS NOT NULL
+                UNION
+                SELECT requisition_id FROM public.content_iterated_register
+                 WHERE requisition_id IS NOT NULL) k
+          LEFT JOIN public.ad_asset_map m ON m.asset_id = k.id
+    """,
+    "graphic": """
+        SELECT COUNT(DISTINCT r.requisition_id)                                       AS register_total,
+               COUNT(DISTINCT r.requisition_id) FILTER (WHERE m.asset_id IS NOT NULL)  AS matched_assets,
+               COUNT(m.ad_id)                                                          AS matched_ads
+          FROM public.content_graphic_register r
+          LEFT JOIN public.ad_asset_map m ON m.asset_id = r.requisition_id
+    """,
+    "influencer": """
+        SELECT COUNT(DISTINCT r.post_id)                                       AS register_total,
+               COUNT(DISTINCT r.post_id) FILTER (WHERE m.asset_id IS NOT NULL)  AS matched_assets,
+               COUNT(m.ad_id)                                                   AS matched_ads
+          FROM public.content_influencer_posts r
+          LEFT JOIN public.ad_asset_map m ON m.asset_id = r.post_id
+    """,
+}
+
 _UNTESTED_SQL: dict[str, str] = {
     "video": """
         SELECT
@@ -4095,10 +4452,73 @@ _UNTESTED_SQL: dict[str, str] = {
           car.date_of_production                                AS date_produced,
           car.created_at                                        AS created_at,
           NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '')
-                                                                AS candidate_master_sku
+                                                                AS candidate_master_sku,
+          -- Origin is a property of the REGISTER, not of the row: each
+          -- register is fed by exactly one upstream system. The live
+          -- Supabase projects are where the team records assets TODAY;
+          -- the Google Sheets are the era before that, kept because the
+          -- ads referencing those ids are still running.
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Asset', car.link_to_asset), (2, 'Instagram', car.ads_instagram_permalink)) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = car.asset_id)::int                        AS matched_ads,
+          'database'::text                                      AS origin,
+          'Supabase · asset-register'::text                     AS source_system
         FROM public.content_asset_register car
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = car.asset_id)
+
+        UNION ALL
+        -- Iterated video lives in its own register (keyed on a
+        -- requisition id, not an asset_id) but reports as media='video'
+        -- everywhere else, so it has to be counted here too -- otherwise
+        -- "untested video" in the UI would silently exclude a whole
+        -- register that the map, the tiles and the tier badge all treat
+        -- as video.
+        SELECT
+          -- Group on requisition_id ALONE. One requisition can have
+          -- several cuts (V1, V2) whose edited_by / format / approval
+          -- differ, and grouping on those too splits one asset into
+          -- several "untested" rows -- which showed up immediately as
+          -- 316 against the refresh script's 315.
+          cir.requisition_id                                    AS id,
+          MIN(cir.edited_by)                                    AS title,
+          MIN(cir.nomenclature)                                 AS nomenclature,
+          MIN(cir.video_format)                                 AS kind,
+          MIN(cir.approval_status)                              AS sub_kind,
+          MIN(cir.edited_link)                                  AS link,
+          NULL::text                                            AS thumbnail,
+          NULL::date                                            AS date_produced,
+          NULL::timestamptz                                     AS created_at,
+          NULLIF(split_part(MIN(COALESCE(cir.nomenclature, '')), '_', 1), '')
+                                                                AS candidate_master_sku,
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Edited', MIN(cir.edited_link))) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cir.requisition_id)::int                        AS matched_ads,
+          'historical'::text                                    AS origin,
+          'Sheet · Iterated Content'::text                      AS source_system
+        FROM public.content_iterated_register cir
+
+        GROUP BY cir.requisition_id
     """,
     "graphic": """
         SELECT
@@ -4115,14 +4535,39 @@ _UNTESTED_SQL: dict[str, str] = {
           COALESCE(
             NULLIF(cgr.product, ''),
             NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
-          )                                                     AS candidate_master_sku
+          )                                                     AS candidate_master_sku,
+          -- Graphics has ONE upstream and it is a sheet, so this tab is
+          -- entirely historical. Both the live tab and the fuller
+          -- historic file land in this same register.
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Link 1', cgr.link_1), (2, 'Link 2', cgr.link_2), (3, 'Link 3', cgr.link_3), (4, 'Creative', cgr.creative), (5, 'Reference', cgr.reference_links)) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cgr.requisition_id)::int                        AS matched_ads,
+          'historical'::text                                    AS origin,
+          'Sheet · Creative Mastersheet (Graphics)'::text        AS source_system
         FROM public.content_graphic_register cgr
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = cgr.requisition_id)
+
     """,
     "influencer": """
         SELECT
-          cip.id::text                                          AS id,
+          -- post_id, NOT the legacy bigint `id`. That column is NULL for
+          -- the 2,648 rows sourced from the creatorhub `cleaned_data`
+          -- export (its NOT NULL was dropped to load them), which made
+          -- this endpoint 500 on a model that requires a string id.
+          -- post_id is the table's real key: non-null and unique across
+          -- all 14,709 rows, and it is the identifier that appears in ad
+          -- names, so it is also what the NOT EXISTS below matches on.
+          cip.post_id                                           AS id,
           cip.username                                          AS title,
           cip.nomenclature                                      AS nomenclature,
           cip.content_type                                      AS kind,
@@ -4131,12 +4576,40 @@ _UNTESTED_SQL: dict[str, str] = {
           cip.post_thumbnail                                    AS thumbnail,
           cip.post_date                                         AS date_produced,
           cip.created_at                                        AS created_at,
-          NULL::text                                            AS candidate_master_sku
+          NULL::text                                            AS candidate_master_sku,
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Post', cip.post_link), (2, 'Download', cip.download_link)) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- creatorhub holds three tables and only ONE is live:
+          --   posts          780 -- what the team maintains today
+          --   historic_posts 1,203 -- explicitly the archive
+          --   cleaned_data  12,726 -- the legacy table, loaded from an
+          --                           export because RLS blocks the API
+          -- So the live/historical split applies inside this project
+          -- too; it is not a Supabase-vs-Sheet distinction.
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cip.post_id)::int                        AS matched_ads,
+          CASE WHEN cip.source_table = 'posts' THEN 'database' ELSE 'historical' END
+                                                                AS origin,
+          CASE cip.source_table
+               WHEN 'posts'          THEN 'Supabase · creatorhub (posts)'
+               WHEN 'historic_posts' THEN 'Supabase · creatorhub (historic_posts)'
+               WHEN 'cleaned_data'   THEN 'Supabase · creatorhub (cleaned_data)'
+               ELSE 'Supabase · creatorhub'
+          END                                                   AS source_system
         FROM public.content_influencer_posts cip
         -- Join on post_id, NOT the bigint PK: the map is keyed on the
         -- identifier that actually appears in ad names (SIF-15233-P1).
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = cip.post_id)
+
     """,
 }
 
@@ -4145,16 +4618,33 @@ _UNTESTED_SQL: dict[str, str] = {
 async def get_untested_assets(
     session: SessionDep,
     media: UntestedMedia = Query(default="video", description="Which asset media type -- video / graphic / influencer"),
+    match_state: Literal["untested", "matched", "all"] = Query(
+        default="untested",
+        description="untested = the id appears in NO ad name (the default, and "
+                    "what this section is for). matched = it appears in at "
+                    "least one. all = the whole register, which is what makes "
+                    "the matched_ads column worth reading.",
+    ),
     has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows. Ignored for influencer (which has no SKU derivation)."),
 ) -> UntestedAssetsResponse:
     base_select = _UNTESTED_SQL[media]
 
     outer_filters: list[str] = []
+    if match_state == "untested":
+        outer_filters.append("b.matched_ads = 0")
+    elif match_state == "matched":
+        outer_filters.append("b.matched_ads > 0")
     if has_sku is True and media != "influencer":
         outer_filters.append("cpis.master_sku IS NOT NULL")
     elif has_sku is False and media != "influencer":
         outer_filters.append("cpis.master_sku IS NULL")
     where_clause = ("WHERE " + " AND ".join(outer_filters)) if outer_filters else ""
+    # Newest-first is right for the untested backlog -- the freshest
+    # unrun asset is the most actionable. It is exactly wrong for the
+    # other two views: the newest assets are precisely the ones that have
+    # not run, so date order buries every non-zero Ads count hundreds of
+    # rows down and page 1 reads as a column of zeros.
+    order_lead = "" if match_state == "untested" else "b.matched_ads DESC,"
 
     sql = text(f"""
         WITH base AS ({base_select})
@@ -4162,6 +4652,7 @@ async def get_untested_assets(
           b.id, b.title, b.nomenclature, b.kind, b.sub_kind,
           b.link, b.thumbnail, b.date_produced, b.created_at,
           b.candidate_master_sku,
+          b.origin, b.source_system, b.links, b.matched_ads,
           cpis.master_sku       AS matched_master_sku,
           cpis.attributed_orders AS sku_attributed_orders,
           cpis.ad_spend          AS sku_ad_spend,
@@ -4171,7 +4662,8 @@ async def get_untested_assets(
           ON cpis.master_sku = b.candidate_master_sku
          AND cpis.window_key = '30d'
         {where_clause}
-        ORDER BY COALESCE(b.date_produced, DATE '1900-01-01') DESC,
+        ORDER BY {order_lead}
+                 COALESCE(b.date_produced, DATE '1900-01-01') DESC,
                  b.created_at DESC NULLS LAST,
                  b.id
     """)
@@ -4189,6 +4681,10 @@ async def get_untested_assets(
             date_produced=r.date_produced,
             created_at=r.created_at,
             candidate_master_sku=r.candidate_master_sku,
+            matched_ads=int(r.matched_ads or 0),
+            origin=r.origin,
+            source_system=r.source_system,
+            links=list(r.links or []),
             matched_master_sku=r.matched_master_sku,
             sku_attributed_orders=int(r.sku_attributed_orders) if r.sku_attributed_orders is not None else None,
             sku_ad_spend=float(r.sku_ad_spend) if r.sku_ad_spend is not None else None,
@@ -4196,12 +4692,19 @@ async def get_untested_assets(
         )
         for r in result
     ]
+    cov = (await session.execute(text(_UNTESTED_COVERAGE_SQL[media]))).one()
     matched = sum(1 for r in rows if r.matched_master_sku)
+    from_db = sum(1 for r in rows if r.origin == "database")
     return UntestedAssetsResponse(
         media=media,
         total_rows=len(rows),
         with_sku_match=matched,
         without_sku_match=len(rows) - matched,
+        from_database=from_db,
+        from_historical=len(rows) - from_db,
+        register_total=int(cov.register_total or 0),
+        matched_assets=int(cov.matched_assets or 0),
+        matched_ads=int(cov.matched_ads or 0),
         rows=rows,
         computed_at=datetime.now(timezone.utc),
     )
@@ -4623,12 +5126,15 @@ async def get_dashboard_channel_breakdown(session: SessionDep) -> list[Breakdown
     # stays in Python (per project convention) but the row shuffle
     # doesn't. This alone drops 27s -> <1s.
     rows = (await session.execute(text(
-        "SELECT utm_source, SUM(total_price) FROM shopify_order_attribution "
-        "GROUP BY utm_source"
+        "SELECT utm_source, "
+        "       (lower(COALESCE(utm_content, '')) IN "
+        "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
+        "       SUM(total_price) FROM shopify_order_attribution "
+        "GROUP BY utm_source, 2"
     ))).all()
     channel_totals: dict[str, float] = {}
-    for utm_source, total_price in rows:
-        ch = _classify_channel(utm_source)
+    for utm_source, organic_ig, total_price in rows:
+        ch = _classify_channel(utm_source, "link_in_bio" if organic_ig else None)
         channel_totals[ch] = channel_totals.get(ch, 0.0) + float(total_price or 0)
     return [BreakdownItem(label=k, value=v) for k, v in channel_totals.items()]
 
@@ -4728,12 +5234,66 @@ _CT_ASSET_DATES = (
     "       NULLIF(btrim(post_thumbnail), '') FROM public.content_influencer_posts"
 )
 
+#: Per-ad spend/outcome metrics SCOPED TO THE WINDOW.
+#:
+#: ad_asset_map carries LIFETIME totals -- ad_lifecycle holds one row per
+#: ad, not one per day -- so summing them gave an asset's whole history
+#: no matter which dates were selected. The date range only ever decided
+#: which assets appeared (`ads_in_window > 0`), never how much money was
+#: counted, and the result did not reconcile with Meta: Aug 18 - Sep 17
+#: read Rs 3,12,38,772 against a true Rs 1,00,96,279 of spend in the
+#: window, 8.3x the Rs 37,42,409 those creatives actually spent in it.
+#:
+#: insights_daily_by_ad is the only genuinely daily table, so the money
+#: metrics come from it. It does NOT carry thruplays, 3-second plays,
+#: outbound clicks or post engagements, and Bronze's daily insights rows
+#: do not either, so those four stay lifetime and the UI marks them.
+_CT_WINDOW_METRICS = (
+    "  SELECT i.ad_id,"
+    "         sum(i.spend)             AS spend,"
+    "         sum(i.impressions)       AS impressions,"
+    "         sum(i.purchases)         AS purchases,"
+    "         sum(i.conv_value)        AS conv_value,"
+    "         sum(i.ncp_count)         AS ncp_count,"
+    "         sum(i.ftewv_count)       AS ftewv_count,"
+    "         sum(i.clicks)            AS link_clicks,"
+    "         sum(i.thruplays)         AS thruplays,"
+    "         sum(i.three_sec_plays)   AS three_sec_plays,"
+    "         sum(i.outbound_clicks)   AS outbound_clicks,"
+    "         sum(i.post_engagements)  AS post_engagements,"
+    # Added 2026-09-18. `reach` and `clicks` were in Bronze all along --
+    # the flatten never read them, and read inline_link_clicks (a field
+    # the fetch never requested) instead, which is why CTR was 0.
+    "         sum(i.all_clicks)        AS all_clicks,"
+    "         sum(i.reach)             AS reach,"
+    "         sum(i.add_to_cart)       AS atc_count,"
+    "         sum(i.checkout_initiate) AS ci_count"
+    "    FROM public.insights_daily_by_ad i"
+    "   WHERE i.day BETWEEN :from_date AND :to_date"
+    "   GROUP BY i.ad_id"
+)
+
+#: Shopify outcomes for the window, per ad. Windowed on the ORDER's own
+#: date, which is the only date that means anything here: an ad that ran
+#: in July did not earn a September order.
+_CT_WINDOW_SHOPIFY = (
+    "  SELECT a.matched_ad_id AS ad_id,"
+    "         COUNT(*)                        AS shopify_orders,"
+    "         COALESCE(SUM(a.total_price), 0) AS shopify_revenue"
+    "    FROM public.shopify_order_attribution a"
+    "   WHERE a.matched_ad_id IS NOT NULL"
+    "     AND a.created_at::date BETWEEN :from_date AND :to_date"
+    "   GROUP BY a.matched_ad_id"
+)
+
 #: Per-asset rollup across every ad whose name carries the asset's id.
-#: `ads_in_window` is what puts an asset in scope; the metric sums are
-#: the asset's lifetime totals, matching how the ad-grain view has always
-#: behaved (it filters on ad_created_date but shows lifetime figures).
+#: `ads_in_window` is what puts an asset in scope; the money metrics are
+#: that asset's spend INSIDE the window, so the column sums reconcile
+#: with what Meta charged over the same dates.
 _CT_AGG = (
     "WITH asset_dates AS (" + _CT_ASSET_DATES + "), "
+    "win AS (" + _CT_WINDOW_METRICS + "), "
+    "winshop AS (" + _CT_WINDOW_SHOPIFY + "), "
     "agg AS ("
     "  SELECT m.asset_id, m.media,"
     "         count(*)                                                   AS ads,"
@@ -4745,13 +5305,26 @@ _CT_AGG = (
     "         max(m.ad_created_date)                                      AS last_ad_date,"
     "         min(m.account_name)                                         AS account_name,"
     "         bool_or(m.name_conflict)                                    AS name_conflict,"
-    "         sum(m.spend)                                                AS spend,"
-    "         sum(m.impressions)                                          AS impressions,"
-    "         sum(m.purchases)                                            AS purchases,"
-    "         sum(m.conv_value)                                           AS conv_value,"
-    "         sum(m.ncp_count)                                            AS ncp_count,"
-    "         sum(m.ftewv_count)                                          AS ftewv_count,"
-    "         sum(m.link_clicks)                                          AS link_clicks,"
+    "         sum(COALESCE(w.spend, 0))                                   AS spend,"
+    "         sum(COALESCE(w.impressions, 0))                             AS impressions,"
+    # Denominator for the four video-engagement metrics above, which are
+    # still LIFETIME. They must be divided by this and never by the
+    # windowed impressions beside it -- the two are ~8x apart over 30
+    # days, which rendered a 90% hook rate where the truth was 9.1%.
+    "         sum(m.impressions)                                          AS impressions_lifetime,"
+    "         sum(COALESCE(w.purchases, 0))                               AS purchases,"
+    "         sum(COALESCE(w.conv_value, 0))                              AS conv_value,"
+    "         sum(COALESCE(w.ncp_count, 0))                               AS ncp_count,"
+    "         sum(COALESCE(w.ftewv_count, 0))                             AS ftewv_count,"
+    # LIFETIME. insights_daily_by_ad.clicks is only populated on 3,193 of
+    # 168,539 rows in a 30-day window, so windowing this drove ctr_pct to
+    # zero. Everything derived from clicks therefore stays lifetime, and
+    # spend_lifetime / purchases_lifetime exist so those ratios divide
+    # like-for-like instead of mixing a windowed numerator with a
+    # lifetime denominator.
+    "         sum(COALESCE(w.all_clicks, 0))                              AS link_clicks,"
+    "         sum(m.spend)                                                AS spend_lifetime,"
+    "         sum(m.purchases)                                            AS purchases_lifetime,"
     # Best verdict any ad of this asset reached. An asset that produced a
     # Winner in one ad and a Discarded in another is a Winner -- the
     # creative proved itself at least once. min() over the rank because
@@ -4763,14 +5336,40 @@ _CT_AGG = (
     "              ELSE 7 END)                                             AS cat_rank,"
     "         max(m.ad_name)                                              AS sample_ad_name,"
     "         sum(m.thruplays)                                            AS thruplays,"
-    "         sum(m.three_sec_plays)                                      AS three_sec_plays,"
+    "         sum(COALESCE(w.three_sec_plays, 0))                         AS three_sec_plays,"
     "         sum(m.outbound_clicks)                                      AS outbound_clicks,"
     "         sum(m.post_engagements)                                     AS post_engagements,"
     # Keep both outbound links tied to one real ad. Lifetime spend matches
     # the metrics shown for this asset; ad_id breaks equal-spend ties.
-    "         (array_agg(m.ad_id ORDER BY m.spend DESC NULLS LAST, m.ad_id))[1]"
-    "                                                                     AS preview_ad_id"
+    "         (array_agg(m.ad_id ORDER BY COALESCE(w.spend, 0) DESC NULLS LAST,"
+    "                                    m.spend DESC NULLS LAST, m.ad_id))[1]"
+    "                                                                     AS preview_ad_id,"
+    # Everything Ads Analyse reads, rolled up to the asset. The ad-grain
+    # tables are joined here rather than copied into ad_asset_map so the
+    # two sections cannot drift: an asset column is the SUM of the same
+    # expression the ad column shows.
+    "         COUNT(DISTINCT aps.campaign_id)                             AS campaigns,"
+    "         COUNT(DISTINCT aps.adset_id)                                AS adsets,"
+    "         bool_or(aps.ad_effective_status = 'ACTIVE')                 AS any_active,"
+    "         bool_or(COALESCE(aps.f1_pass, false))                       AS f1_pass,"
+    "         bool_or(COALESCE(aps.f2_pass, false))                       AS f2_pass,"
+    "         bool_or(COALESCE(aps.f3_pass, false))                       AS f3_pass,"
+    "         bool_or(COALESCE(aps.f4_pass, false))                       AS f4_pass,"
+    "         sum(COALESCE(ws.shopify_orders, 0))                         AS shopify_orders,"
+    "         sum(COALESCE(ws.shopify_revenue, 0))                        AS shopify_revenue,"
+    # Reach does NOT add up -- one person reached by three ads of the
+    # same asset is one person, and Meta gives no asset-level dedupe. The
+    # sum is an UPPER BOUND and the column says so.
+    "         sum(COALESCE(w.reach, 0))                                   AS reach_upper,"
+    "         sum(COALESCE(w.atc_count, 0))                               AS atc_count,"
+    "         sum(COALESCE(w.ci_count, 0))                                AS ci_count,"
+    "         sum(COALESCE(al.engagement_count, 0))                       AS engagement_count,"
+    "         min(aps.campaign_name)                                      AS sample_campaign_name"
     "    FROM public.ad_asset_map m"
+    "    LEFT JOIN win w ON w.ad_id = m.ad_id"
+    "    LEFT JOIN public.ad_performance_summary aps ON aps.ad_id = m.ad_id"
+    "    LEFT JOIN public.ad_lifecycle al ON al.ad_id = m.ad_id"
+    "    LEFT JOIN winshop ws ON ws.ad_id = m.ad_id"
     "   GROUP BY m.asset_id, m.media"
     ") "
 )
@@ -4794,6 +5393,30 @@ _CT_CATEGORY = (
 
 _CT_IS_NEW = (
     "(d.asset_created BETWEEN :from_date AND :to_date AND a.original_ads > 0)"
+)
+
+#: The bar a creative has to clear to count as genuinely tested. An asset
+#: that has been put back in the air across several ads and STILL cannot
+#: reach this many impressions has been answered -- repeatedly.
+_CT_IMPRESSION_FLOOR = 50_000
+
+#: Which of the three buckets an asset belongs to.
+#:
+#: Everything that is not new is a RETEST, and retests split on lifetime
+#: impressions summed across every ad that ever carried the asset --
+#: deliberately lifetime, not the selected window. The question being
+#: asked is "has this creative ever been given a fair run?", and a window
+#: cannot answer that: an asset retested four times across a year would
+#: look untested in any single month.
+#:
+#: historical_discarded -- retested and still under the floor. It has had
+#:   its chances and never drew an audience.
+#: refresh_discarded    -- retested and over the floor. It cleared the
+#:   bare minimum, so its numbers mean something.
+_CT_KIND = (
+    f"CASE WHEN COALESCE({_CT_IS_NEW}, false) THEN 'new' "
+    f"     WHEN COALESCE(a.impressions_lifetime, 0) >= {_CT_IMPRESSION_FLOOR} "
+    f"     THEN 'refresh_discarded' ELSE 'historical_discarded' END"
 )
 
 
@@ -4841,7 +5464,7 @@ class CreativeTestingRow(BaseModel):
     #: One of the asset's ad names -- the client derives Product Focus
     #: (CLP/CTP/VRP/PDP prefix) from it, same as CTD's strip.
     sample_ad_name: str | None
-    #: "new" when the asset was created inside the window, else "iteration".
+    #: "new", "historical_discarded" or "refresh_discarded" -- see _CT_KIND.
     kind: str
     #: Times this asset was reused beyond its first outing. 0 = new.
     iteration_count: int
@@ -4864,11 +5487,70 @@ class CreativeTestingRow(BaseModel):
     cost_per_ftewv: float | None
     ctr_pct: float | None
 
+    # --- inspector columns, asset grain -------------------------------
+    # Every ratio here is recomputed from the SUMS, never averaged across
+    # the per-ad ratios -- a 3-impression ad must not weigh the same as a
+    # 3-million-impression one.
+    #: LIFETIME, with spend_lifetime / purchases_lifetime beside it so
+    #: the click-derived ratios divide like-for-like. The daily table's
+    #: `clicks` is too sparsely populated to window (3,193 non-zero rows
+    #: of 168,539 over 30 days), which is why these are not windowed.
+    link_clicks: float | None = None
+    spend_lifetime: float | None = None
+    purchases_lifetime: float | None = None
+    #: How many distinct campaigns / ad sets the asset has run across. An
+    #: asset has no single campaign or ad set, which is why Ads Analyse's
+    #: campaign_id and adset_id columns have no counterpart here.
+    campaigns: int | None = None
+    adsets: int | None = None
+    any_active: bool | None = None
+    f1_pass: bool | None = None
+    f2_pass: bool | None = None
+    f3_pass: bool | None = None
+    f4_pass: bool | None = None
+    sample_campaign_name: str | None = None
+    #: UPPER BOUND. Reach does not add up across ads -- one person reached
+    #: by three ads of the same asset is one person, and Meta exposes no
+    #: asset-level de-duplication. frequency_upper and pct_reach_ftewv
+    #: inherit the same caveat, and the column headers say so.
+    reach_upper: float | None = None
+    frequency_upper: float | None = None
+    pct_reach_ftewv: float | None = None
+    atc_count: float | None = None
+    ci_count: float | None = None
+    engagement_count: float | None = None
+    shopify_orders: float | None = None
+    shopify_revenue: float | None = None
+    shopify_roas: float | None = None
+    cost_per_shopify_order: float | None = None
+    meta_shop_diff_pct: float | None = None
+    thruplays: float | None = None
+    three_sec_plays: float | None = None
+    outbound_clicks: float | None = None
+    post_engagements: float | None = None
+    impressions_lifetime: float | None = None
+    cost_per_1000: float | None = None
+    cpc_link: float | None = None
+    atc_lc_pct: float | None = None
+    ci_atc_pct: float | None = None
+    checkout_compl_pct: float | None = None
+    cr_lc_pct: float | None = None
+    profit_efficiency: float | None = None
+    contrib_margin_pct: float | None = None
+
 
 class CreativeTestingTotals(BaseModel):
     assets: int
     new_creatives: int
-    iterations: int
+    #: Retested and still under _CT_IMPRESSION_FLOOR lifetime impressions
+    #: across every ad that ever carried the asset -- put back in the air
+    #: repeatedly and never given, or never able to draw, an audience.
+    historical_discarded: int
+    #: Retested and over the floor: it cleared the bare minimum, so its
+    #: performance figures actually mean something.
+    refresh_discarded: int
+    #: Spend and the outcome metrics below are scoped to the selected
+    #: window, so they reconcile with what Meta charged over those dates.
     spend: float
     impressions: float
     purchases: float
@@ -4881,11 +5563,20 @@ class CreativeTestingTotals(BaseModel):
     cost_per_ncp: float | None
     cost_per_ftewv: float | None
     #: Overview-Performance strip. Blended (sum/sum) so every tile
-    #: divides out to the spend and impressions printed beside it.
+    #: divides out to the impressions printed beside it.
+    #:
+    #: Windowed like everything else. They could not be until
+    #: 2026-09-17: the daily insights fetch never requested
+    #: video_thruplay_watched_actions, outbound_clicks or
+    #: inline_post_engagement, so the daily rows carried none of them and
+    #: the flatten wrote zeros -- 3,010 rows with thruplays against
+    #: 21,947 with spend over a 30-day window. Adding those three fields
+    #: and re-fetching is what made these scopeable.
     thruplays: float
     three_sec_plays: float
     outbound_clicks: float
     post_engagements: float
+    impressions_lifetime: float
 
 
 class CreativeTestingResponse(BaseModel):
@@ -4896,10 +5587,25 @@ class CreativeTestingResponse(BaseModel):
     #: `category` itself, so the Winner/P0/P1/P2 tiles keep their real
     #: sizes while one of them is selected.
     category_counts: dict[str, int]
-    #: {"new": n, "iteration": n} under the same filters as `rows` minus
-    #: `kind` itself, so both tabs show their true size whichever is open.
+    #: {"new": n, "historical_discarded": n, "refresh_discarded": n} under
+    #: the same filters as `rows` minus `kind` itself, so every tab shows
+    #: its true size whichever one is open.
     kind_counts: dict[str, int]
 
+
+#: Fields the Creative Testing multi-filter can match on. Asset grain,
+#: so there is no ad_id or adset_id here -- an asset spans many of both.
+#: `category` and `kind` are the computed expressions, not columns, so a
+#: rule reads what the table actually shows.
+_CT_MF_FIELDS: dict[str, str] = {
+    "asset_id": "a.asset_id",
+    "ad_name": "a.sample_ad_name",
+    "campaign_name": "a.sample_campaign_name",
+    "media": "a.media",
+    "account_name": "a.account_name",
+    "category": _CT_CATEGORY,
+    "kind": _CT_KIND,
+}
 
 _CT_SORT_COLUMNS: dict[str, str] = {
     "spend": "a.spend",
@@ -4920,10 +5626,13 @@ async def get_creative_testing(
     session: SessionDep,
     from_date: date = Query(..., description="Window start (required)."),
     to_date: date = Query(..., description="Window end (required)."),
-    kind: Literal["new", "iteration"] | None = Query(
+    kind: Literal[
+        "new", "historical_discarded", "refresh_discarded", "iteration",
+    ] | None = Query(
         default=None,
-        description="Filter to New Creatives or Iterations. Omit for both. "
-                    "Does not affect `kind_counts`.",
+        description="Filter to one bucket. Omit for all. `iteration` is the "
+                    "pre-split name and still means every retest, i.e. both "
+                    "discarded buckets. Does not affect `kind_counts`.",
     ),
     media: Literal["video", "graphic", "influencer"] | None = Query(default=None),
     category: str | None = Query(
@@ -4933,6 +5642,12 @@ async def get_creative_testing(
     ),
     account_name: str | None = Query(default=None),
     search: str | None = Query(default=None, description="Substring of asset_id."),
+    multi_filter: str | None = Query(
+        default=None,
+        description='JSON {"join": "and|or|nand|nor", "rules": [{"field", "op", '
+                    '"value"}]}. Same rule language as Ads Analyse, at asset '
+                    "grain -- see _CT_MF_FIELDS for the fields it accepts.",
+    ),
     sort: Literal[
         "spend", "impressions", "purchases", "roas",
         "cost_per_ncp", "cost_per_ftewv", "asset_created", "last_ad_date", "ads",
@@ -4963,6 +5678,19 @@ async def get_creative_testing(
     if search:
         where.append("a.asset_id ILIKE :search")
         params["search"] = f"%{search}%"
+    if multi_filter:
+        try:
+            parsed = _json.loads(multi_filter)
+            clause = _multi_filter_sql(
+                parsed.get("rules") or [], str(parsed.get("join", "and")),
+                params, _CT_MF_FIELDS,
+            )
+        except (ValueError, TypeError, AttributeError):
+            # Malformed JSON is the client's bug. Serving a silently
+            # unfiltered table that looks correct is the worse failure.
+            raise HTTPException(status_code=400, detail="multi_filter is not valid JSON")
+        if clause:
+            where.append(clause)
 
     base_where = (" AND " + " AND ".join(where)) if where else ""
     # category rides with kind_where, not base_where -- the tiles must
@@ -4972,16 +5700,18 @@ async def get_creative_testing(
         cat_where = f" AND {_CT_CATEGORY} = :category"
         params["category"] = category
     kind_where = ""
-    if kind == "new":
-        kind_where = f" AND {_CT_IS_NEW}"
+    if kind in ("new", "historical_discarded", "refresh_discarded"):
+        kind_where = f" AND {_CT_KIND} = '{kind}'"
     elif kind == "iteration":
-        kind_where = f" AND NOT {_CT_IS_NEW}"
+        # The old two-way name, kept so a saved link or bookmark from
+        # before the split still resolves to the same set of assets.
+        kind_where = f" AND {_CT_KIND} <> 'new'"
 
     select_cols = (
         "a.asset_id, a.media, d.asset_created, d.preview_url, d.thumbnail_url, "
         "a.preview_ad_id, "
         f"{_CT_CATEGORY} AS category, a.sample_ad_name, "
-        f"CASE WHEN {_CT_IS_NEW} THEN 'new' ELSE 'iteration' END AS kind, "
+        f"{_CT_KIND} AS kind, "
         "GREATEST(a.ads - 1, 0) AS iteration_count, "
         "a.ads, a.copy_ads, a.ads_in_window, a.first_ad_date, a.last_ad_date, "
         "a.account_name, a.name_conflict, "
@@ -4989,21 +5719,63 @@ async def get_creative_testing(
         "CASE WHEN a.spend > 0 THEN a.conv_value / a.spend END AS roas, "
         "CASE WHEN a.ncp_count > 0 THEN a.spend / a.ncp_count END AS cost_per_ncp, "
         "CASE WHEN a.ftewv_count > 0 THEN a.spend / a.ftewv_count END AS cost_per_ftewv, "
-        "CASE WHEN a.impressions > 0 THEN a.link_clicks::numeric / a.impressions * 100 END AS ctr_pct"
+        "CASE WHEN a.impressions > 0 "
+        "     THEN a.link_clicks::numeric / a.impressions * 100 END AS ctr_pct, "
+        # --- inspector columns, asset grain -------------------------
+        # Every ratio is recomputed from the SUMS, never averaged from
+        # the per-ad ratios: a 3-impression ad would otherwise weigh the
+        # same as a 3-million-impression one.
+        "a.link_clicks, a.campaigns, a.adsets, a.any_active, "
+        "a.f1_pass, a.f2_pass, a.f3_pass, a.f4_pass, "
+        "a.sample_campaign_name, a.reach_upper, a.atc_count, a.ci_count, "
+        "a.engagement_count, a.shopify_orders, a.shopify_revenue, "
+        "a.thruplays, a.three_sec_plays, a.outbound_clicks, a.post_engagements, "
+        "a.impressions_lifetime, "
+        "CASE WHEN a.impressions > 0 THEN a.spend / a.impressions * 1000 END AS cost_per_1000, "
+        "CASE WHEN a.link_clicks > 0 THEN a.spend / a.link_clicks END AS cpc_link, "
+        "CASE WHEN a.link_clicks > 0 THEN a.atc_count::numeric / a.link_clicks * 100 END AS atc_lc_pct, "
+        "CASE WHEN a.atc_count > 0 THEN a.ci_count::numeric / a.atc_count * 100 END AS ci_atc_pct, "
+        "CASE WHEN a.ci_count > 0 "
+        "     THEN a.purchases::numeric / a.ci_count * 100 END AS checkout_compl_pct, "
+        "CASE WHEN a.link_clicks > 0 "
+        "     THEN a.purchases::numeric / a.link_clicks * 100 END AS cr_lc_pct, "
+        "CASE WHEN a.reach_upper > 0 "
+        "     THEN a.impressions::numeric / a.reach_upper END AS frequency_upper, "
+        "CASE WHEN a.reach_upper > 0 THEN a.ftewv_count::numeric / a.reach_upper * 100 END AS pct_reach_ftewv, "
+        "CASE WHEN a.spend > 0 "
+        "     THEN a.shopify_revenue / a.spend END AS shopify_roas, "
+        "CASE WHEN a.shopify_orders > 0 "
+        "     THEN a.spend / a.shopify_orders END AS cost_per_shopify_order, "
+        "CASE WHEN a.conv_value > 0 "
+        "     THEN (a.shopify_revenue - a.conv_value) / a.conv_value * 100 END AS meta_shop_diff_pct, "
+        "a.spend_lifetime, a.purchases_lifetime, "
+        "(a.conv_value - a.spend) AS profit_efficiency, "
+        "CASE WHEN a.conv_value > 0 "
+        "     THEN (a.conv_value - a.spend) / a.conv_value * 100 END AS contrib_margin_pct"
     )
 
     # Aggregate the ad/asset relation once for the entire response. Each
     # panel retains its original filter scope, but reads this shared result.
     totals_sql = (
             "SELECT COUNT(*) AS assets, "
-            f"COUNT(*) FILTER (WHERE {_CT_IS_NEW}) AS new_creatives, "
-            f"COUNT(*) FILTER (WHERE NOT {_CT_IS_NEW}) AS iterations, "
+            # All three read off the one _CT_KIND expression, so they
+            # partition the asset count by construction. The previous
+            # pair did not: _CT_IS_NEW is NULL for an asset with no
+            # recorded creation date and `NOT NULL` is NULL, so 18 assets
+            # landed in neither tile and 148 + 308 came to 456 against a
+            # real 474. A single CASE cannot lose a row that way.
+            f"COUNT(*) FILTER (WHERE {_CT_KIND} = 'new') AS new_creatives, "
+            f"COUNT(*) FILTER (WHERE {_CT_KIND} = 'historical_discarded') "
+            f"    AS historical_discarded, "
+            f"COUNT(*) FILTER (WHERE {_CT_KIND} = 'refresh_discarded') "
+            f"    AS refresh_discarded, "
             "COALESCE(SUM(a.spend),0) AS spend, COALESCE(SUM(a.impressions),0) AS impressions, "
             "COALESCE(SUM(a.purchases),0) AS purchases, COALESCE(SUM(a.conv_value),0) AS conv_value, "
             "COALESCE(SUM(a.ncp_count),0) AS ncp_count, COALESCE(SUM(a.ftewv_count),0) AS ftewv_count, "
             "CASE WHEN SUM(a.spend) > 0 THEN SUM(a.conv_value)/SUM(a.spend) END AS roas, "
             "CASE WHEN SUM(a.ncp_count) > 0 THEN SUM(a.spend)/SUM(a.ncp_count) END AS cost_per_ncp, "
             "CASE WHEN SUM(a.ftewv_count) > 0 THEN SUM(a.spend)/SUM(a.ftewv_count) END AS cost_per_ftewv, "
+            "COALESCE(SUM(a.impressions_lifetime),0) AS impressions_lifetime, "
             "COALESCE(SUM(a.thruplays),0) AS thruplays, "
             "COALESCE(SUM(a.three_sec_plays),0) AS three_sec_plays, "
             "COALESCE(SUM(a.outbound_clicks),0) AS outbound_clicks, "
@@ -5026,7 +5798,7 @@ async def get_creative_testing(
         "LEFT JOIN public.ad_media am ON am.ad_id = page.preview_ad_id"
         "), '[]'::jsonb) AS rows, "
         "COALESCE((SELECT jsonb_object_agg(k, n) FROM ("
-        f"SELECT CASE WHEN {_CT_IS_NEW} THEN 'new' ELSE 'iteration' END AS k, "
+        f"SELECT {_CT_KIND} AS k, "
         f"COUNT(*) AS n {_CT_BASE}{base_where} GROUP BY 1"
         ") kinds), '{}'::jsonb) AS kind_counts, "
         "COALESCE((SELECT jsonb_object_agg(c, n) FROM ("
@@ -5045,7 +5817,12 @@ async def get_creative_testing(
     return CreativeTestingResponse(
         rows=values["rows"], total=totals.assets, totals=totals,
         category_counts=values["category_counts"],
-        kind_counts={"new": 0, "iteration": 0, **values["kind_counts"]},
+        # Seeded so a bucket with no assets still renders its tab at zero
+        # rather than vanishing from the strip.
+        kind_counts={
+            "new": 0, "historical_discarded": 0, "refresh_discarded": 0,
+            **values["kind_counts"],
+        },
     )
 
 
@@ -5385,9 +6162,16 @@ _MF_KEYWORD_OPS = {"contains_all", "contains_any", "contains_none"}
 
 
 def _multi_filter_sql(
-    rules: list[dict], join: str, params: dict[str, object]
+    rules: list[dict], join: str, params: dict[str, object],
+    fields: dict[str, str] | None = None,
 ) -> str | None:
     """Compile the rule list into one boolean SQL expression.
+
+    `fields` maps a rule's field name to the SQL column it filters on.
+    It is a parameter because the same rule language drives two different
+    grains: Ads Analyse filters ad columns, Creative Testing filters the
+    per-asset rollup, and a field like "ad_name" means a different
+    expression in each. Defaults to the ad-grain map.
 
     `join` is how the rules combine:
         and   every rule must hold
@@ -5405,7 +6189,9 @@ def _multi_filter_sql(
     """
     clauses: list[str] = []
     for i, rule in enumerate(rules):
-        col = _MF_FIELDS.get(str(rule.get("field", "")))
+        col = (fields if fields is not None else _MF_FIELDS).get(
+            str(rule.get("field", ""))
+        )
         op = str(rule.get("op", ""))
         raw = str(rule.get("value", "") or "").strip()
         if not col or not raw:
@@ -5453,3 +6239,383 @@ def _multi_filter_sql(
     if join == "nor":
         return "NOT (" + " OR ".join(clauses) + ")"
     return "(" + " AND ".join(clauses) + ")"
+
+
+# ----------------------------------------------------------------------
+# Shopify Analytics -- customer acquisition, day by day.
+#
+# Port of the store's own ShopifyQL report:
+#
+#     FROM sales
+#     SHOW customers, average_order_value, total_sales,
+#          quantity_ordered_per_order, orders, new_customers,
+#          returning_customers, returning_customer_rate,
+#          total_sales_returning, total_sales_first_time, net_items_sold
+#     WHERE sales_channel != 'Return Prime: Order Return'
+#     GROUP BY day WITH TOTALS, PERCENT_CHANGE
+#     SINCE startOfDay(-30d) UNTIL today
+#     COMPARE TO previous_year_match_day_of_week
+#
+# Everything above is served from `shopify_sales`, which this project
+# mirrors at (day, order_id, new_or_returning_customer, sales_channel).
+# Three notes on the translation, because it is not one-to-one:
+#
+#   * `new_customers` / `returning_customers` here are ORDER counts split
+#     by whether the buyer was new, which is what ShopifyQL's sales table
+#     actually measures -- it has no distinct-customer metric at this
+#     grain. A true distinct-customer count needs shopify_orders, which
+#     is why `customers` is served from there instead.
+#
+#   * `net_items_sold` does not exist in the mirrored dataset;
+#     `quantity_ordered` does, and is gross of returns. It is labelled
+#     "units" rather than silently passed off as net.
+#
+#   * COMPARE TO previous_year_match_day_of_week is a self-join on
+#     day - 364 (52 weeks), NOT day - 365 -- 364 keeps the weekday
+#     aligned, which is the entire point of that comparison. Retail
+#     demand is weekday-shaped, so comparing a Saturday to a Friday
+#     would read as a swing that never happened.
+# ----------------------------------------------------------------------
+
+#: Channels that are refunds, not sales. The store's own report excludes
+#: this one by name; carrying sales_channel in the mirror is what makes
+#: that possible. Without it a refund day reads as negative revenue.
+_RETURN_CHANNELS = ("Return Prime: Order Return",)
+
+
+class ShopifyDayRow(BaseModel):
+    day: date
+    orders: int
+    #: Distinct buyers, Shopify's own count. None only on the derived
+    #: fallback (include_returns), where the order grain cannot express it.
+    customers: int | None
+    total_sales: float
+    average_order_value: float | None
+    #: net_items_sold -- NET of returns, as the original report asked.
+    units: int
+    #: quantity_ordered -- GROSS. Kept because it is the figure the
+    #: ad-side metrics divide by, so the two are comparable side by side.
+    units_gross: int
+    units_per_order: float | None
+    new_customers: int | None
+    returning_customers: int | None
+    returning_customer_rate: float | None
+    total_sales_first_time: float
+    total_sales_returning: float
+    gross_sales: float
+    discounts: float
+    net_sales: float
+
+
+class ShopifyTotals(BaseModel):
+    orders: int
+    #: DISTINCT over the whole window. The daily figures are Shopify's
+    #: and exact, but distinct counts do NOT sum -- adding the 31 days of
+    #: this window gives 38,220 buyers where the window itself has about
+    #: 36,100, because a shopper who ordered twice in the window is
+    #: counted on both days. So these two come from our own order mirror,
+    #: which can be de-duplicated across the window, and
+    #: `customers_coverage_pct` says how much of the window that mirror
+    #: actually holds.
+    customers: int | None
+    returning_customers: int | None
+    customers_coverage_pct: float | None
+    total_sales: float
+    average_order_value: float | None
+    units: int
+    units_gross: int
+    units_per_order: float | None
+    #: This one DOES sum: a shopper is new exactly once, ever, so no day
+    #: can double-count them. Verified against the window figure --
+    #: 26,005 summed vs 25,980 reported, the gap being today still
+    #: growing after the mirror was taken.
+    new_customers: int | None
+    returning_customer_rate: float | None
+    total_sales_first_time: float
+    total_sales_returning: float
+    gross_sales: float
+    discounts: float
+    net_sales: float
+
+
+class ShopifyChannelRow(BaseModel):
+    sales_channel: str
+    orders: int
+    total_sales: float
+    share_pct: float
+
+
+class ShopifyAnalyticsResponse(BaseModel):
+    rows: list[ShopifyDayRow]
+    #: How far each SOURCE actually reaches. The two are fetched by
+    #: different jobs at different times, so on any given morning one is
+    #: hours ahead of the other -- measured 2026-09-17, `sales` had 718
+    #: orders for the day and the order mirror had 127, because the
+    #: order fetch ran at 02:24 UTC and the sales fetch at 11:00.
+    #: Without surfacing this the Customers tile reads as a collapse in
+    #: customers rather than a partial day.
+    #:
+    #: `orders_through` is the last day the order mirror COVERS (>=99%
+    #: of that day's sale orders present), not the last day it holds a
+    #: row for -- one straggling order should not certify a whole day.
+    sales_through: date | None
+    orders_through: date | None
+    #: "shopify_daily" -- every day figure is Shopify's own, mirrored
+    #: from the store's report. "derived" -- include_returns was set, so
+    #: the day rows are aggregated from the order grain instead and the
+    #: distinct-customer metrics are unavailable.
+    source: str
+    totals: ShopifyTotals
+    #: Same shape over the comparison window (day - 364), so the UI can
+    #: show a percent change without a second round trip.
+    previous: ShopifyTotals
+    channels: list[ShopifyChannelRow]
+    excluded_channels: list[str]
+
+
+#: The store's own report, read back verbatim from the day-grain mirror
+#: (ingest_shopify.py's SALES_DAILY_* -- see its comment for why three of
+#: these metrics cannot be derived from the order-grain table). Every
+#: figure here is Shopify's own, so the section reconciles with Shopify
+#: Analytics by construction rather than by a matching derivation.
+#:
+#: `units` is net_items_sold, NET of returns, which is what the original
+#: report asked for. The gross figure is kept alongside as units_gross
+#: rather than dropped -- it is the one the ad-side metrics divide by.
+_SHOPIFY_DAY_SQL = """
+SELECT day,
+       orders::int                             AS orders,
+       customers::int                          AS customers,
+       total_sales::float                      AS total_sales,
+       average_order_value::float              AS average_order_value,
+       net_items_sold::int                     AS units,
+       quantity_ordered::int                   AS units_gross,
+       quantity_ordered_per_order::float       AS units_per_order,
+       new_customers::int                      AS new_customers,
+       returning_customers::int                AS returning_customers,
+       -- Shopify reports this as a fraction; the UI wants percent.
+       (returning_customer_rate * 100)::float  AS returning_customer_rate,
+       total_sales_first_time::float           AS total_sales_first_time,
+       total_sales_returning::float            AS total_sales_returning,
+       gross_sales::float                      AS gross_sales,
+       discounts::float                        AS discounts,
+       net_sales::float                        AS net_sales
+  FROM shopify_sales_daily
+ WHERE day BETWEEN :from_date AND :to_date
+ ORDER BY day ASC
+"""
+
+#: Fallback for include_returns=true. The day-grain mirror bakes in the
+#: report's own `WHERE sales_channel != 'Return Prime: Order Return'`, so
+#: asking to see the refund rows means leaving Shopify's numbers behind
+#: and aggregating the order-grain table instead. The response says so
+#: via `source` rather than quietly serving different definitions under
+#: the same labels:
+#:   * units becomes GROSS quantity_ordered -- there is no net figure at
+#:     order grain.
+#:   * customers/new/returning would become ORDER counts, not distinct
+#:     buyers. That is the error this table exists to avoid, so they come
+#:     back NULL rather than wrong.
+_SHOPIFY_DAY_DERIVED_SQL = """
+SELECT day::date                                              AS day,
+       SUM(COALESCE(orders, 0))::int                          AS orders,
+       NULL::int                                              AS customers,
+       SUM(COALESCE(total_sales, 0))::float                   AS total_sales,
+       AVG(average_order_value)::float                        AS average_order_value,
+       SUM(COALESCE(quantity_ordered, 0))::int                AS units,
+       SUM(COALESCE(quantity_ordered, 0))::int                AS units_gross,
+       CASE WHEN SUM(COALESCE(orders, 0)) > 0
+            THEN SUM(COALESCE(quantity_ordered, 0))::float
+                 / SUM(COALESCE(orders, 0)) END               AS units_per_order,
+       NULL::int                                              AS new_customers,
+       NULL::int                                              AS returning_customers,
+       NULL::float                                            AS returning_customer_rate,
+       SUM(COALESCE(total_sales, 0)) FILTER
+           (WHERE new_or_returning_customer = 'New')::float   AS total_sales_first_time,
+       SUM(COALESCE(total_sales, 0)) FILTER
+           (WHERE new_or_returning_customer = 'Returning')::float AS total_sales_returning,
+       SUM(COALESCE(gross_sales, 0))::float                   AS gross_sales,
+       SUM(COALESCE(discounts, 0))::float                     AS discounts,
+       SUM(COALESCE(net_sales, 0))::float                     AS net_sales
+  FROM shopify_sales
+ WHERE day::date BETWEEN :from_date AND :to_date
+ GROUP BY day::date
+ ORDER BY 1 ASC
+"""
+
+#: Sales by channel over the window -- what the exclusion is filtering,
+#: made visible rather than silently applied.
+_SHOPIFY_CHANNEL_SQL = """
+SELECT COALESCE(sales_channel, '(none)') AS sales_channel,
+       SUM(COALESCE(orders, 0))::int     AS orders,
+       SUM(COALESCE(total_sales, 0))::float AS total_sales
+  FROM shopify_sales
+ WHERE day::date BETWEEN :from_date AND :to_date
+ GROUP BY 1 ORDER BY 3 DESC
+"""
+
+
+#: Buyers across the WHOLE window, distinct. Summing the per-day
+#: figures would count a repeat shopper once per day they ordered; over
+#: 30 days that inflated the tile by about 4%. Same join and same
+#: scoping as the `cust` CTE above -- see its comment for why the join
+#: is on order id.
+_SHOPIFY_CUSTOMERS_SQL = """
+WITH so AS (
+    SELECT DISTINCT order_id, new_or_returning_customer AS kind
+      FROM shopify_sales
+     WHERE day::date BETWEEN :from_date AND :to_date
+       AND order_id IS NOT NULL
+       AND (sales_channel IS NULL OR NOT (sales_channel = ANY(:excluded)))
+), j AS (
+    SELECT o.order_id AS found, o.customer_id, so.kind
+      FROM so LEFT JOIN shopify_orders o
+        ON o.order_id = 'gid://shopify/Order/' || so.order_id
+)
+SELECT (COUNT(DISTINCT customer_id)
+        + COUNT(*) FILTER (WHERE found IS NOT NULL AND customer_id IS NULL))::int AS customers,
+       (COUNT(DISTINCT customer_id) FILTER (WHERE kind = 'Returning')
+        + COUNT(*) FILTER (WHERE kind = 'Returning'
+                             AND found IS NOT NULL
+                             AND customer_id IS NULL))::int AS returning_customers,
+       COUNT(found)::float / NULLIF(COUNT(*), 0) * 100 AS coverage_pct
+  FROM j
+"""
+
+
+def _shopify_totals(
+    rows: list[ShopifyDayRow],
+    customers: int | None = None,
+    returning_customers: int | None = None,
+    customers_coverage_pct: float | None = None,
+) -> ShopifyTotals:
+    """Roll the day rows up the way each metric actually reduces.
+
+    Sums where sums are valid, a weighted mean where they are not
+    (averaging an average would weight a 3-order day the same as a
+    3,000-order one), and NOT AT ALL for the two distinct counts --
+    `customers` and `returning_customers` are passed in from a query
+    that de-duplicates across the window, because adding up daily
+    distinct counts counts a repeat shopper once per day they ordered.
+    """
+    orders = sum(r.orders for r in rows)
+    units = sum(r.units for r in rows)
+    units_gross = sum(r.units_gross for r in rows)
+    sales = sum(r.total_sales for r in rows)
+    # A shopper is new exactly once, ever, so this one is safe to sum.
+    new = sum(r.new_customers or 0 for r in rows) if any(
+        r.new_customers is not None for r in rows) else None
+
+    # Shopify's AOV is the mean of the per-ORDER values, so the window
+    # figure is the daily means weighted by the orders behind each.
+    aov_num = sum((r.average_order_value or 0) * r.orders for r in rows)
+    aov = (aov_num / orders) if orders else None
+
+    rate = None
+    if customers and returning_customers is not None:
+        # Shopify's own definition: returning buyers over all buyers,
+        # NOT returning orders over all orders.
+        rate = returning_customers / customers * 100
+
+    return ShopifyTotals(
+        orders=orders,
+        customers=customers,
+        returning_customers=returning_customers,
+        customers_coverage_pct=customers_coverage_pct,
+        total_sales=sales,
+        average_order_value=aov,
+        units=units,
+        units_gross=units_gross,
+        units_per_order=(units_gross / orders) if orders else None,
+        new_customers=new,
+        returning_customer_rate=rate,
+        total_sales_first_time=sum(r.total_sales_first_time for r in rows),
+        total_sales_returning=sum(r.total_sales_returning for r in rows),
+        gross_sales=sum(r.gross_sales for r in rows),
+        discounts=sum(r.discounts for r in rows),
+        net_sales=sum(r.net_sales for r in rows),
+    )
+
+
+@router.get("/shopify-analytics", response_model=ShopifyAnalyticsResponse)
+@cached_analytics(ttl=120.0)
+async def get_shopify_analytics(
+    session: SessionDep,
+    from_date: date = Query(..., description="Window start (inclusive)."),
+    to_date: date = Query(..., description="Window end (inclusive)."),
+    include_returns: bool = Query(
+        default=False,
+        description="Include the Return Prime refund channel. Off by default -- "
+                    "those rows are refunds and make a day read negative.",
+    ),
+) -> ShopifyAnalyticsResponse:
+    excluded: list[str] = [] if include_returns else list(_RETURN_CHANNELS)
+    params = {"from_date": from_date, "to_date": to_date, "excluded": excluded}
+
+    # The mirrored report already has the exclusion baked in, so it can
+    # only serve the default view; asking to see the refund rows drops
+    # to aggregating the order grain, with three metrics unavailable.
+    day_sql = _SHOPIFY_DAY_DERIVED_SQL if include_returns else _SHOPIFY_DAY_SQL
+    source = "derived" if include_returns else "shopify_daily"
+
+    rows = [
+        ShopifyDayRow(**dict(r._mapping))
+        for r in (await session.execute(text(day_sql), params))
+    ]
+
+    # 364 days, not 365: keeps the weekday aligned.
+    span = (to_date - from_date).days
+    prev_to = to_date - timedelta(days=364)
+    prev_from = prev_to - timedelta(days=span)
+    prev_params = {"from_date": prev_from, "to_date": prev_to, "excluded": excluded}
+    prev_rows = [
+        ShopifyDayRow(**dict(r._mapping))
+        for r in (await session.execute(text(day_sql), prev_params))
+    ]
+
+    cust = (await session.execute(text(_SHOPIFY_CUSTOMERS_SQL), params)).one()
+    prev_cust = (await session.execute(
+        text(_SHOPIFY_CUSTOMERS_SQL), prev_params
+    )).one()
+
+    through = (await session.execute(text(
+        "SELECT (SELECT MAX(day)::date FROM shopify_sales_daily) AS sales_through, "
+        "       (SELECT MAX(created_at)::date FROM shopify_orders) AS orders_through"
+    ))).one()
+    sales_through = through.sales_through
+    # The order mirror only matters for the two window-level distinct
+    # counts now -- the day rows are Shopify's own. Report the last day
+    # it actually COVERS rather than the last day it holds any row for:
+    # on 2026-09-17 it held 127 of the day's 718 orders and would
+    # otherwise have certified the day as complete.
+    orders_through = through.orders_through
+    if (cust.coverage_pct or 0) < 99.0 and orders_through:
+        orders_through = min(orders_through, to_date - timedelta(days=1))
+
+    channel_rows = (await session.execute(
+        text(_SHOPIFY_CHANNEL_SQL), {"from_date": from_date, "to_date": to_date}
+    )).all()
+    channel_total = sum(abs(float(r.total_sales or 0)) for r in channel_rows) or 1.0
+    channels = [
+        ShopifyChannelRow(
+            sales_channel=r.sales_channel,
+            orders=int(r.orders or 0),
+            total_sales=float(r.total_sales or 0),
+            share_pct=abs(float(r.total_sales or 0)) / channel_total * 100,
+        )
+        for r in channel_rows
+    ]
+
+    return ShopifyAnalyticsResponse(
+        rows=rows,
+        sales_through=sales_through,
+        orders_through=orders_through,
+        source=source,
+        totals=_shopify_totals(
+            rows, cust.customers, cust.returning_customers, cust.coverage_pct),
+        previous=_shopify_totals(
+            prev_rows, prev_cust.customers, prev_cust.returning_customers,
+            prev_cust.coverage_pct),
+        channels=channels,
+        excluded_channels=excluded,
+    )

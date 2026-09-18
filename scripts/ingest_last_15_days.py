@@ -96,6 +96,14 @@ ADSET_FIELDS = [
 AD_FIELDS = [
     "id", "account_id", "campaign_id", "adset_id", "name", "status",
     "effective_status", "created_time", "updated_time",
+    # `creative` is NOT optional decoration. scripts/refresh_ad_media.py
+    # builds every ad thumbnail by walking creative.id -> asset_feed_spec
+    # -> image/video, and it takes the NEWEST bronze snapshot of each ad.
+    # The first nightly roster run without this field therefore became
+    # the newest snapshot for all 20,189 ads, none of them carrying
+    # `creative`, and ad_media rebuilt to ZERO rows -- every thumbnail in
+    # the dashboard gone, silently, in one night.
+    "creative{id,effective_object_story_id}",
 ]
 #: Metric fields are identical at every level; only the identity columns
 #: differ. Meta rejects a breakdown field that is below the requested
@@ -105,6 +113,28 @@ _INSIGHTS_METRICS = [
     "account_id", "date_start", "date_stop", "spend", "impressions", "reach",
     "frequency", "clicks", "unique_clicks", "ctr", "cpc", "cpm", "actions",
     "action_values", "conversions", "purchase_roas",
+    # Video-engagement metrics. Absent until 2026-09-17, which meant the
+    # DAILY insight rows carried no hook/hold/engagement data at all --
+    # refresh_insights_daily_by_ad.py extracts these four columns, found
+    # nothing in the daily rows, and wrote zeros. Only the weekly and
+    # monthly summary rows had them, and daily rows WIN the
+    # shortest-range tie-break, so the zeros are what survived: over a
+    # 30-day window, 21,947 rows carried spend and just 3,010 carried
+    # thruplays. Creative Testing could not window its five video rates
+    # on that, and had to divide lifetime numerators by lifetime
+    # impressions instead.
+    #
+    # `actions` was already requested, which is why three_sec_plays
+    # (derived from actions[video_view]) had 14,280 rows against
+    # thruplays' 3,010 -- the one metric of the four with its own source
+    # already in the payload.
+    #
+    # NOT video_play_time: Meta rejects it outright on /insights
+    # ("(#100) video_play_time is not valid for fields param"). The
+    # column of that name in insights_daily_by_ad stays NULL, as it
+    # already was.
+    "video_thruplay_watched_actions", "outbound_clicks",
+    "inline_post_engagement",
 ]
 INSIGHTS_FIELDS_BY_LEVEL = {
     "campaign": ["campaign_id", "campaign_name"] + _INSIGHTS_METRICS,
@@ -131,6 +161,13 @@ AD_STATUSES = ADSET_STATUSES + ["ADSET_PAUSED"]
 
 _ACCOUNT_ID_PATTERN = re.compile(r"^META_ACCOUNT_(\d+)_ID$")
 _ACCOUNT_NAME_PATTERN = re.compile(r"^META_ACCOUNT_(\d+)_NAME$")
+#: Back to 250 after trying 500 on 2026-09-17. The bottleneck is not the
+#: page count -- it is the SIZE of each request. Ad-level insights at
+#: time_increment=1 over a 15-day span made Meta return HTTP 500
+#: error_code 1 ("reduce the amount of data you're asking for"), and 500
+#: rows per page made that worse, not better. Small DATE chunks are what
+#: this endpoint wants: a 1-2 day fetch returns in seconds.
+#: See --chunk-days, which is the knob that actually matters here.
 PAGE_SIZE = 250
 REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_RETRIES = 4
@@ -697,7 +734,7 @@ def _bulk_insert_rows(conn, rows: list[dict[str, Any]], *, chunk_size: int = 100
 # ----------------------------------------------------------------------
 
 
-async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: str, since: date, until: date, time_increment: str, include_roster: bool, levels: list[str] | None = None) -> list[FetchResult]:
+async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: str, since: date, until: date, time_increment: str, include_roster: bool, levels: list[str] | None = None, roster_only: bool = False) -> list[FetchResult]:
     limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
     async with httpx.AsyncClient(limits=limits) as client:
         tasks = []
@@ -706,14 +743,15 @@ async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: st
                 tasks.append(_fetch_campaigns(client, base_url, account, access_token))
                 tasks.append(_fetch_adsets(client, base_url, account, access_token))
                 tasks.append(_fetch_ads(client, base_url, account, access_token))
-            for level in (levels or ["ad"]):
-                tasks.append(
-                    _fetch_insights(
-                        client, base_url, account, access_token,
-                        since=since, until=until, time_increment=time_increment,
-                        level=level,
+            if not roster_only:
+                for level in (levels or ["ad"]):
+                    tasks.append(
+                        _fetch_insights(
+                            client, base_url, account, access_token,
+                            since=since, until=until, time_increment=time_increment,
+                            level=level,
+                        )
                     )
-                )
         return await asyncio.gather(*tasks)
 
 
@@ -798,6 +836,12 @@ def main() -> int:
                              "adset_insights stay empty unless those levels are requested, "
                              "because the silver flatten keys off parent_ids->>'level'.")
     parser.add_argument("--include-roster", action="store_true", help="Also fetch campaigns/adsets/ads (current-state rosters, not time-windowed — off by default, see module docstring).")
+    parser.add_argument("--roster-only", action="store_true",
+                        help="Fetch ONLY the campaign/adset/ad rosters and no insights at all. "
+                             "Implies --include-roster. This is the nightly entity refresh: "
+                             "meta_ads is a current-state table, so it needs a roster pull, but "
+                             "pairing that with an insights window would spend rate-limit budget "
+                             "twice on data another step already fetches.")
     args = parser.parse_args()
 
     if load_dotenv is not None:
@@ -870,8 +914,9 @@ def main() -> int:
             _run(
                 accounts, base_url=base_url, access_token=access_token,
                 since=w_since, until=w_until,
-                time_increment=args.time_increment, include_roster=args.include_roster,
-                levels=levels,
+                time_increment=args.time_increment,
+                include_roster=args.include_roster or args.roster_only,
+                levels=levels, roster_only=args.roster_only,
             )
         )
         for r in results:

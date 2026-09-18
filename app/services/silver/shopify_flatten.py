@@ -495,16 +495,52 @@ _CUSTOMER_ANALYTICS_DDL, _CUSTOMER_ANALYTICS_INSERT = _build_shopifyql_table_sql
 #: for this store (confirmed live 2026-08-26 -- no per-product cost data
 #: entered in Shopify) -- fetched anyway in case that changes later, not
 #: missing/broken, just genuinely zero today.
+#: PK is `sales_row_id`, the synthetic dimension hash, NOT order_id.
+#:
+#: order_id was the PK until 2026-09-17. It stopped working the moment
+#: ingest_shopify.py started identifying sales rows by their GROUP BY
+#: tuple instead of by order_id (it had to -- keying on order_id alone
+#: was silently merging the rows ShopifyQL returns per order and losing
+#: the metrics on 96.6% of them). This builder fills the PK column from
+#: `a.source_id`, so the change quietly wrote the HASH into order_id:
+#: 41,207 rows reading 'sale_0048e54e...' instead of '6764352110838'.
+#:
+#: Now the hash lives in its own column where it belongs and order_id is
+#: read from the payload like any other field, so it stays the real
+#: Shopify order id and can still be joined on.
 _SALES_DDL, _SALES_INSERT = _build_shopifyql_table_sql(
     table_name="shopify_sales",
     object_type="sales",
-    pk_column="order_id",
+    pk_column="sales_row_id",
     date_columns=["day"],
-    text_columns=["new_or_returning_customer"],
+    text_columns=["order_id", "new_or_returning_customer", "sales_channel"],
     boolean_columns=["is_pos_sale", "cost_is_recorded"],
     numeric_columns=[
         "gross_sales", "net_sales", "total_sales", "discounts", "shipping_charges", "taxes", "duties",
         "cost_of_goods_sold", "gross_profit", "gross_margin", "orders", "quantity_ordered", "average_order_value",
+    ],
+)
+
+#: Mirrors ingest_shopify.py's SALES_DAILY_GROUP_BY/METRICS -- the
+#: store's own customer-acquisition report at day grain, carrying the
+#: three families of metric the order-grain table cannot express:
+#: distinct customer counts, net (not gross) items sold, and Shopify's
+#: own average_order_value. One row per day, so `day` is the natural key.
+_SALES_DAILY_DDL, _SALES_DAILY_INSERT = _build_shopifyql_table_sql(
+    table_name="shopify_sales_daily",
+    object_type="sales_daily",
+    #: NOT "day". The PK column is always filled from source_id, which is
+    #: the row-key HASH -- naming the natural key here would overwrite it
+    #: with that hash, exactly the way shopify_sales once lost order_id.
+    #: `day` is read back out of the payload like any other column.
+    pk_column="sales_day_id",
+    date_columns=["day"],
+    text_columns=[],
+    numeric_columns=[
+        "customers", "average_order_value", "total_sales", "quantity_ordered_per_order",
+        "orders", "new_customers", "returning_customers", "returning_customer_rate",
+        "total_sales_returning", "total_sales_first_time", "net_items_sold",
+        "quantity_ordered", "gross_sales", "net_sales", "discounts",
     ],
 )
 
@@ -569,6 +605,7 @@ _TABLES = [
     _Table("shopify_fulfillments", "fulfillments", _FULFILLMENTS_DDL, "TRUNCATE shopify_fulfillments", _FULFILLMENTS_INSERT),
     _Table("shopify_customer_analytics", "customer_analytics", _CUSTOMER_ANALYTICS_DDL, "TRUNCATE shopify_customer_analytics", _CUSTOMER_ANALYTICS_INSERT),
     _Table("shopify_sales", "sales", _SALES_DDL, "TRUNCATE shopify_sales", _SALES_INSERT),
+    _Table("shopify_sales_daily", "sales_daily", _SALES_DAILY_DDL, "TRUNCATE shopify_sales_daily", _SALES_DAILY_INSERT),
     _Table("shopify_discounts", "discounts", _DISCOUNTS_DDL, "TRUNCATE shopify_discounts", _DISCOUNTS_INSERT),
     _Table("shopify_inventory", "inventory", _INVENTORY_DDL, "TRUNCATE shopify_inventory", _INVENTORY_INSERT),
 ]
