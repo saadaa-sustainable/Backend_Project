@@ -765,6 +765,35 @@ async def warm_ads_analyse_cache() -> None:
         except Exception:
             logging.getLogger(__name__).exception("creative_testing_warmer_failed")
 
+    # Also warm /last-click-utm's default filter (no filters, sort by
+    # created_at). The tab loads without a preset, so the very first hit
+    # is what breaks -- that's exactly what this pre-populates.
+    try:
+        async with session_scope() as session:
+            await get_last_click_utm(
+                session=session,
+                channel=None, tier=None,
+                utm_source=None, utm_medium=None, utm_campaign=None,
+                utm_content=None, utm_term=None,
+                matched_value=None, only_matched=False, only_unmatched=False,
+                search=None, from_date=None, to_date=None,
+                sort="created_at", limit=100, offset=0,
+            )
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).exception("last_click_utm_warmer_failed")
+
+    # And /landing-pages default (no filters, sort by sessions).
+    try:
+        async with session_scope() as session:
+            await get_landing_pages(
+                session=session,
+                search=None, sort="sessions", limit=50, offset=0,
+            )
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).exception("landing_pages_warmer_failed")
+
 
 @router.get("/ads-analyse", response_model=AdsAnalyseResponse)
 @cached_analytics(ttl=300.0)
@@ -1523,6 +1552,23 @@ async def get_last_click_utm(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> UtmOrderResponse:
+    # Response cache short-circuit -- shares the same pattern as
+    # _ads_analyse_cache_* above. This endpoint runs 3 SQL queries
+    # cold (summary rollup + rows + count) and can take ~30-120s on
+    # Render's cold PG buffer cache; caching for 15 min keeps the
+    # merchant's tab responsive on repeat visits.
+    _lcu_key = _ads_analyse_cache_key(
+        _lcu_ns="lcu",
+        channel=channel, tier=tier, utm_source=utm_source, utm_medium=utm_medium,
+        utm_campaign=utm_campaign, utm_content=utm_content, utm_term=utm_term,
+        matched_value=matched_value, only_matched=only_matched, only_unmatched=only_unmatched,
+        search=search, from_date=from_date, to_date=to_date,
+        sort=sort, limit=limit, offset=offset,
+    )
+    _cached_lcu = _ads_analyse_cache_get(_lcu_key)
+    if _cached_lcu is not None:
+        return _cached_lcu  # type: ignore[return-value]
+
     # ── tile counts + per-source breakdown (windowed only, ignores every
     # non-date filter) so the tiles represent "everything in this period"
     # and the per-source drill-down works even after row filters change.
@@ -1697,7 +1743,7 @@ async def get_last_click_utm(
         )
     ).scalar_one()
 
-    return UtmOrderResponse(
+    _lcu_resp = UtmOrderResponse(
         rows=rows,
         total=total,
         channel_counts=channel_counts,
@@ -1705,6 +1751,8 @@ async def get_last_click_utm(
         tier_by_channel=tier_by_channel,
         channel_sources=channel_sources,
     )
+    _ads_analyse_cache_put(_lcu_key, _lcu_resp)  # type: ignore[arg-type]
+    return _lcu_resp
 
 
 # ----------------------------------------------------------------------
@@ -2093,6 +2141,16 @@ async def get_landing_pages(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> LandingPageResponse:
+    # Same TTL cache as /ads-analyse + /last-click-utm. Cold hit here is
+    # ~10-30s on Render; caching stops the Landing Page tab from feeling
+    # dead on repeat visits.
+    _lp_key = _ads_analyse_cache_key(
+        _lp_ns="lp", search=search, sort=sort, limit=limit, offset=offset,
+    )
+    _cached_lp = _ads_analyse_cache_get(_lp_key)
+    if _cached_lp is not None:
+        return _cached_lp  # type: ignore[return-value]
+
     sort_column = _LANDING_PAGE_SORT_COLUMNS[sort]
 
     where_clauses = []
@@ -2115,7 +2173,9 @@ async def get_landing_pages(
         await session.execute(text(f"SELECT COUNT(*) FROM landing_page_analysis_30d {where_sql}"), params)
     ).scalar_one()
 
-    return LandingPageResponse(rows=rows, total=total)
+    _lp_resp = LandingPageResponse(rows=rows, total=total)
+    _ads_analyse_cache_put(_lp_key, _lp_resp)  # type: ignore[arg-type]
+    return _lp_resp
 
 
 class LandingPageAdRow(BaseModel):
