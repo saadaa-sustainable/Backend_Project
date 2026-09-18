@@ -113,6 +113,28 @@ _INSIGHTS_METRICS = [
     "account_id", "date_start", "date_stop", "spend", "impressions", "reach",
     "frequency", "clicks", "unique_clicks", "ctr", "cpc", "cpm", "actions",
     "action_values", "conversions", "purchase_roas",
+    # Video-engagement metrics. Absent until 2026-09-17, which meant the
+    # DAILY insight rows carried no hook/hold/engagement data at all --
+    # refresh_insights_daily_by_ad.py extracts these four columns, found
+    # nothing in the daily rows, and wrote zeros. Only the weekly and
+    # monthly summary rows had them, and daily rows WIN the
+    # shortest-range tie-break, so the zeros are what survived: over a
+    # 30-day window, 21,947 rows carried spend and just 3,010 carried
+    # thruplays. Creative Testing could not window its five video rates
+    # on that, and had to divide lifetime numerators by lifetime
+    # impressions instead.
+    #
+    # `actions` was already requested, which is why three_sec_plays
+    # (derived from actions[video_view]) had 14,280 rows against
+    # thruplays' 3,010 -- the one metric of the four with its own source
+    # already in the payload.
+    #
+    # NOT video_play_time: Meta rejects it outright on /insights
+    # ("(#100) video_play_time is not valid for fields param"). The
+    # column of that name in insights_daily_by_ad stays NULL, as it
+    # already was.
+    "video_thruplay_watched_actions", "outbound_clicks",
+    "inline_post_engagement",
 ]
 INSIGHTS_FIELDS_BY_LEVEL = {
     "campaign": ["campaign_id", "campaign_name"] + _INSIGHTS_METRICS,
@@ -139,6 +161,13 @@ AD_STATUSES = ADSET_STATUSES + ["ADSET_PAUSED"]
 
 _ACCOUNT_ID_PATTERN = re.compile(r"^META_ACCOUNT_(\d+)_ID$")
 _ACCOUNT_NAME_PATTERN = re.compile(r"^META_ACCOUNT_(\d+)_NAME$")
+#: Back to 250 after trying 500 on 2026-09-17. The bottleneck is not the
+#: page count -- it is the SIZE of each request. Ad-level insights at
+#: time_increment=1 over a 15-day span made Meta return HTTP 500
+#: error_code 1 ("reduce the amount of data you're asking for"), and 500
+#: rows per page made that worse, not better. Small DATE chunks are what
+#: this endpoint wants: a 1-2 day fetch returns in seconds.
+#: See --chunk-days, which is the knob that actually matters here.
 PAGE_SIZE = 250
 REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_RETRIES = 4

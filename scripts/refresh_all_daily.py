@@ -155,16 +155,6 @@ PHASE_INGEST = [
     # for what that cost in unattributed orders.
     ("meta_roster",           ["scripts/ingest_last_15_days.py",
                                "--roster-only"],                            1800),
-    # Meta's change log -- the ad RENAME history. Fourth registry-only
-    # job: app/services/meta/activities.py existed, said in its own
-    # docstring that Silver needs it to reconstruct rename history, and
-    # was wired to nothing. Bronze held one accidental three-week window
-    # (2026-08-14..09-02). Meta stamps the ad name into the UTM at click
-    # time, so every rename orphans the orders placed before it -- they
-    # name an ad that no longer exists under that name and land in
-    # `adset_name_miss`. Must precede ad_name_aliases in PHASE_SILVER.
-    ("meta_activities",       ["scripts/ingest_meta_activities.py",
-                               "--days", "14"],                             1800),
     ("meta_insights_15d",     ["scripts/ingest_last_15_days.py",
                                "--levels", "ad"],                           2700),
     ("meta_insights_lifetime",["scripts/ingest_last_15_days.py",
@@ -237,11 +227,6 @@ PHASE_SILVER = [
     # the map unions in at its lowest priority, so it MUST run first.
     # Every id it emits was checked to exist in a register -- it widens
     # how an asset can be reached, never what assets exist.
-    # Historical ad names -> ad id, from the change log above. Reads
-    # meta_ads/ad_lifecycle to decide which aliases point at an ad the
-    # cascade can actually resolve, so it runs AFTER silver_meta_entities
-    # and BEFORE silver_shopify re-derives the attribution table.
-    ("ad_name_aliases",       ["scripts/refresh_ad_name_aliases.py"],        600),
     ("asset_id_recovery",     ["scripts/recover_asset_ids.py"],              600),
     ("ad_asset_map",          ["scripts/refresh_ad_asset_map.py"],           600),
     # 900 -> 3600 (2026-09-04). refresh_shopify_silver.py TRUNCATEs and

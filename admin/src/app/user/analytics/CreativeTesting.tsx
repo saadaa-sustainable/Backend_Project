@@ -174,7 +174,11 @@ function Callout({ icon, children }: { icon: string; children: React.ReactNode }
 
 const PAGE_SIZE = 50;
 
-type KindTab = "all" | "new" | "iteration";
+type KindTab = "all" | "new" | "historical_discarded" | "refresh_discarded";
+
+/** Lifetime impressions a creative has to reach to count as genuinely
+ *  tested. Mirrors _CT_IMPRESSION_FLOOR in the API -- change both. */
+const IMPRESSION_FLOOR = 50_000;
 type MediaKey = "video" | "graphic" | "influencer";
 type CategoryKey =
   | "Incremental Winner"
@@ -388,7 +392,8 @@ export function CreativeTesting() {
   }, [filters]);
 
   const newCount = kindCounts.new ?? 0;
-  const iterCount = kindCounts.iteration ?? 0;
+  const histCount = kindCounts.historical_discarded ?? 0;
+  const refreshCount = kindCounts.refresh_discarded ?? 0;
 
   // ── funnel + focus strips, derived over the full row set ──────────
   const derived = useMemo(() => {
@@ -419,6 +424,13 @@ export function CreativeTesting() {
 
   const pageRows = allRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const imp = totals?.impressions || 0;
+  // Denominator for the five video rates. It tracks whichever basis the
+  // API is serving their numerators on, and the two MUST move together:
+  // a lifetime numerator over a windowed denominator read 90% hook rate
+  // (26.1M three-second plays over 29.0M windowed impressions) where the
+  // real figure is 9.1%. Flipping this to `imp` is only correct once
+  // insights_daily_by_ad actually carries daily video metrics.
+  const lifeImp = totals?.impressions_lifetime || 0;
 
   return (
     <div className="space-y-3" style={{ backgroundColor: CT.cream }}>
@@ -498,13 +510,12 @@ export function CreativeTesting() {
         />
       </div>
 
-      {/* ── New / Iteration tabs ──────────────────────────────── */}
-      <div className="flex flex-wrap gap-2">
+      {/* ── New / Retested tabs ───────────────────────────────── */}
+      <div className="flex flex-wrap items-center gap-2">
         {(
           [
-            ["all", "All tested", newCount + iterCount, "Every asset with an ad launched in this window."],
+            ["all", "All tested", newCount + histCount + refreshCount, "Every asset with an ad launched in this window."],
             ["new", "New creatives", newCount, "Asset was created inside this window — its first real test."],
-            ["iteration", "Iterations", iterCount, "Asset predates this window, or ran only as a copy."],
           ] as [KindTab, string, number, string][]
         ).map(([key, label, count, hint]) => {
           const active = kindTab === key;
@@ -525,6 +536,48 @@ export function CreativeTesting() {
             </button>
           );
         })}
+      </div>
+
+      {/* ── Retested creatives ────────────────────────────────── */}
+      <div>
+        <div className="mb-1 flex items-baseline gap-2">
+          <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
+            Retested creatives
+          </span>
+          <span className="text-[11px] text-text-tertiary">
+            {(histCount + refreshCount).toLocaleString("en-IN")} assets · split on{" "}
+            <b>lifetime</b> impressions across every ad that ever carried the asset,
+            not on the selected dates
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              ["historical_discarded", "Historical Discarded", histCount,
+               `Retested, and across ALL its ads it has still never reached ${IMPRESSION_FLOOR.toLocaleString("en-IN")} impressions in its lifetime \u2014 not just in this window. Put back in the air again and again and never cleared the bare minimum.`],
+              ["refresh_discarded", "Refresh Discarded", refreshCount,
+               `Retested and past the ${IMPRESSION_FLOOR.toLocaleString("en-IN")} lifetime impression mark across all its ads. It cleared the bare minimum, so its numbers are worth reading.`],
+            ] as [KindTab, string, number, string][]
+          ).map(([key, label, count, hint]) => {
+            const active = kindTab === key;
+            return (
+              <button
+                key={key}
+                title={hint}
+                onClick={() => setKindTab(key)}
+                className={
+                  "rounded-lg border px-3 py-2 text-left transition-colors " +
+                  (active
+                    ? "border-emerald-400 bg-emerald-50 text-emerald-900"
+                    : "border-border-primary bg-white hover:bg-bg-muted")
+                }
+              >
+                <div className="text-[11px] uppercase tracking-wide opacity-70">{label}</div>
+                <div className="text-lg font-semibold">{count.toLocaleString("en-IN")}</div>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* ── verdict buckets ───────────────────────────────────── */}
@@ -594,13 +647,13 @@ export function CreativeTesting() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
             {(
               [
-                ["TOTAL AMOUNT SPENT", fmtMoney(totals.spend), "Sum · INR", false],
-                ["TOTAL IMPRESSIONS", Math.round(totals.impressions).toLocaleString("en-IN"), "Sum", false],
-                ["AVG. HOOK RATE", pct(totals.three_sec_plays, imp), "Sum(3-Sec Video Plays) ÷ Sum(Impressions)", false],
-                ["AVG. OUTBOUND CTR", pct(totals.outbound_clicks, imp), "Sum(Outbound Clicks) ÷ Sum(Impressions)", false],
-                ["AVG. ENGAGEMENT RATE", pct(totals.post_engagements, imp), "Sum(Post Engagements) ÷ Sum(Impressions)", false],
-                ["AVG. THRUPLAY RATE", pct(totals.thruplays, imp), "Sum(ThruPlays) ÷ Sum(Impressions)", false],
-                ["AVG. HOLD RATE", pct(totals.thruplays, totals.three_sec_plays), "Sum(ThruPlays) ÷ Sum(3-Sec Video Plays)", false],
+                ["TOTAL AMOUNT SPENT", fmtMoney(totals.spend), "Sum · INR · inside the selected dates", false],
+                ["TOTAL IMPRESSIONS", Math.round(totals.impressions).toLocaleString("en-IN"), "Sum · inside the selected dates", false],
+                ["AVG. HOOK RATE", pct(totals.three_sec_plays, lifeImp), "Sum(3-Sec Video Plays) ÷ Sum(Impressions) · LIFETIME basis", false],
+                ["AVG. OUTBOUND CTR", pct(totals.outbound_clicks, lifeImp), "Sum(Outbound Clicks) ÷ Sum(Impressions) · LIFETIME basis", false],
+                ["AVG. ENGAGEMENT RATE", pct(totals.post_engagements, lifeImp), "Sum(Post Engagements) ÷ Sum(Impressions) · LIFETIME basis", false],
+                ["AVG. THRUPLAY RATE", pct(totals.thruplays, lifeImp), "Sum(ThruPlays) ÷ Sum(Impressions) · LIFETIME basis", false],
+                ["AVG. HOLD RATE", pct(totals.thruplays, totals.three_sec_plays), "Sum(ThruPlays) ÷ Sum(3-Sec Video Plays) · LIFETIME basis", false],
                 ["CT ROAS", fmtNum(totals.roas), "Sum(Conv. Value) ÷ Sum(Spend)", true],
               ] as [string, string, string, boolean][]
             ).map(([label, value, formula, hi]) => (
@@ -843,7 +896,7 @@ export function CreativeTesting() {
 
       {/* ── asset table ───────────────────────────────────────── */}
       <p className="text-xs" style={{ color: CT.muted }}>
-        Ad preview and website links show the highest-spend ad for each asset. Open a row to see links for every iteration.
+        Ad preview and website links show the ad that spent most in the selected dates. Open a row to see links for every iteration.
       </p>
       <div
         className="overflow-x-auto rounded-lg border bg-white shadow-sm"

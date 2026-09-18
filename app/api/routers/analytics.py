@@ -4996,12 +4996,45 @@ _CT_ASSET_DATES = (
     "       NULLIF(btrim(post_thumbnail), '') FROM public.content_influencer_posts"
 )
 
+#: Per-ad spend/outcome metrics SCOPED TO THE WINDOW.
+#:
+#: ad_asset_map carries LIFETIME totals -- ad_lifecycle holds one row per
+#: ad, not one per day -- so summing them gave an asset's whole history
+#: no matter which dates were selected. The date range only ever decided
+#: which assets appeared (`ads_in_window > 0`), never how much money was
+#: counted, and the result did not reconcile with Meta: Aug 18 - Sep 17
+#: read Rs 3,12,38,772 against a true Rs 1,00,96,279 of spend in the
+#: window, 8.3x the Rs 37,42,409 those creatives actually spent in it.
+#:
+#: insights_daily_by_ad is the only genuinely daily table, so the money
+#: metrics come from it. It does NOT carry thruplays, 3-second plays,
+#: outbound clicks or post engagements, and Bronze's daily insights rows
+#: do not either, so those four stay lifetime and the UI marks them.
+_CT_WINDOW_METRICS = (
+    "  SELECT i.ad_id,"
+    "         sum(i.spend)             AS spend,"
+    "         sum(i.impressions)       AS impressions,"
+    "         sum(i.purchases)         AS purchases,"
+    "         sum(i.conv_value)        AS conv_value,"
+    "         sum(i.ncp_count)         AS ncp_count,"
+    "         sum(i.ftewv_count)       AS ftewv_count,"
+    "         sum(i.clicks)            AS link_clicks,"
+    "         sum(i.thruplays)         AS thruplays,"
+    "         sum(i.three_sec_plays)   AS three_sec_plays,"
+    "         sum(i.outbound_clicks)   AS outbound_clicks,"
+    "         sum(i.post_engagements)  AS post_engagements"
+    "    FROM public.insights_daily_by_ad i"
+    "   WHERE i.day BETWEEN :from_date AND :to_date"
+    "   GROUP BY i.ad_id"
+)
+
 #: Per-asset rollup across every ad whose name carries the asset's id.
-#: `ads_in_window` is what puts an asset in scope; the metric sums are
-#: the asset's lifetime totals, matching how the ad-grain view has always
-#: behaved (it filters on ad_created_date but shows lifetime figures).
+#: `ads_in_window` is what puts an asset in scope; the money metrics are
+#: that asset's spend INSIDE the window, so the column sums reconcile
+#: with what Meta charged over the same dates.
 _CT_AGG = (
     "WITH asset_dates AS (" + _CT_ASSET_DATES + "), "
+    "win AS (" + _CT_WINDOW_METRICS + "), "
     "agg AS ("
     "  SELECT m.asset_id, m.media,"
     "         count(*)                                                   AS ads,"
@@ -5013,13 +5046,18 @@ _CT_AGG = (
     "         max(m.ad_created_date)                                      AS last_ad_date,"
     "         min(m.account_name)                                         AS account_name,"
     "         bool_or(m.name_conflict)                                    AS name_conflict,"
-    "         sum(m.spend)                                                AS spend,"
-    "         sum(m.impressions)                                          AS impressions,"
-    "         sum(m.purchases)                                            AS purchases,"
-    "         sum(m.conv_value)                                           AS conv_value,"
-    "         sum(m.ncp_count)                                            AS ncp_count,"
-    "         sum(m.ftewv_count)                                          AS ftewv_count,"
-    "         sum(m.link_clicks)                                          AS link_clicks,"
+    "         sum(COALESCE(w.spend, 0))                                   AS spend,"
+    "         sum(COALESCE(w.impressions, 0))                             AS impressions,"
+    # Denominator for the four video-engagement metrics above, which are
+    # still LIFETIME. They must be divided by this and never by the
+    # windowed impressions beside it -- the two are ~8x apart over 30
+    # days, which rendered a 90% hook rate where the truth was 9.1%.
+    "         sum(m.impressions)                                          AS impressions_lifetime,"
+    "         sum(COALESCE(w.purchases, 0))                               AS purchases,"
+    "         sum(COALESCE(w.conv_value, 0))                              AS conv_value,"
+    "         sum(COALESCE(w.ncp_count, 0))                               AS ncp_count,"
+    "         sum(COALESCE(w.ftewv_count, 0))                             AS ftewv_count,"
+    "         sum(COALESCE(w.link_clicks, 0))                             AS link_clicks,"
     # Best verdict any ad of this asset reached. An asset that produced a
     # Winner in one ad and a Discarded in another is a Winner -- the
     # creative proved itself at least once. min() over the rank because
@@ -5036,9 +5074,11 @@ _CT_AGG = (
     "         sum(m.post_engagements)                                     AS post_engagements,"
     # Keep both outbound links tied to one real ad. Lifetime spend matches
     # the metrics shown for this asset; ad_id breaks equal-spend ties.
-    "         (array_agg(m.ad_id ORDER BY m.spend DESC NULLS LAST, m.ad_id))[1]"
+    "         (array_agg(m.ad_id ORDER BY COALESCE(w.spend, 0) DESC NULLS LAST,"
+    "                                    m.spend DESC NULLS LAST, m.ad_id))[1]"
     "                                                                     AS preview_ad_id"
     "    FROM public.ad_asset_map m"
+    "    LEFT JOIN win w ON w.ad_id = m.ad_id"
     "   GROUP BY m.asset_id, m.media"
     ") "
 )
@@ -5062,6 +5102,30 @@ _CT_CATEGORY = (
 
 _CT_IS_NEW = (
     "(d.asset_created BETWEEN :from_date AND :to_date AND a.original_ads > 0)"
+)
+
+#: The bar a creative has to clear to count as genuinely tested. An asset
+#: that has been put back in the air across several ads and STILL cannot
+#: reach this many impressions has been answered -- repeatedly.
+_CT_IMPRESSION_FLOOR = 50_000
+
+#: Which of the three buckets an asset belongs to.
+#:
+#: Everything that is not new is a RETEST, and retests split on lifetime
+#: impressions summed across every ad that ever carried the asset --
+#: deliberately lifetime, not the selected window. The question being
+#: asked is "has this creative ever been given a fair run?", and a window
+#: cannot answer that: an asset retested four times across a year would
+#: look untested in any single month.
+#:
+#: historical_discarded -- retested and still under the floor. It has had
+#:   its chances and never drew an audience.
+#: refresh_discarded    -- retested and over the floor. It cleared the
+#:   bare minimum, so its numbers mean something.
+_CT_KIND = (
+    f"CASE WHEN COALESCE({_CT_IS_NEW}, false) THEN 'new' "
+    f"     WHEN COALESCE(a.impressions_lifetime, 0) >= {_CT_IMPRESSION_FLOOR} "
+    f"     THEN 'refresh_discarded' ELSE 'historical_discarded' END"
 )
 
 
@@ -5109,7 +5173,7 @@ class CreativeTestingRow(BaseModel):
     #: One of the asset's ad names -- the client derives Product Focus
     #: (CLP/CTP/VRP/PDP prefix) from it, same as CTD's strip.
     sample_ad_name: str | None
-    #: "new" when the asset was created inside the window, else "iteration".
+    #: "new", "historical_discarded" or "refresh_discarded" -- see _CT_KIND.
     kind: str
     #: Times this asset was reused beyond its first outing. 0 = new.
     iteration_count: int
@@ -5136,7 +5200,15 @@ class CreativeTestingRow(BaseModel):
 class CreativeTestingTotals(BaseModel):
     assets: int
     new_creatives: int
-    iterations: int
+    #: Retested and still under _CT_IMPRESSION_FLOOR lifetime impressions
+    #: across every ad that ever carried the asset -- put back in the air
+    #: repeatedly and never given, or never able to draw, an audience.
+    historical_discarded: int
+    #: Retested and over the floor: it cleared the bare minimum, so its
+    #: performance figures actually mean something.
+    refresh_discarded: int
+    #: Spend and the outcome metrics below are scoped to the selected
+    #: window, so they reconcile with what Meta charged over those dates.
     spend: float
     impressions: float
     purchases: float
@@ -5149,11 +5221,20 @@ class CreativeTestingTotals(BaseModel):
     cost_per_ncp: float | None
     cost_per_ftewv: float | None
     #: Overview-Performance strip. Blended (sum/sum) so every tile
-    #: divides out to the spend and impressions printed beside it.
+    #: divides out to the impressions printed beside it.
+    #:
+    #: Windowed like everything else. They could not be until
+    #: 2026-09-17: the daily insights fetch never requested
+    #: video_thruplay_watched_actions, outbound_clicks or
+    #: inline_post_engagement, so the daily rows carried none of them and
+    #: the flatten wrote zeros -- 3,010 rows with thruplays against
+    #: 21,947 with spend over a 30-day window. Adding those three fields
+    #: and re-fetching is what made these scopeable.
     thruplays: float
     three_sec_plays: float
     outbound_clicks: float
     post_engagements: float
+    impressions_lifetime: float
 
 
 class CreativeTestingResponse(BaseModel):
@@ -5164,8 +5245,9 @@ class CreativeTestingResponse(BaseModel):
     #: `category` itself, so the Winner/P0/P1/P2 tiles keep their real
     #: sizes while one of them is selected.
     category_counts: dict[str, int]
-    #: {"new": n, "iteration": n} under the same filters as `rows` minus
-    #: `kind` itself, so both tabs show their true size whichever is open.
+    #: {"new": n, "historical_discarded": n, "refresh_discarded": n} under
+    #: the same filters as `rows` minus `kind` itself, so every tab shows
+    #: its true size whichever one is open.
     kind_counts: dict[str, int]
 
 
@@ -5188,10 +5270,13 @@ async def get_creative_testing(
     session: SessionDep,
     from_date: date = Query(..., description="Window start (required)."),
     to_date: date = Query(..., description="Window end (required)."),
-    kind: Literal["new", "iteration"] | None = Query(
+    kind: Literal[
+        "new", "historical_discarded", "refresh_discarded", "iteration",
+    ] | None = Query(
         default=None,
-        description="Filter to New Creatives or Iterations. Omit for both. "
-                    "Does not affect `kind_counts`.",
+        description="Filter to one bucket. Omit for all. `iteration` is the "
+                    "pre-split name and still means every retest, i.e. both "
+                    "discarded buckets. Does not affect `kind_counts`.",
     ),
     media: Literal["video", "graphic", "influencer"] | None = Query(default=None),
     category: str | None = Query(
@@ -5240,16 +5325,18 @@ async def get_creative_testing(
         cat_where = f" AND {_CT_CATEGORY} = :category"
         params["category"] = category
     kind_where = ""
-    if kind == "new":
-        kind_where = f" AND {_CT_IS_NEW}"
+    if kind in ("new", "historical_discarded", "refresh_discarded"):
+        kind_where = f" AND {_CT_KIND} = '{kind}'"
     elif kind == "iteration":
-        kind_where = f" AND NOT {_CT_IS_NEW}"
+        # The old two-way name, kept so a saved link or bookmark from
+        # before the split still resolves to the same set of assets.
+        kind_where = f" AND {_CT_KIND} <> 'new'"
 
     select_cols = (
         "a.asset_id, a.media, d.asset_created, d.preview_url, d.thumbnail_url, "
         "a.preview_ad_id, "
         f"{_CT_CATEGORY} AS category, a.sample_ad_name, "
-        f"CASE WHEN {_CT_IS_NEW} THEN 'new' ELSE 'iteration' END AS kind, "
+        f"{_CT_KIND} AS kind, "
         "GREATEST(a.ads - 1, 0) AS iteration_count, "
         "a.ads, a.copy_ads, a.ads_in_window, a.first_ad_date, a.last_ad_date, "
         "a.account_name, a.name_conflict, "
@@ -5264,22 +5351,24 @@ async def get_creative_testing(
     # panel retains its original filter scope, but reads this shared result.
     totals_sql = (
             "SELECT COUNT(*) AS assets, "
-            # COALESCE, because _CT_IS_NEW is NULL for an asset with no
-            # recorded creation date -- and `NOT NULL` is NULL, so such an
-            # asset was counted as NEITHER new nor an iteration. The two
-            # tiles then failed to sum to the asset count: 148 + 308 = 456
-            # against a real 474, with 18 assets silently in neither.
-            # kind_counts already got this right (its CASE/ELSE sends NULL
-            # to 'iteration'), so the two disagreed. Undated = iteration,
-            # per _CT_IS_NEW's own docstring.
-            f"COUNT(*) FILTER (WHERE COALESCE({_CT_IS_NEW}, false)) AS new_creatives, "
-            f"COUNT(*) FILTER (WHERE NOT COALESCE({_CT_IS_NEW}, false)) AS iterations, "
+            # All three read off the one _CT_KIND expression, so they
+            # partition the asset count by construction. The previous
+            # pair did not: _CT_IS_NEW is NULL for an asset with no
+            # recorded creation date and `NOT NULL` is NULL, so 18 assets
+            # landed in neither tile and 148 + 308 came to 456 against a
+            # real 474. A single CASE cannot lose a row that way.
+            f"COUNT(*) FILTER (WHERE {_CT_KIND} = 'new') AS new_creatives, "
+            f"COUNT(*) FILTER (WHERE {_CT_KIND} = 'historical_discarded') "
+            f"    AS historical_discarded, "
+            f"COUNT(*) FILTER (WHERE {_CT_KIND} = 'refresh_discarded') "
+            f"    AS refresh_discarded, "
             "COALESCE(SUM(a.spend),0) AS spend, COALESCE(SUM(a.impressions),0) AS impressions, "
             "COALESCE(SUM(a.purchases),0) AS purchases, COALESCE(SUM(a.conv_value),0) AS conv_value, "
             "COALESCE(SUM(a.ncp_count),0) AS ncp_count, COALESCE(SUM(a.ftewv_count),0) AS ftewv_count, "
             "CASE WHEN SUM(a.spend) > 0 THEN SUM(a.conv_value)/SUM(a.spend) END AS roas, "
             "CASE WHEN SUM(a.ncp_count) > 0 THEN SUM(a.spend)/SUM(a.ncp_count) END AS cost_per_ncp, "
             "CASE WHEN SUM(a.ftewv_count) > 0 THEN SUM(a.spend)/SUM(a.ftewv_count) END AS cost_per_ftewv, "
+            "COALESCE(SUM(a.impressions_lifetime),0) AS impressions_lifetime, "
             "COALESCE(SUM(a.thruplays),0) AS thruplays, "
             "COALESCE(SUM(a.three_sec_plays),0) AS three_sec_plays, "
             "COALESCE(SUM(a.outbound_clicks),0) AS outbound_clicks, "
@@ -5302,7 +5391,7 @@ async def get_creative_testing(
         "LEFT JOIN public.ad_media am ON am.ad_id = page.preview_ad_id"
         "), '[]'::jsonb) AS rows, "
         "COALESCE((SELECT jsonb_object_agg(k, n) FROM ("
-        f"SELECT CASE WHEN {_CT_IS_NEW} THEN 'new' ELSE 'iteration' END AS k, "
+        f"SELECT {_CT_KIND} AS k, "
         f"COUNT(*) AS n {_CT_BASE}{base_where} GROUP BY 1"
         ") kinds), '{}'::jsonb) AS kind_counts, "
         "COALESCE((SELECT jsonb_object_agg(c, n) FROM ("
@@ -5321,7 +5410,12 @@ async def get_creative_testing(
     return CreativeTestingResponse(
         rows=values["rows"], total=totals.assets, totals=totals,
         category_counts=values["category_counts"],
-        kind_counts={"new": 0, "iteration": 0, **values["kind_counts"]},
+        # Seeded so a bucket with no assets still renders its tab at zero
+        # rather than vanishing from the strip.
+        kind_counts={
+            "new": 0, "historical_discarded": 0, "refresh_discarded": 0,
+            **values["kind_counts"],
+        },
     )
 
 

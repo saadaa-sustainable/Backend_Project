@@ -3,8 +3,10 @@ conv_value, ncp_count, ftewv_count, impressions, clicks) table so CPIS + Creativ
 read windowed metrics without paying the per-row JSONB extraction cost
 that made the /cpis-utm endpoint hit 60+ seconds at 50-row pagination.
 
-Refresh cadence: run after every daily meta ingestion. Idempotent
-(TRUNCATE + INSERT).
+Refresh cadence: run after every daily meta ingestion. Idempotent, and
+built into a side table that is swapped in at the end, so readers are
+never blocked for longer than the rename (see main() for what the old
+TRUNCATE cost once an endpoint depended on this table).
 
 The columns are DERIVED here from Meta's actions[] / action_values[]
 JSONB arrays -- ncp_count comes from actions[first_time_customer_purchase]
@@ -279,16 +281,67 @@ def main() -> None:
             # single SET let a 34-minute job die on the 2-minute default.
             cur.execute(_TIMEOUT)
 
-            print("[pg] TRUNCATE insights_daily_by_ad", flush=True)
-            cur.execute("TRUNCATE public.insights_daily_by_ad")
+            # BUILD INTO A SIDE TABLE, THEN SWAP.
+            #
+            # This used to TRUNCATE and re-INSERT in one transaction.
+            # That kept the data safe -- a failed rebuild rolled the
+            # truncate back with it -- but TRUNCATE takes an ACCESS
+            # EXCLUSIVE lock, so every reader of this table blocked for
+            # the WHOLE rebuild, not just the commit. Once Creative
+            # Testing started reading it for windowed spend, that turned
+            # a routine nightly refresh into a visibly broken section:
+            # the endpoint sat on the lock and died on its statement
+            # timeout, HTTP 500 after 121 seconds.
+            #
+            # Building into a side table and swapping keeps the same
+            # all-or-nothing guarantee -- readers see the old rows until
+            # the swap and the new rows after -- while holding the
+            # exclusive lock only for the rename, which is instant.
+            print("[pg] building insights_daily_by_ad_new ...", flush=True)
+            cur.execute("DROP TABLE IF EXISTS public.insights_daily_by_ad_new")
+            cur.execute(
+                "CREATE TABLE public.insights_daily_by_ad_new "
+                "(LIKE public.insights_daily_by_ad INCLUDING DEFAULTS)"
+            )
+            cur.execute(REBUILD_SQL.replace(
+                "INSERT INTO public.insights_daily_by_ad (",
+                "INSERT INTO public.insights_daily_by_ad_new (",
+            ))
+            # Indexes AFTER the insert -- building them once over the
+            # finished table beats maintaining them row by row.
+            print("[pg] indexing ...", flush=True)
+            cur.execute("ALTER TABLE public.insights_daily_by_ad_new "
+                        "ADD PRIMARY KEY (ad_id, day)")
+            cur.execute("CREATE INDEX ix_idba_ad_day_new "
+                        "ON public.insights_daily_by_ad_new(ad_id, day)")
+            cur.execute("CREATE INDEX ix_idba_day_new "
+                        "ON public.insights_daily_by_ad_new(day)")
 
-            # TRUNCATE and the INSERT share one transaction on purpose:
-            # if the rebuild fails, the truncate rolls back with it and
-            # the table keeps yesterday's rows. Confirmed on the
-            # 2026-09-05 timeout below -- the run died mid-rebuild and
-            # all 1,752,382 rows were still there afterwards.
-            print("[pg] rebuilding from raw_dump_meta ...", flush=True)
-            cur.execute(REBUILD_SQL)
+            # Renaming a table does NOT rename its indexes, so the old
+            # table's indexes keep the canonical names and would collide
+            # the moment the new ones claim them. Move the old names out
+            # of the way first, inside the same transaction as the swap.
+            print("[pg] swapping ...", flush=True)
+            cur.execute("DROP TABLE IF EXISTS public.insights_daily_by_ad_old")
+            cur.execute("ALTER TABLE public.insights_daily_by_ad "
+                        "RENAME TO insights_daily_by_ad_old")
+            for name in ("ix_idba_ad_day", "ix_idba_day", "insights_daily_by_ad_pkey"):
+                cur.execute(f"ALTER INDEX IF EXISTS {name} RENAME TO {name}_old")
+
+            cur.execute("ALTER TABLE public.insights_daily_by_ad_new "
+                        "RENAME TO insights_daily_by_ad")
+            # And claim the canonical names for the new table's indexes,
+            # PK included: leaving it as insights_daily_by_ad_new_pkey
+            # would make the NEXT run's ADD PRIMARY KEY collide with it.
+            cur.execute("ALTER INDEX ix_idba_ad_day_new RENAME TO ix_idba_ad_day")
+            cur.execute("ALTER INDEX ix_idba_day_new RENAME TO ix_idba_day")
+            cur.execute("ALTER INDEX IF EXISTS insights_daily_by_ad_new_pkey "
+                        "RENAME TO insights_daily_by_ad_pkey")
+            conn.commit()
+
+            # Outside the swap transaction: the old table is unreferenced
+            # now, and dropping it is not worth holding the swap open for.
+            cur.execute("DROP TABLE IF EXISTS public.insights_daily_by_ad_old")
             conn.commit()
 
             cur.execute(

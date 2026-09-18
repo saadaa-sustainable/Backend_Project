@@ -1933,7 +1933,16 @@ export interface CreativeTestingRow {
 export interface CreativeTestingTotals {
   assets: number;
   new_creatives: number;
-  iterations: number;
+  /** Retested and STILL under 50,000 lifetime impressions across every ad
+   *  that ever carried the asset. Lifetime, not the selected window: the
+   *  question is whether the creative has ever had a fair run, and a
+   *  single month cannot answer that. */
+  historical_discarded: number;
+  /** Retested and over the 50,000 floor — it cleared the bare minimum, so
+   *  its performance figures carry weight. */
+  refresh_discarded: number;
+  /** Scoped to the selected window, so it reconciles with what Meta
+   *  charged over those dates. */
   spend: number;
   impressions: number;
   purchases: number;
@@ -1943,10 +1952,15 @@ export interface CreativeTestingTotals {
   roas: number | null;
   cost_per_ncp: number | null;
   cost_per_ftewv: number | null;
+  /** Windowed, like everything else, since the daily insights fetch
+   *  started carrying video_thruplay_watched_actions / outbound_clicks /
+   *  inline_post_engagement on 2026-09-17. */
   thruplays: number;
   three_sec_plays: number;
   outbound_clicks: number;
   post_engagements: number;
+  /** Lifetime impressions, kept for reference. No rate divides by it. */
+  impressions_lifetime: number;
 }
 
 export interface CreativeTestingResponse {
@@ -1960,7 +1974,7 @@ export interface CreativeTestingResponse {
 export interface CreativeTestingParams {
   from_date: string;
   to_date: string;
-  kind?: "new" | "iteration";
+  kind?: "new" | "historical_discarded" | "refresh_discarded" | "iteration";
   media?: "video" | "graphic" | "influencer";
   category?: string;
   account_name?: string;
