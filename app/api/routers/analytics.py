@@ -4291,6 +4291,25 @@ class UntestedAssetRow(BaseModel):
     thumbnail: str | None            # only influencer has one right now
     date_produced: date | None       # date_of_production / asset_date / post_date
     created_at: datetime | None
+    #: Ads whose name carries this asset's id. 0 is the definition of
+    #: untested, so the column is the filter's own evidence.
+    matched_ads: int = 0
+    #: Where the asset RECORD came from, which is a different question
+    #: from what the asset is:
+    #:   database   -- a live Supabase register the team maintains today
+    #:   historical -- a Google Sheet from before those registers existed
+    #: Kept because the two need reading differently. A database asset
+    #: that never ran is a live backlog item someone can still action; a
+    #: sheet asset that never ran is mostly archaeology, and its id may
+    #: predate the naming convention the matcher relies on.
+    origin: str
+    #: The specific upstream, for when "historical" is not precise enough.
+    source_system: str
+    #: EVERY link the register holds for this asset, labelled, in column
+    #: order. Was a single COALESCE, which silently dropped link_2,
+    #: link_3, `creative` and reference_links on graphics -- those are
+    #: usually different cuts of the requisition, not copies of one file.
+    links: list[dict] = Field(default_factory=list)
     # SKU mapping + 30d CPIS window enrichment
     candidate_master_sku: str | None
     matched_master_sku: str | None
@@ -4304,6 +4323,16 @@ class UntestedAssetsResponse(BaseModel):
     total_rows: int
     with_sku_match: int
     without_sku_match: int
+    #: The same rows counted by where the record came from, so the UI can
+    #: show the live backlog separately from the sheet-era archive.
+    from_database: int
+    from_historical: int
+    #: The register this tab reads, in full -- so "untested" has a
+    #: denominator. `matched_assets` is how many ids DO appear in an ad
+    #: name, and `matched_ads` is how many ads those account for.
+    register_total: int = 0
+    matched_assets: int = 0
+    matched_ads: int = 0
     rows: list[UntestedAssetRow]
     computed_at: datetime
 
@@ -4319,6 +4348,37 @@ class UntestedAssetsResponse(BaseModel):
 # Per-media SQL fragments producing a common column set. Each SELECT
 # yields: id, title, nomenclature, kind, sub_kind, link, thumbnail,
 # date_produced, created_at, candidate_master_sku (already NULLIF'd).
+#: How much of each register has ever matched an ad, so the untested
+#: count has a denominator. The register list per media mirrors
+#: _UNTESTED_SQL's UNION branches exactly -- video spans two registers.
+_UNTESTED_COVERAGE_SQL: dict[str, str] = {
+    "video": """
+        SELECT COUNT(DISTINCT k.id)                                        AS register_total,
+               COUNT(DISTINCT k.id) FILTER (WHERE m.asset_id IS NOT NULL)  AS matched_assets,
+               COUNT(m.ad_id)                                              AS matched_ads
+          FROM (SELECT asset_id AS id FROM public.content_asset_register
+                 WHERE asset_id IS NOT NULL
+                UNION
+                SELECT requisition_id FROM public.content_iterated_register
+                 WHERE requisition_id IS NOT NULL) k
+          LEFT JOIN public.ad_asset_map m ON m.asset_id = k.id
+    """,
+    "graphic": """
+        SELECT COUNT(DISTINCT r.requisition_id)                                       AS register_total,
+               COUNT(DISTINCT r.requisition_id) FILTER (WHERE m.asset_id IS NOT NULL)  AS matched_assets,
+               COUNT(m.ad_id)                                                          AS matched_ads
+          FROM public.content_graphic_register r
+          LEFT JOIN public.ad_asset_map m ON m.asset_id = r.requisition_id
+    """,
+    "influencer": """
+        SELECT COUNT(DISTINCT r.post_id)                                       AS register_total,
+               COUNT(DISTINCT r.post_id) FILTER (WHERE m.asset_id IS NOT NULL)  AS matched_assets,
+               COUNT(m.ad_id)                                                   AS matched_ads
+          FROM public.content_influencer_posts r
+          LEFT JOIN public.ad_asset_map m ON m.asset_id = r.post_id
+    """,
+}
+
 _UNTESTED_SQL: dict[str, str] = {
     "video": """
         SELECT
@@ -4332,10 +4392,30 @@ _UNTESTED_SQL: dict[str, str] = {
           car.date_of_production                                AS date_produced,
           car.created_at                                        AS created_at,
           NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '')
-                                                                AS candidate_master_sku
+                                                                AS candidate_master_sku,
+          -- Origin is a property of the REGISTER, not of the row: each
+          -- register is fed by exactly one upstream system. The live
+          -- Supabase projects are where the team records assets TODAY;
+          -- the Google Sheets are the era before that, kept because the
+          -- ads referencing those ids are still running.
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Asset', car.link_to_asset), (2, 'Instagram', car.ads_instagram_permalink)) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = car.asset_id)::int                        AS matched_ads,
+          'database'::text                                      AS origin,
+          'Supabase · asset-register'::text                     AS source_system
         FROM public.content_asset_register car
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = car.asset_id)
+
         UNION ALL
         -- Iterated video lives in its own register (keyed on a
         -- requisition id, not an asset_id) but reports as media='video'
@@ -4359,10 +4439,25 @@ _UNTESTED_SQL: dict[str, str] = {
           NULL::date                                            AS date_produced,
           NULL::timestamptz                                     AS created_at,
           NULLIF(split_part(MIN(COALESCE(cir.nomenclature, '')), '_', 1), '')
-                                                                AS candidate_master_sku
+                                                                AS candidate_master_sku,
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Edited', MIN(cir.edited_link))) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cir.requisition_id)::int                        AS matched_ads,
+          'historical'::text                                    AS origin,
+          'Sheet · Iterated Content'::text                      AS source_system
         FROM public.content_iterated_register cir
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = cir.requisition_id)
+
         GROUP BY cir.requisition_id
     """,
     "graphic": """
@@ -4380,14 +4475,39 @@ _UNTESTED_SQL: dict[str, str] = {
           COALESCE(
             NULLIF(cgr.product, ''),
             NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
-          )                                                     AS candidate_master_sku
+          )                                                     AS candidate_master_sku,
+          -- Graphics has ONE upstream and it is a sheet, so this tab is
+          -- entirely historical. Both the live tab and the fuller
+          -- historic file land in this same register.
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Link 1', cgr.link_1), (2, 'Link 2', cgr.link_2), (3, 'Link 3', cgr.link_3), (4, 'Creative', cgr.creative), (5, 'Reference', cgr.reference_links)) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cgr.requisition_id)::int                        AS matched_ads,
+          'historical'::text                                    AS origin,
+          'Sheet · Creative Mastersheet (Graphics)'::text        AS source_system
         FROM public.content_graphic_register cgr
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = cgr.requisition_id)
+
     """,
     "influencer": """
         SELECT
-          cip.id::text                                          AS id,
+          -- post_id, NOT the legacy bigint `id`. That column is NULL for
+          -- the 2,648 rows sourced from the creatorhub `cleaned_data`
+          -- export (its NOT NULL was dropped to load them), which made
+          -- this endpoint 500 on a model that requires a string id.
+          -- post_id is the table's real key: non-null and unique across
+          -- all 14,709 rows, and it is the identifier that appears in ad
+          -- names, so it is also what the NOT EXISTS below matches on.
+          cip.post_id                                           AS id,
           cip.username                                          AS title,
           cip.nomenclature                                      AS nomenclature,
           cip.content_type                                      AS kind,
@@ -4396,12 +4516,40 @@ _UNTESTED_SQL: dict[str, str] = {
           cip.post_thumbnail                                    AS thumbnail,
           cip.post_date                                         AS date_produced,
           cip.created_at                                        AS created_at,
-          NULL::text                                            AS candidate_master_sku
+          NULL::text                                            AS candidate_master_sku,
+          -- Every link the register holds, not just the first. The
+          -- graphics register alone carries link_1..3 plus `creative`
+          -- and reference_links, and COALESCE threw four of them away --
+          -- which matters because they are often different cuts of the
+          -- same requisition, not duplicates of one file.
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Post', cip.post_link), (2, 'Download', cip.download_link)) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- creatorhub holds three tables and only ONE is live:
+          --   posts          780 -- what the team maintains today
+          --   historic_posts 1,203 -- explicitly the archive
+          --   cleaned_data  12,726 -- the legacy table, loaded from an
+          --                           export because RLS blocks the API
+          -- So the live/historical split applies inside this project
+          -- too; it is not a Supabase-vs-Sheet distinction.
+          -- Ads whose name carries this asset's id. Zero IS the
+          -- definition of untested, so the column doubles as the
+          -- filter's own evidence.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cip.post_id)::int                        AS matched_ads,
+          CASE WHEN cip.source_table = 'posts' THEN 'database' ELSE 'historical' END
+                                                                AS origin,
+          CASE cip.source_table
+               WHEN 'posts'          THEN 'Supabase · creatorhub (posts)'
+               WHEN 'historic_posts' THEN 'Supabase · creatorhub (historic_posts)'
+               WHEN 'cleaned_data'   THEN 'Supabase · creatorhub (cleaned_data)'
+               ELSE 'Supabase · creatorhub'
+          END                                                   AS source_system
         FROM public.content_influencer_posts cip
         -- Join on post_id, NOT the bigint PK: the map is keyed on the
         -- identifier that actually appears in ad names (SIF-15233-P1).
-        WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                           WHERE m.asset_id = cip.post_id)
+
     """,
 }
 
@@ -4410,16 +4558,33 @@ _UNTESTED_SQL: dict[str, str] = {
 async def get_untested_assets(
     session: SessionDep,
     media: UntestedMedia = Query(default="video", description="Which asset media type -- video / graphic / influencer"),
+    match_state: Literal["untested", "matched", "all"] = Query(
+        default="untested",
+        description="untested = the id appears in NO ad name (the default, and "
+                    "what this section is for). matched = it appears in at "
+                    "least one. all = the whole register, which is what makes "
+                    "the matched_ads column worth reading.",
+    ),
     has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows. Ignored for influencer (which has no SKU derivation)."),
 ) -> UntestedAssetsResponse:
     base_select = _UNTESTED_SQL[media]
 
     outer_filters: list[str] = []
+    if match_state == "untested":
+        outer_filters.append("b.matched_ads = 0")
+    elif match_state == "matched":
+        outer_filters.append("b.matched_ads > 0")
     if has_sku is True and media != "influencer":
         outer_filters.append("cpis.master_sku IS NOT NULL")
     elif has_sku is False and media != "influencer":
         outer_filters.append("cpis.master_sku IS NULL")
     where_clause = ("WHERE " + " AND ".join(outer_filters)) if outer_filters else ""
+    # Newest-first is right for the untested backlog -- the freshest
+    # unrun asset is the most actionable. It is exactly wrong for the
+    # other two views: the newest assets are precisely the ones that have
+    # not run, so date order buries every non-zero Ads count hundreds of
+    # rows down and page 1 reads as a column of zeros.
+    order_lead = "" if match_state == "untested" else "b.matched_ads DESC,"
 
     sql = text(f"""
         WITH base AS ({base_select})
@@ -4427,6 +4592,7 @@ async def get_untested_assets(
           b.id, b.title, b.nomenclature, b.kind, b.sub_kind,
           b.link, b.thumbnail, b.date_produced, b.created_at,
           b.candidate_master_sku,
+          b.origin, b.source_system, b.links, b.matched_ads,
           cpis.master_sku       AS matched_master_sku,
           cpis.attributed_orders AS sku_attributed_orders,
           cpis.ad_spend          AS sku_ad_spend,
@@ -4436,7 +4602,8 @@ async def get_untested_assets(
           ON cpis.master_sku = b.candidate_master_sku
          AND cpis.window_key = '30d'
         {where_clause}
-        ORDER BY COALESCE(b.date_produced, DATE '1900-01-01') DESC,
+        ORDER BY {order_lead}
+                 COALESCE(b.date_produced, DATE '1900-01-01') DESC,
                  b.created_at DESC NULLS LAST,
                  b.id
     """)
@@ -4454,6 +4621,10 @@ async def get_untested_assets(
             date_produced=r.date_produced,
             created_at=r.created_at,
             candidate_master_sku=r.candidate_master_sku,
+            matched_ads=int(r.matched_ads or 0),
+            origin=r.origin,
+            source_system=r.source_system,
+            links=list(r.links or []),
             matched_master_sku=r.matched_master_sku,
             sku_attributed_orders=int(r.sku_attributed_orders) if r.sku_attributed_orders is not None else None,
             sku_ad_spend=float(r.sku_ad_spend) if r.sku_ad_spend is not None else None,
@@ -4461,12 +4632,19 @@ async def get_untested_assets(
         )
         for r in result
     ]
+    cov = (await session.execute(text(_UNTESTED_COVERAGE_SQL[media]))).one()
     matched = sum(1 for r in rows if r.matched_master_sku)
+    from_db = sum(1 for r in rows if r.origin == "database")
     return UntestedAssetsResponse(
         media=media,
         total_rows=len(rows),
         with_sku_match=matched,
         without_sku_match=len(rows) - matched,
+        from_database=from_db,
+        from_historical=len(rows) - from_db,
+        register_total=int(cov.register_total or 0),
+        matched_assets=int(cov.matched_assets or 0),
+        matched_ads=int(cov.matched_ads or 0),
         rows=rows,
         computed_at=datetime.now(timezone.utc),
     )
@@ -5022,10 +5200,30 @@ _CT_WINDOW_METRICS = (
     "         sum(i.thruplays)         AS thruplays,"
     "         sum(i.three_sec_plays)   AS three_sec_plays,"
     "         sum(i.outbound_clicks)   AS outbound_clicks,"
-    "         sum(i.post_engagements)  AS post_engagements"
+    "         sum(i.post_engagements)  AS post_engagements,"
+    # Added 2026-09-18. `reach` and `clicks` were in Bronze all along --
+    # the flatten never read them, and read inline_link_clicks (a field
+    # the fetch never requested) instead, which is why CTR was 0.
+    "         sum(i.all_clicks)        AS all_clicks,"
+    "         sum(i.reach)             AS reach,"
+    "         sum(i.add_to_cart)       AS atc_count,"
+    "         sum(i.checkout_initiate) AS ci_count"
     "    FROM public.insights_daily_by_ad i"
     "   WHERE i.day BETWEEN :from_date AND :to_date"
     "   GROUP BY i.ad_id"
+)
+
+#: Shopify outcomes for the window, per ad. Windowed on the ORDER's own
+#: date, which is the only date that means anything here: an ad that ran
+#: in July did not earn a September order.
+_CT_WINDOW_SHOPIFY = (
+    "  SELECT a.matched_ad_id AS ad_id,"
+    "         COUNT(*)                        AS shopify_orders,"
+    "         COALESCE(SUM(a.total_price), 0) AS shopify_revenue"
+    "    FROM public.shopify_order_attribution a"
+    "   WHERE a.matched_ad_id IS NOT NULL"
+    "     AND a.created_at::date BETWEEN :from_date AND :to_date"
+    "   GROUP BY a.matched_ad_id"
 )
 
 #: Per-asset rollup across every ad whose name carries the asset's id.
@@ -5035,6 +5233,7 @@ _CT_WINDOW_METRICS = (
 _CT_AGG = (
     "WITH asset_dates AS (" + _CT_ASSET_DATES + "), "
     "win AS (" + _CT_WINDOW_METRICS + "), "
+    "winshop AS (" + _CT_WINDOW_SHOPIFY + "), "
     "agg AS ("
     "  SELECT m.asset_id, m.media,"
     "         count(*)                                                   AS ads,"
@@ -5057,7 +5256,15 @@ _CT_AGG = (
     "         sum(COALESCE(w.conv_value, 0))                              AS conv_value,"
     "         sum(COALESCE(w.ncp_count, 0))                               AS ncp_count,"
     "         sum(COALESCE(w.ftewv_count, 0))                             AS ftewv_count,"
-    "         sum(COALESCE(w.link_clicks, 0))                             AS link_clicks,"
+    # LIFETIME. insights_daily_by_ad.clicks is only populated on 3,193 of
+    # 168,539 rows in a 30-day window, so windowing this drove ctr_pct to
+    # zero. Everything derived from clicks therefore stays lifetime, and
+    # spend_lifetime / purchases_lifetime exist so those ratios divide
+    # like-for-like instead of mixing a windowed numerator with a
+    # lifetime denominator.
+    "         sum(COALESCE(w.all_clicks, 0))                              AS link_clicks,"
+    "         sum(m.spend)                                                AS spend_lifetime,"
+    "         sum(m.purchases)                                            AS purchases_lifetime,"
     # Best verdict any ad of this asset reached. An asset that produced a
     # Winner in one ad and a Discarded in another is a Winner -- the
     # creative proved itself at least once. min() over the rank because
@@ -5069,16 +5276,40 @@ _CT_AGG = (
     "              ELSE 7 END)                                             AS cat_rank,"
     "         max(m.ad_name)                                              AS sample_ad_name,"
     "         sum(m.thruplays)                                            AS thruplays,"
-    "         sum(m.three_sec_plays)                                      AS three_sec_plays,"
+    "         sum(COALESCE(w.three_sec_plays, 0))                         AS three_sec_plays,"
     "         sum(m.outbound_clicks)                                      AS outbound_clicks,"
     "         sum(m.post_engagements)                                     AS post_engagements,"
     # Keep both outbound links tied to one real ad. Lifetime spend matches
     # the metrics shown for this asset; ad_id breaks equal-spend ties.
     "         (array_agg(m.ad_id ORDER BY COALESCE(w.spend, 0) DESC NULLS LAST,"
     "                                    m.spend DESC NULLS LAST, m.ad_id))[1]"
-    "                                                                     AS preview_ad_id"
+    "                                                                     AS preview_ad_id,"
+    # Everything Ads Analyse reads, rolled up to the asset. The ad-grain
+    # tables are joined here rather than copied into ad_asset_map so the
+    # two sections cannot drift: an asset column is the SUM of the same
+    # expression the ad column shows.
+    "         COUNT(DISTINCT aps.campaign_id)                             AS campaigns,"
+    "         COUNT(DISTINCT aps.adset_id)                                AS adsets,"
+    "         bool_or(aps.ad_effective_status = 'ACTIVE')                 AS any_active,"
+    "         bool_or(COALESCE(aps.f1_pass, false))                       AS f1_pass,"
+    "         bool_or(COALESCE(aps.f2_pass, false))                       AS f2_pass,"
+    "         bool_or(COALESCE(aps.f3_pass, false))                       AS f3_pass,"
+    "         bool_or(COALESCE(aps.f4_pass, false))                       AS f4_pass,"
+    "         sum(COALESCE(ws.shopify_orders, 0))                         AS shopify_orders,"
+    "         sum(COALESCE(ws.shopify_revenue, 0))                        AS shopify_revenue,"
+    # Reach does NOT add up -- one person reached by three ads of the
+    # same asset is one person, and Meta gives no asset-level dedupe. The
+    # sum is an UPPER BOUND and the column says so.
+    "         sum(COALESCE(w.reach, 0))                                   AS reach_upper,"
+    "         sum(COALESCE(w.atc_count, 0))                               AS atc_count,"
+    "         sum(COALESCE(w.ci_count, 0))                                AS ci_count,"
+    "         sum(COALESCE(al.engagement_count, 0))                       AS engagement_count,"
+    "         min(aps.campaign_name)                                      AS sample_campaign_name"
     "    FROM public.ad_asset_map m"
     "    LEFT JOIN win w ON w.ad_id = m.ad_id"
+    "    LEFT JOIN public.ad_performance_summary aps ON aps.ad_id = m.ad_id"
+    "    LEFT JOIN public.ad_lifecycle al ON al.ad_id = m.ad_id"
+    "    LEFT JOIN winshop ws ON ws.ad_id = m.ad_id"
     "   GROUP BY m.asset_id, m.media"
     ") "
 )
@@ -5196,6 +5427,57 @@ class CreativeTestingRow(BaseModel):
     cost_per_ftewv: float | None
     ctr_pct: float | None
 
+    # --- inspector columns, asset grain -------------------------------
+    # Every ratio here is recomputed from the SUMS, never averaged across
+    # the per-ad ratios -- a 3-impression ad must not weigh the same as a
+    # 3-million-impression one.
+    #: LIFETIME, with spend_lifetime / purchases_lifetime beside it so
+    #: the click-derived ratios divide like-for-like. The daily table's
+    #: `clicks` is too sparsely populated to window (3,193 non-zero rows
+    #: of 168,539 over 30 days), which is why these are not windowed.
+    link_clicks: float | None = None
+    spend_lifetime: float | None = None
+    purchases_lifetime: float | None = None
+    #: How many distinct campaigns / ad sets the asset has run across. An
+    #: asset has no single campaign or ad set, which is why Ads Analyse's
+    #: campaign_id and adset_id columns have no counterpart here.
+    campaigns: int | None = None
+    adsets: int | None = None
+    any_active: bool | None = None
+    f1_pass: bool | None = None
+    f2_pass: bool | None = None
+    f3_pass: bool | None = None
+    f4_pass: bool | None = None
+    sample_campaign_name: str | None = None
+    #: UPPER BOUND. Reach does not add up across ads -- one person reached
+    #: by three ads of the same asset is one person, and Meta exposes no
+    #: asset-level de-duplication. frequency_upper and pct_reach_ftewv
+    #: inherit the same caveat, and the column headers say so.
+    reach_upper: float | None = None
+    frequency_upper: float | None = None
+    pct_reach_ftewv: float | None = None
+    atc_count: float | None = None
+    ci_count: float | None = None
+    engagement_count: float | None = None
+    shopify_orders: float | None = None
+    shopify_revenue: float | None = None
+    shopify_roas: float | None = None
+    cost_per_shopify_order: float | None = None
+    meta_shop_diff_pct: float | None = None
+    thruplays: float | None = None
+    three_sec_plays: float | None = None
+    outbound_clicks: float | None = None
+    post_engagements: float | None = None
+    impressions_lifetime: float | None = None
+    cost_per_1000: float | None = None
+    cpc_link: float | None = None
+    atc_lc_pct: float | None = None
+    ci_atc_pct: float | None = None
+    checkout_compl_pct: float | None = None
+    cr_lc_pct: float | None = None
+    profit_efficiency: float | None = None
+    contrib_margin_pct: float | None = None
+
 
 class CreativeTestingTotals(BaseModel):
     assets: int
@@ -5251,6 +5533,20 @@ class CreativeTestingResponse(BaseModel):
     kind_counts: dict[str, int]
 
 
+#: Fields the Creative Testing multi-filter can match on. Asset grain,
+#: so there is no ad_id or adset_id here -- an asset spans many of both.
+#: `category` and `kind` are the computed expressions, not columns, so a
+#: rule reads what the table actually shows.
+_CT_MF_FIELDS: dict[str, str] = {
+    "asset_id": "a.asset_id",
+    "ad_name": "a.sample_ad_name",
+    "campaign_name": "a.sample_campaign_name",
+    "media": "a.media",
+    "account_name": "a.account_name",
+    "category": _CT_CATEGORY,
+    "kind": _CT_KIND,
+}
+
 _CT_SORT_COLUMNS: dict[str, str] = {
     "spend": "a.spend",
     "impressions": "a.impressions",
@@ -5286,6 +5582,12 @@ async def get_creative_testing(
     ),
     account_name: str | None = Query(default=None),
     search: str | None = Query(default=None, description="Substring of asset_id."),
+    multi_filter: str | None = Query(
+        default=None,
+        description='JSON {"join": "and|or|nand|nor", "rules": [{"field", "op", '
+                    '"value"}]}. Same rule language as Ads Analyse, at asset '
+                    "grain -- see _CT_MF_FIELDS for the fields it accepts.",
+    ),
     sort: Literal[
         "spend", "impressions", "purchases", "roas",
         "cost_per_ncp", "cost_per_ftewv", "asset_created", "last_ad_date", "ads",
@@ -5316,6 +5618,19 @@ async def get_creative_testing(
     if search:
         where.append("a.asset_id ILIKE :search")
         params["search"] = f"%{search}%"
+    if multi_filter:
+        try:
+            parsed = _json.loads(multi_filter)
+            clause = _multi_filter_sql(
+                parsed.get("rules") or [], str(parsed.get("join", "and")),
+                params, _CT_MF_FIELDS,
+            )
+        except (ValueError, TypeError, AttributeError):
+            # Malformed JSON is the client's bug. Serving a silently
+            # unfiltered table that looks correct is the worse failure.
+            raise HTTPException(status_code=400, detail="multi_filter is not valid JSON")
+        if clause:
+            where.append(clause)
 
     base_where = (" AND " + " AND ".join(where)) if where else ""
     # category rides with kind_where, not base_where -- the tiles must
@@ -5344,7 +5659,39 @@ async def get_creative_testing(
         "CASE WHEN a.spend > 0 THEN a.conv_value / a.spend END AS roas, "
         "CASE WHEN a.ncp_count > 0 THEN a.spend / a.ncp_count END AS cost_per_ncp, "
         "CASE WHEN a.ftewv_count > 0 THEN a.spend / a.ftewv_count END AS cost_per_ftewv, "
-        "CASE WHEN a.impressions > 0 THEN a.link_clicks::numeric / a.impressions * 100 END AS ctr_pct"
+        "CASE WHEN a.impressions > 0 "
+        "     THEN a.link_clicks::numeric / a.impressions * 100 END AS ctr_pct, "
+        # --- inspector columns, asset grain -------------------------
+        # Every ratio is recomputed from the SUMS, never averaged from
+        # the per-ad ratios: a 3-impression ad would otherwise weigh the
+        # same as a 3-million-impression one.
+        "a.link_clicks, a.campaigns, a.adsets, a.any_active, "
+        "a.f1_pass, a.f2_pass, a.f3_pass, a.f4_pass, "
+        "a.sample_campaign_name, a.reach_upper, a.atc_count, a.ci_count, "
+        "a.engagement_count, a.shopify_orders, a.shopify_revenue, "
+        "a.thruplays, a.three_sec_plays, a.outbound_clicks, a.post_engagements, "
+        "a.impressions_lifetime, "
+        "CASE WHEN a.impressions > 0 THEN a.spend / a.impressions * 1000 END AS cost_per_1000, "
+        "CASE WHEN a.link_clicks > 0 THEN a.spend / a.link_clicks END AS cpc_link, "
+        "CASE WHEN a.link_clicks > 0 THEN a.atc_count::numeric / a.link_clicks * 100 END AS atc_lc_pct, "
+        "CASE WHEN a.atc_count > 0 THEN a.ci_count::numeric / a.atc_count * 100 END AS ci_atc_pct, "
+        "CASE WHEN a.ci_count > 0 "
+        "     THEN a.purchases::numeric / a.ci_count * 100 END AS checkout_compl_pct, "
+        "CASE WHEN a.link_clicks > 0 "
+        "     THEN a.purchases::numeric / a.link_clicks * 100 END AS cr_lc_pct, "
+        "CASE WHEN a.reach_upper > 0 "
+        "     THEN a.impressions::numeric / a.reach_upper END AS frequency_upper, "
+        "CASE WHEN a.reach_upper > 0 THEN a.ftewv_count::numeric / a.reach_upper * 100 END AS pct_reach_ftewv, "
+        "CASE WHEN a.spend > 0 "
+        "     THEN a.shopify_revenue / a.spend END AS shopify_roas, "
+        "CASE WHEN a.shopify_orders > 0 "
+        "     THEN a.spend / a.shopify_orders END AS cost_per_shopify_order, "
+        "CASE WHEN a.conv_value > 0 "
+        "     THEN (a.shopify_revenue - a.conv_value) / a.conv_value * 100 END AS meta_shop_diff_pct, "
+        "a.spend_lifetime, a.purchases_lifetime, "
+        "(a.conv_value - a.spend) AS profit_efficiency, "
+        "CASE WHEN a.conv_value > 0 "
+        "     THEN (a.conv_value - a.spend) / a.conv_value * 100 END AS contrib_margin_pct"
     )
 
     # Aggregate the ad/asset relation once for the entire response. Each
@@ -5755,9 +6102,16 @@ _MF_KEYWORD_OPS = {"contains_all", "contains_any", "contains_none"}
 
 
 def _multi_filter_sql(
-    rules: list[dict], join: str, params: dict[str, object]
+    rules: list[dict], join: str, params: dict[str, object],
+    fields: dict[str, str] | None = None,
 ) -> str | None:
     """Compile the rule list into one boolean SQL expression.
+
+    `fields` maps a rule's field name to the SQL column it filters on.
+    It is a parameter because the same rule language drives two different
+    grains: Ads Analyse filters ad columns, Creative Testing filters the
+    per-asset rollup, and a field like "ad_name" means a different
+    expression in each. Defaults to the ad-grain map.
 
     `join` is how the rules combine:
         and   every rule must hold
@@ -5775,7 +6129,9 @@ def _multi_filter_sql(
     """
     clauses: list[str] = []
     for i, rule in enumerate(rules):
-        col = _MF_FIELDS.get(str(rule.get("field", "")))
+        col = (fields if fields is not None else _MF_FIELDS).get(
+            str(rule.get("field", ""))
+        )
         op = str(rule.get("op", ""))
         raw = str(rule.get("value", "") or "").strip()
         if not col or not raw:

@@ -51,6 +51,7 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { AssetAdsModal } from "./AssetAdsModal";
 import { AssetPreviewCell } from "./AssetPreview";
 import { AdPreviewLinks, DestinationLink } from "./AdLinks";
+import { MultiFilter, MultiFilterState } from "./MultiFilter";
 
 /** CTD's cream/gold palette. Scoped here rather than pushed into the
  *  app's design tokens, which are blue-based for every other tab. */
@@ -268,6 +269,339 @@ function detectProductFocus(name: string | null | undefined): ProductFocusKey {
 }
 
 type CtypeKey = "IFAD" | "Graphic AD" | "VID" | "STATIC";
+/** One inspector column, mirroring Ads Analyse's ColDef so the two
+ *  tables behave the same way: pick what you want to see, filter on a
+ *  rule set, read a wide row.
+ *
+ *  BASIS matters and is printed in the header. The date filter can only
+ *  scope what insights_daily_by_ad reliably carries -- spend,
+ *  impressions, purchases, conv value, NCP and FTEWV. Clicks, reach,
+ *  ATC, checkouts, Shopify and the video counters are lifetime, so every
+ *  ratio built from them is computed from lifetime inputs on BOTH sides
+ *  rather than mixing a windowed numerator into a lifetime denominator.
+ *  That mix is what once rendered a 90% hook rate where the truth was
+ *  9.1%. */
+type AssetColDef = {
+  key: string;
+  header: string;
+  group: string;
+  /** Lifetime columns are marked in the picker and header tooltip. */
+  lifetime?: boolean;
+  defaultVisible?: boolean;
+  align?: "left" | "right";
+  render: (r: CreativeTestingRow) => React.ReactNode;
+};
+
+const num = (n: number | null | undefined) =>
+  n === null || n === undefined ? "—" : Math.round(n).toLocaleString("en-IN");
+const pctOf = (n: number | null | undefined, digits = 2) =>
+  n === null || n === undefined ? "—" : n.toFixed(digits) + "%";
+const yn = (b: boolean | null | undefined) =>
+  b === null || b === undefined ? "—" : b ? "Yes" : "No";
+
+/** Every column the asset table can show. The first fifteen are the
+ *  set that was always here and stay visible by default; the rest are
+ *  the Ads Analyse inspector rolled up to the asset.
+ *
+ *  `lifetime: true` marks a column the date filter CANNOT scope, because
+ *  the daily insights table has no usable source for it. Those four are
+ *  link clicks, thruplays, outbound clicks and post engagements -- the
+ *  fields only entered the Meta fetch on 2026-09-17. Showing them
+ *  windowed would render a near-empty number that reads as a collapse,
+ *  so they are lifetime and say so.
+ *
+ *  No campaign or ad-set column: an asset runs across many of both, so
+ *  the counts are what carry meaning. */
+/** What each bucket actually counts, in the words of the rule that
+ *  computes it. These sat in `title` attributes, which meant the
+ *  definition only existed if you happened to hover -- and the 50k rule
+ *  in particular is not guessable from the label. */
+const BUCKET_INFO: Record<string, { what: string; rule: string; note?: string }> = {
+  all: {
+    what: "Every asset with at least one ad CREATED inside the selected dates.",
+    rule: "ads_in_window > 0",
+    note: "An asset that only ran older ads during this window does not appear — this counts creatives that were PUT INTO test here, not everything that happened to spend.",
+  },
+  new: {
+    what: "The asset's first real test: it was produced inside this window and ran as a genuine ad rather than only as a copy.",
+    rule: "register creation date is inside the window AND at least one non-\u201ccopy\u201d ad carries it",
+    note: "Creation date comes from the video / graphic / influencer register, not from any ad date.",
+  },
+  historical_discarded: {
+    what: "Retested, and across ALL its ads it has still never reached 50,000 impressions in its LIFETIME — put back in the air again and again without ever clearing the bare minimum.",
+    rule: "not new AND SUM(impressions) over every ad that ever carried the asset < 50,000",
+    note: "Deliberately lifetime, not the selected dates. The question is whether the creative has ever had a fair run, and a single month cannot answer that.",
+  },
+  refresh_discarded: {
+    what: "Retested and past the 50,000 lifetime impression mark across all its ads — it cleared the bare minimum, so its performance figures carry weight.",
+    rule: "not new AND SUM(impressions) over every ad that ever carried the asset >= 50,000",
+    note: "The 50k test asks whether a creative got a fair run, NOT whether it was discarded: most assets here hold a Winner or live-analysis verdict.",
+  },
+};
+
+/** A small \u24d8 that opens the definition. Stops propagation so clicking
+ *  it never also switches the tab underneath. */
+function InfoDot({ id }: { id: string }) {
+  const [open, setOpen] = useState(false);
+  const info = BUCKET_INFO[id];
+  if (!info) return null;
+  return (
+    <span className="relative inline-block align-middle">
+      {/* A <span role="button">, NOT a <button>: this sits inside the
+          tab's own <button>, and nesting them is invalid HTML that React
+          refuses to hydrate ("<button> cannot be a descendant of
+          <button>"). Keyboard support is wired by hand to keep what the
+          real element gave for free. */}
+      <span
+        role="button"
+        tabIndex={0}
+        aria-label="What this counts"
+        aria-expanded={open}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }
+        }}
+        className="ml-0.5 inline-flex h-[18px] w-[18px] cursor-pointer items-center justify-center rounded-full border font-semibold leading-none transition-colors hover:brightness-95"
+        style={{
+          borderColor: open ? CT.ink : CT.muted,
+          color: open ? "#FFFFFF" : CT.ink,
+          backgroundColor: open ? CT.ink : "#FFFFFF",
+          fontSize: "11px",
+        }}
+      >
+        i
+      </span>
+      {open && (
+        <>
+          {/* Click-away. Fixed and behind the panel, so anywhere outside
+              closes it without each tab needing its own handler. */}
+          <span
+            className="fixed inset-0 z-20"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+            }}
+          />
+          <span
+            onClick={(e) => e.stopPropagation()}
+            className="absolute left-0 top-6 z-30 block w-80 rounded-lg border p-3 text-left normal-case shadow-xl"
+            style={{
+              borderColor: CT.border,
+              // Explicit, not a utility: this panel sits over the table
+              // and over other tiles, and anything less than fully
+              // opaque let their numbers read through the definition.
+              backgroundColor: "#FFFFFF",
+              letterSpacing: "normal",
+            }}
+          >
+            <span className="block text-[12px] leading-relaxed" style={{ color: CT.ink }}>
+              {info.what}
+            </span>
+            <span
+              className="mt-2 block rounded bg-bg-muted px-2 py-1 font-mono text-[10.5px] leading-relaxed"
+              style={{ color: CT.muted }}
+            >
+              {info.rule}
+            </span>
+            {info.note && (
+              <span className="mt-2 block text-[11px] leading-relaxed" style={{ color: CT.muted }}>
+                {info.note}
+              </span>
+            )}
+          </span>
+        </>
+      )}
+    </span>
+  );
+}
+
+const ASSET_COLUMNS: AssetColDef[] = [
+  // ---- Identity -----------------------------------------------------
+  { key: "preview_thumb", header: "Preview", group: "Identity", defaultVisible: true,
+    render: (r) => <AssetPreviewCell asset={r} /> },
+  { key: "asset_id", header: "Asset", group: "Identity", defaultVisible: true,
+    render: (r) => (
+      <span className="font-mono text-[12px]">
+        {r.asset_id}
+        {r.name_conflict && (
+          <span className="ml-1 rounded border border-amber-300 bg-amber-100 px-1 text-[10px] text-amber-900"
+                title="An ad naming this asset also names another one.">⚠</span>
+        )}
+      </span>
+    ) },
+  { key: "ad_preview", header: "Ad preview", group: "Identity", defaultVisible: true,
+    render: (r) => <AdPreviewLinks adId={r.preview_ad_id} url={r.ad_preview_url} /> },
+  { key: "destination", header: "Website destination", group: "Identity", defaultVisible: true,
+    render: (r) => (
+      <span className="block max-w-[20rem] truncate">
+        <DestinationLink adId={r.preview_ad_id} url={r.destination_url} />
+      </span>
+    ) },
+  { key: "media", header: "Media", group: "Identity", defaultVisible: true,
+    render: (r) => {
+      const mm = r.media ? MEDIA_META[r.media] : null;
+      return mm ? <span className={`rounded border px-1.5 py-0.5 text-[11px] ${mm.cls}`}>{mm.icon} {mm.label}</span> : null;
+    } },
+  { key: "kind", header: "Kind", group: "Identity", defaultVisible: true,
+    render: (r) => r.kind === "new" ? (
+      <span className="rounded border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-800">New</span>
+    ) : (
+      <span className="rounded border border-amber-200 bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-900"
+            title={`Reused ${r.iteration_count}× beyond its first outing`}>Iter ×{r.iteration_count}</span>
+    ) },
+  { key: "category", header: "Category", group: "Identity", defaultVisible: true,
+    render: (r) => {
+      const cat = (r.category ?? "Discarded") as CategoryKey;
+      return <span className="text-[11px] font-medium" style={{ color: CAT_ACCENT[cat] }}>{cat}</span>;
+    } },
+  { key: "sample_ad_name", header: "Sample ad name", group: "Identity",
+    render: (r) => (
+      <span className="block max-w-[22rem] truncate text-[12px]" title={r.sample_ad_name ?? ""}>
+        {r.sample_ad_name ?? "—"}
+      </span>
+    ) },
+  { key: "account_name", header: "Account", group: "Identity",
+    render: (r) => <span className="text-[12px]">{r.account_name ?? "—"}</span> },
+
+  // ---- Timeline -----------------------------------------------------
+  { key: "asset_created", header: "Created", group: "Timeline", defaultVisible: true, align: "right",
+    render: (r) => <span className="text-[12px] text-text-tertiary">{r.asset_created ?? "—"}</span> },
+  { key: "first_ad_date", header: "First ad", group: "Timeline", align: "right",
+    render: (r) => <span className="text-[12px] text-text-tertiary">{r.first_ad_date ?? "—"}</span> },
+  { key: "last_ad_date", header: "Last ad", group: "Timeline", align: "right",
+    render: (r) => <span className="text-[12px] text-text-tertiary">{r.last_ad_date ?? "—"}</span> },
+
+  // ---- Volume -------------------------------------------------------
+  { key: "ads", header: "Ads", group: "Volume", defaultVisible: true, align: "right",
+    render: (r) => <>{r.ads}</> },
+  { key: "copy_ads", header: "Copies", group: "Volume", defaultVisible: true, align: "right",
+    render: (r) => <span className="text-text-tertiary">{r.copy_ads}</span> },
+  { key: "ads_in_window", header: "Ads in window", group: "Volume", align: "right",
+    render: (r) => <>{r.ads_in_window}</> },
+  { key: "campaigns", header: "Campaigns", group: "Volume", align: "right",
+    render: (r) => <span title="Distinct campaigns this asset has run across">{r.campaigns ?? "—"}</span> },
+  { key: "adsets", header: "Ad sets", group: "Volume", align: "right",
+    render: (r) => <span title="Distinct ad sets this asset has run across">{r.adsets ?? "—"}</span> },
+  { key: "any_active", header: "Any active", group: "Volume", align: "right",
+    render: (r) => <>{yn(r.any_active)}</> },
+
+  // ---- Delivery -----------------------------------------------------
+  { key: "spend", header: "Spend", group: "Delivery", defaultVisible: true, align: "right",
+    render: (r) => <>{fmtMoney(r.spend)}</> },
+  { key: "impressions", header: "Impressions", group: "Delivery", align: "right",
+    render: (r) => <>{num(r.impressions)}</> },
+  { key: "reach_upper", header: "Reach (upper)", group: "Delivery", align: "right",
+    render: (r) => <span title="Sum across ads. Reach does not de-duplicate people between ads of the same asset, so this is an upper bound.">{num(r.reach_upper)}</span> },
+  { key: "frequency_upper", header: "Freq. (lower)", group: "Delivery", align: "right",
+    render: (r) => <span title="Impressions ÷ upper-bound reach, so the true frequency is at least this.">{fmtNum(r.frequency_upper)}</span> },
+  { key: "cost_per_1000", header: "CPM", group: "Delivery", align: "right",
+    render: (r) => <>{fmtMoney(r.cost_per_1000)}</> },
+  { key: "link_clicks", header: "Link clicks", group: "Delivery", align: "right",
+    render: (r) => <>{num(r.link_clicks)}</> },
+  { key: "ctr_pct", header: "CTR", group: "Delivery", align: "right",
+    render: (r) => <>{pctOf(r.ctr_pct)}</> },
+  { key: "cpc_link", header: "CPC", group: "Delivery", align: "right",
+    render: (r) => <>{fmtMoney(r.cpc_link)}</> },
+
+  // ---- Funnel -------------------------------------------------------
+  { key: "atc_count", header: "Add to cart", group: "Funnel", align: "right",
+    render: (r) => <>{num(r.atc_count)}</> },
+  { key: "ci_count", header: "Checkouts", group: "Funnel", align: "right",
+    render: (r) => <>{num(r.ci_count)}</> },
+  { key: "atc_lc_pct", header: "ATC / click", group: "Funnel", align: "right",
+    render: (r) => <>{pctOf(r.atc_lc_pct)}</> },
+  { key: "ci_atc_pct", header: "Checkout / ATC", group: "Funnel", align: "right",
+    render: (r) => <>{pctOf(r.ci_atc_pct)}</> },
+  { key: "checkout_compl_pct", header: "Purchase / checkout", group: "Funnel", align: "right",
+    render: (r) => <>{pctOf(r.checkout_compl_pct)}</> },
+  { key: "cr_lc_pct", header: "CR / click", group: "Funnel", align: "right",
+    render: (r) => <>{pctOf(r.cr_lc_pct)}</> },
+  { key: "engagement_count", header: "Engagements", group: "Funnel", lifetime: true, align: "right",
+    render: (r) => <>{num(r.engagement_count)}</> },
+
+  // ---- Meta outcome -------------------------------------------------
+  { key: "purchases", header: "Purch.", group: "Meta outcome", defaultVisible: true, align: "right",
+    render: (r) => <>{fmtCompact(r.purchases)}</> },
+  { key: "conv_value", header: "Conv. value", group: "Meta outcome", align: "right",
+    render: (r) => <>{fmtMoney(r.conv_value)}</> },
+  { key: "roas", header: "ROAS", group: "Meta outcome", defaultVisible: true, align: "right",
+    render: (r) => <>{fmtNum(r.roas)}</> },
+  { key: "ncp_count", header: "NCP", group: "Meta outcome", align: "right",
+    render: (r) => <>{num(r.ncp_count)}</> },
+  { key: "cost_per_ncp", header: "₹/NCP", group: "Meta outcome", defaultVisible: true, align: "right",
+    render: (r) => <>{fmtMoney(r.cost_per_ncp)}</> },
+  { key: "ftewv_count", header: "FTEWV", group: "Meta outcome", align: "right",
+    render: (r) => <>{num(r.ftewv_count)}</> },
+  { key: "cost_per_ftewv", header: "₹/FTEWV", group: "Meta outcome", defaultVisible: true, align: "right",
+    render: (r) => <>{fmtMoney(r.cost_per_ftewv)}</> },
+  { key: "pct_reach_ftewv", header: "FTEWV / reach", group: "Meta outcome", align: "right",
+    render: (r) => <>{pctOf(r.pct_reach_ftewv)}</> },
+  { key: "profit_efficiency", header: "Profit eff.", group: "Meta outcome", align: "right",
+    render: (r) => <>{fmtMoney(r.profit_efficiency)}</> },
+  { key: "contrib_margin_pct", header: "Contrib. margin", group: "Meta outcome", align: "right",
+    render: (r) => <>{pctOf(r.contrib_margin_pct)}</> },
+
+  // ---- Shopify ------------------------------------------------------
+  { key: "shopify_orders", header: "Shopify orders", group: "Shopify", align: "right",
+    render: (r) => <>{num(r.shopify_orders)}</> },
+  { key: "shopify_revenue", header: "Shopify revenue", group: "Shopify", align: "right",
+    render: (r) => <>{fmtMoney(r.shopify_revenue)}</> },
+  { key: "shopify_roas", header: "Shopify ROAS", group: "Shopify", align: "right",
+    render: (r) => <>{fmtNum(r.shopify_roas)}</> },
+  { key: "cost_per_shopify_order", header: "₹/Shopify order", group: "Shopify", align: "right",
+    render: (r) => <>{fmtMoney(r.cost_per_shopify_order)}</> },
+  { key: "meta_shop_diff_pct", header: "Meta vs Shopify", group: "Shopify", align: "right",
+    render: (r) => <>{pctOf(r.meta_shop_diff_pct)}</> },
+
+  // ---- Video --------------------------------------------------------
+  { key: "three_sec_plays", header: "3-sec plays", group: "Video", align: "right",
+    render: (r) => <>{num(r.three_sec_plays)}</> },
+  { key: "thruplays", header: "ThruPlays", group: "Video", lifetime: true, align: "right",
+    render: (r) => <>{num(r.thruplays)}</> },
+  { key: "outbound_clicks", header: "Outbound clicks", group: "Video", lifetime: true, align: "right",
+    render: (r) => <>{num(r.outbound_clicks)}</> },
+  { key: "post_engagements", header: "Post engagements", group: "Video", lifetime: true, align: "right",
+    render: (r) => <>{num(r.post_engagements)}</> },
+
+  // ---- Verdict flags ------------------------------------------------
+  { key: "f1_pass", header: "F1", group: "Verdict", align: "right", render: (r) => <>{yn(r.f1_pass)}</> },
+  { key: "f2_pass", header: "F2", group: "Verdict", align: "right", render: (r) => <>{yn(r.f2_pass)}</> },
+  { key: "f3_pass", header: "F3", group: "Verdict", align: "right", render: (r) => <>{yn(r.f3_pass)}</> },
+  { key: "f4_pass", header: "F4", group: "Verdict", align: "right", render: (r) => <>{yn(r.f4_pass)}</> },
+
+  // ---- Lifetime reference -------------------------------------------
+  { key: "spend_lifetime", header: "Spend (life)", group: "Lifetime", lifetime: true, align: "right",
+    render: (r) => <>{fmtMoney(r.spend_lifetime)}</> },
+  { key: "impressions_lifetime", header: "Impressions (life)", group: "Lifetime", lifetime: true, align: "right",
+    render: (r) => <>{num(r.impressions_lifetime)}</> },
+  { key: "purchases_lifetime", header: "Purch. (life)", group: "Lifetime", lifetime: true, align: "right",
+    render: (r) => <>{fmtCompact(r.purchases_lifetime)}</> },
+];
+
+const ASSET_COL_GROUPS = Array.from(new Set(ASSET_COLUMNS.map((c) => c.group)));
+const DEFAULT_HIDDEN = new Set(
+  ASSET_COLUMNS.filter((c) => !c.defaultVisible).map((c) => c.key),
+);
+
+/** Fields the asset-grain multi-filter offers. Mirrors _CT_MF_FIELDS on
+ *  the API -- a field missing there is silently skipped, so the two
+ *  lists have to agree. */
+const ASSET_FILTER_FIELDS = [
+  { key: "asset_id", label: "Asset ID" },
+  { key: "ad_name", label: "Ad Name" },
+  { key: "media", label: "Media" },
+  { key: "category", label: "Category" },
+  { key: "kind", label: "Kind" },
+  { key: "account_name", label: "Account" },
+];
+
 const CTYPES: CtypeKey[] = ["IFAD", "Graphic AD", "VID", "STATIC"];
 const CREATIVE_FOCUS_COLOR: Record<string, string> = {
   IFAD: "#7C3AED",
@@ -335,6 +669,11 @@ export function CreativeTesting() {
   const [fromDate, setFromDate] = useState(initial.from);
   const [toDate, setToDate] = useState(initial.to);
   const [kindTab, setKindTab] = useState<KindTab>("all");
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set(DEFAULT_HIDDEN));
+  const [showCols, setShowCols] = useState(false);
+  const [colSearch, setColSearch] = useState("");
+  const [multiFilter, setMultiFilter] = useState<MultiFilterState | null>(null);
+  const visibleCols = ASSET_COLUMNS.filter((c) => !hiddenCols.has(c.key));
   const [media, setMedia] = useState<MediaKey | "">("");
   const [category, setCategory] = useState<CategoryKey | "">("");
   const [search, setSearch] = useState("");
@@ -357,11 +696,12 @@ export function CreativeTesting() {
       from_date: fromDate,
       to_date: toDate,
       kind: kindTab === "all" ? undefined : kindTab,
+      multi_filter: multiFilter ? JSON.stringify(multiFilter) : undefined,
       media: media || undefined,
       category: category || undefined,
       search: debouncedSearch || undefined,
     }),
-    [fromDate, toDate, kindTab, media, category, debouncedSearch],
+    [fromDate, toDate, kindTab, media, category, debouncedSearch, multiFilter],
   );
 
   useEffect(() => {
@@ -423,14 +763,12 @@ export function CreativeTesting() {
   }, [allRows]);
 
   const pageRows = allRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  // Denominator for the five video rates, and for the chart. Numerator
+  // and denominator MUST move together: a lifetime numerator over a
+  // windowed denominator once read 90% hook rate where the truth was
+  // 9.1%. Both are windowed as of 2026-09-18, when the flatten started
+  // extracting reach and clicks from Bronze.
   const imp = totals?.impressions || 0;
-  // Denominator for the five video rates. It tracks whichever basis the
-  // API is serving their numerators on, and the two MUST move together:
-  // a lifetime numerator over a windowed denominator read 90% hook rate
-  // (26.1M three-second plays over 29.0M windowed impressions) where the
-  // real figure is 9.1%. Flipping this to `imp` is only correct once
-  // insights_daily_by_ad actually carries daily video metrics.
-  const lifeImp = totals?.impressions_lifetime || 0;
 
   return (
     <div className="space-y-3" style={{ backgroundColor: CT.cream }}>
@@ -508,6 +846,23 @@ export function CreativeTesting() {
           placeholder="Search asset id…"
           className="w-48 rounded-md border border-border-primary px-2 py-1 text-sm"
         />
+        {/* Sits with the controls, so the feedback is where the change
+            was made. A 30-day window is a multi-second query and the
+            date picker gave no sign it had been heard. */}
+        {loading && (
+          <span
+            className="inline-flex items-center gap-1.5 text-xs"
+            style={{ color: CT.muted }}
+            role="status"
+            aria-live="polite"
+          >
+            <span
+              className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
+              aria-hidden="true"
+            />
+            Loading {fromDate} → {toDate}…
+          </span>
+        )}
       </div>
 
       {/* ── New / Retested tabs ───────────────────────────────── */}
@@ -522,7 +877,7 @@ export function CreativeTesting() {
           return (
             <button
               key={key}
-              title={hint}
+              title={undefined}
               onClick={() => setKindTab(key)}
               className={
                 "rounded-lg border px-3 py-2 text-left transition-colors " +
@@ -531,7 +886,10 @@ export function CreativeTesting() {
                   : "border-border-primary bg-white hover:bg-bg-muted")
               }
             >
-              <div className="text-[11px] uppercase tracking-wide opacity-70">{label}</div>
+              <div className="flex items-center gap-0.5">
+                <span className="text-[11px] uppercase tracking-wide opacity-70">{label}</span>
+                <InfoDot id={key} />
+              </div>
               <div className="text-lg font-semibold">{count.toLocaleString("en-IN")}</div>
             </button>
           );
@@ -563,7 +921,7 @@ export function CreativeTesting() {
             return (
               <button
                 key={key}
-                title={hint}
+                title={undefined}
                 onClick={() => setKindTab(key)}
                 className={
                   "rounded-lg border px-3 py-2 text-left transition-colors " +
@@ -572,7 +930,10 @@ export function CreativeTesting() {
                     : "border-border-primary bg-white hover:bg-bg-muted")
                 }
               >
-                <div className="text-[11px] uppercase tracking-wide opacity-70">{label}</div>
+                <div className="flex items-center gap-0.5">
+                  <span className="text-[11px] uppercase tracking-wide opacity-70">{label}</span>
+                  <InfoDot id={key} />
+                </div>
                 <div className="text-lg font-semibold">{count.toLocaleString("en-IN")}</div>
               </button>
             );
@@ -623,6 +984,13 @@ export function CreativeTesting() {
         </div>
       </div>
 
+      {/* Everything below is derived from the fetch, so while one is in
+          flight it is the PREVIOUS window's numbers. Dimming says that
+          without blanking figures the eye may still want to compare. */}
+      <div
+        className={loading ? "pointer-events-none opacity-40 transition-opacity" : "transition-opacity"}
+      >
+
       {/* ── Overview — Performance ────────────────────────────── */}
       {totals && (
         <div
@@ -649,11 +1017,11 @@ export function CreativeTesting() {
               [
                 ["TOTAL AMOUNT SPENT", fmtMoney(totals.spend), "Sum · INR · inside the selected dates", false],
                 ["TOTAL IMPRESSIONS", Math.round(totals.impressions).toLocaleString("en-IN"), "Sum · inside the selected dates", false],
-                ["AVG. HOOK RATE", pct(totals.three_sec_plays, lifeImp), "Sum(3-Sec Video Plays) ÷ Sum(Impressions) · LIFETIME basis", false],
-                ["AVG. OUTBOUND CTR", pct(totals.outbound_clicks, lifeImp), "Sum(Outbound Clicks) ÷ Sum(Impressions) · LIFETIME basis", false],
-                ["AVG. ENGAGEMENT RATE", pct(totals.post_engagements, lifeImp), "Sum(Post Engagements) ÷ Sum(Impressions) · LIFETIME basis", false],
-                ["AVG. THRUPLAY RATE", pct(totals.thruplays, lifeImp), "Sum(ThruPlays) ÷ Sum(Impressions) · LIFETIME basis", false],
-                ["AVG. HOLD RATE", pct(totals.thruplays, totals.three_sec_plays), "Sum(ThruPlays) ÷ Sum(3-Sec Video Plays) · LIFETIME basis", false],
+                ["AVG. HOOK RATE", pct(totals.three_sec_plays, imp), "Sum(3-Sec Video Plays) ÷ Sum(Impressions) · inside the selected dates", false],
+                ["AVG. OUTBOUND CTR", pct(totals.outbound_clicks, imp), "Sum(Outbound Clicks) ÷ Sum(Impressions) · inside the selected dates", false],
+                ["AVG. ENGAGEMENT RATE", pct(totals.post_engagements, imp), "Sum(Post Engagements) ÷ Sum(Impressions) · inside the selected dates", false],
+                ["AVG. THRUPLAY RATE", pct(totals.thruplays, imp), "Sum(ThruPlays) ÷ Sum(Impressions) · inside the selected dates", false],
+                ["AVG. HOLD RATE", pct(totals.thruplays, totals.three_sec_plays), "Sum(ThruPlays) ÷ Sum(3-Sec Video Plays) · inside the selected dates", false],
                 ["CT ROAS", fmtNum(totals.roas), "Sum(Conv. Value) ÷ Sum(Spend)", true],
               ] as [string, string, string, boolean][]
             ).map(([label, value, formula, hi]) => (
@@ -894,6 +1262,91 @@ export function CreativeTesting() {
         </div>
       )}
 
+      </div>{/* end dim-while-loading */}
+
+      {/* ── inspector controls ────────────────────────────────── */}
+      <MultiFilter applied={multiFilter} onApply={setMultiFilter} fields={ASSET_FILTER_FIELDS} />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => setShowCols((v) => !v)}
+          className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+        >
+          ▤ Columns ({visibleCols.length}/{ASSET_COLUMNS.length})
+        </button>
+        {hiddenCols.size !== DEFAULT_HIDDEN.size && (
+          <button
+            onClick={() => setHiddenCols(new Set(DEFAULT_HIDDEN))}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+          >
+            Reset to default
+          </button>
+        )}
+        <span className="text-[11px]" style={{ color: CT.muted }}>
+          <span className="opacity-50">∞</span> marks a lifetime metric the date filter cannot scope
+        </span>
+      </div>
+
+      {showCols && (
+        <div className="rounded-lg border bg-white p-3 shadow-sm" style={{ borderColor: CT.border }}>
+          <div className="mb-2 flex items-center gap-2">
+            <input
+              value={colSearch}
+              onChange={(e) => setColSearch(e.target.value)}
+              placeholder="Find a column…"
+              className="w-56 rounded-md border border-border-primary px-2 py-1 text-xs"
+            />
+            <button
+              onClick={() => setHiddenCols(new Set())}
+              className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
+            >
+              Show all
+            </button>
+            <button
+              onClick={() => setHiddenCols(new Set(ASSET_COLUMNS.map((c) => c.key)))}
+              className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
+            >
+              Hide all
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3 lg:grid-cols-4">
+            {ASSET_COL_GROUPS.map((grp) => {
+              const cols = ASSET_COLUMNS.filter(
+                (c) => c.group === grp &&
+                  c.header.toLowerCase().includes(colSearch.toLowerCase()),
+              );
+              if (!cols.length) return null;
+              return (
+                <div key={grp}>
+                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide"
+                       style={{ color: CT.muted }}>
+                    {grp}
+                  </div>
+                  {cols.map((c) => (
+                    <label key={c.key} className="flex items-center gap-1.5 py-0.5 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={!hiddenCols.has(c.key)}
+                        onChange={() =>
+                          setHiddenCols((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(c.key)) next.delete(c.key);
+                            else next.add(c.key);
+                            return next;
+                          })
+                        }
+                      />
+                      <span>{c.header}</span>
+                      {c.lifetime && <span className="opacity-40" title="Lifetime, not windowed">∞</span>}
+                    </label>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ── asset table ───────────────────────────────────────── */}
       <p className="text-xs" style={{ color: CT.muted }}>
         Ad preview and website links show the ad that spent most in the selected dates. Open a row to see links for every iteration.
@@ -902,48 +1355,59 @@ export function CreativeTesting() {
         className="overflow-x-auto rounded-lg border bg-white shadow-sm"
         style={{ borderColor: CT.border }}
       >
-        <table className="w-full min-w-[1520px] text-sm">
+        <table className="ct-asset-table min-w-full text-sm">
           <thead
             className="text-left text-[10px] font-semibold uppercase tracking-wider"
             style={{ backgroundColor: CT.cream, color: CT.muted }}
           >
             <tr>
-              <th className="px-3 py-2">Preview</th>
-              <th className="px-3 py-2">Asset</th>
-              <th className="px-3 py-2">Ad preview</th>
-              <th className="px-3 py-2">Website destination</th>
-              <th className="px-3 py-2">Media</th>
-              <th className="px-3 py-2">Kind</th>
-              <th className="px-3 py-2">Category</th>
-              <th className="px-3 py-2 text-right">Created</th>
-              <th className="px-3 py-2 text-right">Ads</th>
-              <th className="px-3 py-2 text-right">Copies</th>
-              <th className="px-3 py-2 text-right">Spend</th>
-              <th className="px-3 py-2 text-right">Purch.</th>
-              <th className="px-3 py-2 text-right">ROAS</th>
-              <th className="px-3 py-2 text-right">₹/NCP</th>
-              <th className="px-3 py-2 text-right">₹/FTEWV</th>
+              {visibleCols.map((c) => (
+                <th
+                  key={c.key}
+                  className={"px-3 py-2 whitespace-nowrap " + (c.align === "right" ? "text-right" : "")}
+                  title={c.lifetime
+                    ? "LIFETIME — the date filter cannot scope this metric; no daily source carries it."
+                    : undefined}
+                >
+                  {c.header}
+                  {c.lifetime && <span className="ml-1 opacity-50" title="Lifetime, not windowed">∞</span>}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {loading && (
-              <tr>
-                <td colSpan={15} className="px-3 py-6 text-center text-text-tertiary">
-                  Loading…
-                </td>
-              </tr>
-            )}
+            {/* Skeleton rows, not a single "Loading…" line. A 30-day
+                window takes seconds to come back, and a one-line message
+                made the table look EMPTY rather than busy -- the shape of
+                what is coming is the useful signal. */}
+            {loading &&
+              Array.from({ length: 8 }).map((_, i) => (
+                <tr key={`sk-${i}`} className="border-t" style={{ borderColor: CT.border }}>
+                  {visibleCols.map((c) => (
+                    <td key={c.key} className="px-3 py-2">
+                      <div
+                        className="h-3 animate-pulse rounded bg-bg-muted"
+                        style={{
+                          // Vary the width so it reads as content rather
+                          // than a progress bar, and keep it stable per
+                          // cell so it does not jitter between frames.
+                          width: c.align === "right" ? "3.5rem" : "70%",
+                          opacity: 1 - i * 0.07,
+                        }}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
             {!loading && pageRows.length === 0 && (
               <tr>
-                <td colSpan={15} className="px-3 py-6 text-center text-text-tertiary">
+                <td colSpan={visibleCols.length} className="px-3 py-6 text-center text-text-tertiary">
                   No assets tested in this window.
                 </td>
               </tr>
             )}
             {!loading &&
               pageRows.map((r) => {
-                const mm = r.media ? MEDIA_META[r.media] : null;
-                const cat = (r.category ?? "Discarded") as CategoryKey;
                 return (
                   <tr
                     key={r.asset_id}
@@ -958,62 +1422,14 @@ export function CreativeTesting() {
                     onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#FDF8E8")}
                     onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "")}
                   >
-                    <td className="px-3 py-2">
-                      <AssetPreviewCell asset={r} />
-                    </td>
-                    <td className="px-3 py-2 font-mono text-[12px]">
-                      {r.asset_id}
-                      {r.name_conflict && (
-                        <span
-                          className="ml-1 rounded border border-amber-300 bg-amber-100 px-1 text-[10px] text-amber-900"
-                          title="An ad naming this asset also names another one."
-                        >
-                          ⚠
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <AdPreviewLinks adId={r.preview_ad_id} url={r.ad_preview_url} />
-                    </td>
-                    <td className="px-3 py-2">
-                      <DestinationLink adId={r.preview_ad_id} url={r.destination_url} />
-                    </td>
-                    <td className="px-3 py-2">
-                      {mm && (
-                        <span className={`rounded border px-1.5 py-0.5 text-[11px] ${mm.cls}`}>
-                          {mm.icon} {mm.label}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      {r.kind === "new" ? (
-                        <span className="rounded border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-800">
-                          New
-                        </span>
-                      ) : (
-                        <span
-                          className="rounded border border-amber-200 bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-900"
-                          title={`Reused ${r.iteration_count}× beyond its first outing`}
-                        >
-                          Iter ×{r.iteration_count}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className="text-[11px] font-medium" style={{ color: CAT_ACCENT[cat] }}>
-                        {cat}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-right text-[12px] text-text-tertiary">
-                      {r.asset_created ?? "—"}
-                    </td>
-                    <td className="px-3 py-2 text-right">{r.ads}</td>
-                    <td className="px-3 py-2 text-right text-text-tertiary">{r.copy_ads}</td>
-                    <td className="px-3 py-2 text-right">{fmtMoney(r.spend)}</td>
-                    <td className="px-3 py-2 text-right">{fmtCompact(r.purchases)}</td>
-                    <td className="px-3 py-2 text-right">{fmtNum(r.roas)}</td>
-                    <td className="px-3 py-2 text-right">{fmtMoney(r.cost_per_ncp)}</td>
-                    <td className="px-3 py-2 text-right">{fmtMoney(r.cost_per_ftewv)}</td>
+                    {visibleCols.map((c) => (
+                      <td
+                        key={c.key}
+                        className={"px-3 py-2 " + (c.align === "right" ? "text-right" : "")}
+                      >
+                        {c.render(r)}
+                      </td>
+                    ))}
                   </tr>
                 );
               })}

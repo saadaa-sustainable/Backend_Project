@@ -1790,6 +1790,18 @@ export interface UntestedAssetRow {
   thumbnail: string | null;
   date_produced: string | null;
   created_at: string | null;
+  /** Where the RECORD came from — "database" (a live Supabase register
+   *  the team maintains today) or "historical" (a Google Sheet from
+   *  before those registers existed). Different things to act on: a
+   *  database asset that never ran is a live backlog item; a sheet asset
+   *  that never ran is mostly archive. */
+  /** Ads whose name carries this asset's id. 0 IS "untested". */
+  matched_ads: number;
+  origin: "database" | "historical";
+  source_system: string;
+  /** Every link the register holds, labelled, in column order. Graphics
+   *  carries up to five (link_1..3, creative, reference_links). */
+  links: { label: string; url: string }[];
   candidate_master_sku: string | null;
   matched_master_sku: string | null;
   sku_attributed_orders: number | null;
@@ -1802,12 +1814,21 @@ export interface UntestedAssetsResponse {
   total_rows: number;
   with_sku_match: number;
   without_sku_match: number;
+  from_database: number;
+  from_historical: number;
+  /** The whole register, so "untested" has a denominator. */
+  register_total: number;
+  matched_assets: number;
+  matched_ads: number;
   rows: UntestedAssetRow[];
   computed_at: string;
 }
 
 export interface UntestedAssetsParams {
   media?: UntestedMedia;
+  /** untested (default) / matched / all. "all" is what makes the
+   *  matched_ads column worth reading. */
+  match_state?: "untested" | "matched" | "all";
   has_sku?: boolean;
 }
 
@@ -1815,6 +1836,7 @@ export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<
   const q = new URLSearchParams();
   if (params.media) q.set("media", params.media);
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
+  if (params.match_state) q.set("match_state", params.match_state);
   const qs = q.toString();
   return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
 }
@@ -1928,6 +1950,50 @@ export interface CreativeTestingRow {
   cost_per_ncp: number | null;
   cost_per_ftewv: number | null;
   ctr_pct: number | null;
+
+  // --- inspector columns, asset grain --------------------------------
+  // Ratios are recomputed from the SUMS server-side, never averaged from
+  // per-ad ratios. Fields marked LIFETIME cannot follow the date filter:
+  // insights_daily_by_ad has no usable daily source for them.
+  link_clicks: number | null;          // LIFETIME
+  spend_lifetime: number | null;       // LIFETIME
+  purchases_lifetime: number | null;   // LIFETIME
+  impressions_lifetime: number | null; // LIFETIME
+  /** Distinct campaigns / ad sets the asset ran across. An asset has no
+   *  single campaign or ad set, so there are no id columns for these. */
+  campaigns: number | null;
+  adsets: number | null;
+  any_active: boolean | null;
+  f1_pass: boolean | null;
+  f2_pass: boolean | null;
+  f3_pass: boolean | null;
+  f4_pass: boolean | null;
+  sample_campaign_name: string | null;
+  /** UPPER BOUND -- reach does not de-duplicate people across ads of the
+   *  same asset. frequency_upper is therefore a LOWER bound. */
+  reach_upper: number | null;
+  frequency_upper: number | null;
+  pct_reach_ftewv: number | null;
+  atc_count: number | null;
+  ci_count: number | null;
+  engagement_count: number | null;     // LIFETIME
+  shopify_orders: number | null;       // LIFETIME
+  shopify_revenue: number | null;      // LIFETIME
+  shopify_roas: number | null;         // LIFETIME
+  cost_per_shopify_order: number | null;
+  meta_shop_diff_pct: number | null;
+  thruplays: number | null;            // LIFETIME
+  three_sec_plays: number | null;
+  outbound_clicks: number | null;      // LIFETIME
+  post_engagements: number | null;     // LIFETIME
+  cost_per_1000: number | null;
+  cpc_link: number | null;             // LIFETIME
+  atc_lc_pct: number | null;           // LIFETIME
+  ci_atc_pct: number | null;
+  checkout_compl_pct: number | null;   // LIFETIME
+  cr_lc_pct: number | null;            // LIFETIME
+  profit_efficiency: number | null;
+  contrib_margin_pct: number | null;
 }
 
 export interface CreativeTestingTotals {
@@ -1979,6 +2045,10 @@ export interface CreativeTestingParams {
   category?: string;
   account_name?: string;
   search?: string;
+  /** JSON MultiFilterState. Asset grain -- see _CT_MF_FIELDS on the API
+   *  for the fields it accepts; an unknown field is skipped, not an
+   *  error, so the two lists must agree. */
+  multi_filter?: string;
   sort?: string;
   limit?: number;
   offset?: number;
@@ -1995,6 +2065,7 @@ export function fetchCreativeTesting(
   if (params.category) qs.set("category", params.category);
   if (params.account_name) qs.set("account_name", params.account_name);
   if (params.search) qs.set("search", params.search);
+  if (params.multi_filter) qs.set("multi_filter", params.multi_filter);
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));

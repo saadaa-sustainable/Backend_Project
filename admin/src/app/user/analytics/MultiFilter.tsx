@@ -36,7 +36,12 @@ export interface MultiFilterState {
   rules: MultiFilterRule[];
 }
 
-const FIELDS: { key: string; label: string }[] = [
+export type MultiFilterField = { key: string; label: string };
+
+/** Ad-grain default, used by Ads Analyse. Creative Testing passes its
+ *  own asset-grain list -- the same rule language over a different set
+ *  of columns. */
+const FIELDS: MultiFilterField[] = [
   { key: "ad_name", label: "Ad Name" },
   { key: "campaign_name", label: "Campaign" },
   { key: "adset_id", label: "Adset ID" },
@@ -102,19 +107,30 @@ const AE = {
 
 const EMPTY_RULE: MultiFilterRule = { field: "ad_name", op: "contains_all", value: "" };
 
+/** A blank rule for whichever field list is in play -- defaulting to
+ *  "ad_name" would produce a rule the asset-grain map cannot resolve,
+ *  and `_multi_filter_sql` silently skips a rule whose field is unknown,
+ *  so the filter would appear to apply and do nothing. */
+const emptyRuleFor = (fields: MultiFilterField[]): MultiFilterRule =>
+  fields.some((f) => f.key === EMPTY_RULE.field)
+    ? { ...EMPTY_RULE }
+    : { field: fields[0]?.key ?? EMPTY_RULE.field, op: "contains_all", value: "" };
+
 export function MultiFilter({
   applied,
   onApply,
+  fields = FIELDS,
 }: {
   applied: MultiFilterState | null;
   onApply: (state: MultiFilterState | null) => void;
+  fields?: MultiFilterField[];
 }) {
   const initial = fromJoin(applied?.join ?? "and");
   const [mode, setMode] = useState<JoinMode>(initial.mode);
   const [negate, setNegate] = useState(initial.negate);
   const join = toJoin(mode, negate);
   const [rules, setRules] = useState<MultiFilterRule[]>(
-    applied?.rules?.length ? applied.rules : [{ ...EMPTY_RULE }],
+    applied?.rules?.length ? applied.rules : [emptyRuleFor(fields)],
   );
 
   const dirtyCount = rules.filter((r) => r.value.trim()).length;
@@ -158,7 +174,7 @@ export function MultiFilter({
           </button>
           <button
             onClick={() => {
-              setRules([{ ...EMPTY_RULE }]);
+              setRules([emptyRuleFor(fields)]);
               setMode("and");
               setNegate(false);
               onApply(null);
@@ -200,7 +216,7 @@ export function MultiFilter({
                 className="w-44 rounded-md border bg-white px-2 py-2 text-sm"
                 style={{ borderColor: AE.border, color: AE.ink }}
               >
-                {FIELDS.map((f) => (
+                {fields.map((f) => (
                   <option key={f.key} value={f.key}>{f.label}</option>
                 ))}
               </select>
@@ -228,7 +244,7 @@ export function MultiFilter({
               />
               <button
                 onClick={() =>
-                  setRules((rs) => (rs.length === 1 ? [{ ...EMPTY_RULE }] : rs.filter((_, j) => j !== i)))
+                  setRules((rs) => (rs.length === 1 ? [emptyRuleFor(fields)] : rs.filter((_, j) => j !== i)))
                 }
                 title="Remove this rule"
                 className="rounded-md border bg-white px-2 py-1.5 text-sm"
@@ -244,7 +260,7 @@ export function MultiFilter({
 
       <div className="mt-2 text-center">
         <button
-          onClick={() => setRules((rs) => [...rs, { ...EMPTY_RULE }])}
+          onClick={() => setRules((rs) => [...rs, emptyRuleFor(fields)])}
           className="text-sm font-medium"
           style={{ color: AE.brick }}
         >

@@ -1620,7 +1620,7 @@ export function AdsAnalyse() {
                     key={c.key}
                     onClick={() => toggleSort(c.key)}
                     className={
-                      "cursor-pointer px-2 py-2 font-medium hover:bg-bg-muted " +
+                      "cursor-pointer whitespace-nowrap px-2.5 py-2.5 font-medium hover:bg-bg-muted " +
                       (c.kind === "num" || c.kind === "int" || c.kind === "pct" || c.kind === "money" ? "text-right" : "")
                     }
                     title={`Sort by ${c.header}`}
@@ -1635,7 +1635,7 @@ export function AdsAnalyse() {
               {pageRows.map(({ row, cat }) => (
                 <tr key={row.ad_id} className="border-b border-border-soft hover:bg-bg-surface">
                   {visibleCols.map((c) => (
-                    <td key={c.key} className="px-2 py-1">
+                    <td key={c.key} className="px-2.5 py-1.5">
                       {c.render(row, cat)}
                     </td>
                   ))}

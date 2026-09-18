@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS public.insights_daily_by_ad (
     outbound_clicks    numeric,
     post_engagements   numeric,
     video_play_time    numeric,
+    reach              numeric,
+    all_clicks         numeric,
     refreshed_at  timestamptz DEFAULT NOW(),
     PRIMARY KEY (ad_id, day)
 );
@@ -74,7 +76,9 @@ ALTER TABLE public.insights_daily_by_ad
     ADD COLUMN IF NOT EXISTS three_sec_plays   numeric,
     ADD COLUMN IF NOT EXISTS outbound_clicks   numeric,
     ADD COLUMN IF NOT EXISTS post_engagements  numeric,
-    ADD COLUMN IF NOT EXISTS video_play_time   numeric;
+    ADD COLUMN IF NOT EXISTS video_play_time   numeric,
+    ADD COLUMN IF NOT EXISTS reach             numeric,
+    ADD COLUMN IF NOT EXISTS all_clicks        numeric;
 CREATE INDEX IF NOT EXISTS ix_idba_ad_day ON public.insights_daily_by_ad(ad_id, day);
 CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
 """
@@ -172,7 +176,17 @@ extracted AS (
         0
       ) AS ftewv_count,
       NULLIF(raw_payload->>'impressions','')::numeric AS impressions,
+      -- LINK clicks. Sparse until the fetch started asking for
+      -- inline_link_clicks (2026-09-17); rows older than that carry NULL
+      -- here and the all_clicks column below is what they have.
       NULLIF(raw_payload->>'inline_link_clicks','')::numeric AS clicks,
+      -- ALL clicks, which Meta has always returned. A different metric
+      -- from link clicks -- it counts every click on the ad, not just
+      -- the ones that went to the site -- so it gets its own column
+      -- rather than being COALESCEd into `clicks` and quietly changing
+      -- what a CTR built on that column means.
+      NULLIF(raw_payload->>'clicks','')::numeric AS all_clicks,
+      NULLIF(raw_payload->>'reach','')::numeric AS reach,
       -- omni_* first, plain second -- byte-for-byte ad_lifecycle.py's
       -- _first_match() ordering, so the summed value and the lifetime
       -- rollup agree on what counts as a purchase.
@@ -211,6 +225,12 @@ expanded AS (
       e.ftewv_count / NULLIF(e.de - e.ds + 1, 0) AS ftewv_count,
       e.impressions / NULLIF(e.de - e.ds + 1, 0) AS impressions,
       e.clicks      / NULLIF(e.de - e.ds + 1, 0) AS clicks,
+      e.all_clicks  / NULLIF(e.de - e.ds + 1, 0) AS all_clicks,
+      -- Reach is people, not events: spreading it across a range would
+      -- imply the same person was reached afresh each day. A true daily
+      -- row carries its own reach, so the divide only ever applies to a
+      -- weekly/monthly slice, where the average day is the honest read.
+      e.reach       / NULLIF(e.de - e.ds + 1, 0) AS reach,
       e.purchases         / NULLIF(e.de - e.ds + 1, 0) AS purchases,
       e.add_to_cart       / NULLIF(e.de - e.ds + 1, 0) AS add_to_cart,
       e.checkout_initiate / NULLIF(e.de - e.ds + 1, 0) AS checkout_initiate,
@@ -227,14 +247,14 @@ expanded AS (
 ),
 best AS (
     SELECT DISTINCT ON (ad_id, day)
-      ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
+      ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, reach, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
     FROM expanded
     ORDER BY ad_id, day, range_days ASC
 )
 INSERT INTO public.insights_daily_by_ad (
-    ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
+    ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, reach, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
 )
-SELECT ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
+SELECT ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, reach, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
 FROM best
 """
 
