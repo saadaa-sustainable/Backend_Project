@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import SessionDep
+from app.services.ad_efficiency import calculate_efficiency_scores, get_efficiency_anchors
 from app.services.analytics_cache import cached_analytics
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
 
@@ -140,12 +141,8 @@ async def get_ad_lifecycle(
 # ad_performance_summary on ad_id. Now LEFT JOINs the two so the
 # response carries both sides.
 #
-# Not yet exposed (needs Silver-layer work, not a router change): the
-# six fleet-anchored efficiency scores CTD ships in its ae_table_view
-# (cpr_eff, ftv_contrib_eff, ftev_volume, ncp_cost_eff, roas_eff,
-# profit_vol_eff). Those are computed in CTD's refresh_ae_table.py by
-# ranking every ad against the account-level distribution; this project
-# doesn't compute them yet.
+# Efficiency scores use CTD's original lifetime formulas, with cached
+# global benchmarks from ad_lifecycle shared across filters and pages.
 # ----------------------------------------------------------------------
 
 #: SELECT-list expression -> ORDER BY expression. Keeping the map here
@@ -187,8 +184,12 @@ _ADS_ANALYSE_SELECT = (
     # once daily rather than re-derived per request from 1.75M daily
     # rows.
     "ahm.category_at_day_14, ahm.history_status, "
-    "ahm.impressions_50k_date, ahm.days_to_50k, "
     "ahm.impressions_at_day_14, "
+    # Lifetime timing comes from the complete source timeline. Its day
+    # counts start at first delivery, unlike the creation-based local
+    # day-14 replay. Preserve source NULLs instead of mixing definitions.
+    "ame.impressions_50k_date, ame.days_to_50k, "
+    "ame.date_of_result, ame.days_to_result, "
     # Derivable columns — SELECT-time so no schema change needed.
     # Formulas match CTD's dashboard.js definitions verbatim.
     "CASE WHEN al.impressions > 0 THEN al.spend * 1000.0 / al.impressions END AS cost_per_1000, "
@@ -200,7 +201,7 @@ _ADS_ANALYSE_SELECT = (
     # this endpoint is lifetime-only until the window-metrics endpoint ships).
     "al.reach AS ltv_reach, "
     "al.frequency AS ltv_frequency, "
-    # first_seen_date: earliest ad_insights.date_start per ad. Joined below.
+    # First delivery from the source; local fallback only for unmirrored ads.
     "fs.first_seen_date, "
     # Asset resolution -- see _ADS_ANALYSE_FROM_ROWS for the priority
     # chain that populates these. asset_match_source tells the UI whether
@@ -357,15 +358,22 @@ _ADS_ANALYSE_FROM_AGG = (
     "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id"
 )
 
-# Row-fetch FROM: extends the base with the per-row first_seen probe.
-# ad_insights is 1:1 with ad_id so a lateral MIN is trivial -- no heavy
-# scan. Split out of the aggregate FROM on 2026-09-14 because the count /
-# totals / category-counts queries were paying for it three extra times.
-_ADS_ANALYSE_FROM = _ADS_ANALYSE_FROM_AGG + (
+# Source timing uses first positive delivery across the full history.
+# An existing source row with NULL first_seen has no known delivery; do
+# not replace it with a date from incomplete local reporting. CASE also
+# avoids probing ad_insights for ads already covered by the mirror.
+_ROWS_PICK_FS = (
+    " LEFT JOIN public.ad_metrics_external ame ON ame.ad_id = aps.ad_id"
     " LEFT JOIN LATERAL ("
-    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai WHERE ai.ad_id = aps.ad_id"
+    "  SELECT CASE WHEN ame.ad_id IS NOT NULL THEN ame.first_seen_date"
+    "    ELSE (SELECT MIN(ai.date_start) FROM ad_insights ai WHERE ai.ad_id = aps.ad_id)"
+    "  END AS first_seen_date"
     ") fs ON true"
 )
+
+# Row queries pay for timing lookups only after selecting the page.
+# Aggregate queries need them only when filtering by first_seen.
+_ADS_ANALYSE_FROM = _ADS_ANALYSE_FROM_AGG + _ROWS_PICK_FS
 
 
 # Row-fetching FROM: extends the base with an asset-lookup that
@@ -425,11 +433,6 @@ _ADS_ANALYSE_FROM_ROWS = _ADS_ANALYSE_FROM + (
 #: `al` when the sort or the created-date filter touches ad_lifecycle,
 #: `fs` when the first_seen filter does.
 _ROWS_PICK_AL = " LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id"
-_ROWS_PICK_FS = (
-    " LEFT JOIN LATERAL ("
-    "  SELECT MIN(ai.date_start) AS first_seen_date FROM ad_insights ai"
-    "  WHERE ai.ad_id = aps.ad_id) fs ON true"
-)
 
 
 def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
@@ -470,14 +473,20 @@ def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
     )
 
 
+def _ads_analyse_aggregate_from(where_sql: str) -> str:
+    # Counts, categories and totals must resolve the same first_seen
+    # date as the page picker; other filters avoid this join entirely.
+    return _ADS_ANALYSE_FROM_AGG + (_ROWS_PICK_FS if "fs." in where_sql else "")
+
+
 def _ads_analyse_count_sql(where_sql: str) -> str:
-    return f"SELECT COUNT(*) {_ADS_ANALYSE_FROM_AGG} {where_sql}"
+    return f"SELECT COUNT(*) {_ads_analyse_aggregate_from(where_sql)} {where_sql}"
 
 
 def _ads_analyse_category_counts_sql(where_sql: str) -> str:
     return (
         f"SELECT COALESCE(aps.category, 'Uncategorized'), COUNT(*) "
-        f"{_ADS_ANALYSE_FROM_AGG} {where_sql} GROUP BY 1"
+        f"{_ads_analyse_aggregate_from(where_sql)} {where_sql} GROUP BY 1"
     )
 
 
@@ -515,7 +524,7 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
             "SUM(w.conv_value) / NULLIF(SUM(w.spend),0) AS avg_meta_roas, "
             "SUM(w.shopify_sales) / NULLIF(SUM(w.spend),0) AS avg_shopify_roas, "
             "SUM(w.link_clicks) * 100.0 / NULLIF(SUM(w.impressions),0) AS avg_ctr_pct "
-            f"{_ADS_ANALYSE_FROM_AGG}{_DELIVERY_TOTALS_JOIN} {where_sql}"
+            f"{_ads_analyse_aggregate_from(where_sql)}{_DELIVERY_TOTALS_JOIN} {where_sql}"
         )
     return (
         "SELECT COUNT(*) AS ad_count, "
@@ -541,7 +550,7 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
         "COALESCE(SUM(al.three_sec_video_plays),0) AS three_sec_video_plays, "
         "COALESCE(SUM(((al.outbound_clicks->0)->>'value')::numeric),0) AS outbound_clicks, "
         "COALESCE(SUM(al.post_engagements),0) AS post_engagements "
-        f"{_ADS_ANALYSE_FROM_AGG} {where_sql}"
+        f"{_ads_analyse_aggregate_from(where_sql)} {where_sql}"
     )
 
 
@@ -595,6 +604,17 @@ class AdsAnalyseRow(BaseModel):
     contrib_margin_pct: float | None
     profit_efficiency: float | None
     cpr_1000: float | None
+    # Lifetime efficiency ratios against all ads, including when the
+    # delivery overlay replaces the displayed raw metrics with a window.
+    blended_eff: float | None = None
+    delivery_eff: float | None = None
+    sales_spend_eff: float | None = None
+    cpr_eff: float | None = None
+    ftv_contrib_eff: float | None = None
+    ftev_volume: float | None = None
+    ncp_cost_eff: float | None = None
+    roas_eff: float | None = None
+    profit_vol_eff: float | None = None
     cpc_link: float | None
     checkout_compl_pct: float | None
     cr_lc_pct: float | None
@@ -632,17 +652,21 @@ class AdsAnalyseRow(BaseModel):
     #: Meta insights in bronze begin 2026-01-01, so ~9,800 of ~14,900
     #: ads were created before any daily data exists for them.
     history_status: str | None
-    #: The day this ad's cumulative impressions crossed 50,000 -- the F1
-    #: gate every category above "P2 analysis" depends on. NULL when it
-    #: never crossed, or when the ad predates the daily range and the
-    #: running sum would date the crossing too late to be honest.
-    impressions_50k_date: date | None
-    #: The same fact as an age: days from creation to crossing 50k.
-    days_to_50k: int | None
     #: Cumulative impressions over the first fortnight -- the number
     #: behind category_at_day_14's F1 test, shown so the verdict is
     #: auditable rather than asserted.
     impressions_at_day_14: float | None
+
+    # Lifetime timeline from the authoritative per-ad mirror. These
+    # remain lifetime values even when delivery metrics use a date window.
+    #: First day cumulative impressions reached 50,000; NULL if unknown/unreached.
+    impressions_50k_date: date | None
+    #: Days from first delivery to crossing 50k, clamped at zero by the source.
+    days_to_50k: int | None
+    #: Crossing date, otherwise first delivery +14 days, otherwise creation +14 days.
+    date_of_result: date | None = None
+    #: Days from first delivery to result; NULL without a known first delivery.
+    days_to_result: int | None = None
 
     # Asset resolution from the three CTD content tables. Match source is
     # one of: 'direct' (workflow ad_id link), 'ctd_matched' (CTD's fuzzy
@@ -869,14 +893,15 @@ async def get_ads_analyse(
             "How to apply [from_date, to_date]: "
             "'created' filters ads whose ad_created_date falls inside the window (default, "
             "matches CTD's Creative Testing behaviour where you're evaluating recently-launched creatives); "
-            "'first_seen' filters ads whose first_seen_date (first ad_insights row) falls in the window; "
+            "'first_seen' filters ads whose first delivery date falls in the window "
+            "(the local reporting minimum is used only for ads absent from the source mirror); "
             "'delivery' asks what the ads DID during the window: it keeps only ads that "
             "delivered impressions in it, and every metric on the row -- spend, impressions, "
             "reach, conversion value, purchases, NCP, FTEWV and every ratio built on them -- is "
             "re-summed at daily grain over the window, as are the category tiles and the KPI "
             "strip. Columns with no daily source (add-to-cart, checkout-initiate, engagement and "
             "the funnel percentages) come back NULL rather than as a lifetime figure sitting "
-            "beside windowed spend."
+            "beside windowed spend. Lifetime timeline dates and elapsed days stay unchanged."
         ),
     ),
     sort: Literal[
@@ -984,6 +1009,15 @@ async def get_ads_analyse(
         {**params, "limit": limit, "offset": offset},
     )
     rows = [AdsAnalyseRow(**dict(r._mapping)) for r in rows_result]
+
+    # The legacy table keeps efficiency scores on lifetime inputs even
+    # when delivery metrics are overlaid. Calculate before that overlay,
+    # using one cached full-population aggregate, never the current page.
+    if rows:
+        anchors = await get_efficiency_anchors(session)
+        for row in rows:
+            for key, score in calculate_efficiency_scores(row.model_dump(), anchors).items():
+                setattr(row, key, score)
 
     # ── delivery-window overlay ──────────────────────────────────
     # Only for date_field='delivery'. 'created' / 'first_seen' already
@@ -1518,6 +1552,7 @@ def _parse_text_filter(raw: str | None, key_prefix: str) -> tuple[list[str], dic
 
 
 @router.get("/last-click-utm", response_model=UtmOrderResponse)
+@cached_analytics(ttl=900.0)
 async def get_last_click_utm(
     session: SessionDep,
     channel: Literal[
@@ -1552,23 +1587,6 @@ async def get_last_click_utm(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> UtmOrderResponse:
-    # Response cache short-circuit -- shares the same pattern as
-    # _ads_analyse_cache_* above. This endpoint runs 3 SQL queries
-    # cold (summary rollup + rows + count) and can take ~30-120s on
-    # Render's cold PG buffer cache; caching for 15 min keeps the
-    # merchant's tab responsive on repeat visits.
-    _lcu_key = _ads_analyse_cache_key(
-        _lcu_ns="lcu",
-        channel=channel, tier=tier, utm_source=utm_source, utm_medium=utm_medium,
-        utm_campaign=utm_campaign, utm_content=utm_content, utm_term=utm_term,
-        matched_value=matched_value, only_matched=only_matched, only_unmatched=only_unmatched,
-        search=search, from_date=from_date, to_date=to_date,
-        sort=sort, limit=limit, offset=offset,
-    )
-    _cached_lcu = _ads_analyse_cache_get(_lcu_key)
-    if _cached_lcu is not None:
-        return _cached_lcu  # type: ignore[return-value]
-
     # ── tile counts + per-source breakdown (windowed only, ignores every
     # non-date filter) so the tiles represent "everything in this period"
     # and the per-source drill-down works even after row filters change.
@@ -1743,7 +1761,7 @@ async def get_last_click_utm(
         )
     ).scalar_one()
 
-    _lcu_resp = UtmOrderResponse(
+    return UtmOrderResponse(
         rows=rows,
         total=total,
         channel_counts=channel_counts,
@@ -1751,8 +1769,6 @@ async def get_last_click_utm(
         tier_by_channel=tier_by_channel,
         channel_sources=channel_sources,
     )
-    _ads_analyse_cache_put(_lcu_key, _lcu_resp)  # type: ignore[arg-type]
-    return _lcu_resp
 
 
 # ----------------------------------------------------------------------
@@ -2134,6 +2150,7 @@ class LandingPageResponse(BaseModel):
 
 
 @router.get("/landing-pages", response_model=LandingPageResponse)
+@cached_analytics(ttl=900.0)
 async def get_landing_pages(
     session: SessionDep,
     search: str | None = Query(default=None, description="Matches landing_page_path, case-insensitive substring."),
@@ -2141,16 +2158,6 @@ async def get_landing_pages(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> LandingPageResponse:
-    # Same TTL cache as /ads-analyse + /last-click-utm. Cold hit here is
-    # ~10-30s on Render; caching stops the Landing Page tab from feeling
-    # dead on repeat visits.
-    _lp_key = _ads_analyse_cache_key(
-        _lp_ns="lp", search=search, sort=sort, limit=limit, offset=offset,
-    )
-    _cached_lp = _ads_analyse_cache_get(_lp_key)
-    if _cached_lp is not None:
-        return _cached_lp  # type: ignore[return-value]
-
     sort_column = _LANDING_PAGE_SORT_COLUMNS[sort]
 
     where_clauses = []
@@ -2173,9 +2180,7 @@ async def get_landing_pages(
         await session.execute(text(f"SELECT COUNT(*) FROM landing_page_analysis_30d {where_sql}"), params)
     ).scalar_one()
 
-    _lp_resp = LandingPageResponse(rows=rows, total=total)
-    _ads_analyse_cache_put(_lp_key, _lp_resp)  # type: ignore[arg-type]
-    return _lp_resp
+    return LandingPageResponse(rows=rows, total=total)
 
 
 class LandingPageAdRow(BaseModel):
@@ -4615,6 +4620,7 @@ _UNTESTED_SQL: dict[str, str] = {
 
 
 @router.get("/untested", response_model=UntestedAssetsResponse)
+@cached_analytics(ttl=300.0, max_entries=12)
 async def get_untested_assets(
     session: SessionDep,
     media: UntestedMedia = Query(default="video", description="Which asset media type -- video / graphic / influencer"),
@@ -5892,6 +5898,7 @@ _CT_ADS_SQL = (
 
 
 @router.get("/creative-testing/{asset_id}/ads", response_model=CreativeTestingAdsResponse)
+@cached_analytics(ttl=300.0)
 async def get_creative_testing_ads(
     session: SessionDep,
     asset_id: str,
@@ -5900,7 +5907,9 @@ async def get_creative_testing_ads(
 
     A "new" asset normally has one; an iterated one has several, and the
     client steps through them so a merchant can see how the same creative
-    performed each time it was put back in market.
+    performed each time it was put back in market. Untested Assets reuses
+    this read for its tested-asset popup: its matched_ads count uses the
+    same asset_id predicate, with no date, status, or media restriction.
     """
     result = await session.execute(text(_CT_ADS_SQL), {"asset_id": asset_id})
     ads = [CreativeTestingAdRow(**dict(r._mapping)) for r in result]

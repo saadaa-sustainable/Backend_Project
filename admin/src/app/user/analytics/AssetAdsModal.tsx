@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Per-asset ad drill-down, opened by clicking a row in Creative Testing.
+ * Per-asset ad drill-down, shared by Creative Testing and Untested Assets.
  *
  * A NEW asset normally has one ad, so the modal just shows it. An
  * ITERATED asset has several — the same creative put back in market more
@@ -16,21 +16,15 @@
  * 2.76, and five later copies ranged from Discarded to ROAS 13.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import {
   ApiError,
   CreativeTestingAdRow,
   fetchCreativeTestingAds,
 } from "@/lib/api";
 import { AdPreviewLinks, DestinationLink } from "./AdLinks";
-
-const CT = {
-  border: "#E8E2D5",
-  muted: "#9A9384",
-  gold: "#C9A227",
-  goldDeep: "#B07E12",
-  cream: "#FAF8F3",
-};
+import { getAdPopupTheme, type AdPopupAppearance } from "@/lib/adPopupTheme";
 
 const CAT_COLOR: Record<string, string> = {
   "Incremental Winner": "#15803D",
@@ -72,14 +66,17 @@ function iterLabel(i: number) {
   return `${i}th iteration`;
 }
 
-function Flag({ label, on }: { label: string; on: boolean | null }) {
+function Flag({ label, on, appearance }: {
+  label: string; on: boolean | null; appearance: AdPopupAppearance;
+}) {
+  const colors = getAdPopupTheme(appearance);
   return (
     <span
       className="rounded px-1.5 py-0.5 text-[10px] font-medium"
       style={{
-        backgroundColor: on ? "#EAF5EC" : "#F2F0EA",
-        color: on ? "#2E7D32" : CT.muted,
-        border: `1px solid ${on ? "#BFDFC6" : CT.border}`,
+        backgroundColor: on ? "#EAF5EC" : colors.mutedSurface,
+        color: on ? "#2E7D32" : colors.muted,
+        border: `1px solid ${on ? "#BFDFC6" : colors.border}`,
       }}
     >
       {label} {on ? "✓" : "✕"}
@@ -87,23 +84,39 @@ function Flag({ label, on }: { label: string; on: boolean | null }) {
   );
 }
 
-export function AssetAdsModal({
-  assetId,
-  onClose,
-}: {
+type AssetAdsModalProps = {
   assetId: string;
+  assetName?: string;
+  appearance?: AdPopupAppearance;
+  requestTimeoutMs?: number;
   onClose: () => void;
-}) {
+};
+
+export function AssetAdsModal(props: AssetAdsModalProps) {
+  return <AssetAdsDialog key={props.assetId} {...props} />;
+}
+
+function AssetAdsDialog({
+  assetId,
+  assetName,
+  appearance = "creative",
+  requestTimeoutMs,
+  onClose,
+}: AssetAdsModalProps) {
+  const colors = getAdPopupTheme(appearance);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  const selectedAdId = useId();
   const [ads, setAds] = useState<CreativeTestingAdRow[]>([]);
   const [media, setMedia] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    fetchCreativeTestingAds(assetId)
+    fetchCreativeTestingAds(assetId, requestTimeoutMs)
       .then((res) => {
         if (cancelled) return;
         setAds(res.ads);
@@ -118,58 +131,93 @@ export function AssetAdsModal({
     return () => {
       cancelled = true;
     };
-  }, [assetId]);
+  }, [assetId, requestTimeoutMs, attempt]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    const dialog = dialogRef.current;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    dialog?.showModal();
+    document.body.style.overflow = "hidden";
+    return () => {
+      dialog?.close();
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+
+  function retry() {
+    setError(null);
+    setLoading(true);
+    setAttempt((value) => value + 1);
+  }
 
   const ad = ads[sel];
   const totalSpend = ads.reduce((a, x) => a + (x.spend ?? 0), 0);
   const totalConv = ads.reduce((a, x) => a + (x.conv_value ?? 0), 0);
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ backgroundColor: "rgba(40,36,28,0.45)" }}
-      onClick={onClose}
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        onClose();
+      }}
+      onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
+      onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}
+      className="fixed inset-0 m-auto max-h-[88dvh] w-[calc(100%-2rem)] max-w-5xl overflow-y-auto rounded-xl border p-0 shadow-2xl backdrop:bg-black/50"
+      style={{ backgroundColor: colors.bg, borderColor: colors.border, color: colors.text, "--asset-ad-focus": colors.focus } as CSSProperties}
     >
-      <div
-        className="max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-xl shadow-2xl"
-        style={{ backgroundColor: CT.cream, border: `1px solid ${CT.border}` }}
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div>
         {/* header */}
         <div
           className="flex items-start justify-between gap-3 border-b px-5 py-4"
-          style={{ borderColor: CT.border }}
+          style={{ borderColor: colors.border }}
         >
-          <div>
-            <div className="font-mono text-lg font-semibold tracking-tight">{assetId}</div>
-            <div className="text-xs" style={{ color: CT.muted }}>
-              {media ?? "—"} · {ads.length} ad{ads.length === 1 ? "" : "s"} ·{" "}
-              {ads.length > 1 ? "iterated creative" : "single outing"} · lifetime spend{" "}
-              {money(totalSpend)} · blended ROAS{" "}
-              {totalSpend > 0 ? num(totalConv / totalSpend) : "—"}
+          <div className="min-w-0">
+            <h2 id={titleId} className="break-words text-lg font-semibold tracking-tight">
+              Asset · {assetName?.trim() || assetId}
+            </h2>
+            <div className="mt-1 break-all font-mono text-xs" style={{ color: colors.muted }}>
+              Asset ID: {assetId}
+            </div>
+            <div className="text-xs" style={{ color: colors.muted }}>
+              {loading ? "Loading matched ads…" : error ? "Matched ads unavailable" : (
+                <>
+                  {ads.length} matched ad{ads.length === 1 ? "" : "s"}
+                  {media ? ` · ${media}` : ""} · lifetime spend {money(totalSpend)} · blended ROAS{" "}
+                  {totalSpend > 0 ? num(totalConv / totalSpend) : "—"}
+                </>
+              )}
             </div>
           </div>
           <button
+            type="button"
+            autoFocus
             onClick={onClose}
-            className="rounded-md border px-2 py-1 text-sm"
-            style={{ borderColor: CT.border, color: CT.muted }}
+            aria-label="Close matched ads"
+            className="rounded-md border px-2 py-1 text-sm focus-visible:outline-2 focus-visible:outline-[var(--asset-ad-focus)]"
+            style={{ borderColor: colors.border, color: colors.muted }}
           >
             ✕
           </button>
         </div>
 
         {loading && (
-          <div className="px-5 py-10 text-center text-sm" style={{ color: CT.muted }}>
+          <div role="status" className="px-5 py-10 text-center text-sm" style={{ color: colors.muted }}>
             Loading ads…
           </div>
         )}
-        {error && <div className="px-5 py-6 text-sm text-rose-700">{error}</div>}
+        {error && (
+          <div className="px-5 py-6 text-sm">
+            <p role="alert" className="text-rose-700">{error}</p>
+            <button type="button" onClick={retry} className="mt-3 rounded-md border px-3 py-1.5 focus-visible:outline-2 focus-visible:outline-[var(--asset-ad-focus)]" style={{ borderColor: colors.border, backgroundColor: colors.surface, color: colors.accent }}>
+              Retry loading ads
+            </button>
+          </div>
+        )}
 
         {!loading && !error && ads.length > 0 && (
           <div className="px-5 py-4">
@@ -178,7 +226,7 @@ export function AssetAdsModal({
               <>
                 <div
                   className="mb-1 text-[10px] font-semibold uppercase tracking-wider"
-                  style={{ color: CT.muted }}
+                  style={{ color: colors.muted }}
                 >
                   Outings · launch order
                 </div>
@@ -188,13 +236,16 @@ export function AssetAdsModal({
                     return (
                       <button
                         key={a.ad_id}
+                        type="button"
                         onClick={() => setSel(i)}
+                        aria-pressed={active}
+                        aria-controls={selectedAdId}
                         title={`${a.ad_created_date ?? ""} · ${a.category ?? ""}`}
                         className="rounded-md border px-2.5 py-1.5 text-xs transition-colors"
                         style={{
-                          borderColor: active ? CT.goldDeep : CT.border,
-                          backgroundColor: active ? CT.goldDeep : "#FFFFFF",
-                          color: active ? "#FFFFFF" : "#3A362E",
+                          borderColor: active ? colors.accent : colors.border,
+                          backgroundColor: active ? colors.accent : colors.surface,
+                          color: active ? colors.onAccent : colors.text,
                           fontWeight: active ? 600 : 400,
                         }}
                       >
@@ -202,7 +253,7 @@ export function AssetAdsModal({
                         {a.is_copy && (
                           <span
                             className="ml-1 text-[9px]"
-                            style={{ color: active ? "#F4E7C8" : CT.muted }}
+                            style={{ color: active ? colors.onAccent : colors.muted }}
                           >
                             copy
                           </span>
@@ -217,61 +268,65 @@ export function AssetAdsModal({
             {/* selected ad */}
             {ad && (
               <div
+                id={selectedAdId}
                 role="region"
                 aria-label="Selected ad"
                 className="rounded-lg border bg-white p-4"
-                style={{ borderColor: CT.border }}
+                style={{ borderColor: colors.border }}
               >
                 <div className="mb-3 flex flex-wrap items-center gap-2">
                   <span
                     className="rounded px-2 py-0.5 text-[11px] font-medium"
                     style={{
-                      backgroundColor: "#FFFFFF",
-                      color: STATUS_COLOR[ad.ad_status ?? ""] ?? CT.muted,
-                      border: `1px solid ${STATUS_COLOR[ad.ad_status ?? ""] ?? CT.border}`,
+                      backgroundColor: colors.surface,
+                      color: STATUS_COLOR[ad.ad_status ?? ""] ?? colors.muted,
+                      border: `1px solid ${STATUS_COLOR[ad.ad_status ?? ""] ?? colors.border}`,
                     }}
                   >
                     {ad.ad_status ?? "unknown status"}
                   </span>
                   <span
                     className="rounded px-2 py-0.5 text-[11px] font-medium text-white"
-                    style={{ backgroundColor: CAT_COLOR[ad.category ?? ""] ?? CT.muted }}
+                    style={{ backgroundColor: CAT_COLOR[ad.category ?? ""] ?? colors.muted }}
                   >
                     {ad.category ?? "—"}
                   </span>
                   {ad.is_copy && (
                     <span
                       className="rounded px-2 py-0.5 text-[11px]"
-                      style={{ border: `1px solid ${CT.border}`, color: CT.muted }}
+                      style={{ border: `1px solid ${colors.border}`, color: colors.muted }}
                     >
                       duplicated ad
                     </span>
                   )}
-                  <span className="text-[11px]" style={{ color: CT.muted }}>
+                  <span className="text-[11px]" style={{ color: colors.muted }}>
                     launched {ad.ad_created_date ?? "—"}
                   </span>
                 </div>
 
-                <div className="mb-3 break-all font-mono text-[12px] leading-snug">
-                  {ad.ad_name ?? "—"}
+                <div className="mb-3 break-words text-sm font-medium leading-snug">
+                  Ad name: {ad.ad_name || "Unnamed ad"}
+                  <div className="mt-1 break-all font-mono text-[11px] font-normal" style={{ color: colors.muted }}>
+                    Ad ID: {ad.ad_id}
+                  </div>
                 </div>
 
-                <div className="mb-4 grid gap-3 rounded-md border p-3 sm:grid-cols-2" style={{ borderColor: CT.border }}>
+                <div className="mb-4 grid gap-3 rounded-md border p-3 sm:grid-cols-2" style={{ borderColor: colors.border }}>
                   <div>
-                    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: CT.muted }}>Ad preview</div>
-                    <AdPreviewLinks key={ad.ad_id} adId={ad.ad_id} url={ad.ad_preview_url} />
+                    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: colors.muted }}>Ad preview</div>
+                    <AdPreviewLinks appearance={appearance} key={ad.ad_id} adId={ad.ad_id} url={ad.ad_preview_url} />
                   </div>
                   <div>
-                    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: CT.muted }}>Website destination</div>
-                    <DestinationLink adId={ad.ad_id} url={ad.destination_url} />
+                    <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: colors.muted }}>Website destination</div>
+                    <DestinationLink appearance={appearance} adId={ad.ad_id} url={ad.destination_url} />
                   </div>
                 </div>
 
                 <div className="mb-3 flex flex-wrap gap-1.5">
-                  <Flag label="F1" on={ad.f1_pass} />
-                  <Flag label="F2" on={ad.f2_pass} />
-                  <Flag label="F3" on={ad.f3_pass} />
-                  <Flag label="F4" on={ad.f4_pass} />
+                  <Flag appearance={appearance} label="F1" on={ad.f1_pass} />
+                  <Flag appearance={appearance} label="F2" on={ad.f2_pass} />
+                  <Flag appearance={appearance} label="F3" on={ad.f3_pass} />
+                  <Flag appearance={appearance} label="F4" on={ad.f4_pass} />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -290,11 +345,11 @@ export function AssetAdsModal({
                     <div
                       key={label}
                       className="rounded-md border p-2"
-                      style={{ borderColor: CT.border, backgroundColor: CT.cream }}
+                      style={{ borderColor: colors.border, backgroundColor: appearance === "standard" ? colors.mutedSurface : colors.bg }}
                     >
                       <div
                         className="text-[10px] uppercase tracking-wide"
-                        style={{ color: CT.muted }}
+                        style={{ color: colors.muted }}
                       >
                         {label}
                       </div>
@@ -306,21 +361,22 @@ export function AssetAdsModal({
             )}
 
             {/* all outings at a glance */}
-            {ads.length > 1 && (
+            {ads.length > 0 && (
               <div className="mt-4">
                 <div
                   className="mb-1 text-[10px] font-semibold uppercase tracking-wider"
-                  style={{ color: CT.muted }}
+                  style={{ color: colors.muted }}
                 >
-                  All outings
+                  All matched ads · {ads.length}
                 </div>
                 <div
                   className="overflow-x-auto rounded-lg border bg-white"
-                  style={{ borderColor: CT.border }}
+                  style={{ borderColor: colors.border }}
                 >
-                  <table className="w-full min-w-[620px] text-xs">
-                    <thead style={{ color: CT.muted }}>
+                  <table aria-label="All matched ads" className="w-full min-w-[900px] text-xs">
+                    <thead style={{ color: colors.muted, backgroundColor: appearance === "standard" ? colors.mutedSurface : undefined }}>
                       <tr className="text-left text-[10px] uppercase tracking-wide">
+                        <th className="px-2 py-1.5">Ad name / ID</th>
                         <th className="px-2 py-1.5">Outing</th>
                         <th className="px-2 py-1.5">Launched</th>
                         <th className="px-2 py-1.5">Status</th>
@@ -339,14 +395,27 @@ export function AssetAdsModal({
                           onClick={() => setSel(i)}
                           className="cursor-pointer border-t"
                           style={{
-                            borderColor: CT.border,
-                            backgroundColor: i === sel ? "#FDF8E8" : undefined,
+                            borderColor: colors.border,
+                            backgroundColor: i === sel ? colors.selected : undefined,
                           }}
                         >
                           <td className="px-2 py-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setSel(i)}
+                              aria-pressed={i === sel}
+                              aria-controls={selectedAdId}
+                              style={{ color: colors.accent }}
+                              className="min-w-48 max-w-80 rounded text-left hover:underline focus-visible:outline-2 focus-visible:outline-[var(--asset-ad-focus)]"
+                            >
+                              <span className="block break-words font-medium">{a.ad_name || "Unnamed ad"}</span>
+                              <span className="mt-1 block break-all font-mono text-[10px]" style={{ color: colors.muted }}>{a.ad_id}</span>
+                            </button>
+                          </td>
+                          <td className="px-2 py-1.5">
                             {iterLabel(a.iteration_index)}
                             {a.is_copy && (
-                              <span className="ml-1 text-[10px]" style={{ color: CT.muted }}>
+                              <span className="ml-1 text-[10px]" style={{ color: colors.muted }}>
                                 copy
                               </span>
                             )}
@@ -354,21 +423,21 @@ export function AssetAdsModal({
                           <td className="px-2 py-1.5">{a.ad_created_date ?? "—"}</td>
                           <td
                             className="px-2 py-1.5"
-                            style={{ color: STATUS_COLOR[a.ad_status ?? ""] ?? CT.muted }}
+                            style={{ color: STATUS_COLOR[a.ad_status ?? ""] ?? colors.muted }}
                           >
                             {a.ad_status ?? "—"}
                           </td>
                           <td
                             className="px-2 py-1.5"
-                            style={{ color: CAT_COLOR[a.category ?? ""] ?? CT.muted }}
+                            style={{ color: CAT_COLOR[a.category ?? ""] ?? colors.muted }}
                           >
                             {a.category ?? "—"}
                           </td>
                           <td className="px-2 py-1.5">
-                            <AdPreviewLinks adId={a.ad_id} url={a.ad_preview_url} inline />
+                            <AdPreviewLinks appearance={appearance} adId={a.ad_id} url={a.ad_preview_url} inline />
                           </td>
                           <td className="px-2 py-1.5">
-                            <DestinationLink adId={a.ad_id} url={a.destination_url} />
+                            <DestinationLink appearance={appearance} adId={a.ad_id} url={a.destination_url} />
                           </td>
                           <td className="px-2 py-1.5 text-right">{money(a.spend)}</td>
                           <td className="px-2 py-1.5 text-right">{num(a.roas)}</td>
@@ -384,12 +453,13 @@ export function AssetAdsModal({
         )}
 
         {!loading && !error && ads.length === 0 && (
-          <div className="px-5 py-10 text-center text-sm" style={{ color: CT.muted }}>
+          <div className="px-5 py-10 text-center text-sm" style={{ color: colors.muted }}>
             No ads found for this asset.
           </div>
         )}
       </div>
-    </div>
+    </dialog>,
+    document.body,
   );
 }
 

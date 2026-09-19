@@ -29,6 +29,10 @@ dashboard all pick them up with no change to the endpoint or the
 frontend. ad_lifecycle is the single leverage point because
 ad_performance_summary is built from it.
 
+Ads Analyse also reads the source's lifetime timing fields directly from
+this mirror. These must travel together: the result date and elapsed
+days use first delivery, which can precede this project's local history.
+
 Ads present here but absent from ad_lifecycle (19,565 against 14,866 --
 the ones this project never ingested) are inserted too, so the row count
 matches rather than merely the values.
@@ -130,16 +134,19 @@ _COLUMN_MAP: dict[str, str] = {
     "shopify_sales": "shopify_revenue",
     "shopify_aov": "shopify_aov",
     "shopify_roas": "shopify_roas",
+    "first_seen_date": "first_seen_date",
     "date_target_imp_achieved": "impressions_50k_date",
+    "date_of_result": "date_of_result",
+    "days_to_result": "days_to_result",
     "days_to_target_f1": "days_to_50k",
 }
 
 _TEXT = {"ad_id", "ad_name", "ad_status", "account_name", "campaign_name",
          "adset_id", "adset_name", "category"}
 _BOOL = {"f1_pass", "f2_pass", "f3_pass", "f4_pass"}
-_DATE = {"impressions_50k_date"}
+_DATE = {"first_seen_date", "impressions_50k_date", "date_of_result"}
 _TS = {"ad_created_time"}
-_INT = {"days_to_50k"}
+_INT = {"days_to_result", "days_to_50k"}
 
 
 def _sql_type(col: str) -> str:
@@ -166,6 +173,15 @@ DDL = (
     )
     + ",\n    synced_at timestamptz\n)"
 )
+
+# CREATE TABLE does not extend mirrors already present in an installation.
+# Add the timing fields in the same transaction as the replacement rows,
+# so a failed refresh preserves both the previous schema and its data.
+ALTERS = [
+    "ALTER TABLE public.ad_metrics_external "
+    f"ADD COLUMN IF NOT EXISTS {column} {_sql_type(column)}"
+    for column in ("first_seen_date", "date_of_result", "days_to_result")
+]
 
 SELECT_SQL = (
     "SELECT " + ", ".join(_COLUMN_MAP) + " FROM ae_table_view WHERE ad_id IS NOT NULL"
@@ -422,6 +438,8 @@ def main() -> int:
         with tgt, tgt.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = '600s'")
             cur.execute(DDL)
+            for statement in ALTERS:
+                cur.execute(statement)
             # TRUNCATE + INSERT inside ONE transaction: a failure rolls
             # back to the previous mirror rather than leaving the overlay
             # with nothing to apply.

@@ -15,9 +15,8 @@
  *
  * SKU mapping: `candidate_master_sku` is derived per-media on the
  * backend; `matched_master_sku` is populated only when that prefix
- * exists in cpis_by_sku_utm (30d). The three metric columns show that
- * SKU's recent orders / spend / cost-per-order so merchants can
- * prioritise concepts for SKUs already selling.
+ * exists in cpis_by_sku_utm (30d). Tested assets open the matched-ad
+ * drill-down, using the same mapping as the table's ad counts.
  *
  * Data source: three tables mirrored one-shot from the legacy CTD
  * dashboard (scripts/migrate_asset_register_from_ctd.py). Re-run that
@@ -33,6 +32,7 @@ import {
   fetchUntestedAssets,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { AssetAdsModal } from "./AssetAdsModal";
 
 type SkuFilter = "all" | "matched" | "unmatched";
 
@@ -45,10 +45,6 @@ const MEDIA_TABS: { value: UntestedMedia; label: string; desc: string }[] = [
 function fmtInt(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString();
-}
-function fmtCurrency(n: number | null | undefined) {
-  if (n === null || n === undefined) return "—";
-  return `₹${Math.round(n).toLocaleString()}`;
 }
 function fmtDate(s: string | null) {
   if (!s) return "—";
@@ -63,7 +59,7 @@ function fmtDate(s: string | null) {
  *  tables, not a spreadsheet. Naming the actual upstream keeps the
  *  distinction honest where the two media differ.
  *
- *  Graphics has one origin (a sheet), so it never renders this toggle. */
+ *  Every media tab exposes the source filter, including empty sources. */
 const ORIGIN_LABELS: Record<
   UntestedMedia,
   { all: string; database: string; historical: string;
@@ -71,28 +67,28 @@ const ORIGIN_LABELS: Record<
 > = {
   video: {
     all: "All video assets",
-    database: "From Supabase",
+    database: "DAM Project",
     historical: "Historical · from Sheets",
     databaseHint:
-      "Recorded in the Supabase asset-register, which the team maintains today.",
+      "Assets recorded in the DAM Project.",
     historicalHint:
       "Iterated video, recorded only in the \u201cIterated Content\u201d Google Sheet from before that register existed.",
   },
   graphic: {
     all: "All graphic assets",
-    database: "From Supabase",
+    database: "DAM Project",
     historical: "Historical · from Sheets",
-    databaseHint: "No Supabase source — graphics are sheet-only.",
+    databaseHint: "Graphic assets recorded in the DAM Project.",
     historicalHint:
       "The Creative Mastersheet (Graphics) Google Sheet — the only source graphics has ever had.",
   },
   influencer: {
     all: "All influencer assets",
-    database: "From Supabase · live posts",
+    database: "DAM Project",
     // NOT "from Sheets": influencer history lives in creatorhub too.
     historical: "Historical · creatorhub archive",
     databaseHint:
-      "creatorhub public.posts — the live table the team maintains today.",
+      "Creator posts recorded in the DAM Project.",
     historicalHint:
       "creatorhub historic_posts and cleaned_data: the same Supabase project, but its archive tables rather than the live one. No spreadsheet involved.",
   },
@@ -105,6 +101,8 @@ export function UntestedAssets() {
   const [data, setData] = useState<UntestedAssetsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [openAsset, setOpenAsset] = useState<UntestedAssetRow | null>(null);
   const [skuFilter, setSkuFilter] = useState<SkuFilter>("all");
   const [kindFilter, setKindFilter] = useState<string>("all");
   const [search, setSearch] = useState<string>("");
@@ -113,27 +111,24 @@ export function UntestedAssets() {
   // DOM keeps the export whole (it still reads every filtered row) while
   // the browser only ever holds a screenful.
   const [page, setPage] = useState(0);
-  // Assets recorded in a live Supabase register are a workable backlog;
-  // assets that only ever existed in a pre-migration Google Sheet are an
-  // archive. Mixing them made the video tab read as 779 actionable
-  // items when 71 of those are sheet-era rows nobody maintains.
-  const [originFilter, setOriginFilter] = useState<"all" | "database" | "historical">("all");
-  // Server-side, because "matched" and "all" are different populations
-  // rather than a subset of what is already loaded.
-  // Defaults to the WHOLE register, not to untested. The Ads column is
-  // the point of this table and on an untested-only list every value is
-  // 0 by definition -- the filter's own evidence, and nothing else.
-  // Untested is one click away and still the headline KPI.
+  // Each media tab opens on the DAM Project, with historical assets
+  // available through the visible source filter.
+  const [originFilter, setOriginFilter] = useState<"all" | "database" | "historical">("database");
+  // Testing status filters the loaded register locally. Cards continue
+  // to summarize every asset in the selected source.
   const [matchState, setMatchState] = useState<"untested" | "matched" | "all">("all");
+
+  function beginLoad() {
+    setLoading(true);
+    setError(null);
+    setData(null);
+  }
 
   // Refetch whenever the media tab changes. The row shape is the same
   // across all three -- just different populated fields.
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setData(null);
-    fetchUntestedAssets({ media, match_state: matchState })
+    fetchUntestedAssets({ media, match_state: "all" })
       .then((r) => {
         if (!cancelled) setData(r);
       })
@@ -148,30 +143,38 @@ export function UntestedAssets() {
     return () => {
       cancelled = true;
     };
-  }, [media, matchState]);
+  }, [media, retryCount]);
 
-  // Reset kind filter when switching media (kinds are per-media).
-  useEffect(() => {
-    setKindFilter("all");
-  }, [media]);
+  // Source controls remain visible even when a selected source is empty.
+  // Mixed origins only determine whether the table needs a source column.
+  const hasMixedOrigins = !!data && data.from_database > 0 && data.from_historical > 0;
 
   const kinds = useMemo(() => {
     if (!data) return [] as string[];
     const s = new Set<string>();
     for (const r of data.rows) if (r.kind) s.add(r.kind);
+    // Keep an active filter visible if a different testing status has
+    // no assets of this kind, so it can still be cleared.
+    if (kindFilter !== "all") s.add(kindFilter);
     return Array.from(s).sort();
-  }, [data]);
+  }, [data, kindFilter]);
+
+  // KPI scope: the selected media and source, independent of table filters.
+  const sourceRows = useMemo(() => {
+    if (!data) return [] as UntestedAssetRow[];
+    return data.rows.filter((row) => originFilter === "all" || row.origin === originFilter);
+  }, [data, originFilter]);
 
   const filteredRows = useMemo(() => {
-    if (!data) return [] as UntestedAssetRow[];
     const q = search.trim().toLowerCase();
-    return data.rows.filter((r) => {
+    return sourceRows.filter((r) => {
+      if (matchState === "untested" && r.matched_ads !== 0) return false;
+      if (matchState === "matched" && r.matched_ads <= 0) return false;
       if (media !== "influencer") {
         if (skuFilter === "matched" && !r.matched_master_sku) return false;
         if (skuFilter === "unmatched" && r.matched_master_sku) return false;
       }
       if (kindFilter !== "all" && r.kind !== kindFilter) return false;
-      if (originFilter !== "all" && r.origin !== originFilter) return false;
       if (!q) return true;
       const hay = [r.id, r.title, r.nomenclature, r.candidate_master_sku, r.matched_master_sku, r.sub_kind]
         .filter(Boolean)
@@ -179,7 +182,26 @@ export function UntestedAssets() {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [data, media, skuFilter, kindFilter, search, originFilter]);
+  }, [sourceRows, matchState, media, skuFilter, kindFilter, search]);
+
+  // Summarize the complete selected source, before table filters and paging.
+  const metrics = useMemo(() => {
+    let tested = 0;
+    let matchedAds = 0;
+    let withSku = 0;
+    for (const row of sourceRows) {
+      if (row.matched_ads > 0) tested += 1;
+      matchedAds += row.matched_ads;
+      if (row.matched_master_sku) withSku += 1;
+    }
+    return {
+      total: sourceRows.length,
+      tested,
+      notTested: sourceRows.length - tested,
+      matchedAds,
+      withSku,
+    };
+  }, [sourceRows]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   // Clamp rather than reset to 0: narrowing a filter while deep in the
@@ -199,15 +221,17 @@ export function UntestedAssets() {
   const subKindColLabel = media === "video" ? "Category" : media === "graphic" ? "Audience" : "Deliverable";
   const showThumbnail = media === "influencer";
   const showSkuColumns = media !== "influencer";
+  const columnCount = 7 + Number(showThumbnail) + Number(titleColLabel !== "—")
+    + (showSkuColumns ? 2 : 0) + Number(hasMixedOrigins);
+  const populationLabel = matchState === "untested" ? "not tested" : matchState === "matched" ? "tested" : "registered";
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h2 className="text-lg font-semibold text-text-primary">Untested Assets</h2>
         <p className="text-sm text-text-secondary">
-          Assets briefed &amp; produced but never run in a Meta ad. Mapped to master SKUs via
-          the planning-nomenclature prefix; SKU-side 30d metrics show how each mapped SKU is
-          currently selling. Switch media below.
+          Browse registered assets and filter by whether they have run in a Meta ad.
+          Click a tested asset to view its matched ads and their performance.
         </p>
       </div>
 
@@ -218,11 +242,16 @@ export function UntestedAssets() {
           return (
             <button
               key={t.value}
+              aria-pressed={active}
               onClick={() => {
+                if (media === t.value) return;
                 // A different media tab is a different list -- start at
                 // the top. Done here rather than in an effect so it is
                 // one render, not two.
+                beginLoad();
                 setMedia(t.value);
+                setKindFilter("all");
+                setOriginFilter("database");
                 setPage(0);
               }}
               className={`relative px-3 pb-2 pt-1 text-[13px] font-medium transition-colors ${
@@ -239,63 +268,60 @@ export function UntestedAssets() {
         })}
       </div>
 
-      {/* KPI tiles. "Untested" on its own has no scale to it -- 543 is
-          a third of the graphics register but 3% of the influencer one,
-          and those mean very different things. The register total and
-          what HAS matched give it a denominator. */}
+      {/* Cards summarize the source; testing status filters only the table. */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <KpiTile
-          label="Never tested"
-          value={data ? fmtInt(data.register_total - data.matched_assets) : "—"}
-          hint={loading ? "Loading…" : "Asset id appears in no ad name. Counts the whole register, so it does not move when you change the Show filter."}
+          label="Total Assets"
+          value={data ? fmtInt(metrics.total) : "—"}
+          hint="All assets in the selected source"
         />
         <KpiTile
-          label="In register"
-          value={data ? fmtInt(data.register_total) : "—"}
-          hint="Every asset this media type holds"
+          label="Not Tested"
+          value={data ? fmtInt(metrics.notTested) : "—"}
+          hint={loading ? "Loading…" : "Assets with no matched ads in the selected source"}
         />
         <KpiTile
-          label="Matched assets"
-          value={data ? fmtInt(data.matched_assets) : "—"}
-          hint={data && data.register_total
-            ? `${Math.round((data.matched_assets / data.register_total) * 100)}% of the register has run at least once`
-            : "Assets whose id appears in at least one ad name"}
+          label="Tested"
+          value={data ? fmtInt(metrics.tested) : "—"}
+          hint={data && metrics.total
+            ? `${Math.round((metrics.tested / metrics.total) * 100)}% of assets in the selected source have been tested`
+            : "Assets with at least one matched ad in the selected source"}
         />
         <KpiTile
-          label="Ads matched"
-          value={data ? fmtInt(data.matched_ads) : "—"}
-          hint="Ads those matched assets account for"
+          label="Matched Ads"
+          value={data ? fmtInt(metrics.matchedAds) : "—"}
+          hint="Ads matched to assets in the selected source"
         />
         {showSkuColumns ? (
           <KpiTile
-            label="With catalog SKU"
-            value={data ? `${fmtInt(data.with_sku_match)} / ${fmtInt(data.total_rows)}` : "—"}
-            hint="Of the rows currently listed, how many have a SKU prefix with a recent CPIS window row"
+            label="SKU Matched"
+            value={data ? `${fmtInt(metrics.withSku)} / ${fmtInt(metrics.total)}` : "—"}
+            hint="Assets with a catalog SKU in the selected source"
           />
         ) : (
           <KpiTile
-            label="Note"
+            label="SKU Matched"
             value="No SKU mapping"
             hint="Influencer nomenclature (SIF-…) doesn't carry a product SKU code"
           />
         )}
       </div>
 
-      {/* What the tab is listing. Untested is the default and the point
-          of the section, but "all" is what makes the Ads column mean
-          something -- a column of zeros teaches nothing. */}
+      {/* Testing status narrows the selected source without changing it. */}
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
         <label className="text-xs font-medium text-text-secondary">Show:</label>
         <div className="flex overflow-hidden rounded border border-border-primary">
           {([
             ["all", ORIGIN_LABELS[media].all, "Every asset this media type holds, matched or not."],
-            ["untested", "Never tested", "Asset id appears in NO ad name — Ads matched reads 0 for every row, which is the definition."],
-            ["matched", "Has run", "Asset id appears in at least one ad name."],
+            ["untested", "Not Tested", "Assets with no matched ads."],
+            ["matched", "Tested", "Assets with at least one matched ad."],
           ] as const).map(([v, label, hint]) => (
             <button
               key={v}
               title={hint}
+              aria-pressed={matchState === v}
               onClick={() => {
+                if (matchState === v) return;
                 setMatchState(v);
                 setPage(0);
               }}
@@ -316,16 +342,15 @@ export function UntestedAssets() {
         </div>
       </div>
 
-      {/* Where the record came from. Only worth showing when the tab
-          actually has both -- graphics is sheet-only, influencer is
-          database-only, and a one-option toggle is just noise. */}
-      {data && data.from_database > 0 && data.from_historical > 0 && (
+      {/* Keep all sources selectable, including DAM Project (0), so an
+          empty source never silently broadens into historical assets. */}
+      {data && (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
           <label className="text-xs font-medium text-text-secondary">Source:</label>
           <div className="flex overflow-hidden rounded border border-border-primary">
             {([
               ["all", `All (${data.total_rows.toLocaleString("en-IN")})`,
-               "Every untested asset in this media type, whichever register recorded it."],
+               "Every listed asset in this media type, whichever register recorded it."],
               ["database",
                `${ORIGIN_LABELS[media].database} (${data.from_database.toLocaleString("en-IN")})`,
                ORIGIN_LABELS[media].databaseHint],
@@ -336,6 +361,7 @@ export function UntestedAssets() {
               <button
                 key={v}
                 title={hint}
+                aria-pressed={originFilter === v}
                 onClick={() => {
                   setOriginFilter(v);
                   setPage(0);
@@ -408,8 +434,19 @@ export function UntestedAssets() {
       </div>
 
       {error && (
-        <div className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">
-          {error}
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => {
+              beginLoad();
+              setRetryCount((count) => count + 1);
+            }}
+            disabled={loading}
+            className="shrink-0 rounded border border-red-300 px-3 py-1 font-medium hover:bg-red-100 disabled:opacity-40"
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -431,37 +468,40 @@ export function UntestedAssets() {
                 <>
                   <Th>Candidate SKU</Th>
                   <Th>Matched SKU</Th>
-                  <Th align="right">SKU Orders (30d)</Th>
-                  <Th align="right">SKU Spend (30d)</Th>
-                  <Th align="right">SKU CPO (30d)</Th>
                 </>
               )}
               <Th align="right">Ads matched</Th>
               <Th>Produced</Th>
               {/* Only when the tab mixes both -- otherwise every row
                   would repeat the same value. */}
-              {data && data.from_database > 0 && data.from_historical > 0 && <Th>Source</Th>}
+              {hasMixedOrigins && <Th>Source</Th>}
               <Th>Links</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border-primary bg-bg-white">
             {loading && (
               <tr>
-                <td colSpan={20} className="px-3 py-6 text-center text-text-secondary">
+                <td colSpan={columnCount} className="px-3 py-6 text-center text-text-secondary">
                   Loading…
                 </td>
               </tr>
             )}
-            {!loading && filteredRows.length === 0 && (
+            {!loading && !error && filteredRows.length === 0 && (
               <tr>
-                <td colSpan={20} className="px-3 py-6 text-center text-text-secondary">
-                  No untested {media} assets match the current filters.
+                <td colSpan={columnCount} className="px-3 py-6 text-center text-text-secondary">
+                  {originFilter === "database" && data?.from_database === 0
+                    ? "No DAM Project assets match this view. Select Historical or All to browse other sources."
+                    : `No ${populationLabel} ${media} assets match the current filters.`}
                 </td>
               </tr>
             )}
             {!loading &&
               pageRows.map((r) => (
-                <tr key={`${r.media}:${r.id}`} className="hover:bg-bg-surface">
+                <tr
+                  key={`${r.media}:${r.id}`}
+                  className={`hover:bg-bg-surface ${r.matched_ads > 0 ? "cursor-pointer" : ""}`}
+                  onClick={r.matched_ads > 0 ? () => setOpenAsset(r) : undefined}
+                >
                   {showThumbnail && (
                     <Td>
                       {r.thumbnail ? (
@@ -477,7 +517,19 @@ export function UntestedAssets() {
                       )}
                     </Td>
                   )}
-                  <Td className="font-mono">{r.id}</Td>
+                  <Td className="font-mono">
+                    {r.matched_ads > 0 ? (
+                      <button
+                        type="button"
+                        aria-haspopup="dialog"
+                        aria-label={`View matched ads for asset ${r.id}`}
+                        onClick={(event) => { event.stopPropagation(); setOpenAsset(r); }}
+                        className="text-text-link underline decoration-dotted underline-offset-4 hover:decoration-solid focus-visible:outline-2 focus-visible:outline-offset-2"
+                      >
+                        {r.id}
+                      </button>
+                    ) : r.id}
+                  </Td>
                   {titleColLabel !== "—" && <Td>{r.title ?? "—"}</Td>}
                   <Td>{r.kind ?? "—"}</Td>
                   <Td>{r.sub_kind ?? "—"}</Td>
@@ -494,9 +546,6 @@ export function UntestedAssets() {
                           <span className="text-text-tertiary">—</span>
                         )}
                       </Td>
-                      <Td align="right">{fmtInt(r.sku_attributed_orders)}</Td>
-                      <Td align="right">{fmtCurrency(r.sku_ad_spend)}</Td>
-                      <Td align="right">{fmtCurrency(r.sku_cost_per_order)}</Td>
                     </>
                   )}
                   <Td align="right">
@@ -506,14 +555,14 @@ export function UntestedAssets() {
                         (r.matched_ads > 0 ? "text-text-primary" : "text-text-tertiary")
                       }
                       title={r.matched_ads > 0
-                        ? `${r.matched_ads} ad${r.matched_ads === 1 ? "" : "s"} name this asset`
+                        ? `View ${r.matched_ads} matched ad${r.matched_ads === 1 ? "" : "s"}`
                         : "No ad name carries this asset id — that is what makes it untested"}
                     >
                       {r.matched_ads}
                     </span>
                   </Td>
                   <Td>{fmtDate(r.date_produced)}</Td>
-                  {data && data.from_database > 0 && data.from_historical > 0 && (
+                  {hasMixedOrigins && (
                     <Td>
                       <span
                         title={r.source_system}
@@ -536,7 +585,7 @@ export function UntestedAssets() {
                         `creative` file, and those are different cuts of
                         the requisition rather than copies of one. */}
                     {r.links?.length ? (
-                      <span className="flex flex-wrap gap-1">
+                      <span className="flex flex-wrap gap-1" onClick={(event) => event.stopPropagation()}>
                         {r.links.map((l) => (
                           <a
                             key={l.label}
@@ -564,17 +613,17 @@ export function UntestedAssets() {
         <span>
           Showing {filteredRows.length ? pageStart + 1 : 0}–{Math.min(pageStart + PAGE_SIZE, filteredRows.length)}{" "}
           of {filteredRows.length.toLocaleString("en-IN")}{" "}
-          {matchState === "untested" ? "never-tested" : matchState === "matched" ? "already-run" : ""} asset
+          {populationLabel} asset
           {filteredRows.length === 1 ? "" : "s"}
           {filteredRows.length !== (data?.total_rows ?? 0) &&
-            ` (${(data?.total_rows ?? 0).toLocaleString("en-IN")} untested ${media} assets in total)`}
+            ` (${(data?.total_rows ?? 0).toLocaleString("en-IN")} registered ${media} assets in total)`}
           .
           {data && ` Computed at ${new Date(data.computed_at).toLocaleString()}.`}
         </span>
         {pageCount > 1 && (
           <span className="ml-auto inline-flex items-center gap-2">
             <button
-              onClick={() => setPage((v) => Math.max(0, v - 1))}
+              onClick={() => setPage(Math.max(0, safePage - 1))}
               disabled={safePage === 0}
               className="rounded-md border border-border-primary px-2 py-1 disabled:opacity-40"
             >
@@ -584,7 +633,7 @@ export function UntestedAssets() {
               Page {safePage + 1} of {pageCount.toLocaleString("en-IN")}
             </span>
             <button
-              onClick={() => setPage((v) => Math.min(pageCount - 1, v + 1))}
+              onClick={() => setPage(Math.min(pageCount - 1, safePage + 1))}
               disabled={safePage >= pageCount - 1}
               className="rounded-md border border-border-primary px-2 py-1 disabled:opacity-40"
             >
@@ -593,13 +642,23 @@ export function UntestedAssets() {
           </span>
         )}
       </div>
+      {openAsset && (
+        <AssetAdsModal
+          key={`${openAsset.media}:${openAsset.id}`}
+          assetId={openAsset.id}
+          assetName={openAsset.nomenclature || openAsset.title || openAsset.id}
+          appearance="standard"
+          requestTimeoutMs={30_000}
+          onClose={() => setOpenAsset(null)}
+        />
+      )}
     </div>
   );
 }
 
 function KpiTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="rounded-md border border-border-primary bg-bg-white px-4 py-3">
+    <div role="group" aria-label={label} className="rounded-md border border-border-primary bg-bg-white px-4 py-3">
       <div className="text-xs font-medium uppercase tracking-wide text-text-secondary">
         {label}
       </div>
