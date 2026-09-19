@@ -232,6 +232,17 @@ WITH f1_hit AS (
 
 ### Result-timing — falls back to `first_seen_date + 14 days` if F1 never hit
 
+Ads Analyse reads these lifetime timing fields from `ad_metrics_external`,
+copied from the original `ae_table_view` by `sync_ad_metrics_external.py`.
+`first_seen_date` is the original first delivery date. The 50k date and elapsed
+days must stay together; the local day-14 history table uses a different,
+creation-based start date. Result dates may be future deadlines for new ads.
+Changing the delivery reporting window does not change these lifetime dates.
+
+Existing mirrors can copy only the timing fields with
+`scripts/backfill_ad_result_timing.py --source-env /path/to/source.env` (dry run)
+and `--apply`. This preserves performance metrics and refresh timestamps.
+
 ```sql
 CASE
     WHEN f.date_target_imp_achieved IS NOT NULL THEN f.date_target_imp_achieved
@@ -286,7 +297,13 @@ contrib_margin_pct  = CASE WHEN amount_spent>0 AND conv_value>0
                         ELSE -100 END
 ```
 
-### Fleet-wide "anchor" metrics — every ad's efficiency is relative to the whole account
+### Fleet-wide "anchor" metrics — every ad's efficiency is relative to all ads
+
+Ads Analyse now exposes all nine scores using the original `ae_table_view` SQL
+(legacy Git commit `0232121`, `backend/_consolidate_ae_views.py`). Benchmarks use
+all lifetime rows across accounts, including zeros in the medians. They are
+cached for five minutes and do not change with page or table filters. As in
+the original dashboard, scores remain lifetime values in delivery-date mode.
 
 ```
 anchor_cpr        = SUM(amount_spent) / SUM(reach) * 1000     (global)
@@ -306,6 +323,22 @@ aa_ncp_cost_eff   = (g_spend/g_ncp) / cost_per_ncp                   (cost_per_n
 ab_roas_eff       = roas_ma / anchor_roas                           (roas_ma > 0 AND anchor_roas > 0)
 ac_profit_vol_eff = profit_efficiency / med_profit                  (med_profit <> 0)
 ```
+
+The three composite scores use the **unrounded** components:
+
+```
+delivery_eff    = cpr_eff + ftv_contrib_eff + anchor_cpftewv / cost_per_ftewv
+sales_spend_eff = ncp_cost_eff + roas_eff
+blended_eff     = .10*cpr_eff + .25*ftv_contrib_eff + .15*ftev_volume
+                + .20*ncp_cost_eff + .20*roas_eff + .10*profit_vol_eff
+```
+
+All nine outputs round to three decimal places. CPR uses reach, not impressions;
+the legacy column named `cost_per_1000` stored CPR. The additional delivery
+component is zero when its row cost is nonpositive or its global FTEWV sum is
+unavailable. The view's CASE guards return zero when they fail; missing operands
+inside a successful guard remain NULL, including in composite sums. Zero global
+sums become NULL. A negative nonzero profit median remains a valid denominator.
 
 ### `shopify_ad_agg` rebuild — tiered order-to-ad spend spread
 

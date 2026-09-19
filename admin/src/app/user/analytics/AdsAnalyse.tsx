@@ -18,10 +18,9 @@
  *      cat-disc — see globals.css).
  *   6. Column picker (▤) + Inspector drawer (⚙) — Shopify-style, backed
  *      by localStorage 'aeHiddenCols_v1'.
- *   7. 68-column table — the columns backend has data for render live;
- *      Tier-3 columns (efficiency scores, reach snapshots) render "—"
- *      with a tooltip explaining what Silver-layer work would unlock
- *      them (see docs/backend_project_upgrade_plan.md).
+ *   7. 68-column table — including efficiency ratios from the API.
+ *      Columns that still need source data, such as reach snapshots,
+ *      render "—" with a tooltip explaining the missing calculation.
  *   8. Footer: pagination + row-count cascade + diagnostics.
  *
  * Everything data-derivable in-Silver already comes through
@@ -746,26 +745,22 @@ const COLUMNS: ColDef[] = [
     render: (r) => <span>{r.ad_created_date ?? "—"}</span> },
   { key: "first_seen_date", header: "First Seen", kind: "date", group: "Timeline",
     render: (r) => <span>{r.first_seen_date ?? "—"}</span> },
-  // Audit item C, resolved 2026-09-05: the cumulative daily impressions
-  // scan now runs once a day in scripts/refresh_ad_history_milestones.py
-  // instead of per request, so these two are real columns rather than
-  // placeholders.
-  { key: "date_target_imp_achieved", header: "50k Imp. Date", kind: "date", group: "Timeline", defaultVisible: true,
+  // Lifetime milestones come from the API's recorded ad history, even
+  // when delivery metrics are filtered to a shorter date range.
+  { key: "impressions_50k_date", header: "50k Imp. Date", kind: "date", group: "Timeline", defaultVisible: true,
     render: (r) => r.impressions_50k_date
-      ? <span title={r.days_to_50k != null ? `${r.days_to_50k} days after launch` : undefined}>
+      ? <span title={r.days_to_50k != null ? `${r.days_to_50k} days after first delivery` : undefined}>
           {r.impressions_50k_date}
         </span>
-      : <Placeholder reason={
-          r.history_status === "no_history" || r.history_status === "partial_history"
-            ? "Created before 2026-01-01, where Meta insights in bronze begin — the running impression total would start mid-life and date the crossing too late, so it is left blank rather than published wrong."
-            : "Has not crossed 50,000 cumulative impressions."
-        } /> },
+      : <Placeholder reason="No recorded 50,000-impression crossing date. The ad may not have reached the threshold or its historical date is unavailable." /> },
   { key: "date_of_result", header: "Result Date", kind: "date", group: "Timeline",
-    render: () => <Placeholder reason="Result date needs threshold-crossing timeline — audit item C" /> },
+    render: (r) => r.date_of_result
+      ? <span title="The recorded 50,000-impression crossing date; otherwise 14 days after first delivery, falling back to creation date. This date can be in the future.">{r.date_of_result}</span>
+      : <Placeholder reason="Result date is unavailable because the crossing date, first delivery date, and creation date are unknown." /> },
   { key: "days_to_result", header: "Days Result", kind: "int", group: "Timeline",
-    render: () => <Placeholder reason="Depends on Result Date" /> },
-  { key: "days_to_target_f1", header: "Days to 50k", kind: "int", group: "Timeline",
-    render: (r) => <span className="num">{r.days_to_50k ?? "—"}</span> },
+    render: (r) => <span className="num" title="Days from first delivery to Result Date; unavailable when first delivery is unknown.">{r.days_to_result ?? "—"}</span> },
+  { key: "days_to_50k", header: "Days to 50k", kind: "int", group: "Timeline",
+    render: (r) => <span className="num" title="Days from first delivery to the recorded 50,000-impression crossing.">{r.days_to_50k ?? "—"}</span> },
   // Category / Flags
   { key: "category", header: "Category (now)", kind: "cat", group: "Category", defaultVisible: true,
     render: (_r, cat) => <CatBadge cat={cat} /> },
@@ -865,25 +860,25 @@ const COLUMNS: ColDef[] = [
     render: (r) => <span className="num">₹{money(r.profit_efficiency)}</span> },
   { key: "contrib_margin_pct", header: "Contrib Margin %", kind: "pct", group: "Efficiency", defaultVisible: true,
     render: (r) => <span className="num">{pct(r.contrib_margin_pct)}%</span> },
-  // Fleet-anchored efficiency scores — Tier 3 (audit item A)
+  // Efficiency ratios from the API, using lifetime fleet benchmarks.
   { key: "blended_eff", header: "Blended Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A) — needs refresh_efficiency_scores.py" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.blended_eff)}</span> },
   { key: "delivery_eff", header: "Delivery Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.delivery_eff)}</span> },
   { key: "sales_spend_eff", header: "Sales/Spend Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.sales_spend_eff)}</span> },
   { key: "cpr_eff", header: "CPR Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.cpr_eff)}</span> },
   { key: "ftv_contrib_eff", header: "FTV Contrib Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.ftv_contrib_eff)}</span> },
   { key: "ftev_volume", header: "FTEV Volume", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.ftev_volume)}</span> },
   { key: "ncp_cost_eff", header: "NCP Cost Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.ncp_cost_eff)}</span> },
   { key: "roas_eff", header: "ROAS Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.roas_eff)}</span> },
   { key: "profit_vol_eff", header: "Profit Vol Eff", kind: "num", group: "Efficiency",
-    render: () => <Placeholder reason="Fleet-anchored ranking (audit item A)" /> },
+    render: (r) => <span className="num" title="Lifetime efficiency relative to all ads">{num3(r.profit_vol_eff)}</span> },
   // Lifetime metrics
   { key: "ltv_reach", header: "LTV Reach", kind: "int", group: "Reach",
     render: (r) => <span className="num">{fmt(r.ltv_reach, { maximumFractionDigits: 0 })}</span> },
@@ -911,6 +906,10 @@ const COLUMNS: ColDef[] = [
 const ALL_KEYS = COLUMNS.map((c) => c.key);
 const DEFAULT_VISIBLE_KEYS = new Set(COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
 const HIDDEN_STORAGE_KEY = "aeHiddenCols_v1";
+const LEGACY_COLUMN_KEYS: Record<string, string> = {
+  date_target_imp_achieved: "impressions_50k_date",
+  days_to_target_f1: "days_to_50k",
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Component
@@ -980,7 +979,12 @@ export function AdsAnalyse() {
     if (typeof window === "undefined") return new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k)));
     try {
       const raw = window.localStorage.getItem(HIDDEN_STORAGE_KEY);
-      if (raw) return new Set(JSON.parse(raw));
+      if (raw) {
+        const stored: unknown = JSON.parse(raw);
+        if (Array.isArray(stored) && stored.every((key) => typeof key === "string")) {
+          return new Set(stored.map((key) => LEGACY_COLUMN_KEYS[key] ?? key));
+        }
+      }
     } catch {}
     return new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k)));
   });
@@ -1054,10 +1058,11 @@ export function AdsAnalyse() {
   // so tab-switching / hard-refresh needs to skip the fetch when the
   // filter set is unchanged. 5-min TTL matches Dashboard.tsx's
   // useCachedFetch default. Filter-scoped key so a filter change
-  // always misses the cache and fetches fresh.
+  // always misses the cache and fetches fresh. Version 3 invalidates
+  // cached rows from before the API included the restored timeline data.
   useEffect(() => {
     let cancelled = false;
-    const cacheKey = "ae-ads-analyse|" + JSON.stringify(filters);
+    const cacheKey = "ae-ads-analyse-v3|" + JSON.stringify(filters);
     const TTL_MS = 5 * 60 * 1000;
     type Cached = {
       rows: AdsAnalyseRow[];

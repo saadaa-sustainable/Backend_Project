@@ -2,7 +2,23 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
-First, run the development server:
+Start this project's FastAPI backend from the repository root:
+
+```bash
+SCHEDULER_ENABLED=false .venv/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8002
+```
+
+This local UI backend does not start a second ingestion scheduler. Existing
+ingestion jobs can continue in their own process.
+
+Set the matching URL in `admin/.env.local` (Next.js reads this file, not the
+repository-root `.env`):
+
+```dotenv
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8002
+```
+
+Then run the frontend from `admin/`:
 
 ```bash
 npm run dev
@@ -15,6 +31,13 @@ bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+If an analytics page still reports a backend connection error after a restart,
+check `lsof -nP -iTCP:8002 -sTCP:LISTEN` for an older server on the same port.
+An old process bound to `127.0.0.1` can receive browser requests even when another
+server is listening on `0.0.0.0`. Give the UI backend its own free port and update
+`NEXT_PUBLIC_API_BASE_URL` to match. Refresh the browser after changing this URL;
+restart Next.js if it still requests the previous port.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

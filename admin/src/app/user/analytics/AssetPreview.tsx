@@ -1,8 +1,9 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { getAdPopupTheme, type AdPopupAppearance } from "@/lib/adPopupTheme";
 import { getAssetPreview, type AssetPreview, type AssetPreviewSource } from "@/lib/assetPreview";
 
 type Asset = AssetPreviewSource & { asset_id: string; media: string | null };
@@ -18,14 +19,27 @@ function PreviewImage({ src, alt, sizes, className, onError }: {
   return <Image src={src} alt={alt} fill sizes={sizes} unoptimized loading="lazy" className={className} onError={onError} />;
 }
 
-export function PreviewDialog({ item, preview, onClose }: {
+export function PreviewDialog({ item, preview, onClose, appearance = "creative" }: {
   item: { id: string; media: string | null; label: "Asset" | "Ad" };
   preview: AssetPreview;
   onClose: () => void;
+  appearance?: AdPopupAppearance;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [failed, setFailed] = useState(false);
+  const theme = getAdPopupTheme(appearance);
+  const colors = {
+    "--preview-bg": theme.bg,
+    "--preview-surface": theme.surface,
+    "--preview-border": theme.border,
+    "--preview-text": theme.text,
+    "--preview-muted": theme.muted,
+    "--preview-accent": theme.accent,
+    "--preview-accent-hover": theme.accentHover,
+    "--preview-on-accent": theme.onAccent,
+    "--preview-focus": theme.focus,
+  } as CSSProperties;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -45,18 +59,19 @@ export function PreviewDialog({ item, preview, onClose }: {
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}
-      className="fixed inset-0 m-auto max-h-[92dvh] w-[calc(100%-2rem)] max-w-2xl overflow-y-auto rounded-xl border border-[#E8E2D5] bg-[#FAF8F3] p-0 text-[#3A362E] shadow-2xl backdrop:bg-black/60"
+      style={colors}
+      className="fixed inset-0 m-auto max-h-[92dvh] w-[calc(100%-2rem)] max-w-2xl overflow-y-auto rounded-xl border border-[var(--preview-border)] bg-[var(--preview-bg)] p-0 text-[var(--preview-text)] shadow-2xl backdrop:bg-black/60"
     >
-      <div className="flex items-center justify-between gap-3 border-b border-[#E8E2D5] px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--preview-border)] px-4 py-3">
         <div>
           <h2 id={titleId} className="font-semibold">{item.label} preview · {item.id}</h2>
-          <p className="text-xs text-[#9A9384]">{preview.provider}{item.media ? ` · ${item.media}` : ""}</p>
+          <p className="text-xs text-[var(--preview-muted)]">{preview.provider}{item.media ? ` · ${item.media}` : ""}</p>
         </div>
-        <button type="button" autoFocus onClick={onClose} aria-label={`Close ${item.label.toLowerCase()} preview`} className="rounded-md border border-[#E8E2D5] px-3 py-1.5 hover:bg-white focus-visible:outline-2 focus-visible:outline-[#B07E12]">✕</button>
+        <button type="button" autoFocus onClick={onClose} aria-label={`Close ${item.label.toLowerCase()} preview`} className="rounded-md border border-[var(--preview-border)] px-3 py-1.5 hover:bg-[var(--preview-surface)] focus-visible:outline-2 focus-visible:outline-[var(--preview-focus)]">✕</button>
       </div>
 
       <div className="p-4">
-        <div className="relative flex min-h-56 items-center justify-center overflow-hidden rounded-lg border border-[#E8E2D5] bg-white">
+        <div className="relative flex min-h-56 items-center justify-center overflow-hidden rounded-lg border border-[var(--preview-border)] bg-[var(--preview-surface)]">
           {!failed && preview.src && preview.kind === "embed" ? (
             <iframe
               src={preview.src}
@@ -74,14 +89,14 @@ export function PreviewDialog({ item, preview, onClose }: {
               <PreviewImage src={preview.src} alt={`Creative ${item.label.toLowerCase()} ${item.id}`} sizes="(max-width: 672px) 90vw, 640px" className="object-contain" onError={() => setFailed(true)} />
             </div>
           ) : (
-            <p className="max-w-sm px-6 py-12 text-center text-sm text-[#9A9384]">
+            <p className="max-w-sm px-6 py-12 text-center text-sm text-[var(--preview-muted)]">
               {failed ? "This preview could not be loaded." : `This ${item.label.toLowerCase()} opens on its source website.`} Use the preview link below to view it.
             </p>
           )}
         </div>
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-[#9A9384]">If the preview doesn’t load, open the original {item.label.toLowerCase()}.</p>
-          <a href={preview.href!} target="_blank" rel="noopener noreferrer" className="rounded-md bg-[#B07E12] px-3 py-2 text-sm font-medium text-white hover:bg-[#93680E]">Open preview ↗</a>
+          <p className="text-xs text-[var(--preview-muted)]">If the preview doesn’t load, open the original {item.label.toLowerCase()}.</p>
+          <a href={preview.href!} target="_blank" rel="noopener noreferrer" className="rounded-md bg-[var(--preview-accent)] px-3 py-2 text-sm font-medium text-[var(--preview-on-accent)] hover:bg-[var(--preview-accent-hover)]">Open preview ↗</a>
         </div>
       </div>
     </dialog>,

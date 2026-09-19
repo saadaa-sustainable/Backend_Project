@@ -17,8 +17,8 @@ from app.api.routers import analytics
 def clear_analytics_caches():
     caches = [
         getattr(analytics, name).analytics_cache
-        for name in ("get_creative_testing", "get_ads_analyse", "_daily_mirror_ready",
-                     "_get_cpis_reconciliation")
+        for name in ("get_creative_testing", "get_creative_testing_ads", "get_ads_analyse", "_daily_mirror_ready",
+                     "_get_cpis_reconciliation", "get_efficiency_anchors")
     ]
     for cache in caches:
         cache.entries.clear()
@@ -339,8 +339,12 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
     totals_result.one.return_value = SimpleNamespace(**totals_data)
     exists_result = MagicMock()
     exists_result.first.return_value = (1,)
+    anchors_result = _mapped_result({
+        "g_spend": 1000, "g_reach": 10000, "g_ftewv": 100,
+        "g_ncp": 20, "g_conv": 2000, "med_ftewv": 5, "med_profit": 100,
+    })
     session = SimpleNamespace(execute=AsyncMock(side_effect=[
-        exists_result, exists_result, rows_result, daily_result, count_result,
+        exists_result, exists_result, rows_result, anchors_result, daily_result, count_result,
         categories_result, totals_result,
     ]))
 
@@ -348,8 +352,8 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
         session, from_date=date(2026, 9, 1), to_date=date(2026, 9, 15), date_field="delivery",
     )
 
-    assert session.execute.await_count == 7
-    daily_query, daily_params = session.execute.call_args_list[3].args
+    assert session.execute.await_count == 8
+    daily_query, daily_params = session.execute.call_args_list[4].args
     assert str(daily_query) == analytics._EXTERNAL_DAILY
     _parsed_statement(daily_query)
     assert daily_params == {"ad_ids": ["123"], "from_str": date(2026, 9, 1),

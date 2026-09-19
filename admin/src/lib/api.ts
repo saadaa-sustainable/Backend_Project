@@ -135,7 +135,7 @@ export function clearAnalyticsCache(): void {
   analyticsCache.clear();
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const analyticsRead = path.startsWith("/admin/analytics/") && (
     method === "GET" || (method === "POST" && path === "/admin/analytics/cpis-utm/spend-trends")
@@ -144,31 +144,48 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // a public HTTP cache. Include headers and request body in the key.
   if (analyticsRead && typeof window !== "undefined" && !init?.signal && init?.cache !== "reload") {
     const key = JSON.stringify([API_BASE_URL, method, path, init?.body ?? null,
-      [...new Headers(init?.headers).entries()].sort()]);
-    return analyticsCache.get(key, () => fetchResponse<T>(path, init));
+      [...new Headers(init?.headers).entries()].sort(), timeoutMs ?? null]);
+    return analyticsCache.get(key, () => fetchResponse<T>(path, init, timeoutMs));
   }
-  const result = await fetchResponse<T>(path, init);
+  const result = await fetchResponse<T>(path, init, timeoutMs);
   if (method !== "GET" && !analyticsRead) clearAnalyticsCache();
   return result;
 }
 
-async function fetchResponse<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new ApiError(
-      `${init?.method ?? "GET"} ${path} failed (${res.status}): ${body.slice(0, 300)}`,
-      res.status,
-    );
+async function fetchResponse<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
+  // The timeout belongs to the shared fetch, so concurrent readers do
+  // not start separate timers or cancel one another's request.
+  const controller = timeoutMs === undefined ? null : new AbortController();
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  const signal = controller
+    ? init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal
+    : init?.signal;
+  try {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...init?.headers,
+      },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new ApiError(
+        `${init?.method ?? "GET"} ${path} failed (${res.status}): ${body.slice(0, 300)}`,
+        res.status,
+      );
+    }
+    return await res.json() as T;
+  } catch (error) {
+    if (controller?.signal.aborted && !init?.signal?.aborted) {
+      throw new ApiError(`Loading took longer than ${Math.round(timeoutMs! / 1000)} seconds. Please try again.`, 408);
+    }
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  return res.json() as Promise<T>;
 }
 
 export function fetchTables(): Promise<TablesResponse> {
@@ -573,11 +590,14 @@ export interface AdsAnalyseRow {
   // insights in bronze begin 2026-01-01, so ads created earlier have no
   // first fortnight to replay.
   history_status: string | null;
-  // Day cumulative impressions crossed 50,000 (the F1 gate), and the
-  // same fact as an age. Null when never crossed, or when the ad
-  // predates the daily range and the running sum would date it late.
+  // Lifetime 50,000-impression crossing and days from first delivery.
+  // Null when the threshold has not been crossed or history is unknown.
   impressions_50k_date: string | null;
   days_to_50k: number | null;
+  // Recorded crossing date, otherwise first delivery + 14 days (with
+  // creation date as a fallback). The result date can be in the future.
+  date_of_result: string | null;
+  days_to_result: number | null;
   impressions_at_day_14: number | null;
 
   ad_id: string;
@@ -618,6 +638,16 @@ export interface AdsAnalyseRow {
   roas: number | null;
   contrib_margin_pct: number | null;
   profit_efficiency: number | null;
+  // Efficiency ratios computed against the lifetime fleet benchmarks.
+  blended_eff: number | null;
+  delivery_eff: number | null;
+  sales_spend_eff: number | null;
+  cpr_eff: number | null;
+  ftv_contrib_eff: number | null;
+  ftev_volume: number | null;
+  ncp_cost_eff: number | null;
+  roas_eff: number | null;
+  profit_vol_eff: number | null;
   cpr_1000: number | null;
   cpc_link: number | null;
   checkout_compl_pct: number | null;
@@ -1838,7 +1868,7 @@ export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
   if (params.match_state) q.set("match_state", params.match_state);
   const qs = q.toString();
-  return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
+  return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`, undefined, 30_000);
 }
 
 // Dashboard tab -- per-widget fetchers. Fire in parallel and render
@@ -2108,9 +2138,12 @@ export interface CreativeTestingAdsResponse {
 
 export function fetchCreativeTestingAds(
   assetId: string,
+  timeoutMs?: number,
 ): Promise<CreativeTestingAdsResponse> {
   return request<CreativeTestingAdsResponse>(
     `/admin/analytics/creative-testing/${encodeURIComponent(assetId)}/ads`,
+    undefined,
+    timeoutMs,
   );
 }
 
