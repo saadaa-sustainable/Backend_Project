@@ -928,6 +928,8 @@ export function AdsAnalyse() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [failedLoadMore, setFailedLoadMore] = useState(false);
 
   // ── filters ──────────────────────────────────────────────────
   const [levelToggle, setLevelToggle] = useState<"ad" | "adset" | "campaign">("ad");
@@ -939,6 +941,7 @@ export function AdsAnalyse() {
   const [rollupTotal, setRollupTotal] = useState(0);
   const [rollupLoading, setRollupLoading] = useState(false);
   const [rollupError, setRollupError] = useState<string | null>(null);
+  const [rollupRetryCount, setRollupRetryCount] = useState(0);
 
   const [account, setAccount] = useState("");
   const [groupBy, setGroupBy] = useState<"ad" | "ad_name" | "adset" | "campaign">("ad");
@@ -1027,12 +1030,14 @@ export function AdsAnalyse() {
         setRollupRows(res.rows);
         setRollupTotal(res.total);
       })
-      .catch(() => !cancelled && setRollupError("Could not load the rollup."))
+      .catch((err: unknown) => {
+        if (!cancelled) setRollupError(err instanceof ApiError ? err.message : "Could not reach the analytics backend. Please retry.");
+      })
       .finally(() => !cancelled && setRollupLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, search]);
+  }, [levelToggle, account, search, rollupRetryCount]);
 
   const filters = useMemo(
     () => ({
@@ -1077,6 +1082,8 @@ export function AdsAnalyse() {
         if (raw) {
           const c = JSON.parse(raw) as Cached;
           if (Date.now() - c.ts < TTL_MS) {
+            setError(null);
+            setFailedLoadMore(false);
             setRows(c.rows);
             setTotal(c.total);
             setCategoryCountsFromApi(c.category_counts);
@@ -1094,6 +1101,7 @@ export function AdsAnalyse() {
     }
     setLoading(true);
     setError(null);
+    setFailedLoadMore(false);
     // Fetch a large first batch so client-side recategorisation +
     // numeric filters have enough data to be useful without a
     // per-filter round-trip. 500 rows keeps under 1MB per fetch.
@@ -1134,20 +1142,23 @@ export function AdsAnalyse() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof ApiError ? err.message : "Could not reach the FastAPI backend. Is it running on :8001?");
+        setError(err instanceof ApiError ? err.message : "Could not reach the analytics backend. Please retry.");
       })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [filters]);
+  }, [filters, retryCount]);
 
   async function loadMore() {
     setLoadingMore(true);
+    setError(null);
+    setFailedLoadMore(false);
     try {
       const res = await fetchAdsAnalyse({ ...filters, limit: 500, offset: rows.length });
       setRows((prev) => [...prev, ...res.rows]);
     } catch (err) {
+      setFailedLoadMore(true);
       setError(err instanceof ApiError ? err.message : "Could not load more rows.");
     } finally {
       setLoadingMore(false);
@@ -1274,8 +1285,12 @@ export function AdsAnalyse() {
       {levelToggle !== "ad" && (
         <div className="space-y-2">
           {rollupError && (
-            <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-              {rollupError}
+            <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+              <span>{rollupError}</span>
+              <button type="button" onClick={() => setRollupRetryCount((count) => count + 1)} disabled={rollupLoading}
+                className="shrink-0 rounded border border-current px-3 py-1 font-medium disabled:opacity-40">
+                Retry
+              </button>
             </div>
           )}
           <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
@@ -1608,7 +1623,16 @@ export function AdsAnalyse() {
       </div>
 
       {/* Errors */}
-      {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">{error}</div>}
+      {error && (
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">
+          <span>{error}</span>
+          <button type="button" onClick={() => failedLoadMore ? void loadMore() : setRetryCount((count) => count + 1)}
+            disabled={loading || loadingMore}
+            className="shrink-0 rounded border border-current px-3 py-1 font-medium disabled:opacity-40">
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════════════════════
           Main table

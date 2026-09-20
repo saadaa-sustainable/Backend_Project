@@ -822,7 +822,7 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
   const s = qs.toString();
-  return request<AdsAnalyseResponse>(`/admin/analytics/ads-analyse${s ? `?${s}` : ""}`);
+  return request<AdsAnalyseResponse>(`/admin/analytics/ads-analyse${s ? `?${s}` : ""}`, undefined, 30_000);
 }
 
 // ---------------------------------------------------------------------
@@ -2195,7 +2195,7 @@ export function fetchAdsAnalyseRollup(params: {
   if (params.search) qs.set("search", params.search);
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
-  return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`);
+  return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`, undefined, 30_000);
 }
 
 // ---------------------------------------------------------------------
