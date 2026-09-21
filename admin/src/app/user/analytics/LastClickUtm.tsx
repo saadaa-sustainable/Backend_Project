@@ -97,6 +97,7 @@ const CHANNEL_COLOR: Record<UtmChannel | "Total", string> = {
 const TIER_ORDER = [
   "ad_direct",
   "adset_scoped",
+  "edit_name_match",
   "ad_name_match",
   "adset_name_miss",
   "campaign_scoped",
@@ -132,6 +133,7 @@ type TierKey = (typeof TIER_ORDER)[number];
 const TIER_LABEL: Record<TierKey, string> = {
   ad_direct: "Ad Direct",
   adset_scoped: "Adset Scoped",
+  edit_name_match: "Edit Name Match",
   ad_name_match: "Ad Name Match",
   adset_name_miss: "Adset · Name Miss",
   campaign_scoped: "Campaign Scoped",
@@ -150,6 +152,14 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     step: "STEP 2",
     title: "ADSET-SCOPED NAME",
     hint: "utm_term names a known adset and utm_content matches an ad name inside it exactly (or after stripping Copy/_h0 suffixes). Beats a same-named ad elsewhere in the account. Orders whose adset matched but whose name did not are not a separate step -- they are this step's failures, in the section below.",
+  },
+  edit_name_match: {
+    // Numbered 2B, not 3: this is the adset branch's SECOND attempt at
+    // the same question, not a new test. Renumbering the steps after it
+    // would have changed what every existing step number means.
+    step: "STEP 2B",
+    title: "EDIT NAME MATCHES",
+    hint: "utm_content matched a name the ad USED to have. utm_content is frozen at click time, so an ad renamed since the click still carries its old name in the order while Meta carries only the new one. Resolved from ad_edit_log, scoped to the adset in utm_term, and only ever tried after the current name has already failed \u2014 a historical name can never outrank a live one.",
   },
   ad_name_match: {
     step: "STEP 3",
@@ -187,6 +197,7 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
 const MATCHED_ON: Record<TierKey, string> = {
   ad_direct: "utm_content",
   adset_scoped: "utm_content",
+  edit_name_match: "utm_content",
   ad_name_match: "utm_content",
   adset_name_miss: "utm_term",
   campaign_scoped: "utm_content",
@@ -198,6 +209,7 @@ const MATCHED_ON: Record<TierKey, string> = {
 const TIER_COLOR: Record<TierKey, string> = {
   ad_direct: theme.successMid,
   adset_scoped: theme.infoMid,
+  edit_name_match: "#7C3AED",
   ad_name_match: "#0891B2",
   adset_name_miss: theme.warningMid,
   campaign_scoped: theme.accentPurple,
@@ -208,6 +220,7 @@ const TIER_COLOR: Record<TierKey, string> = {
 const TIER_CLASS: Record<TierKey, string> = {
   ad_direct: "ai-tier-ad_direct",
   adset_scoped: "ai-tier-adset_scoped",
+  edit_name_match: "ai-tier-edit_name_match",
   ad_name_match: "ai-tier-ad_name_match",
   adset_name_miss: "ai-tier-adset_only",
   campaign_scoped: "ai-tier-adset_scoped",

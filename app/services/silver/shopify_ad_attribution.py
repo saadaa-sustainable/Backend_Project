@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import unquote
 
 from sqlalchemy import text
@@ -139,6 +139,19 @@ class AdUniverse:
     # both constrain matching and make a duplicated campaign name ambiguous.
     campaign_name_ids: dict[str, set[str]] = field(default_factory=dict)
     campaign_fuzzy_ids: dict[str, set[str]] = field(default_factory=dict)
+    #: Per ad set, the ads of that ad set carrying every name they have
+    #: EVER answered to (from public.ad_edit_log), not just their current
+    #: one. Deliberately a separate index rather than extra aliases on the
+    #: main ads: a historical name must never be able to win against a
+    #: live one, so this is only consulted after the current-name match
+    #: has already failed. See _attribute_order's `edit_name_match`.
+    adset_hist_ads: dict[str, list[AdMeta]] = field(default_factory=dict)
+    #: (utm_content_lower, adset_id | '*') -> ad_id, from
+    #: public.ad_name_override. Reported as `edit_name_match`: these are
+    #: not a rule of their own, they are the rename the edit log failed
+    #: to record, supplied by someone who checked. When the log is fixed
+    #: the rule finds them unaided and the row becomes redundant.
+    overrides: dict[tuple[str, str], str] = field(default_factory=dict)
 
 
 # Use both entity rosters, including direct IDs for ads without a usable name.
@@ -160,6 +173,61 @@ WHERE COALESCE(al.ad_id, a.ad_id) IS NOT NULL
 _ADSET_ROSTER_SQL = (
     "SELECT adset_id, campaign_id, campaign_name FROM meta_adsets WHERE adset_id IS NOT NULL"
 )
+
+# Every name an ad has ever carried, scoped to the ad set it was in when
+# the rename happened.
+#
+# `utm_content` is frozen at click time -- it holds the ad's name AS IT
+# WAS THEN. `ad_lifecycle` and `meta_ads` hold only the name now, so a
+# rename between the click and today silently breaks name matching. That
+# is the entire `adset_name_miss` tier: 54,055 orders where the ad set
+# resolved and the name did not.
+#
+# Both sides of the rename are taken. `new_value` matters as much as
+# `old_value`: a second rename makes today's name yesterday's alias.
+# `object_name` is the name as of the event, which covers an ad renamed
+# before our first fetch.
+#
+# adset_id comes from the log itself, so it is the ad set the ad was in
+# AT EDIT TIME rather than the one it sits in now, and the key is exactly
+# the pair an order hands us -- utm_term is the ad set, utm_content the
+# name. Measured on this data, scoping the lookup to the ad set cuts
+# ambiguous keys from 13.3% (name alone) to 1.9%.
+_ADSET_NAME_HISTORY_SQL = """
+SELECT DISTINCT e.adset_id, e.ad_id, BTRIM(nm) AS historical_name
+  FROM public.ad_edit_log e,
+       LATERAL (VALUES (e.extra_data ->> 'old_value'),
+                       (e.extra_data ->> 'new_value'),
+                       (e.object_name)) v(nm)
+ WHERE e.event_type = 'update_ad_friendly_name'
+   AND e.ad_id IS NOT NULL AND e.adset_id IS NOT NULL
+   AND nm IS NOT NULL AND BTRIM(nm) <> ''
+"""
+
+_AD_EDIT_LOG_EXISTS = (
+    "SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema='public' AND table_name='ad_edit_log'"
+)
+
+# Hand-supplied mappings (scripts/load_ad_name_overrides.py).
+#
+# This is the one input the cascade does not derive. Someone who knows
+# which ad actually ran said so, and that is evidence the data does not
+# carry -- an ad renamed before our earliest log, or a UTM that never
+# equalled any recorded name. It therefore outranks every automatic
+# rule, including a direct ad id: if a human says this utm_content means
+# that ad, an inference has nothing to add.
+#
+# adset_id '*' applies account-wide; a real id scopes the mapping to
+# orders from that ad set, which is what makes an ambiguous name usable.
+_OVERRIDE_SQL = (
+    "SELECT utm_content_lower, adset_id, ad_id FROM public.ad_name_override"
+)
+
+_OVERRIDE_EXISTS = (
+    "SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema='public' AND table_name='ad_name_override'"
+)
 _CAMPAIGN_ROSTER_SQL = (
     "SELECT campaign_id, campaign_name FROM meta_campaigns WHERE campaign_id IS NOT NULL"
 )
@@ -173,6 +241,8 @@ def _build_ad_universe(
     ads: Iterable[AdMeta], *,
     adsets: Iterable[tuple[str, str | None, str | None]] = (),
     campaigns: Iterable[tuple[str, str | None]] = (),
+    name_history: Iterable[tuple[str, str, str]] = (),
+    overrides: Iterable[tuple[str, str, str]] = (),
 ) -> AdUniverse:
     """Build the same pure matching indexes for database loads and audit replays."""
     universe = AdUniverse()
@@ -215,6 +285,36 @@ def _build_ad_universe(
         if len(ids) == 1:
             cid = next(iter(ids))
             universe.roster_campaign_names[norm] = (cid, universe.roster_campaigns.get(cid))
+
+    # Historical names, indexed per ad set. Each entry is the REAL ad
+    # object with its past names attached as aliases, so `_ad_names`
+    # yields them and `_scoped_match` can run its ordinary strict layers
+    # over them unchanged -- the matching rule is identical, only the
+    # names it sees are wider. `_unique_ad` still collapses by ad_id, so
+    # an ad reachable by two of its own old names is one candidate, not
+    # two, while two different ads sharing an old name stay ambiguous and
+    # therefore terminal.
+    hist_by_ad: dict[tuple[str, str], set[str]] = {}
+    for adset_id, ad_id, historical_name in name_history:
+        if not adset_id or not ad_id or not historical_name:
+            continue
+        hist_by_ad.setdefault((adset_id, ad_id), set()).add(historical_name.strip())
+    for (adset_id, ad_id), names in hist_by_ad.items():
+        ad = universe.by_id.get(ad_id)
+        if ad is None:
+            # An ad the cascade cannot resolve anyway. An alias for it
+            # could only produce a match pointing at nothing.
+            continue
+        universe.adset_hist_ads.setdefault(adset_id, []).append(
+            replace(ad, aliases=tuple(dict.fromkeys((*ad.aliases, *sorted(names))))),
+        )
+
+    for utm_lower, adset_id, ad_id in overrides:
+        if not utm_lower or ad_id not in universe.by_id:
+            # A mapping naming an ad the cascade cannot resolve would
+            # produce a match pointing at nothing.
+            continue
+        universe.overrides[(utm_lower.strip().lower(), adset_id or "*")] = ad_id
     return universe
 
 
@@ -231,7 +331,23 @@ async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
     ]
     adsets = [tuple(row) for row in await session.execute(text(_ADSET_ROSTER_SQL))]
     campaigns = [tuple(row) for row in await session.execute(text(_CAMPAIGN_ROSTER_SQL))]
-    return _build_ad_universe(ads, adsets=adsets, campaigns=campaigns)
+    # Optional: an install that has not run scripts/ingest_ad_edit_log.py
+    # simply has no rename history, and the cascade behaves exactly as it
+    # did before rather than failing to load.
+    name_history: list[tuple[str, str, str]] = []
+    if (await session.execute(text(_AD_EDIT_LOG_EXISTS))).first() is not None:
+        name_history = [
+            tuple(row) for row in await session.execute(text(_ADSET_NAME_HISTORY_SQL))
+        ]
+        logger.info("ad_edit_log name history loaded", extra={"rows": len(name_history)})
+    overrides: list[tuple[str, str, str]] = []
+    if (await session.execute(text(_OVERRIDE_EXISTS))).first() is not None:
+        overrides = [tuple(row) for row in await session.execute(text(_OVERRIDE_SQL))]
+        logger.info("ad_name_override loaded", extra={"rows": len(overrides)})
+    return _build_ad_universe(
+        ads, adsets=adsets, campaigns=campaigns, name_history=name_history,
+        overrides=overrides,
+    )
 
 
 def _unique_ad(candidates: Iterable[AdMeta]) -> AdMeta | None:
@@ -375,6 +491,24 @@ def _attribute_order(
         ad = _unique_ad(direct)
         return matched("ad_direct", ad) if ad else _UNMATCHED
 
+    # Hand-supplied mappings, reported as `edit_name_match` because that
+    # is what they stand in for: a rename the edit log did not record.
+    #
+    # Placed after the direct ad-id check so an explicit id in the URL
+    # still wins -- that is stronger evidence than a name mapping, and
+    # these rows exist for names, not ids. Placed BEFORE the adset
+    # branch because an account-wide mapping must apply whatever ad set
+    # the order came through: the case it exists for is an order from ad
+    # set A naming an ad that sits in ad set B, which is unreachable
+    # from inside a branch scoped to A.
+    if universe.overrides:
+        for value in _value_candidates(utm_content):
+            key = value.strip().lower()
+            for scope in (utm_term.strip(), "*"):
+                ad_id = universe.overrides.get((key, scope)) if scope else None
+                if ad_id:
+                    return matched("edit_name_match", universe.by_id[ad_id])
+
     adset_ids = {
         value for value in _value_candidates(utm_term)
         if value in universe.adset_ads or value in universe.roster_adsets
@@ -387,6 +521,25 @@ def _attribute_order(
         ad = _scoped_match(ads, utm_content, strict=True)
         if ad:
             return matched("adset_scoped", ad)
+
+        # The ad's CURRENT name did not match. Before giving up, try the
+        # names it used to have: `utm_content` was written at click time,
+        # so an ad renamed since then still carries its old name in the
+        # order while ad_lifecycle carries only the new one.
+        #
+        # Strictly after the live-name attempt above, never instead of
+        # it. 5,843 orders that already resolve on a current name ALSO
+        # match some ad's historical name, so consulting history first
+        # would let a stale name shadow a correct match.
+        #
+        # Same rule, same strictness -- only the set of names is wider,
+        # so ambiguity stays terminal here exactly as it does above.
+        hist = universe.adset_hist_ads.get(adset_id)
+        if hist:
+            ad = _scoped_match(hist, utm_content, strict=True)
+            if ad:
+                return matched("edit_name_match", ad)
+
         parent = universe.roster_adsets.get(adset_id)
         if parent is None:
             ids = {ad.campaign_id for ad in ads}

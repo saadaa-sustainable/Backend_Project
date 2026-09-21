@@ -164,7 +164,15 @@ def _read(path: Path) -> list[dict[str, str]]:
     header = [h.strip().lower() for h in rows[0]]
     known = {i: HEADER_MAP[h] for i, h in enumerate(header) if h in HEADER_MAP}
 
-    if "utm_content" in known.values() and "ad_name" in known.values():
+    # ad_id alone is a complete mapping -- the docstring above offers it
+    # as an alternative to ad_name, and it is the STRONGER of the two
+    # (an id cannot be ambiguous). Requiring ad_name here meant an
+    # id-keyed file silently fell through to positional reading, which
+    # then tried to resolve the id column as a name and rejected every
+    # row with "no ad in the account has that name".
+    if "utm_content" in known.values() and (
+        "ad_name" in known.values() or "ad_id" in known.values()
+    ):
         return [
             {known[i]: (r[i].strip() if i < len(r) else "") for i in known}
             for r in rows[1:]

@@ -666,6 +666,29 @@ export interface AdsAnalyseRow {
   ltv_reach: number | null;
   ltv_frequency: number | null;
   first_seen_date: string | null;
+  /**
+   * De-duplicated reach, from public.ad_reach_cumulative.
+   *
+   * `reach` above is still a sum of daily rows, which double-counts
+   * anyone who saw the ad on more than one day -- measured at 2.55x the
+   * truth over a 15-day window. These five come from snapshots Meta
+   * itself de-duplicated, so they are the only reach figures on the row
+   * that count people rather than person-days.
+   *
+   * NULL (not 0) when no snapshot covers the window.
+   */
+  previous_reach: number | null;
+  latest_reach: number | null;
+  /** MAX(0, latest - previous): people new since the epoch. */
+  incremental_reach: number | null;
+  /** Windowed spend per 1,000 new people; NULL when none were new. */
+  cost_per_1000_incremental_reach: number | null;
+  /** Share of the reach of every ad under the same filters. */
+  reach_weight_pct: number | null;
+  /** Which snapshot dates the two anchors came from -- they can trail
+   *  the requested window when the backfill is sparse. */
+  reach_prev_as_of: string | null;
+  reach_latest_as_of: string | null;
   // Asset resolution from content_asset_register /
   // content_iterated_register / content_graphic_register /
   // content_influencer_posts.
@@ -2175,6 +2198,15 @@ export interface RollupRow {
   roas: number | null;
   cost_per_purchase: number | null;
   cpr_1000: number | null;
+  /** Last-click Shopify outcomes for this entity, over the requested
+   *  window on the ORDER's own date. Campaign comes straight off
+   *  matched_campaign_id; ad set is resolved through the matched ad,
+   *  so an order attributed only to a campaign has no ad set and is
+   *  correctly absent at that level. */
+  shopify_orders: number | null;
+  shopify_revenue: number | null;
+  shopify_roas: number | null;
+  cost_per_shopify_order: number | null;
 }
 
 export interface RollupResponse {
@@ -2189,12 +2221,19 @@ export function fetchAdsAnalyseRollup(params: {
   search?: string;
   sort?: string;
   limit?: number;
+  /** Window for the Shopify last-click columns, on the ORDER's date.
+   *  Defaults server-side to the trailing 30 days — an unbounded sum
+   *  would sit three years of orders beside a 30-day spend figure. */
+  from_date?: string;
+  to_date?: string;
 }): Promise<RollupResponse> {
   const qs = new URLSearchParams({ level: params.level });
   if (params.account_name) qs.set("account_name", params.account_name);
   if (params.search) qs.set("search", params.search);
   if (params.sort) qs.set("sort", params.sort);
   if (params.limit) qs.set("limit", String(params.limit));
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
   return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`, undefined, 30_000);
 }
 
