@@ -160,6 +160,16 @@ PHASE_INGEST = [
     ("meta_insights_lifetime",["scripts/ingest_last_15_days.py",
                                "--levels", "campaign,adset,ad",
                                "--time-increment", "all_days"],             2700),
+    # De-duplicated unique reach. Cannot be derived from the daily rows
+    # above at any later stage: reach counts people, and summing days
+    # counts a person once per day they saw the ad -- measured at 2.55x
+    # the truth over a 15-day window. --anchors keeps this to the ~8
+    # as-of dates the UI's date presets can ask for, and rows already
+    # stored are skipped, so a nightly run only fetches the dates that
+    # moved (today, yesterday, and the rolling preset boundaries).
+    ("meta_reach_cumulative", ["scripts/fetch_reach_cumulative.py",
+                               "--anchors",
+                               "--levels", "ad,adset,campaign"],            3600),
     ("meta_dpa_products",     ["scripts/fetch_ad_product_insights.py"],     1800),
     ("instagram_posts",       ["scripts/ingest_instagram_chronological.py"], 1800),
     ("shopify_daily",         SHOPIFY_INGEST_CMD,        SHOPIFY_INGEST_TIMEOUT_S),
@@ -183,7 +193,18 @@ PHASE_SILVER = [
     # Must precede ad_lifecycle (reads meta_ads for ad_name/status) and
     # silver_shopify (re-derives the whole attribution table each run).
     ("silver_meta_entities",  ["scripts/refresh_meta_entities.py"],          900),
-    ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],   900),
+    # 900 -> 2400 (2026-09-21). The rebuild takes 1372-1514s measured, so
+    # a 900s budget killed it EVERY night: the table sat frozen at
+    # 2026-09-17 -- the date of the last manual run -- while Bronze had
+    # data through the 20th, and every Creative Testing window past that
+    # date silently read zeros.
+    #
+    # It got slower on purpose. Building into a side table and swapping
+    # does more work than TRUNCATE + INSERT, and that is the trade: the
+    # old form held ACCESS EXCLUSIVE for its whole run, so a routine
+    # refresh took the section down with HTTP 500s. Pay the extra minutes
+    # rather than block every reader, and give the step room to finish.
+    ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],  2400),
     # ad_lifecycle was NEVER in this pipeline. It was registered only as
     # a FlattenJob in app/services/silver/registry.py, so the in-process
     # scheduler was the only thing that refreshed it -- and that
@@ -238,7 +259,20 @@ PHASE_SILVER = [
     # the log stopped at "[1/2] refresh_shopify_tables". The work is
     # genuinely bigger than 15 minutes; capping it lower just moves the
     # failure.
+    # Ad rename history, mirrored from the legacy Meta_ads_data project.
+    # MUST run before silver_shopify, which re-derives the whole
+    # attribution table: the cascade's `edit_name_match` step resolves
+    # `utm_content` against names an ad USED to have, and a stale mirror
+    # silently narrows that step rather than failing.
+    ("ad_edit_log",           ["scripts/ingest_ad_edit_log.py"],             900),
     ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],        3600),
+    # Gold: the table Ads Analyse reads. Fifth registry-only job --
+    # registered in app/services/silver/registry.py and wired to nothing,
+    # so it had not refreshed in ten days while ad_lifecycle beside it
+    # was current. Runs AFTER silver_shopify because it joins Meta
+    # metrics to Shopify-attributed revenue; earlier just rebuilds
+    # yesterday's answer.
+    ("gold_ad_performance",   ["scripts/refresh_ad_performance_summary.py"], 1200),
     ("silver_inventory",      ["scripts/refresh_master_sku_inventory.py"],   600),
     # Must run AFTER silver_shopify: it reads raw_dump_shopify products
     # and the shopify_inventory silver table, and precomputes the

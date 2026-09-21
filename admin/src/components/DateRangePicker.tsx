@@ -17,7 +17,7 @@
  * there is no real lower bound to claim.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { theme } from "@/lib/theme";
 
 export interface DateRange {
@@ -117,6 +117,8 @@ function MonthGrid({
   hover,
   onPick,
   onHover,
+  accentSolid,
+  accentSoft,
 }: {
   month: Date;
   from: string;
@@ -124,6 +126,8 @@ function MonthGrid({
   hover: string | null;
   onPick: (d: string) => void;
   onHover: (d: string | null) => void;
+  accentSolid: string;
+  accentSoft: string;
 }) {
   const first = startOfMonth(month);
   const start = addDays(first, -first.getDay());
@@ -154,8 +158,8 @@ function MonthGrid({
               onMouseEnter={() => onHover(s)}
               className="relative h-8 text-[12px] tabular-nums transition-colors"
               style={{
-                color: isEnd ? "#FFFFFF" : outside ? CT.muted : inRange ? CT.gold : CT.ink,
-                backgroundColor: isEnd ? CT.gold : inRange ? CT.goldSoft : "transparent",
+                color: isEnd ? "#FFFFFF" : outside ? CT.muted : inRange ? accentSolid : CT.ink,
+                backgroundColor: isEnd ? accentSolid : inRange ? accentSoft : "transparent",
                 fontWeight: isEnd ? 700 : 400,
                 borderRadius: isEnd ? 999 : 0,
               }}
@@ -173,11 +177,24 @@ export function DateRangePicker({
   value,
   preset,
   onApply,
+  align = "right",
+  accent,
 }: {
   value: DateRange;
   preset: string;
   onApply: (range: DateRange, preset: string) => void;
+  /** Which edge the panel hangs from. The panel is ~500px wide, so a
+   *  trigger near the LEFT of its container must open leftwards or the
+   *  first month lands off-screen. Default keeps existing callers. */
+  align?: "left" | "right";
+  /** Section accent for the selected day and Apply. Defaults to the app
+   *  token, which is blue (`accentYellow` is a misnomer -- #3B6BF5).
+   *  A section with its own palette passes it so the picker does not
+   *  arrive in a colour nothing around it uses. */
+  accent?: { solid: string; soft: string };
 }) {
+  const ACCENT = accent?.solid ?? CT.gold;
+  const ACCENT_SOFT = accent?.soft ?? CT.goldSoft;
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<DateRange>(value);
   const [draftPreset, setDraftPreset] = useState<string>(preset);
@@ -186,6 +203,44 @@ export function DateRangePicker({
     addMonths(startOfMonth(value.to ? new Date(value.to) : new Date()), -1),
   );
   const box = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  // Horizontal offset of the panel from the trigger's left edge, in px.
+  // Measured rather than declared: `align` is only a preference, and a
+  // preference cannot know that this particular trigger sits 300px from
+  // the left of a page whose sidebar covers the first 264. Twice now the
+  // preset rail has ended up off-screen because a caller inherited the
+  // wrong default, so the panel now places itself.
+  const [offset, setOffset] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const trigger = box.current;
+      const el = panel.current;
+      if (!trigger || !el) return;
+      const t = trigger.getBoundingClientRect();
+      const w = el.offsetWidth;
+      const GUTTER = 8;
+      // Stay inside the scrollable content column when there is one --
+      // clamping to the viewport alone would happily slide the panel
+      // under a fixed sidebar, which is invisible to getBoundingClientRect.
+      const host = trigger.closest("main")?.getBoundingClientRect();
+      const lo = (host ? host.left : 0) + GUTTER;
+      const hi = (host ? host.right : document.documentElement.clientWidth) - GUTTER;
+
+      // Preferred edge first, then the opposite, then clamp.
+      const preferred = align === "left" ? t.left : t.right - w;
+      const flipped = align === "left" ? t.right - w : t.left;
+      let x = preferred;
+      if (preferred < lo || preferred + w > hi) {
+        x = flipped >= lo && flipped + w <= hi ? flipped : Math.max(lo, Math.min(preferred, hi - w));
+      }
+      setOffset(x - t.left);
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [open, align]);
 
   useEffect(() => {
     if (!open) return;
@@ -234,7 +289,7 @@ export function DateRangePicker({
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between gap-2 rounded-md border bg-white px-3 py-2 text-sm"
-        style={{ borderColor: open ? CT.gold : CT.border, color: CT.ink }}
+        style={{ borderColor: open ? ACCENT : CT.border, color: CT.ink }}
       >
         <span className="font-medium">{buttonLabel}</span>
         <span style={{ color: CT.muted }}>▾</span>
@@ -242,8 +297,9 @@ export function DateRangePicker({
 
       {open && (
         <div
-          className="absolute right-0 z-50 mt-1 flex overflow-hidden rounded-xl border bg-white shadow-2xl"
-          style={{ borderColor: CT.border }}
+          ref={panel}
+          className="absolute left-0 z-50 mt-1 flex w-max overflow-hidden rounded-xl border bg-white shadow-2xl"
+          style={{ borderColor: CT.border, transform: `translateX(${offset}px)` }}
         >
           {/* presets */}
           <div className="w-44 shrink-0 border-r py-2" style={{ borderColor: CT.border, backgroundColor: theme.bgMuted }}>
@@ -262,10 +318,10 @@ export function DateRangePicker({
                   }}
                   className="block w-full px-4 py-2.5 text-left text-sm transition-colors"
                   style={{
-                    backgroundColor: active ? CT.goldSoft : "transparent",
-                    color: active ? CT.gold : CT.ink,
+                    backgroundColor: active ? ACCENT_SOFT : "transparent",
+                    color: active ? ACCENT : CT.ink,
                     fontWeight: active ? 600 : 400,
-                    borderLeft: `3px solid ${active ? CT.gold : "transparent"}`,
+                    borderLeft: `3px solid ${active ? ACCENT : "transparent"}`,
                   }}
                 >
                   {p.label}
@@ -313,6 +369,8 @@ export function DateRangePicker({
                     hover={hover}
                     onPick={pick}
                     onHover={setHover}
+                    accentSolid={ACCENT}
+                    accentSoft={ACCENT_SOFT}
                   />
                 </div>
               ))}
@@ -347,7 +405,7 @@ export function DateRangePicker({
                     setOpen(false);
                   }}
                   className="rounded-md px-4 py-1.5 text-sm font-medium text-white"
-                  style={{ backgroundColor: CT.brick }}
+                  style={{ backgroundColor: ACCENT }}
                 >
                   Apply
                 </button>

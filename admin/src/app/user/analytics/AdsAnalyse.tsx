@@ -302,6 +302,46 @@ function Placeholder({ reason }: { reason: string }) {
   );
 }
 
+/**
+ * One de-duplicated-reach figure, with the snapshot date it describes.
+ *
+ * `asOf` is not decoration. The snapshots are fetched per anchor date,
+ * and a custom range can land between two of them — the backend then
+ * answers with the newest snapshot at or before the anchor rather than
+ * refusing. A number that quietly describes 2026-08-31 while the header
+ * says 2026-09-05 is the kind of thing nobody catches, so when the
+ * snapshot trails the window the cell says so on hover and marks itself.
+ */
+function ReachCell({
+  value,
+  asOf,
+  asOfFrom,
+  what,
+  emptyReason = "No reach snapshot covers this window yet — run scripts/fetch_reach_cumulative.py.",
+}: {
+  value: number | null;
+  asOf: string | null;
+  /** Opening end of the span, for a figure that is a difference rather
+   *  than a level. Without it an Incr. Reach of 0 looks like a bug
+   *  instead of "this ad added nobody between these two dates". */
+  asOfFrom?: string | null;
+  what: string;
+  emptyReason?: string;
+}) {
+  if (value == null) {
+    return (
+      <span className="num text-text-tertiary" title={emptyReason}>
+        —
+      </span>
+    );
+  }
+  return (
+    <span className="num" title={`${what}.\nSnapshot: ${asOfFrom ? `${asOfFrom} \u2192 ${asOf ?? "unknown"}` : asOf ?? "unknown"}`}>
+      {fmt(value, { maximumFractionDigits: 0 })}
+    </span>
+  );
+}
+
 function FBadge({ pass, name }: { pass: boolean | null; name: string }) {
   const cls = pass === null ? "u" : pass ? "y" : "n";
   const label = pass === null ? "unknown" : pass ? "passed" : "failed";
@@ -716,6 +756,103 @@ function landingType(url: string | null): { badge: string; cls: string } {
   return { badge: "Other", cls: "lp-other" };
 }
 
+/** Rollup (ad set / campaign) columns. Separate from COLUMNS because
+ *  the grain differs: there is no ad id, no asset, no F1-F4 verdict, and
+ *  reach here is Meta's own per-entity figure rather than anything
+ *  summable from ads.
+ *
+ *  Shopify columns are last-click attribution rolled up to this level --
+ *  the same source the ad level uses. */
+type RollupColDef = {
+  key: string;
+  header: string;
+  group: string;
+  defaultVisible?: boolean;
+  align?: "right";
+  title?: string;
+  render: (r: RollupRow) => React.ReactNode;
+};
+
+const rInt = (n: number | null | undefined) =>
+  n === null || n === undefined ? "—" : Math.round(n).toLocaleString("en-IN");
+const rMoney = (n: number | null | undefined) =>
+  n === null || n === undefined ? "—" : "₹" + Math.round(n).toLocaleString("en-IN");
+const rNum = (n: number | null | undefined, dp = 2) =>
+  n === null || n === undefined ? "—" : n.toFixed(dp);
+
+const ROLLUP_COLUMNS: RollupColDef[] = [
+  { key: "entity_name", header: "Name", group: "Identity", defaultVisible: true,
+    render: (r) => (
+      <span className="block max-w-[26rem] truncate" title={r.entity_name ?? ""}>
+        {r.entity_name ?? r.entity_id}
+      </span>
+    ) },
+  { key: "entity_id", header: "ID", group: "Identity",
+    render: (r) => <span className="num whitespace-nowrap">{r.entity_id}</span> },
+  { key: "account_name", header: "Account", group: "Identity", defaultVisible: true,
+    render: (r) => <>{r.account_name ?? "—"}</> },
+  { key: "ads", header: "Ads", group: "Identity", defaultVisible: true, align: "right",
+    render: (r) => <>{r.ads.toLocaleString("en-IN")}</> },
+
+  { key: "spend", header: "Spend", group: "Meta", defaultVisible: true, align: "right",
+    render: (r) => <>{rMoney(r.spend)}</> },
+  { key: "impressions", header: "Impressions", group: "Meta", defaultVisible: true, align: "right",
+    render: (r) => <>{rInt(r.impressions)}</> },
+  { key: "reach", header: "Reach", group: "Meta", defaultVisible: true, align: "right",
+    title: "Meta-deduplicated — not a sum of ad reach",
+    render: (r) => <>{rInt(r.reach)}</> },
+  { key: "frequency", header: "Freq.", group: "Meta", defaultVisible: true, align: "right",
+    render: (r) => <>{rNum(r.frequency)}</> },
+  { key: "clicks", header: "Clicks", group: "Meta", align: "right",
+    render: (r) => <>{rInt(r.clicks)}</> },
+  { key: "ctr", header: "CTR", group: "Meta", align: "right",
+    render: (r) => <>{r.ctr === null ? "—" : r.ctr.toFixed(2) + "%"}</> },
+  { key: "cpm", header: "CPM", group: "Meta", align: "right",
+    render: (r) => <>{rMoney(r.cpm)}</> },
+  { key: "cpr_1000", header: "₹/1k reach", group: "Meta", defaultVisible: true, align: "right",
+    render: (r) => <>{rMoney(r.cpr_1000)}</> },
+  { key: "purchases", header: "Purch.", group: "Meta", defaultVisible: true, align: "right",
+    render: (r) => <>{rInt(r.purchases)}</> },
+  { key: "conv_value", header: "Conv. value", group: "Meta", align: "right",
+    render: (r) => <>{rMoney(r.conv_value)}</> },
+  { key: "roas", header: "ROAS", group: "Meta", defaultVisible: true, align: "right",
+    render: (r) => <>{rNum(r.roas)}</> },
+  { key: "cost_per_purchase", header: "₹/purchase", group: "Meta", align: "right",
+    render: (r) => <>{rMoney(r.cost_per_purchase)}</> },
+
+  { key: "shopify_orders", header: "Shop. orders", group: "Shopify", defaultVisible: true, align: "right",
+    title: "Shopify orders last-click-attributed to this entity, over the selected dates",
+    render: (r) => <>{!r.shopify_orders ? "—" : r.shopify_orders.toLocaleString("en-IN")}</> },
+  { key: "shopify_revenue", header: "Shop. revenue", group: "Shopify", defaultVisible: true, align: "right",
+    render: (r) => <>{!r.shopify_revenue ? "—" : rMoney(r.shopify_revenue)}</> },
+  { key: "shopify_roas", header: "Shop. ROAS", group: "Shopify", defaultVisible: true, align: "right",
+    title: "Shopify revenue ÷ Meta spend",
+    render: (r) => <>{rNum(r.shopify_roas)}</> },
+  { key: "cost_per_shopify_order", header: "₹/order", group: "Shopify", defaultVisible: true, align: "right",
+    title: "Meta spend ÷ Shopify orders",
+    render: (r) => <>{rMoney(r.cost_per_shopify_order)}</> },
+
+  { key: "window", header: "Window", group: "Timeline", defaultVisible: true, align: "right",
+    title: "The period these Meta figures actually cover — rows refresh independently",
+    render: (r) => (
+      <span className="text-[11px] text-text-tertiary">
+        {r.date_start ?? "—"} → {r.date_stop ?? "—"}
+      </span>
+    ) },
+];
+
+/** Numeric columns of the rollup, for the inspector's rule builder.
+ *  Derived from ROLLUP_COLUMNS so a column added there shows up here
+ *  automatically, minus the ones that are not numbers. */
+const ROLLUP_NUMERIC_FIELDS = ROLLUP_COLUMNS
+  .filter((c) => !["entity_name", "entity_id", "account_name", "window"].includes(c.key))
+  .map((c) => ({ key: c.key, label: c.header }));
+
+const ROLLUP_GROUPS = Array.from(new Set(ROLLUP_COLUMNS.map((c) => c.group)));
+const ROLLUP_DEFAULT_HIDDEN = new Set(
+  ROLLUP_COLUMNS.filter((c) => !c.defaultVisible).map((c) => c.key),
+);
+
 const COLUMNS: ColDef[] = [
   // Identity
   { key: "preview_thumb", header: "Preview", kind: "link", group: "Identity", defaultVisible: true,
@@ -779,18 +916,43 @@ const COLUMNS: ColDef[] = [
   // Delivery
   { key: "impressions", header: "Impressions", kind: "int", group: "Delivery", defaultVisible: true,
     render: (r) => <span className="num">{fmt(r.impressions, { maximumFractionDigits: 0 })}</span> },
+  // UPPER BOUND on a windowed view. This is summed from the daily rows,
+  // and reach de-duplicates per day, so anyone who saw the ad on more
+  // than one day is counted once per day. Measured against Meta over
+  // 2026-09-01..15: the daily sum said 13,995,699 where the true
+  // de-duplicated figure was 5,481,912. Latest Reach / Incr. Reach in
+  // this same group are the de-duplicated ones.
   { key: "reach", header: "Reach", kind: "int", group: "Reach", defaultVisible: true,
-    render: (r) => <span className="num">{fmt(r.reach, { maximumFractionDigits: 0 })}</span> },
-  { key: "reach_weight_pct", header: "Reach Weight %", kind: "pct", group: "Reach",
-    render: () => <Placeholder reason="Needs fleet-total reach normalisation — audit item A/B" /> },
-  { key: "previous_reach", header: "Prev Reach", kind: "int", group: "Reach",
-    render: () => <Placeholder reason="Needs ae_reach_recent daily snapshot table — audit item B" /> },
-  { key: "latest_reach", header: "Latest Reach", kind: "int", group: "Reach",
-    render: () => <Placeholder reason="Needs ae_reach_recent daily snapshot table — audit item B" /> },
-  { key: "incremental_reach", header: "Incr. Reach", kind: "int", group: "Reach",
-    render: () => <Placeholder reason="Needs ae_reach_recent (latest − prev) — audit item B" /> },
-  { key: "cost_per_1000_incremental_reach", header: "Cost / 1k Incr.", kind: "money", group: "Reach",
-    render: () => <Placeholder reason="Needs reach snapshot + windowed spend — audit item B" /> },
+    render: (r) => <span className="num" title="Summed from daily rows, so it counts a person once per day they saw the ad — an upper bound, not unique people. Use Latest Reach / Incr. Reach for de-duplicated figures.">{fmt(r.reach, { maximumFractionDigits: 0 })}</span> },
+  // The four snapshot columns below read public.ad_reach_cumulative,
+  // filled by scripts/fetch_reach_cumulative.py. They are the only reach
+  // figures in this table Meta de-duplicated: the `Reach` column above
+  // is a sum of daily rows, which counts a person once per day they saw
+  // the ad (measured at 2.55x the truth over a 15-day window).
+  //
+  // Each carries the snapshot date it actually came from, because a
+  // sparse backfill can leave an anchor trailing the requested window
+  // and a figure that silently describes a different day is worse than
+  // no figure at all.
+  { key: "reach_weight_pct", header: "Reach Weight %", kind: "pct", group: "Reach", defaultVisible: true,
+    render: (r) => <span className="num" title="Share of the reach of every ad under the current filters.">{r.reach_weight_pct == null ? "—" : `${pct(r.reach_weight_pct)}%`}</span> },
+  { key: "previous_reach", header: "Prev Reach", kind: "int", group: "Reach", defaultVisible: true,
+    render: (r) => <ReachCell value={r.previous_reach} asOf={r.reach_prev_as_of}
+      what="Cumulative unique people reached from the reach epoch up to the day before this window"
+      emptyReason="Needs a bounded date range: an unbounded window (Lifetime) has no 'before' to compare against. Also blank when no snapshot predates this ad." /> },
+  { key: "latest_reach", header: "Latest Reach", kind: "int", group: "Reach", defaultVisible: true,
+    render: (r) => <ReachCell value={r.latest_reach} asOf={r.reach_latest_as_of}
+      what="Cumulative unique people reached from the reach epoch up to the end of this window" /> },
+  { key: "incremental_reach", header: "Incr. Reach", kind: "int", group: "Reach", defaultVisible: true,
+    render: (r) => <ReachCell value={r.incremental_reach} asOf={r.reach_latest_as_of} asOfFrom={r.reach_prev_as_of}
+      what="Latest − Prev: people reached during this window who had never been reached before it"
+      emptyReason="Needs a bounded date range: an unbounded window (Lifetime) has no 'before' to compare against. Also blank when no snapshot predates this ad." /> },
+  { key: "cost_per_1000_incremental_reach", header: "Cost / 1k Incr.", kind: "money", group: "Reach", defaultVisible: true,
+    render: (r) => <span className="num" title={
+      r.cost_per_1000_incremental_reach == null
+        ? "Needs windowed spend beside a non-zero incremental reach. Blank on the 'created' / 'first seen' date modes, where spend is lifetime and dividing it by a windowed reach would mix two periods."
+        : "Windowed spend per 1,000 genuinely new people reached."
+    }>{r.cost_per_1000_incremental_reach == null ? "—" : `₹${num2(r.cost_per_1000_incremental_reach)}`}</span> },
   { key: "frequency", header: "Freq", kind: "num", group: "Delivery", defaultVisible: true,
     render: (r) => <span className="num">{num2(r.frequency)}</span> },
   { key: "spend", header: "Spend", kind: "money", group: "Delivery", defaultVisible: true,
@@ -906,6 +1068,16 @@ const COLUMNS: ColDef[] = [
 const ALL_KEYS = COLUMNS.map((c) => c.key);
 const DEFAULT_VISIBLE_KEYS = new Set(COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
 const HIDDEN_STORAGE_KEY = "aeHiddenCols_v1";
+/** Columns that shipped hidden-by-default and have since been promoted.
+ *  Only consulted when migrating the legacy bare-array storage format,
+ *  which cannot distinguish "the user hid this" from "this did not
+ *  exist yet". The five de-duplicated reach columns are here because
+ *  they were placeholders until 2026-09-21 and were therefore written
+ *  into every existing user's hidden list. */
+const NEWLY_DEFAULT_VISIBLE = [
+  "reach_weight_pct", "previous_reach", "latest_reach",
+  "incremental_reach", "cost_per_1000_incremental_reach",
+];
 const LEGACY_COLUMN_KEYS: Record<string, string> = {
   date_target_imp_achieved: "impressions_50k_date",
   days_to_target_f1: "days_to_50k",
@@ -933,11 +1105,38 @@ export function AdsAnalyse() {
 
   // ── filters ──────────────────────────────────────────────────
   const [levelToggle, setLevelToggle] = useState<"ad" | "adset" | "campaign">("ad");
+  // Rollup-only controls. The rule builder and the ad search do not
+  // apply to entity rows, so these are the two the endpoint actually
+  // honours: a name substring and an ORDER BY.
+  const [rollupSearch, setRollupSearch] = useState("");
+  const debouncedRollupSearch = useDebouncedValue(rollupSearch.trim());
+  const [rollupSort, setRollupSort] = useState("spend");
+  const [rollupHidden, setRollupHidden] = useState<Set<string>>(new Set(ROLLUP_DEFAULT_HIDDEN));
+  const [showRollupCols, setShowRollupCols] = useState(false);
+  const [showRollupRules, setShowRollupRules] = useState(false);
+  const rollupCols = ROLLUP_COLUMNS.filter((c) => !rollupHidden.has(c.key));
   // Ad Sets / Campaigns read adset_insights / campaign_insights via the
   // rollup endpoint. Reach there is Meta's own per-entity figure -- it
   // is NOT summable from the ad rows, which is exactly why this needs a
   // separate call rather than a client-side group-by.
   const [rollupRows, setRollupRows] = useState<RollupRow[]>([]);
+  const [rollupNumeric, setRollupNumeric] = useState<NumericFilter[]>([]);
+  // Applied client-side over the fetched page, exactly as the ad level
+  // does: the rollup endpoint has no numeric-rule parameter, and the
+  // alternative -- pretending to filter server-side -- would quietly
+  // drop rows beyond the 500 fetched.
+  const rollupFiltered = useMemo(
+    () =>
+      rollupRows.filter((r) =>
+        rollupNumeric.every((nf) => {
+          const v = (r as unknown as Record<string, number | null>)[nf.field];
+          if (v === null || v === undefined) return false;
+          return applyOperator(v, nf.op, nf.value);
+        }),
+      ),
+    [rollupRows, rollupNumeric],
+  );
+
   const [rollupTotal, setRollupTotal] = useState(0);
   const [rollupLoading, setRollupLoading] = useState(false);
   const [rollupError, setRollupError] = useState<string | null>(null);
@@ -978,24 +1177,70 @@ export function AdsAnalyse() {
   ), [thresholds]);
 
   // ── column picker ────────────────────────────────────────────
+  //
+  // The stored value used to be a bare array of hidden keys, which made
+  // a saved preference outrank every later change to the defaults: a
+  // column added after the user last opened this picker was absent from
+  // that array's `known` context, so it inherited "hidden" and could
+  // never appear on its own. Five de-duplicated reach columns shipped
+  // straight into that hole -- present in the API response, rendered by
+  // the table, and invisible.
+  //
+  // So the stored shape now carries which keys existed when it was
+  // written. A key the saved state never saw is not a decision the user
+  // made, and falls back to its default. The legacy array still loads;
+  // it simply has no `known` list, so every column is treated as new
+  // and the current defaults win once.
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(() => {
-    if (typeof window === "undefined") return new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k)));
+    const fallback = () => new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k)));
+    if (typeof window === "undefined") return fallback();
     try {
       const raw = window.localStorage.getItem(HIDDEN_STORAGE_KEY);
-      if (raw) {
-        const stored: unknown = JSON.parse(raw);
-        if (Array.isArray(stored) && stored.every((key) => typeof key === "string")) {
-          return new Set(stored.map((key) => LEGACY_COLUMN_KEYS[key] ?? key));
-        }
+      if (!raw) return fallback();
+      const stored: unknown = JSON.parse(raw);
+
+      const isKeyList = (v: unknown): v is string[] =>
+        Array.isArray(v) && v.every((k) => typeof k === "string");
+      const rename = (k: string) => LEGACY_COLUMN_KEYS[k] ?? k;
+
+      // Legacy: a bare array of hidden keys, with no record of what it
+      // knew about. Trust it for everything -- wiping a user's column
+      // choices to surface new ones would be a worse trade -- and apply
+      // a one-off un-hide for the columns that shipped hidden and have
+      // since become default-visible. Anything added from here on is
+      // handled by `known` below and needs no such list.
+      if (isKeyList(stored)) {
+        const hidden = new Set(stored.map(rename));
+        for (const key of NEWLY_DEFAULT_VISIBLE) hidden.delete(key);
+        return hidden;
       }
-    } catch {}
-    return new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k)));
+
+      const hiddenRaw = (stored as { hidden?: unknown })?.hidden;
+      if (!isKeyList(hiddenRaw)) return fallback();
+
+      const knownRaw = (stored as { known?: unknown }).known;
+      const known = new Set((isKeyList(knownRaw) ? knownRaw : []).map(rename));
+      const hidden = new Set(hiddenRaw.map(rename));
+
+      for (const key of ALL_KEYS) {
+        if (known.has(key)) continue;
+        // Never seen by the saved state -> honour the column's default.
+        if (DEFAULT_VISIBLE_KEYS.has(key)) hidden.delete(key);
+        else hidden.add(key);
+      }
+      return hidden;
+    } catch {
+      return fallback();
+    }
   });
   const [colPickerOpen, setColPickerOpen] = useState(false);
   const [colSearch, setColSearch] = useState("");
   useEffect(() => {
     try {
-      window.localStorage.setItem(HIDDEN_STORAGE_KEY, JSON.stringify([...hiddenCols]));
+      window.localStorage.setItem(
+        HIDDEN_STORAGE_KEY,
+        JSON.stringify({ hidden: [...hiddenCols], known: ALL_KEYS }),
+      );
     } catch {}
   }, [hiddenCols]);
   const visibleCols = COLUMNS.filter((c) => !hiddenCols.has(c.key));
@@ -1022,8 +1267,13 @@ export function AdsAnalyse() {
     fetchAdsAnalyseRollup({
       level: levelToggle,
       account_name: account || undefined,
-      search: search || undefined,
+      search: debouncedRollupSearch || undefined,
+      sort: rollupSort,
       limit: 500,
+      // The Shopify columns follow the section's own date range, so the
+      // rollup answers the same question the ad level does.
+      from_date: fromDate || undefined,
+      to_date: toDate || undefined,
     })
       .then((res) => {
         if (cancelled) return;
@@ -1037,7 +1287,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, search, rollupRetryCount]);
+  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, fromDate, toDate]);
 
   const filters = useMemo(
     () => ({
@@ -1243,7 +1493,10 @@ export function AdsAnalyse() {
           they clicked. The row count on the right replaces it as a
           more useful piece of context. */}
       <div className="flex items-baseline gap-3">
-        <h2 className="text-base font-semibold text-text-primary">Creative Testing</h2>
+        {/* Was "Creative Testing" -- a leftover from the CTD port that
+            became actively wrong once Creative Testing existed as its
+            own tab. */}
+        <h2 className="text-base font-semibold text-text-primary">Ads Analyse</h2>
         <div className="inline-flex rounded-md border border-border-primary bg-white shadow-sm">
           {(["ad", "adset", "campaign"] as const).map((lv) => (
             <button
@@ -1276,101 +1529,6 @@ export function AdsAnalyse() {
         </span>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════════
-          Ad Set / Campaign rollup. Replaces the ad table entirely when a
-          level is picked -- the columns differ (reach and frequency are
-          Meta's own per-entity figures, not summable from ads) and the
-          F1-F4 verdicts are an ad-level concept that does not apply here.
-         ═══════════════════════════════════════════════════════════ */}
-      {levelToggle !== "ad" && (
-        <div className="space-y-2">
-          {rollupError && (
-            <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-              <span>{rollupError}</span>
-              <button type="button" onClick={() => setRollupRetryCount((count) => count + 1)} disabled={rollupLoading}
-                className="shrink-0 rounded border border-current px-3 py-1 font-medium disabled:opacity-40">
-                Retry
-              </button>
-            </div>
-          )}
-          <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
-            <table className="w-full min-w-[980px] text-sm">
-              <thead className="bg-bg-muted text-left text-[11px] uppercase tracking-wide text-text-tertiary">
-                <tr>
-                  <th className="px-3 py-2">{levelToggle === "adset" ? "Ad set" : "Campaign"}</th>
-                  <th className="px-3 py-2">Account</th>
-                  <th className="px-3 py-2 text-right">Ads</th>
-                  <th className="px-3 py-2 text-right">Spend</th>
-                  <th className="px-3 py-2 text-right">Impressions</th>
-                  <th className="px-3 py-2 text-right" title="Meta-deduplicated — not a sum of ad reach">
-                    Reach
-                  </th>
-                  <th className="px-3 py-2 text-right">Freq.</th>
-                  <th className="px-3 py-2 text-right">₹/1k reach</th>
-                  <th className="px-3 py-2 text-right">Purch.</th>
-                  <th className="px-3 py-2 text-right">ROAS</th>
-                  <th className="px-3 py-2 text-right">Window</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rollupLoading && (
-                  <tr>
-                    <td colSpan={11} className="px-3 py-6 text-center text-text-tertiary">
-                      Loading…
-                    </td>
-                  </tr>
-                )}
-                {!rollupLoading && rollupRows.length === 0 && (
-                  <tr>
-                    <td colSpan={11} className="px-3 py-6 text-center text-text-tertiary">
-                      No {levelToggle === "adset" ? "ad sets" : "campaigns"} found.
-                    </td>
-                  </tr>
-                )}
-                {!rollupLoading &&
-                  rollupRows.map((r) => (
-                    <tr key={r.entity_id} className="border-t border-border-primary hover:bg-bg-muted">
-                      <td className="px-3 py-2">{r.entity_name ?? r.entity_id}</td>
-                      <td className="px-3 py-2 text-text-tertiary">{r.account_name ?? "—"}</td>
-                      <td className="px-3 py-2 text-right">{r.ads.toLocaleString("en-IN")}</td>
-                      <td className="px-3 py-2 text-right">
-                        {r.spend === null ? "—" : "₹" + Math.round(r.spend).toLocaleString("en-IN")}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {r.impressions === null ? "—" : Math.round(r.impressions).toLocaleString("en-IN")}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {r.reach === null ? "—" : Math.round(r.reach).toLocaleString("en-IN")}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {r.frequency === null ? "—" : r.frequency.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {r.cpr_1000 === null ? "—" : "₹" + Math.round(r.cpr_1000).toLocaleString("en-IN")}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {r.purchases === null ? "—" : Math.round(r.purchases).toLocaleString("en-IN")}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {r.roas === null ? "—" : r.roas.toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right text-[11px] text-text-tertiary">
-                        {r.date_start ?? "—"} → {r.date_stop ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-[11px] leading-relaxed text-text-tertiary">
-            Reach and frequency are Meta&rsquo;s own per-{levelToggle} figures, not a sum of the
-            ads underneath — Meta dedupes a person per entity, so adding ad-level reach counts the
-            same person once per ad they saw. Each row&rsquo;s <b>Window</b> shows the period its
-            figures actually cover; rows are refreshed independently, so they are not all the same
-            period.
-          </p>
-        </div>
-      )}
 
       {/* ═══════════════════════════════════════════════════════════
           Filter cards — ACCOUNT / GROUP BY / CATEGORY / AD STATUS /
@@ -1400,6 +1558,11 @@ export function AdsAnalyse() {
           </CardSelect>
         </FilterCard>
 
+        {/* Ad-column filters. The rollup endpoint takes account,
+            search and a date window only, so on the Ad set / Campaign
+            levels these would be controls that visibly do nothing. */}
+        {levelToggle === "ad" && (
+          <>
         <FilterCard label="Category">
           <CardSelect
             value={categoryFilter}
@@ -1431,11 +1594,18 @@ export function AdsAnalyse() {
             <option value="first_seen">First Seen</option>
           </CardSelect>
         </FilterCard>
+          </>
+        )}
 
         <FilterCard label="Date range">
           <DateRangePicker
             value={{ from: fromDate, to: toDate }}
             preset={datePreset}
+            // Opens rightwards. This card is third of six, so hanging the
+            // ~700px panel off its RIGHT edge pushed the preset rail off
+            // the left of the viewport entirely -- the calendar showed
+            // but Today / Last 7 Days / Lifetime were unreachable.
+            align="left"
             onApply={(r, pk) => {
               setFromDate(r.from);
               setToDate(r.to);
@@ -1443,10 +1613,214 @@ export function AdsAnalyse() {
             }}
           />
         </FilterCard>
+
+        {/* Rollup-only, in the SAME grid as the shared cards above so
+            all five filters read as one row rather than a second block
+            floating under the first. */}
+        {levelToggle !== "ad" && (
+          <>
+            <FilterCard label={levelToggle === "adset" ? "Ad set name" : "Campaign name"}>
+              <input
+                value={rollupSearch}
+                onChange={(e) => setRollupSearch(e.target.value)}
+                placeholder="Contains…"
+                className="w-full rounded-md border border-border-primary px-2 py-1 text-sm"
+              />
+            </FilterCard>
+            <FilterCard label="Sort by">
+              <CardSelect value={rollupSort} onChange={setRollupSort}>
+                <option value="spend">Spend</option>
+                <option value="impressions">Impressions</option>
+                <option value="reach">Reach</option>
+                <option value="roas">Meta ROAS</option>
+                <option value="ads">Ads</option>
+                <option value="shopify_orders">Shopify orders</option>
+                <option value="shopify_revenue">Shopify revenue</option>
+                <option value="shopify_roas">Shopify ROAS</option>
+              </CardSelect>
+            </FilterCard>
+          </>
+        )}
       </div>
 
-      <MultiFilter applied={multiFilter} onApply={setMultiFilter} />
+      {/* ═══════════════════════════════════════════════════════════
+          Ad Set / Campaign rollup. Replaces the ad table entirely when a
+          level is picked -- the columns differ (reach and frequency are
+          Meta's own per-entity figures, not summable from ads) and the
+          F1-F4 verdicts are an ad-level concept that does not apply here.
+         ═══════════════════════════════════════════════════════════ */}
+      {levelToggle !== "ad" && (
+        <div className="space-y-2">
+          {rollupError && (
+            <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+              <span>{rollupError}</span>
+              <button type="button" onClick={() => setRollupRetryCount((count) => count + 1)} disabled={rollupLoading}
+                className="shrink-0 rounded border border-current px-3 py-1 font-medium disabled:opacity-40">
+                Retry
+              </button>
+            </div>
+          )}
+          {/* Inspector controls, same shape as the ad level's. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setShowRollupCols((v) => !v)}
+              className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+            >
+              ▤ Columns ({rollupCols.length}/{ROLLUP_COLUMNS.length})
+            </button>
+            {rollupHidden.size !== ROLLUP_DEFAULT_HIDDEN.size && (
+              <button
+                onClick={() => setRollupHidden(new Set(ROLLUP_DEFAULT_HIDDEN))}
+                className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+              >
+                Reset to default
+              </button>
+            )}
+            <button
+              onClick={() => setShowRollupRules((v) => !v)}
+              className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+            >
+              ⚖ Metric rules{rollupNumeric.length ? ` (${rollupNumeric.length})` : ""}
+            </button>
+            {rollupNumeric.length > 0 && (
+              <span className="text-[11px] text-text-tertiary">
+                {rollupFiltered.length.toLocaleString("en-IN")} of{" "}
+                {rollupRows.length.toLocaleString("en-IN")} rows match
+              </span>
+            )}
+          </div>
 
+          {showRollupRules && (
+            <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
+              <div className="mb-2 text-[11px] text-text-tertiary">
+                Rules apply to the {rollupRows.length.toLocaleString("en-IN")} rows fetched for
+                this level — not to the whole table server-side.
+              </div>
+              <NumericFiltersPanel
+                filters={rollupNumeric}
+                onChange={setRollupNumeric}
+                fields={ROLLUP_NUMERIC_FIELDS}
+              />
+            </div>
+          )}
+
+          {showRollupCols && (
+            <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
+              <div className="mb-2 flex items-center gap-2">
+                <button
+                  onClick={() => setRollupHidden(new Set())}
+                  className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
+                >
+                  Show all
+                </button>
+                <button
+                  onClick={() => setRollupHidden(new Set(ROLLUP_COLUMNS.map((c) => c.key)))}
+                  className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
+                >
+                  Hide all
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
+                {ROLLUP_GROUPS.map((grp) => (
+                  <div key={grp}>
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                      {grp}
+                    </div>
+                    {ROLLUP_COLUMNS.filter((c) => c.group === grp).map((c) => (
+                      <label key={c.key} className="flex items-center gap-1.5 py-0.5 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={!rollupHidden.has(c.key)}
+                          onChange={() =>
+                            setRollupHidden((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(c.key)) next.delete(c.key);
+                              else next.add(c.key);
+                              return next;
+                            })
+                          }
+                        />
+                        <span>{c.header}</span>
+                      </label>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
+            <table className="ae-table w-full min-w-full text-sm">
+              <thead className="bg-bg-muted text-left text-[11px] uppercase tracking-wide text-text-tertiary">
+                <tr>
+                  {rollupCols.map((c) => (
+                    <th
+                      key={c.key}
+                      title={c.title}
+                      className={"px-3 py-2 " + (c.align === "right" ? "text-right" : "")}
+                    >
+                      {c.key === "entity_name"
+                        ? levelToggle === "adset" ? "Ad set" : "Campaign"
+                        : c.header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rollupLoading && (
+                  <tr>
+                    <td colSpan={rollupCols.length} className="px-3 py-6 text-center text-text-tertiary">
+                      Loading…
+                    </td>
+                  </tr>
+                )}
+                {!rollupLoading && rollupFiltered.length === 0 && (
+                  <tr>
+                    <td colSpan={rollupCols.length} className="px-3 py-6 text-center text-text-tertiary">
+                      No {levelToggle === "adset" ? "ad sets" : "campaigns"} found.
+                    </td>
+                  </tr>
+                )}
+                {!rollupLoading &&
+                  rollupFiltered.map((r) => (
+                    <tr key={r.entity_id} className="border-t border-border-soft hover:bg-bg-surface">
+                      {rollupCols.map((c) => (
+                        <td
+                          key={c.key}
+                          className={"px-3 py-2 " + (c.align === "right" ? "text-right" : "")}
+                        >
+                          {c.render(r)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] leading-relaxed text-text-tertiary">
+            Reach and frequency are Meta&rsquo;s own per-{levelToggle} figures, not a sum of the
+            ads underneath — Meta dedupes a person per entity, so adding ad-level reach counts the
+            same person once per ad they saw. Each row&rsquo;s <b>Window</b> shows the period its
+            figures actually cover; rows are refreshed independently, so they are not all the same
+            period.
+          </p>
+        </div>
+      )}
+
+      {/* The rule builder works over AD columns and the rollup endpoint
+          does not take it, so it is ad-level only. */}
+      {levelToggle === "ad" && (
+        <MultiFilter applied={multiFilter} onApply={setMultiFilter} />
+      )}
+
+      {/* Everything below is AD-GRAIN: the thresholds, the verdict
+          tiles, the launch chart and the main table all describe
+          individual ads. On the Ad set / Campaign levels they would be
+          answering a different question than the table above them, so
+          they are not rendered at all rather than left showing ad
+          numbers under an ad-set heading. */}
+      {levelToggle === "ad" && (
+        <>
       {/* F1–F4 thresholds, same card treatment. */}
       <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-5">
         <FilterCard label="F1 — Impressions">
@@ -1682,6 +2056,9 @@ export function AdsAnalyse() {
         </div>
       )}
 
+        </>
+      )}
+
       {/* ═══════════════════════════════════════════════════════════
           Footer — pagination + cascade + diagnostics
          ═══════════════════════════════════════════════════════════ */}
@@ -1875,7 +2252,19 @@ function applyOperator(v: number, op: NumericOp, target: number): boolean {
   }
 }
 
-function NumericFiltersPanel({ filters, onChange }: { filters: NumericFilter[]; onChange: (f: NumericFilter[]) => void }) {
+function NumericFiltersPanel({
+  filters,
+  onChange,
+  fields = NUMERIC_FIELDS,
+}: {
+  filters: NumericFilter[];
+  onChange: (f: NumericFilter[]) => void;
+  /** Which columns the rules can target. Defaults to the ad-grain list;
+   *  the rollup passes its own, since half the ad fields do not exist at
+   *  entity level and a rule on a missing field silently matches
+   *  nothing. */
+  fields?: { key: string; label: string }[];
+}) {
   function update(idx: number, patch: Partial<NumericFilter>) {
     onChange(filters.map((f, i) => (i === idx ? { ...f, ...patch } : f)));
   }
@@ -1884,7 +2273,7 @@ function NumericFiltersPanel({ filters, onChange }: { filters: NumericFilter[]; 
       {filters.map((nf, idx) => (
         <div key={idx} className="flex items-center gap-1 rounded-md border border-border-primary p-1.5">
           <select value={nf.field} onChange={(e) => update(idx, { field: e.target.value })} className="rounded border px-1 py-0.5 text-xs">
-            {NUMERIC_FIELDS.map((f) => (
+            {fields.map((f) => (
               <option key={f.key} value={f.key}>{f.label}</option>
             ))}
           </select>
@@ -1905,7 +2294,12 @@ function NumericFiltersPanel({ filters, onChange }: { filters: NumericFilter[]; 
         </div>
       ))}
       <button
-        onClick={() => onChange([...filters, { field: "spend", op: "gte", value: 1000 }])}
+        onClick={() =>
+          // Seed with a field the CALLER offers. "spend" exists in both
+          // lists today, but a hardcoded default would produce a silent
+          // no-op rule the moment a caller's list drops it.
+          onChange([...filters, { field: fields[0]?.key ?? "spend", op: "gte", value: 1000 }])
+        }
         className="rounded-md border border-dashed border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
       >
         + Add filter rule

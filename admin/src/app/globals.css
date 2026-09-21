@@ -349,6 +349,10 @@ body {
 .ai-tier-ad_name_match  { background: #d1fae5; color: #065f46; }
 .ai-tier-adset_scoped   { background: #dbeafe; color: #1e40af; }
 .ai-tier-adset_only     { background: #fef3c7; color: #92400e; }
+/* Edit Name Match: violet, deliberately distinct from the two blue
+   adset tiers -- it IS the adset branch, but resolved on a name the
+   ad no longer has, which is worth reading at a glance. */
+.ai-tier-edit_name_match{ background: #ede9fe; color: #5b21b6; }
 .ai-tier-campaign_only  { background: #ffedd5; color: #9a3412; }
 .ai-tier-unmatched      { background: #e2e8f0; color: #475569; }
 .ai-tier-none           { background: #f1f5f9; color: #94a3b8; }

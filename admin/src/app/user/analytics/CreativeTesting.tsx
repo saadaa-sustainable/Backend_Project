@@ -52,6 +52,7 @@ import { AssetAdsModal } from "./AssetAdsModal";
 import { AssetPreviewCell } from "./AssetPreview";
 import { AdPreviewLinks, DestinationLink } from "./AdLinks";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
+import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
 
 /** CTD's cream/gold palette. Scoped here rather than pushed into the
  *  app's design tokens, which are blue-based for every other tab. */
@@ -234,13 +235,6 @@ const MEDIA_META: Record<MediaKey, { icon: string; label: string; cls: string }>
   influencer: { icon: "👤", label: "Influencer", cls: "bg-rose-100 text-rose-800 border-rose-200" },
 };
 
-const DATE_PRESETS: { key: string; label: string; days: number | null }[] = [
-  { key: "7", label: "Last 7 days", days: 7 },
-  { key: "30", label: "Last 30 days", days: 30 },
-  { key: "90", label: "Last 90 days", days: 90 },
-  { key: "180", label: "Last 6 months", days: 180 },
-  { key: "365", label: "Last 12 months", days: 365 },
-];
 
 // ── CTD-verbatim classifiers ────────────────────────────────────────
 type ProductFocusKey = "Home" | "Category" | "Collection" | "Product" | "Others";
@@ -626,12 +620,6 @@ function detectCtype(row: CreativeTestingRow): CtypeKey {
 function iso(d: Date) {
   return d.toISOString().slice(0, 10);
 }
-function presetRange(days: number) {
-  const to = new Date();
-  const from = new Date();
-  from.setDate(from.getDate() - days + 1);
-  return { from: iso(from), to: iso(to) };
-}
 function fmtMoney(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
   return "₹" + Math.round(n).toLocaleString("en-IN");
@@ -664,8 +652,11 @@ export function CreativeTesting() {
   const [defsOpen, setDefsOpen] = useState(false);
   const [openAsset, setOpenAsset] = useState<string | null>(null);
 
-  const [preset, setPreset] = useState("30");
-  const initial = presetRange(30);
+  const [preset, setPreset] = useState("last30");
+  // resolvePreset, not a local helper: the picker owns its preset keys
+  // ("last30", not "30"), and seeding state with a key it does not
+  // recognise leaves its label blank on first paint.
+  const initial = resolvePreset("last30");
   const [fromDate, setFromDate] = useState(initial.from);
   const [toDate, setToDate] = useState(initial.to);
   const [kindTab, setKindTab] = useState<KindTab>("all");
@@ -679,17 +670,6 @@ export function CreativeTesting() {
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim());
   const [page, setPage] = useState(0);
-
-  function applyPreset(key: string) {
-    setPreset(key);
-    const p = DATE_PRESETS.find((x) => x.key === key);
-    if (p?.days) {
-      const r = presetRange(p.days);
-      setFromDate(r.from);
-      setToDate(r.to);
-    }
-    setPage(0);
-  }
 
   const filters = useMemo(
     () => ({
@@ -799,37 +779,32 @@ export function CreativeTesting() {
 
       {/* ── filters ───────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-        <select
-          value={preset}
-          onChange={(e) => applyPreset(e.target.value)}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          {DATE_PRESETS.map((p) => (
-            <option key={p.key} value={p.key}>
-              {p.label}
-            </option>
-          ))}
-          <option value="custom">Custom…</option>
-        </select>
-        <input
-          type="date"
-          value={fromDate}
-          onChange={(e) => {
-            setFromDate(e.target.value);
-            setPreset("custom");
-          }}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        />
-        <span className="text-xs text-text-tertiary">to</span>
-        <input
-          type="date"
-          value={toDate}
-          onChange={(e) => {
-            setToDate(e.target.value);
-            setPreset("custom");
-          }}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        />
+        {/* The same dual-month picker Ads Analyse uses, rather than a
+            preset dropdown beside two bare date inputs. It carries its
+            own presets and applies from/to in one commit, so changing a
+            range is one fetch instead of one per input. */}
+        <div className="relative w-64">
+          <DateRangePicker
+            value={{ from: fromDate, to: toDate }}
+            preset={preset}
+            // Opens leftwards: this trigger sits at the left edge of the
+            // filter bar and the panel is ~500px wide, so hanging it off
+            // the right edge put the first month off-screen.
+            align="left"
+            // The section's own gold, not the app token -- which is named
+            // accentYellow but is #3B6BF5, a blue nothing else here uses.
+            accent={{ solid: CT.goldFill, soft: "#FBF3DF" }}
+            onApply={(r, pk) => {
+              setFromDate(r.from);
+              setToDate(r.to);
+              setPreset(pk);
+              // The old preset dropdown did this; a new range is a new
+              // result set, so staying on page 5 shows page 5 of
+              // something else.
+              setPage(0);
+            }}
+          />
+        </div>
         <select
           value={media}
           onChange={(e) => setMedia(e.target.value as MediaKey | "")}
