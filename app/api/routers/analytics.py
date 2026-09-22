@@ -263,6 +263,31 @@ _EXTERNAL_DAILY = (
     "GROUP BY ad_id"
 )
 
+# Shopify orders/revenue for a window, from THIS project's own
+# attribution, keyed on the order's own date.
+#
+# `ad_daily_external` is supposed to carry these, and on an install
+# where its mirror is fully synced it does. Here it does not: measured
+# 2026-09-22, ad 120233708339770431 had 340 daily rows spanning
+# 2025-10-04..2026-09-20 with shopify_orders = 0 on every one, while
+# shopify_order_attribution held 2,919 real orders worth 31.5L for the
+# same ad. The windowed overlay took the mirror's zero and overwrote a
+# correct figure with it -- an ad showing 49L of Meta conversion value
+# beside "0 Shopify orders".
+#
+# A zero from a source that carries no Shopify data at all is not
+# evidence of no sales, which is the same distinction the overlay
+# already draws between NULL and 0 further down. This gives it a second
+# opinion to check against.
+_ATTRIBUTION_DAILY = (
+    "SELECT matched_ad_id, COUNT(*), COALESCE(SUM(total_price), 0) "
+    "FROM public.shopify_order_attribution "
+    "WHERE matched_ad_id = ANY(:ad_ids) "
+    "  AND created_at >= CAST(:from_str AS date) "
+    "  AND created_at <  (CAST(:to_str AS date) + 1) "
+    "GROUP BY matched_ad_id"
+)
+
 # Fallback daily grain for an install with no source configured: this
 # project's own bronze insights. Carries spend / impressions / reach and
 # nothing else, and UNION ALLs two bronze tables that overlap, so an
@@ -1204,6 +1229,18 @@ async def get_ads_analyse(
             "from_str": from_date,
             "to_str": to_date,
         })).all()
+        # Second opinion on the Shopify pair, from our own attribution.
+        # See _ATTRIBUTION_DAILY: the mirror's Shopify columns can be
+        # uniformly zero on an install whose sync never ran, and a zero
+        # there is indistinguishable from "sold nothing" once it lands
+        # on the row.
+        attr_rows = (await session.execute(text(_ATTRIBUTION_DAILY), {
+            "ad_ids": ad_ids,
+            "from_str": from_date,
+            "to_str": to_date,
+        })).all()
+        attr_map = {aid: (int(n or 0), float(rev or 0)) for aid, n, rev in attr_rows}
+
         for (aid, spend, impr, reach, conv, purch, clicks,
              ncp, ftewv, s_orders, s_sales) in daily_rows:
             windowed_map[aid] = {
@@ -1223,6 +1260,33 @@ async def get_ads_analyse(
                 "shopify_orders": None if s_orders is None else float(s_orders),
                 "shopify_revenue": None if s_sales is None else float(s_sales),
             }
+
+        # Our attribution wins outright for the Shopify pair.
+        #
+        # An earlier version of this only filled NULLs and zeros, on the
+        # reasoning that a populated mirror had better coverage. That is
+        # true of the LIFETIME mirror (ad_metrics_external) and false of
+        # this DAILY one. Measured over 2026-01-01..09-22:
+        #
+        #   ad_daily_external      56,550 orders   6.17 Cr   1,142 ads
+        #   this project           183,150 orders  22.39 Cr
+        #   all Meta-sourced       193,345 orders  23.61 Cr
+        #
+        # The daily mirror carries 29% of Meta-sourced orders against
+        # our 95%, so preferring it understated Shopify revenue by ~9x
+        # on affected ads -- ad 120215866514990422 read 425 orders and
+        # "-92% Meta vs Shop" against a true 3,834, which looks like an
+        # ad that cannot convert rather than a column reading the wrong
+        # table.
+        #
+        # Our figure is also the only one that survives the obvious
+        # sanity check: Meta over-reports, so Shopify orders must come in
+        # BELOW Meta's purchase count. Ours does (3,834 < 4,817). The
+        # lifetime mirror does not (8,494 > 4,817), on 274 ads.
+        for aid, (n_orders, revenue) in attr_map.items():
+            w = windowed_map.setdefault(aid, {})
+            w["shopify_orders"] = float(n_orders)
+            w["shopify_revenue"] = revenue
 
         for r in rows:
             w = windowed_map.get(r.ad_id) or {}
@@ -1833,7 +1897,7 @@ async def get_last_click_utm(
     ),
     only_matched: bool = Query(default=False, description="Only rows where has_match=true."),
     only_unmatched: bool = Query(default=False, description="Only rows where has_match=false."),
-    search: str | None = Query(default=None, description="Matches order name, case-insensitive substring."),
+    search: str | None = Query(default=None, description="Case-insensitive substring over order name, utm_content, utm_term and matched ad name; exact match on matched_ad_id."),
     from_date: date | None = Query(default=None, description="Only orders with created_at >= this date."),
     to_date: date | None = Query(default=None, description="Only orders with created_at <= this date (inclusive)."),
     sort: Literal["created_at", "total_price", "customer_num_orders"] = Query(default="created_at"),
@@ -1969,8 +2033,31 @@ async def get_last_click_utm(
         where_clauses.extend(sub_clauses)
         params.update(sub_params)
     if search:
-        where_clauses.append("soa.name ILIKE :search")
+        # Order name OR the identifiers the page puts on screen.
+        #
+        # This matched `soa.name` alone, so pasting a utm_content -- the
+        # exact value the "Adset matched · ad name failed" panel above
+        # displays, and the natural thing to reach for when chasing a
+        # mismatch -- returned nothing at all. The value was in the
+        # table; the box simply was not looking at that column.
+        #
+        # An empty result from a search box reads as "no such order",
+        # which is a different and much more alarming claim than "I only
+        # search names". utm_term and the matched ad name are included
+        # for the same reason: every one of them is rendered in this
+        # table, so every one of them is something a reader will paste
+        # back in.
+        where_clauses.append(
+            "(soa.name ILIKE :search"
+            " OR soa.utm_content ILIKE :search"
+            " OR soa.utm_term ILIKE :search"
+            " OR soa.matched_ad_name ILIKE :search"
+            " OR soa.matched_ad_id = :search_exact)"
+        )
         params["search"] = f"%{search}%"
+        # Exact on the id: a substring match on an 18-digit id would
+        # make a short query match half the account.
+        params["search_exact"] = search.strip()
     if channel:
         channel_sql, channel_params = _channel_sql_predicate(channel)
         # Qualify the predicate's column refs with soa. -- the row query
@@ -6207,6 +6294,130 @@ _ROLLUP_CFG = {
     "adset": ("adset_insights", "adset_id", "adset_name"),
 }
 
+#: Daily grain for the same entities, built by
+#: scripts/refresh_insights_daily_by_entity.py.
+#:
+#: The caveat above is why these exist. `adset_insights` holds ONE
+#: fetched window per entity -- ad set 120233707955260431 carried
+#: 2026-09-07..09-21, fifteen days -- and the rollup put that beside
+#: Shopify figures covering whatever range the user picked. That ad set
+#: read 21.5L of conversion value against a true 3.07 Cr over Jan..Sep,
+#: and "% Meta vs Shop" showed +923% when the honest answer was -29%.
+#: Summing the daily grain over the requested window puts both sides of
+#: every ratio on one period.
+_ROLLUP_DAILY = {
+    "campaign": ("insights_daily_by_campaign", "campaign_id"),
+    "adset": ("insights_daily_by_adset", "adset_id"),
+}
+
+#: Rolling 3/7/14/28-day performance, anchored on the LAST DATE PRESENT
+#: IN THE DATA rather than on today. Meta's daily insights land a day in
+#: arrears, so anchoring on today would make every "3D" column cover two
+#: real days and one empty one, and every entity would look like it had
+#: just slowed down.
+#:
+#: Windows, exactly as specified:
+#:     current   [last - (P-1), last]
+#:     previous  [last - (2P-1), last - P]
+#: The previous window is fetched only for the reach comparison.
+#:
+#: REACH PROXY is a deliberate SUM of daily reach and is NOT
+#: de-duplicated -- that is the point of the name. It counts person-days,
+#: so it is a directional volume signal, not a headcount; the Reach
+#: column above it remains the de-duplicated figure. The two differ by
+#: design and should not be reconciled.
+_ROLLING_PERIODS = (3, 7, 14, 28)
+
+
+def _rolling_metrics_sql(table: str, id_col: str) -> str:
+    """Every rolling window in ONE pass over the daily table."""
+    parts = []
+    for p in _ROLLING_PERIODS:
+        parts += [
+            f"SUM(spend) FILTER (WHERE day > CAST(:last_date AS date) - {p}) AS d{p}_spend",
+            f"SUM(reach) FILTER (WHERE day > CAST(:last_date AS date) - {p}) AS d{p}_reach_proxy",
+            f"SUM(reach) FILTER (WHERE day > CAST(:last_date AS date) - {2 * p} "
+            f"                     AND day <= CAST(:last_date AS date) - {p}) AS d{p}_reach_prev",
+            f"SUM(ftewv_count) FILTER (WHERE day > CAST(:last_date AS date) - {p}) AS d{p}_ftewv",
+        ]
+    return (
+        f"SELECT {id_col} AS entity_id, " + ", ".join(parts) +
+        f" FROM public.{table} "
+        f" WHERE day > CAST(:last_date AS date) - {2 * max(_ROLLING_PERIODS)} AND day <= CAST(:last_date AS date) "
+        f" GROUP BY {id_col}"
+    )
+
+
+def _rolling_lc_sql(level: str) -> str:
+    """Last-click revenue per rolling window, same mapping the Shopify
+    columns use -- utm_term for ad sets, matched_campaign_id for
+    campaigns -- so LC Revenue and Shop. Revenue cannot disagree about
+    which orders belong to the entity."""
+    parts = [
+        f"SUM(total_price) FILTER (WHERE created_at::date > CAST(:last_date AS date) - {p}) AS d{p}_lc_revenue"
+        for p in _ROLLING_PERIODS
+    ]
+    if level == "campaign":
+        src = ("FROM public.shopify_order_attribution "
+               "WHERE matched_campaign_id IS NOT NULL")
+        key = "matched_campaign_id"
+    else:
+        src = ("FROM public.shopify_order_attribution a "
+               "JOIN public.meta_adsets s ON s.adset_id = a.utm_term "
+               "WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> '' "
+               "  AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'")
+        key = "a.utm_term"
+        parts = [x.replace("total_price", "a.total_price")
+                  .replace("created_at", "a.created_at") for x in parts]
+    return (
+        f"SELECT {key} AS entity_id, " + ", ".join(parts) + f" {src} "
+        f"  AND created_at::date > CAST(:last_date AS date) - {max(_ROLLING_PERIODS)} "
+        f"  AND created_at::date <= CAST(:last_date AS date) "
+        f"GROUP BY {key}"
+    ).replace("  AND created_at::date", "  AND a.created_at::date" if level != "campaign" else "  AND created_at::date")
+
+
+#: De-duplicated reach for a window, from public.ad_reach_cumulative.
+#:
+#: Reach is the one metric that must NOT be summed from the daily table:
+#: Meta dedupes a person per entity per window, so adding 265 daily
+#: figures counts the same human once per day they saw the ad set. This
+#: takes the cumulative snapshot at each end of the window and
+#: subtracts, which is people-new-in-window rather than person-days.
+_ROLLUP_REACH_SQL = """
+    SELECT COALESCE(x.entity_id, c.entity_id) AS entity_id,
+           COALESCE(x.reach, c.reach) AS reach
+      FROM (
+        -- EXACT window, fetched the way the Apps Script asks for it:
+        -- one /insights call with time_range {since, until}, reading
+        -- `reach` off the response. Meta de-duplicates over precisely
+        -- that range, so this IS the unique reach for the window.
+        SELECT entity_id, cumulative_reach AS reach
+          FROM public.ad_reach_cumulative
+         WHERE level = :reach_level
+           AND epoch_date = CAST(:from_date AS date)
+           AND as_of_date = CAST(:to_date AS date)
+      ) x
+      FULL OUTER JOIN (
+        -- Fallback for a window nobody has fetched: the difference
+        -- between two cumulative snapshots. That is people NEW since
+        -- the epoch, which is NOT the same quantity as unique reach in
+        -- the window -- it excludes anyone first reached earlier. Kept
+        -- because a directional figure beats a blank column, but the
+        -- exact row above always wins when it exists.
+        SELECT l.entity_id,
+               GREATEST(0, l.cumulative_reach - COALESCE(p.cumulative_reach, 0)) AS reach
+          FROM (SELECT DISTINCT ON (entity_id) entity_id, cumulative_reach
+                  FROM public.ad_reach_cumulative
+                 WHERE level = :reach_level AND as_of_date <= CAST(:to_date AS date)
+                 ORDER BY entity_id, as_of_date DESC) l
+          LEFT JOIN (SELECT DISTINCT ON (entity_id) entity_id, cumulative_reach
+                       FROM public.ad_reach_cumulative
+                      WHERE level = :reach_level AND as_of_date < CAST(:from_date AS date)
+                      ORDER BY entity_id, as_of_date DESC) p ON p.entity_id = l.entity_id
+      ) c ON c.entity_id = x.entity_id
+"""
+
 #: Last-click Shopify outcomes rolled up to the level the toggle is on,
 #: so Ad Sets and Campaigns carry the same attributed orders and revenue
 #: the ad level already shows.
@@ -6237,15 +6448,37 @@ _ROLLUP_SHOPIFY_SQL = {
            AND a.created_at::date BETWEEN :from_date AND :to_date
          GROUP BY a.matched_campaign_id
     """,
+    # Grouped on utm_term -- the ad set id the click itself carried --
+    # not on the ad set of whatever ad the cascade managed to match.
+    #
+    # utm_term IS the ad set id: of 850 distinct numeric values, 842 are
+    # real adset_ids, 0 are ad ids, 0 are campaign ids. It needs no
+    # matching step, so it cannot be wrong about which ad set was
+    # involved, and it counts orders whose AD was never resolved.
+    #
+    # The old form joined meta_ads on matched_ad_id, which credited the
+    # ad set that OWNS the matched ad rather than the one the click came
+    # from. Measured 2026-01-01..09-22, the two disagree on 272 of 842
+    # shared ad sets, net -7,300 orders, always over-crediting the ad set
+    # holding the popular ad names -- ad set 120215821591390422 read
+    # 11,813 against a true 11,293. The account-wide override mappings
+    # make this drift by construction ("orders from ad set A naming an
+    # ad in B"), so it grows as more of them are added.
+    #
+    # Two filters are not optional. META ONLY: Google Ads puts its
+    # keyword/criterion id in utm_term, and 148136693402 (5,496 orders)
+    # would otherwise look like an ad set. KNOWN AD SETS ONLY: utm_term
+    # also carries literal junk -- 'cta' alone is 1,238 orders.
     "adset": """
-        SELECT m.adset_id                             AS entity_id,
+        SELECT a.utm_term                             AS entity_id,
                COUNT(*)                               AS shopify_orders,
                COALESCE(SUM(a.total_price), 0)        AS shopify_revenue
           FROM public.shopify_order_attribution a
-          JOIN public.meta_ads m ON m.ad_id = a.matched_ad_id
-         WHERE m.adset_id IS NOT NULL
+          JOIN public.meta_adsets s ON s.adset_id = a.utm_term
+         WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> ''
+           AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'
            AND a.created_at::date BETWEEN :from_date AND :to_date
-         GROUP BY m.adset_id
+         GROUP BY a.utm_term
     """,
 }
 
@@ -6287,6 +6520,65 @@ class RollupRow(BaseModel):
     shopify_revenue: float | None = None
     shopify_roas: float | None = None
     cost_per_shopify_order: float | None = None
+    #: (shopify_revenue - conv_value) / conv_value * 100 -- the same
+    #: "Meta over-reporting" measure the ad level carries, rolled up.
+    #:
+    #: Negative means Meta claimed MORE revenue than last-click Shopify
+    #: found, which is the normal direction: Meta counts 7-day-click and
+    #: 1-day-view, last-click counts the final touch. Across the fleet
+    #: over 2026 that gap is ~1.49x, so roughly -33% here is ordinary.
+    #: Sharply worse than that is worth a look; positive means Meta
+    #: under-reported, which is rare.
+    #:
+    #: NULL, not 0, when conv_value is 0 -- with no Meta claim there is
+    #: nothing to be over or under, and a 0 would sort among real values
+    #: as though it were agreement.
+    meta_shop_diff_pct: float | None = None
+
+    #: Rolling 3-day window ending at the data's last date.
+    d3_spend: float | None = None
+    d3_lc_revenue: float | None = None
+    d3_lc_roas: float | None = None
+    #: SUMMED daily reach -- person-days, NOT de-duplicated people.
+    d3_reach_proxy: float | None = None
+    d3_reach_prev: float | None = None
+    d3_reach_delta: float | None = None
+    d3_reach_delta_pct: float | None = None
+    d3_ftewv: float | None = None
+    d3_cost_per_ftewv: float | None = None
+    #: Rolling 7-day window ending at the data's last date.
+    d7_spend: float | None = None
+    d7_lc_revenue: float | None = None
+    d7_lc_roas: float | None = None
+    #: SUMMED daily reach -- person-days, NOT de-duplicated people.
+    d7_reach_proxy: float | None = None
+    d7_reach_prev: float | None = None
+    d7_reach_delta: float | None = None
+    d7_reach_delta_pct: float | None = None
+    d7_ftewv: float | None = None
+    d7_cost_per_ftewv: float | None = None
+    #: Rolling 14-day window ending at the data's last date.
+    d14_spend: float | None = None
+    d14_lc_revenue: float | None = None
+    d14_lc_roas: float | None = None
+    #: SUMMED daily reach -- person-days, NOT de-duplicated people.
+    d14_reach_proxy: float | None = None
+    d14_reach_prev: float | None = None
+    d14_reach_delta: float | None = None
+    d14_reach_delta_pct: float | None = None
+    d14_ftewv: float | None = None
+    d14_cost_per_ftewv: float | None = None
+    #: Rolling 28-day window ending at the data's last date.
+    d28_spend: float | None = None
+    d28_lc_revenue: float | None = None
+    d28_lc_roas: float | None = None
+    #: SUMMED daily reach -- person-days, NOT de-duplicated people.
+    d28_reach_proxy: float | None = None
+    d28_reach_prev: float | None = None
+    d28_reach_delta: float | None = None
+    d28_reach_delta_pct: float | None = None
+    d28_ftewv: float | None = None
+    d28_cost_per_ftewv: float | None = None
 
 
 class RollupResponse(BaseModel):
@@ -6335,7 +6627,7 @@ async def get_ads_analyse_rollup(
     where_sql = "WHERE " + " AND ".join(where)
 
     sort_sql = {
-        "spend": "i.spend", "impressions": "i.impressions", "reach": "i.reach",
+        "spend": "spend", "impressions": "impressions", "reach": "reach",
         "roas": "roas", "ads": "ads",
         "shopify_orders": "shopify_orders", "shopify_revenue": "shopify_revenue",
         "shopify_roas": "shopify_roas",
@@ -6344,8 +6636,27 @@ async def get_ads_analyse_rollup(
     # Default to the trailing 30 days rather than all time: an unbounded
     # sum would put three years of orders beside a 30-day spend figure
     # and read as a spectacular ROAS.
+    daily_table, daily_id = _ROLLUP_DAILY[level]
+    # Anchored on the data, not the clock -- Meta's daily insights land
+    # a day in arrears, so `today` would give every entity one empty day
+    # in its 3D window and make the whole fleet look like it just stalled.
+    params["last_date"] = (await session.execute(
+        text(f"SELECT MAX(day) FROM public.{daily_table}"))).scalar() or date.today()
     params["to_date"] = to_date or date.today()
     params["from_date"] = from_date or (params["to_date"] - timedelta(days=29))
+
+    params["reach_level"] = level
+    # Every Meta figure now comes from the daily grain summed over the
+    # REQUESTED window, so it shares a period with the Shopify columns
+    # beside it. `i` is still joined for identity and as a fallback for
+    # entities the daily table has not seen.
+    m = "COALESCE(w.{0}, i.{0})"
+    spend, impr = m.format("spend"), m.format("impressions")
+    # Reach deliberately does NOT fall back to i.reach: that value
+    # describes the insights row's own window, and silently mixing it in
+    # is the mismatch this whole change removes.
+    reach = "rw.reach"
+    clicks = "COALESCE(w.clicks, i.clicks)"
 
     sql = (
         # account_name is NULL on a good share of the insights rows --
@@ -6354,23 +6665,44 @@ async def get_ads_analyse_rollup(
         # is always present, so fall back to resolving the name from it.
         f"SELECT i.{id_col} AS entity_id, i.{name_col} AS entity_name, "
         "        COALESCE(i.account_name, acct.account_name) AS account_name, "
-        f"       COALESCE(c.ads, 0)::int AS ads, i.date_start, i.date_stop, "
-        "        i.spend, i.impressions, i.reach, i.frequency, i.clicks, i.ctr, i.cpm, "
-        f"       {purchases} AS purchases, {conv_value} AS conv_value, "
-        f"       CASE WHEN i.spend > 0 THEN {conv_value} / i.spend END AS roas, "
-        f"       CASE WHEN {purchases} > 0 THEN i.spend / {purchases} END AS cost_per_purchase, "
-        "        CASE WHEN i.reach > 0 THEN i.spend * 1000.0 / i.reach END AS cpr_1000, "
+        f"       COALESCE(c.ads, 0)::int AS ads, "
+        # The window these figures actually cover is now the one asked
+        # for, not whatever the insights row happened to be fetched with.
+        "        CAST(:from_date AS date) AS date_start, "
+        "        CAST(:to_date AS date) AS date_stop, "
+        f"       {spend} AS spend, {impr} AS impressions, {reach} AS reach, "
+        f"       CASE WHEN {reach} > 0 THEN {impr} / {reach} END AS frequency, "
+        f"       {clicks} AS clicks, "
+        f"       CASE WHEN {impr} > 0 THEN {clicks} * 100.0 / {impr} END AS ctr, "
+        f"       CASE WHEN {impr} > 0 THEN {spend} * 1000.0 / {impr} END AS cpm, "
+        f"       COALESCE(w.purchases, {purchases}) AS purchases, "
+        f"       COALESCE(w.conv_value, {conv_value}) AS conv_value, "
+        f"       CASE WHEN {spend} > 0 THEN COALESCE(w.conv_value, {conv_value}) / {spend} END AS roas, "
+        f"       CASE WHEN COALESCE(w.purchases, {purchases}) > 0 "
+        f"            THEN {spend} / COALESCE(w.purchases, {purchases}) END AS cost_per_purchase, "
+        f"       CASE WHEN {reach} > 0 THEN {spend} * 1000.0 / {reach} END AS cpr_1000, "
         "        COALESCE(sh.shopify_orders, 0)::int AS shopify_orders, "
         "        COALESCE(sh.shopify_revenue, 0) AS shopify_revenue, "
-        "        CASE WHEN i.spend > 0 "
-        "             THEN COALESCE(sh.shopify_revenue, 0) / i.spend END AS shopify_roas, "
+        f"       CASE WHEN {spend} > 0 "
+        f"            THEN COALESCE(sh.shopify_revenue, 0) / {spend} END AS shopify_roas, "
         "        CASE WHEN COALESCE(sh.shopify_orders, 0) > 0 "
-        "             THEN i.spend / sh.shopify_orders END AS cost_per_shopify_order "
+        f"            THEN {spend} / sh.shopify_orders END AS cost_per_shopify_order, "
+        "        rm.d3_spend, rm.d3_reach_proxy, rm.d3_reach_prev, rm.d3_ftewv, rl.d3_lc_revenue, rm.d7_spend, rm.d7_reach_proxy, rm.d7_reach_prev, rm.d7_ftewv, rl.d7_lc_revenue, rm.d14_spend, rm.d14_reach_proxy, rm.d14_reach_prev, rm.d14_ftewv, rl.d14_lc_revenue, rm.d28_spend, rm.d28_reach_proxy, rm.d28_reach_prev, rm.d28_ftewv, rl.d28_lc_revenue "
         f"FROM public.{table} i "
         "LEFT JOIN (SELECT account_id, MIN(account_name) AS account_name "
         "             FROM ad_lifecycle "
         "            WHERE account_id IS NOT NULL AND account_name IS NOT NULL "
         "            GROUP BY account_id) acct ON acct.account_id = i.account_id "
+        f"LEFT JOIN (SELECT {daily_id} AS entity_id, SUM(spend) AS spend, "
+        "                  SUM(impressions) AS impressions, SUM(clicks) AS clicks, "
+        "                  SUM(conv_value) AS conv_value, SUM(purchases) AS purchases "
+        f"             FROM public.{daily_table} "
+        "            WHERE day BETWEEN :from_date AND :to_date "
+        f"            GROUP BY {daily_id}) w ON w.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_ROLLUP_REACH_SQL}) rw ON rw.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_rolling_metrics_sql(daily_table, daily_id)}) rm "
+        f"       ON rm.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
         f"LEFT JOIN ({_ROLLUP_SHOPIFY_SQL[level]}) sh ON sh.entity_id = i.{id_col} "
         f"LEFT JOIN (SELECT {id_col}, COUNT(*) AS ads FROM ad_lifecycle "
         f"            WHERE {id_col} IS NOT NULL GROUP BY {id_col}) c "
@@ -6379,6 +6711,44 @@ async def get_ads_analyse_rollup(
         f"ORDER BY {sort_sql} DESC NULLS LAST LIMIT :limit OFFSET :offset"
     )
     rows = [RollupRow(**dict(r._mapping)) for r in await session.execute(text(sql), params)]
+
+    # Derived here rather than in SQL: both inputs are already on the
+    # row, and computing it in the query would mean repeating the
+    # campaign/adset Shopify join a second time just to divide by it.
+    for r in rows:
+        if r.conv_value and r.shopify_revenue is not None:
+            r.meta_shop_diff_pct = (r.shopify_revenue - r.conv_value) * 100.0 / r.conv_value
+        # Ratios derived here, per spec: a zero denominator returns 0
+        # rather than NULL, so the column sorts as "no movement" instead
+        # of dropping to the bottom as unknown.
+        if r.d3_spend:
+            r.d3_lc_roas = (r.d3_lc_revenue or 0) / r.d3_spend
+        if r.d3_ftewv:
+            r.d3_cost_per_ftewv = (r.d3_spend or 0) / r.d3_ftewv
+        cur, prev = r.d3_reach_proxy or 0, r.d3_reach_prev or 0
+        r.d3_reach_delta = cur - prev
+        r.d3_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
+        if r.d7_spend:
+            r.d7_lc_roas = (r.d7_lc_revenue or 0) / r.d7_spend
+        if r.d7_ftewv:
+            r.d7_cost_per_ftewv = (r.d7_spend or 0) / r.d7_ftewv
+        cur, prev = r.d7_reach_proxy or 0, r.d7_reach_prev or 0
+        r.d7_reach_delta = cur - prev
+        r.d7_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
+        if r.d14_spend:
+            r.d14_lc_roas = (r.d14_lc_revenue or 0) / r.d14_spend
+        if r.d14_ftewv:
+            r.d14_cost_per_ftewv = (r.d14_spend or 0) / r.d14_ftewv
+        cur, prev = r.d14_reach_proxy or 0, r.d14_reach_prev or 0
+        r.d14_reach_delta = cur - prev
+        r.d14_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
+        if r.d28_spend:
+            r.d28_lc_roas = (r.d28_lc_revenue or 0) / r.d28_spend
+        if r.d28_ftewv:
+            r.d28_cost_per_ftewv = (r.d28_spend or 0) / r.d28_ftewv
+        cur, prev = r.d28_reach_proxy or 0, r.d28_reach_prev or 0
+        r.d28_reach_delta = cur - prev
+        r.d28_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
 
     # Same account join as the row query: where_sql now references
     # `acct`, and a count without it fails with "missing FROM-clause

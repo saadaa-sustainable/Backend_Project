@@ -205,6 +205,12 @@ PHASE_SILVER = [
     # refresh took the section down with HTTP 500s. Pay the extra minutes
     # rather than block every reader, and give the step room to finish.
     ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],  2400),
+    # Adset/campaign daily grain. Feeds the Ads Analyse rollup's Meta
+    # metrics and its rolling 3/7/14/28-day columns, both of which are
+    # windowed -- without this they fall back to adset_insights, which
+    # holds one arbitrary fetched window per entity and put 21.5L of
+    # conversion value beside a true 3.07 Cr.
+    ("silver_insights_entity", ["scripts/refresh_insights_daily_by_entity.py"], 1800),
     # ad_lifecycle was NEVER in this pipeline. It was registered only as
     # a FlattenJob in app/services/silver/registry.py, so the in-process
     # scheduler was the only thing that refreshed it -- and that

@@ -225,6 +225,42 @@ def preset_anchor_dates(today: date) -> list[date]:
     return sorted(a for a in anchors if a >= DEFAULT_EPOCH)
 
 
+def preset_windows(today: date) -> list[tuple[date, date]]:
+    """(since, until) for every window the UI can ask for.
+
+    This is the Apps Script's `getAdsetReach(adsetId, start, end)` shape:
+    one /insights call with an explicit time_range, reading `reach`
+    straight off the response. Meta de-duplicates over exactly that
+    range, so the answer is the true unique reach for the window --
+    not a difference between two cumulative snapshots, which measures
+    people NEW since the epoch and is a different quantity.
+
+    Stored with epoch_date = since, so a row answers "reach over
+    [since, until]" and the read path can look one up exactly.
+    """
+    first_of_this = today.replace(day=1)
+    last_of_prev = first_of_this - timedelta(days=1)
+    yesterday = today - timedelta(days=1)
+    windows = [
+        (today, today),
+        (yesterday, yesterday),
+        (today - timedelta(days=6), today),
+        (today - timedelta(days=29), today),
+        (today - timedelta(days=89), today),
+        (first_of_this, today),
+        (last_of_prev.replace(day=1), last_of_prev),
+        (DEFAULT_EPOCH, today),          # "Lifetime", now bounded
+        (DEFAULT_EPOCH, yesterday),      # ... and its data-last-date twin
+        # Same windows ending yesterday -- Meta's daily insights land a
+        # day late, so the dashboard's own last date is usually
+        # yesterday and those are the ranges it actually requests.
+        (yesterday - timedelta(days=6), yesterday),
+        (yesterday - timedelta(days=29), yesterday),
+        (yesterday - timedelta(days=89), yesterday),
+    ]
+    return sorted({(f, t) for f, t in windows if f >= DEFAULT_EPOCH and f <= t})
+
+
 def date_series(start: date, end: date) -> list[date]:
     return [start + timedelta(days=i) for i in range((end - start).days + 1)]
 
@@ -398,6 +434,17 @@ def _existing_pairs(db: _Db, level: str, epoch: date) -> set[date]:
 _WRITE_CHUNK = 500
 
 
+def _existing_windows(db: _Db, level: str) -> set[tuple[date, date]]:
+    """(since, until) pairs already stored for this level."""
+    def _go(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT epoch_date, as_of_date FROM public.ad_reach_cumulative "
+                "WHERE level = %s", (level,))
+            return {(r[0], r[1]) for r in cur.fetchall()}
+    return db.run(_go)
+
+
 def _write(db: _Db, rows: list[tuple]) -> int:
     if not rows:
         return 0
@@ -428,7 +475,8 @@ async def _run(
     access_token: str,
     levels: list[str],
     epoch: date,
-    as_of_dates: list[date],
+    as_of_dates: list[date] | None,
+    windows: list[tuple[date, date]] | None,
     db: _Db,
     refetch: bool,
 ) -> tuple[int, int]:
@@ -436,19 +484,24 @@ async def _run(
     total_calls = 0
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
         for level in levels:
-            already = set() if refetch else _existing_pairs(db, level, epoch)
-            todo = [d for d in as_of_dates if d not in already]
-            skipped = len(as_of_dates) - len(todo)
+            pairs = windows if windows is not None else [(epoch, d) for d in as_of_dates]
+            if refetch:
+                todo_pairs = pairs
+            else:
+                have = _existing_windows(db, level)
+                todo_pairs = [p for p in pairs if p not in have]
+            skipped = len(pairs) - len(todo_pairs)
+            todo = [u for _s, u in todo_pairs]
             print(f"\n=== level={level}  {len(todo)} as-of dates to fetch"
                   f"{f' ({skipped} already stored)' if skipped else ''}", flush=True)
-            for as_of in todo:
+            for since, as_of in todo_pairs:
                 t0 = time.monotonic()
                 # Accounts in parallel, as-of dates strictly in series:
                 # each call's cost grows with the window, and the token's
                 # hourly budget is the binding constraint, not latency.
                 results = await asyncio.gather(*[
                     _fetch_cumulative(client, base_url, acct, access_token,
-                                      level=level, epoch=epoch, as_of=as_of)
+                                      level=level, epoch=since, as_of=as_of)
                     for acct in accounts
                 ], return_exceptions=True)
                 rows: list[tuple] = []
@@ -458,19 +511,19 @@ async def _run(
                         failed.append(f"{acct.name or acct.account_id}: {res}")
                         continue
                     total_calls += 1
-                    rows.extend(_to_rows(res, level=level, epoch=epoch, as_of=as_of,
+                    rows.extend(_to_rows(res, level=level, epoch=since, as_of=as_of,
                                          fallback_account_id=acct.account_id))
                 if failed:
                     # Loudly, and without writing a partial snapshot: a
                     # snapshot missing one account's ads is not a smaller
                     # snapshot, it is a wrong one, and the subtraction
                     # downstream would read the gap as lost reach.
-                    print(f"  {as_of}  FAILED -- {'; '.join(failed)}", flush=True)
+                    print(f"  {since}..{as_of}  FAILED -- {'; '.join(failed)}", flush=True)
                     continue
                 n = _write(db, rows)
                 total_rows += n
                 reach = sum(r[6] for r in rows)
-                print(f"  {as_of}  {n:>6,} rows  reach={reach:>12,}  "
+                print(f"  {since}..{as_of}  {n:>6,} rows  reach={reach:>12,}  "
                       f"{time.monotonic() - t0:5.1f}s", flush=True)
     return total_rows, total_calls
 
@@ -478,6 +531,9 @@ async def _run(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--preset-windows", action="store_true",
+                        help="Fetch TRUE window reach for every range the UI "
+                             "presets can ask for (since..until per call).")
     parser.add_argument("--anchors", action="store_true",
                         help="Fetch only the as-of dates the UI date presets need (~14).")
     parser.add_argument("--as-of", help="A single as-of date (YYYY-MM-DD, or 'today'/'yesterday').")
@@ -506,7 +562,11 @@ def main() -> int:
         print(f"Unknown level(s): {', '.join(bad)}. Valid: {', '.join(LEVELS)}", file=sys.stderr)
         return 2
 
-    if args.anchors:
+    windows: list[tuple[date, date]] | None = None
+    as_of_dates: list[date] = []
+    if args.preset_windows:
+        windows = preset_windows(today)
+    elif args.anchors:
         as_of_dates = preset_anchor_dates(today)
     elif args.as_of:
         token = args.as_of.strip().lower()
@@ -518,11 +578,13 @@ def main() -> int:
         as_of_dates = date_series(date.fromisoformat(args.from_date),
                                   date.fromisoformat(args.to_date))
     else:
-        print("Pick one of --anchors / --as-of / (--from and --to).", file=sys.stderr)
+        print("Pick one of --preset-windows / --anchors / --as-of / (--from and --to).",
+              file=sys.stderr)
         return 2
 
-    as_of_dates = [d for d in as_of_dates if epoch <= d <= today]
-    if not as_of_dates:
+    if windows is None:
+        as_of_dates = [d for d in as_of_dates if epoch <= d <= today]
+    if windows is None and not as_of_dates:
         print("No as-of dates in range after clamping to [epoch, today].", file=sys.stderr)
         return 2
 
@@ -544,7 +606,13 @@ def main() -> int:
     print(f"Epoch:      {epoch}  (every snapshot is cumulative from this date)")
     print(f"Levels:     {', '.join(levels)}")
     print(f"Accounts:   {', '.join(a.name or a.account_id for a in accounts)}")
-    print(f"As-of dates ({len(as_of_dates)}): {', '.join(d.isoformat() for d in as_of_dates)}")
+    if windows is not None:
+        print(f"Windows ({len(windows)}):")
+        for f, t in windows:
+            print(f"   {f} .. {t}")
+    else:
+        print(f"As-of dates ({len(as_of_dates)}): "
+              f"{', '.join(d.isoformat() for d in as_of_dates)}")
     print(f"Page size:  {PAGE_SIZE}")
     if args.dry_run:
         print("\n--dry-run: nothing fetched.")
@@ -560,7 +628,7 @@ def main() -> int:
         t0 = time.monotonic()
         rows, calls = asyncio.run(_run(
             accounts, base_url=base_url, access_token=access_token,
-            levels=levels, epoch=epoch, as_of_dates=as_of_dates,
+            levels=levels, epoch=epoch, as_of_dates=as_of_dates, windows=windows,
             db=db, refetch=args.refetch,
         ))
         print(f"\n[OK] {rows:,} rows written from {calls} account-level passes "
