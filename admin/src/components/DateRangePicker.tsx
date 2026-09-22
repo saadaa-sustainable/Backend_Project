@@ -20,6 +20,23 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { theme } from "@/lib/theme";
 
+/**
+ * The earliest date any metric on this dashboard can honestly describe.
+ *
+ * Shopify order history is effectively 2026-only -- 376,348 of 377,215
+ * orders fall in 2026, against 794 in all of 2025 -- while Meta's
+ * lifetime spend and conversion value reach back years. Pairing them
+ * produced ads showing real Meta revenue against zero Shopify revenue:
+ * 2,751 ads carrying 36.9 Cr of conversion value and no orders at all.
+ * That reads as catastrophic performance; it is a coverage gap.
+ *
+ * `insights_daily_by_ad` begins 2025-12-29, so 2026-01-01 is the first
+ * date on which Meta daily AND Shopify both have real coverage. Below
+ * it we have neither, so "all time" was never a thing this dashboard
+ * could show.
+ */
+export const DATA_FLOOR = "2026-01-01";
+
 export interface DateRange {
   from: string; // YYYY-MM-DD, "" = unbounded
   to: string;
@@ -37,7 +54,7 @@ const PRESETS: { key: PresetKey; label: string }[] = [
   { key: "thisMonth", label: "This Month" },
   { key: "lastMonth", label: "Last Month" },
   { key: "last90", label: "Last 90 Days" },
-  { key: "lifetime", label: "Lifetime" },
+  { key: "lifetime", label: "Lifetime (from 1 Jan 2026)" },
   { key: "custom", label: "Custom Range" },
 ];
 
@@ -98,7 +115,12 @@ export function resolvePreset(key: PresetKey): DateRange {
       return { from: iso(first), to: iso(last) };
     }
     case "lifetime":
-      return { from: "", to: "" };
+      // Was ("", "") -- an empty range makes every endpoint skip its
+      // window predicates and fall back to LIFETIME columns, which is
+      // exactly the mismatch above. A real bounded range routes this
+      // through the same windowed path as every other preset, so spend,
+      // conversion value and Shopify orders share one basis.
+      return { from: DATA_FLOOR, to: iso(today) };
     default:
       return { from: "", to: "" };
   }
@@ -379,7 +401,7 @@ export function DateRangePicker({
             <div className="mt-3 flex items-center justify-between border-t pt-3" style={{ borderColor: CT.border }}>
               <div className="font-mono text-[13px]" style={{ color: CT.ink }}>
                 {draftPreset === "lifetime"
-                  ? "All time"
+                  ? `${fmtDisplay(DATA_FLOOR)}  -  today`
                   : `${fmtDisplay(draft.from)}  -  ${fmtDisplay(draft.to)}`}
               </div>
               <div className="flex gap-2">
@@ -397,7 +419,7 @@ export function DateRangePicker({
                     // half-open window the server would read as unbounded.
                     const r =
                       draftPreset === "lifetime"
-                        ? { from: "", to: "" }
+                        ? resolvePreset("lifetime")
                         : draft.from && !draft.to
                           ? { from: draft.from, to: draft.from }
                           : draft;

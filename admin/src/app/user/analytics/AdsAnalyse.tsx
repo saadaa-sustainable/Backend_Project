@@ -35,7 +35,7 @@ import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/li
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
-import { DateRangePicker } from "@/components/DateRangePicker";
+import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
@@ -831,7 +831,88 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "cost_per_shopify_order", header: "₹/order", group: "Shopify", defaultVisible: true, align: "right",
     title: "Meta spend ÷ Shopify orders",
     render: (r) => <>{rMoney(r.cost_per_shopify_order)}</> },
-
+  // Same measure and the same thresholds as the ad-level column, so a
+  // number means the same thing at both grains. Red past -20% only
+  // flags worse-than-usual: Meta over-reports by ~1.49x fleet-wide, so
+  // a moderate negative is the expected reading, not a problem.
+  { key: "meta_shop_diff_pct", header: "% Meta vs Shop", group: "Shopify", defaultVisible: true, align: "right",
+    render: (r) => (
+      <span className={
+        r.meta_shop_diff_pct == null ? "" :
+        r.meta_shop_diff_pct < -20 ? "text-rose-600" :
+        r.meta_shop_diff_pct > 20 ? "text-emerald-600" : ""
+      }>
+        {r.meta_shop_diff_pct == null ? "—" : `${pct(r.meta_shop_diff_pct)}%`}
+      </span>
+    ) },
+  // Rolling windows anchored on the data's LAST DATE, not today --
+  // Meta's daily insights arrive a day late, so "today" would put an
+  // empty day inside every 3D window. All hidden by default: 32 extra
+  // columns would otherwise bury the 12 that are on by default.
+  { key: "d3_spend", header: "3D Spend", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d3_spend)}</span> },
+  { key: "d3_lc_revenue", header: "3D LC Revenue", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d3_lc_revenue)}</span> },
+  { key: "d3_lc_roas", header: "3D LC ROAS", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num">{num2(r.d3_lc_roas)}</span> },
+  { key: "d3_reach_proxy", header: "3D Reach Proxy", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d3_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+  { key: "d3_reach_delta", header: "3D Reach Δ", group: "Rolling 3D", align: "right",
+    render: (r) => <span className={"num " + ((r.d3_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d3_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d3_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+  { key: "d3_reach_delta_pct", header: "3D Reach Δ%", group: "Rolling 3D", align: "right",
+    render: (r) => <span className={"num " + ((r.d3_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d3_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d3_reach_delta_pct)}%</span> },
+  { key: "d3_ftewv", header: "3D FTEWV", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num">{fmt(r.d3_ftewv, { maximumFractionDigits: 0 })}</span> },
+  { key: "d3_cost_per_ftewv", header: "3D Cost/FTEWV", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num">₹{num2(r.d3_cost_per_ftewv)}</span> },
+  { key: "d7_spend", header: "7D Spend", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d7_spend)}</span> },
+  { key: "d7_lc_revenue", header: "7D LC Revenue", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d7_lc_revenue)}</span> },
+  { key: "d7_lc_roas", header: "7D LC ROAS", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num">{num2(r.d7_lc_roas)}</span> },
+  { key: "d7_reach_proxy", header: "7D Reach Proxy", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d7_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+  { key: "d7_reach_delta", header: "7D Reach Δ", group: "Rolling 7D", align: "right",
+    render: (r) => <span className={"num " + ((r.d7_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d7_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d7_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+  { key: "d7_reach_delta_pct", header: "7D Reach Δ%", group: "Rolling 7D", align: "right",
+    render: (r) => <span className={"num " + ((r.d7_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d7_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d7_reach_delta_pct)}%</span> },
+  { key: "d7_ftewv", header: "7D FTEWV", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num">{fmt(r.d7_ftewv, { maximumFractionDigits: 0 })}</span> },
+  { key: "d7_cost_per_ftewv", header: "7D Cost/FTEWV", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num">₹{num2(r.d7_cost_per_ftewv)}</span> },
+  { key: "d14_spend", header: "14D Spend", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d14_spend)}</span> },
+  { key: "d14_lc_revenue", header: "14D LC Revenue", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d14_lc_revenue)}</span> },
+  { key: "d14_lc_roas", header: "14D LC ROAS", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num">{num2(r.d14_lc_roas)}</span> },
+  { key: "d14_reach_proxy", header: "14D Reach Proxy", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d14_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+  { key: "d14_reach_delta", header: "14D Reach Δ", group: "Rolling 14D", align: "right",
+    render: (r) => <span className={"num " + ((r.d14_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d14_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d14_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+  { key: "d14_reach_delta_pct", header: "14D Reach Δ%", group: "Rolling 14D", align: "right",
+    render: (r) => <span className={"num " + ((r.d14_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d14_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d14_reach_delta_pct)}%</span> },
+  { key: "d14_ftewv", header: "14D FTEWV", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num">{fmt(r.d14_ftewv, { maximumFractionDigits: 0 })}</span> },
+  { key: "d14_cost_per_ftewv", header: "14D Cost/FTEWV", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num">₹{num2(r.d14_cost_per_ftewv)}</span> },
+  { key: "d28_spend", header: "28D Spend", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d28_spend)}</span> },
+  { key: "d28_lc_revenue", header: "28D LC Revenue", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num">₹{money(r.d28_lc_revenue)}</span> },
+  { key: "d28_lc_roas", header: "28D LC ROAS", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num">{num2(r.d28_lc_roas)}</span> },
+  { key: "d28_reach_proxy", header: "28D Reach Proxy", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d28_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+  { key: "d28_reach_delta", header: "28D Reach Δ", group: "Rolling 28D", align: "right",
+    render: (r) => <span className={"num " + ((r.d28_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d28_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d28_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+  { key: "d28_reach_delta_pct", header: "28D Reach Δ%", group: "Rolling 28D", align: "right",
+    render: (r) => <span className={"num " + ((r.d28_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d28_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d28_reach_delta_pct)}%</span> },
+  { key: "d28_ftewv", header: "28D FTEWV", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num">{fmt(r.d28_ftewv, { maximumFractionDigits: 0 })}</span> },
+  { key: "d28_cost_per_ftewv", header: "28D Cost/FTEWV", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num">₹{num2(r.d28_cost_per_ftewv)}</span> },
   { key: "window", header: "Window", group: "Timeline", defaultVisible: true, align: "right",
     title: "The period these Meta figures actually cover — rows refresh independently",
     render: (r) => (
@@ -1150,7 +1231,14 @@ export function AdsAnalyse() {
   // where the point of the section is to evaluate recently-launched
   // creatives. Picking "Last 7 days" then means "ads launched in the
   // last 7 days" instead of "ads that ran in the last 7 days".
-  const [dateField, setDateField] = useState<"delivery" | "created" | "first_seen">("created");
+  // 'delivery', not 'created'. Only the delivery mode re-sums metrics
+  // from the daily grain; 'created' and 'first_seen' merely filter WHICH
+  // ads appear and leave every metric at its lifetime value. With the
+  // date floor that distinction matters: an ad that last ran in 2024
+  // would still show its full Meta conversion value beside zero Shopify
+  // revenue -- 2,751 ads carried 36.9 Cr that way. Under 'delivery' it
+  // drops out instead, because it delivered nothing in the window.
+  const [dateField, setDateField] = useState<"delivery" | "created" | "first_seen">("delivery");
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim());
   const [onlyWithOrders, setOnlyWithOrders] = useState(false);
@@ -1161,8 +1249,14 @@ export function AdsAnalyse() {
   // Date range window -- when both are set, spend / impressions /
   // purchases / conv_value / roas in the response are overwritten
   // with values summed from Bronze raw_dump_meta within the window.
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  // Seeded from the preset rather than left blank. Blank meant NO date
+  // params were sent at all, so the backend kept every lifetime column
+  // -- Meta spend and conversion value reaching back years against
+  // Shopify orders that only exist for 2026. `Lifetime` now resolves to
+  // a real bounded range (see DATA_FLOOR), and it has to be applied on
+  // first load, not only after someone opens the picker and hits Apply.
+  const [fromDate, setFromDate] = useState(() => resolvePreset("lifetime").from);
+  const [toDate, setToDate] = useState(() => resolvePreset("lifetime").to);
   const [datePreset, setDatePreset] = useState<string>("lifetime");
 
   // ── F1..F4 thresholds ────────────────────────────────────────

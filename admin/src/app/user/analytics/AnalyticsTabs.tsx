@@ -2,6 +2,7 @@
 
 import { useMemo, useSyncExternalStore } from "react";
 import dynamic from "next/dynamic";
+import { DataFloorNotice } from "@/components/DataFloorNotice";
 
 function TabLoading() {
   return <div role="status" className="min-h-40 py-8 text-sm text-text-secondary">Loading analytics…</div>;
@@ -157,6 +158,11 @@ export function AnalyticsTabs() {
           </nav>
         </div>
       </div>
+
+      {/* One insertion point for every tab: the data floor applies to
+          all of them, and repeating the banner per section would let the
+          wording drift between them. Dismissible per browser. */}
+      <DataFloorNotice />
 
       {tab === null ? <TabLoading /> : TAB_META[tab].render()}
     </div>

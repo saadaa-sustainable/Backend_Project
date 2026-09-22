@@ -12,12 +12,25 @@ a gold table."
 
 Deliberately curated, not `ad_lifecycle`'s full ~190-column wide table --
 Gold is meant to be dashboard-shaped, not "everything about this ad."
-Coverage caveat carried forward from `shopify_ad_attribution.py`: only
-orders that resolved to tier IN ('ad_direct', 'ad_name_match') carry a
-`matched_ad_id` (campaign_match/unmatched orders don't roll up to a
-specific ad here) -- so `shopify_orders`/`shopify_revenue` are a real but
-partial slice of an ad's actual Shopify-attributed sales, same caveat that
-already applies to `shopify_order_attribution` itself.
+Shopify coverage, corrected 2026-09-22. This previously claimed only
+tier IN ('ad_direct', 'ad_name_match') rolled up to an ad. The SQL below
+has never had a tier filter -- it takes EVERY row with a non-NULL
+matched_ad_id -- so anyone reading this to understand the numbers was
+told the wrong thing.
+
+What is true: `ext` (public.ad_metrics_external, mirrored from the
+legacy system) WINS over this project's own attribution wherever it has
+a row, and local figures only fill the gaps. That is deliberate and
+measured: on 2026-09-22 the legacy system credited 379,706 orders to a
+specific ad against this project's 172,373 over the same window -- 100%
+coverage against 46% -- with no spreading on either side (its
+ad_order_detail holds one row per order, 379,706 rows for 379,706
+distinct order ids).
+
+The consequence worth knowing: an ad WITH an ext row shows the
+reference figure, and an ad WITHOUT one shows this project's, so the
+column can mix two attribution regimes row by row. Ads whose local
+number looks low against the reference are that, not a bug.
 """
 
 from __future__ import annotations
@@ -67,7 +80,7 @@ COLUMN_FORMULAS: dict[str, str] = {
     "spend": "ad_lifecycle.spend (passthrough)",
     "meta_conv_value": "ad_lifecycle.conv_value (Meta-pixel-reported conversion value)",
     "meta_roas": "ad_lifecycle.roas (meta_conv_value / spend, as Meta's own pixel reports it)",
-    "shopify_orders": "COUNT(shopify_order_attribution rows) WHERE matched_ad_id = this ad -- tier IN ('ad_direct','ad_name_match') only",
+    "shopify_orders": "COUNT(shopify_order_attribution rows) WHERE matched_ad_id = this ad (ALL tiers), overridden by ad_metrics_external where present",
     "shopify_revenue": "SUM(shopify_order_attribution.total_price) WHERE matched_ad_id = this ad",
     "shopify_aov": "shopify_revenue / shopify_orders",
     "shopify_roas": "shopify_revenue / spend -- the real-order-backed ROAS, contrast against meta_roas's pixel-reported figure",

@@ -185,8 +185,16 @@ export function NameMissPanel({
                             </span>
                           ) : (
                             <div className="flex flex-col gap-0.5">
-                              {r.candidate_ad_names.map((n) => (
-                                <span key={n} className="font-mono text-[11px] text-text-secondary">
+                              {/* Keyed by position, not by name. An ad
+                                  set can hold two ads with the SAME
+                                  name -- that is the whole reason this
+                                  panel exists -- so the name is not a
+                                  unique key and React warned once per
+                                  duplicate. The list is display-only
+                                  and never reorders, so the index is a
+                                  stable key here. */}
+                              {r.candidate_ad_names.map((n, i) => (
+                                <span key={`${i}-${n}`} className="font-mono text-[11px] text-text-secondary">
                                   {n}
                                 </span>
                               ))}

@@ -2207,6 +2207,56 @@ export interface RollupRow {
   shopify_revenue: number | null;
   shopify_roas: number | null;
   cost_per_shopify_order: number | null;
+  /** (shopify_revenue - conv_value) / conv_value * 100. Negative means
+   *  Meta claimed more than last-click Shopify found, which is normal:
+   *  the fleet gap over 2026 is ~1.49x, so around -33% is ordinary.
+   *  NULL when there is no Meta conversion value to compare against. */
+  meta_shop_diff_pct: number | null;
+
+  /** Rolling 3-day window ending at the data's last date, not today. */
+  d3_spend: number | null;
+  d3_lc_revenue: number | null;
+  d3_lc_roas: number | null;
+  /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
+  d3_reach_proxy: number | null;
+  d3_reach_prev: number | null;
+  d3_reach_delta: number | null;
+  d3_reach_delta_pct: number | null;
+  d3_ftewv: number | null;
+  d3_cost_per_ftewv: number | null;
+  /** Rolling 7-day window ending at the data's last date, not today. */
+  d7_spend: number | null;
+  d7_lc_revenue: number | null;
+  d7_lc_roas: number | null;
+  /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
+  d7_reach_proxy: number | null;
+  d7_reach_prev: number | null;
+  d7_reach_delta: number | null;
+  d7_reach_delta_pct: number | null;
+  d7_ftewv: number | null;
+  d7_cost_per_ftewv: number | null;
+  /** Rolling 14-day window ending at the data's last date, not today. */
+  d14_spend: number | null;
+  d14_lc_revenue: number | null;
+  d14_lc_roas: number | null;
+  /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
+  d14_reach_proxy: number | null;
+  d14_reach_prev: number | null;
+  d14_reach_delta: number | null;
+  d14_reach_delta_pct: number | null;
+  d14_ftewv: number | null;
+  d14_cost_per_ftewv: number | null;
+  /** Rolling 28-day window ending at the data's last date, not today. */
+  d28_spend: number | null;
+  d28_lc_revenue: number | null;
+  d28_lc_roas: number | null;
+  /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
+  d28_reach_proxy: number | null;
+  d28_reach_prev: number | null;
+  d28_reach_delta: number | null;
+  d28_reach_delta_pct: number | null;
+  d28_ftewv: number | null;
+  d28_cost_per_ftewv: number | null;
 }
 
 export interface RollupResponse {
