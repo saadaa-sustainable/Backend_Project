@@ -100,12 +100,43 @@ CREATE TABLE IF NOT EXISTS public.ad_name_override (
     ad_id             text NOT NULL,
     ad_name           text,
     note              text,
+    -- NULL = this row is the sole mapping for its key. A number makes
+    -- the key a WEIGHTED SPLIT: several ads share one utm_content and
+    -- each takes a share of its orders proportional to weight.
+    --
+    -- Needed when two ads in one ad set carry the SAME name, which no
+    -- matching rule can ever separate -- e.g. two Sep-682 ads both
+    -- named SMCP_VRP_UB_US_916_Sep-682_03/10/2025_H0. The orders are
+    -- real and belong to one of them; nothing in the data says which.
+    weight            numeric,
     added_at          timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (utm_content_lower, adset_id)
+    -- ad_id is part of the key so one utm_content can carry several
+    -- weighted rows. Previously (utm_content_lower, adset_id) alone,
+    -- which allowed exactly one ad per key.
+    PRIMARY KEY (utm_content_lower, adset_id, ad_id)
 );
 CREATE INDEX IF NOT EXISTS ix_ad_name_override_ad_id
     ON public.ad_name_override (ad_id);
 """
+
+#: Migrates the first shipped shape. Idempotent, no-op on a fresh table.
+MIGRATIONS = ["""
+ALTER TABLE public.ad_name_override ADD COLUMN IF NOT EXISTS weight numeric;
+""", """
+DO $$
+DECLARE cols text;
+BEGIN
+    SELECT string_agg(a.attname, ',' ORDER BY k.ord) INTO cols
+      FROM pg_constraint c
+      JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+     WHERE c.conrelid = 'public.ad_name_override'::regclass AND c.contype = 'p';
+    IF cols = 'utm_content_lower,adset_id' THEN
+        ALTER TABLE public.ad_name_override DROP CONSTRAINT ad_name_override_pkey,
+            ADD PRIMARY KEY (utm_content_lower, adset_id, ad_id);
+    END IF;
+END $$;
+"""]
 
 #: Ad id -> name -> adset, straight from the same two tables the
 #: attribution universe is built from, so an override can only name an
@@ -120,12 +151,26 @@ SELECT COALESCE(al.ad_id, a.ad_id)                                        AS ad_
 
 INSERT = """
 INSERT INTO public.ad_name_override
-    (utm_content_lower, adset_id, ad_id, ad_name, note)
+    (utm_content_lower, adset_id, ad_id, ad_name, note, weight)
 VALUES %s
-ON CONFLICT (utm_content_lower, adset_id) DO UPDATE SET
-    ad_id = EXCLUDED.ad_id, ad_name = EXCLUDED.ad_name,
-    note = EXCLUDED.note, added_at = now()
+ON CONFLICT (utm_content_lower, adset_id, ad_id) DO UPDATE SET
+    ad_name = EXCLUDED.ad_name, note = EXCLUDED.note,
+    weight = EXCLUDED.weight, added_at = now()
 """
+
+def _weight(rec: dict) -> float | None:
+    """Parse an optional weight. Absent/blank means "sole mapping"."""
+    raw = (rec.get("weight") or "").strip()
+    if not raw:
+        return None
+    try:
+        w = float(raw)
+    except ValueError:
+        return None
+    # A non-positive share would silently take no orders while still
+    # looking like a mapping someone wrote on purpose.
+    return w if w > 0 else None
+
 
 HEADER_MAP = {
     "utm_content": "utm_content", "utm content": "utm_content", "content": "utm_content",
@@ -134,6 +179,7 @@ HEADER_MAP = {
     "ad_id": "ad_id", "ad id": "ad_id",
     "adset_name": "adset_name", "ad set": "adset_name",
     "note": "note", "reason": "note",
+    "weight": "weight", "share": "weight", "spend_weight": "weight",
 }
 
 #: Names are compared after the same normalisation live matching uses, so
@@ -206,6 +252,8 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = '600s'")
             cur.execute(DDL)
+            for _m in MIGRATIONS:
+                cur.execute(_m)
 
             if args.list:
                 cur.execute(
@@ -261,7 +309,8 @@ def main() -> int:
                         rejected.append((label, f"no ad in the account has id {given_id}"))
                         continue
                     accepted.append((uc.lower(), aset, given_id, by_id[given_id],
-                                     (rec.get("note") or "").strip() or None))
+                                     (rec.get("note") or "").strip() or None,
+                                     _weight(rec)))
                     continue
 
                 cands = by_exact.get(an.lower()) or by_norm.get(_norm(an)) or []
@@ -280,7 +329,8 @@ def main() -> int:
                     continue
                 ad_id, real_name = next(iter(ids.items()))
                 accepted.append((uc.lower(), aset, ad_id, real_name,
-                                 (rec.get("note") or "").strip() or None))
+                                 (rec.get("note") or "").strip() or None,
+                                 _weight(rec)))
 
             print(f"{'outcome':<12}{'rows':>6}")
             print(f"{'accepted':<12}{len(accepted):>6}")
@@ -291,9 +341,10 @@ def main() -> int:
                     print(f"  {what:<84} {why}")
             if accepted:
                 print("\nACCEPTED:")
-                for uc, aset, ad_id, real_name, _ in accepted[:40]:
+                for uc, aset, ad_id, real_name, _note, weight in accepted[:40]:
                     scope = "any adset" if aset == ANY_ADSET else f"from adset {aset}"
-                    print(f"  {uc[:50]:52} -> {real_name[:46]:48} [{scope}]")
+                    share = "" if weight is None else f" weight={weight:g}"
+                    print(f"  {uc[:50]:52} -> {real_name[:46]:48} [{scope}]{share}")
                 if len(accepted) > 40:
                     print(f"  ... and {len(accepted) - 40:,} more")
                 psycopg2.extras.execute_values(cur, INSERT, accepted, page_size=500)

@@ -1833,7 +1833,7 @@ async def get_last_click_utm(
     ),
     only_matched: bool = Query(default=False, description="Only rows where has_match=true."),
     only_unmatched: bool = Query(default=False, description="Only rows where has_match=false."),
-    search: str | None = Query(default=None, description="Matches order name, case-insensitive substring."),
+    search: str | None = Query(default=None, description="Case-insensitive substring over order name, utm_content, utm_term and matched ad name; exact match on matched_ad_id."),
     from_date: date | None = Query(default=None, description="Only orders with created_at >= this date."),
     to_date: date | None = Query(default=None, description="Only orders with created_at <= this date (inclusive)."),
     sort: Literal["created_at", "total_price", "customer_num_orders"] = Query(default="created_at"),
@@ -1969,8 +1969,31 @@ async def get_last_click_utm(
         where_clauses.extend(sub_clauses)
         params.update(sub_params)
     if search:
-        where_clauses.append("soa.name ILIKE :search")
+        # Order name OR the identifiers the page puts on screen.
+        #
+        # This matched `soa.name` alone, so pasting a utm_content -- the
+        # exact value the "Adset matched · ad name failed" panel above
+        # displays, and the natural thing to reach for when chasing a
+        # mismatch -- returned nothing at all. The value was in the
+        # table; the box simply was not looking at that column.
+        #
+        # An empty result from a search box reads as "no such order",
+        # which is a different and much more alarming claim than "I only
+        # search names". utm_term and the matched ad name are included
+        # for the same reason: every one of them is rendered in this
+        # table, so every one of them is something a reader will paste
+        # back in.
+        where_clauses.append(
+            "(soa.name ILIKE :search"
+            " OR soa.utm_content ILIKE :search"
+            " OR soa.utm_term ILIKE :search"
+            " OR soa.matched_ad_name ILIKE :search"
+            " OR soa.matched_ad_id = :search_exact)"
+        )
         params["search"] = f"%{search}%"
+        # Exact on the id: a substring match on an 18-digit id would
+        # make a short query match half the account.
+        params["search_exact"] = search.strip()
     if channel:
         channel_sql, channel_params = _channel_sql_predicate(channel)
         # Qualify the predicate's column refs with soa. -- the row query

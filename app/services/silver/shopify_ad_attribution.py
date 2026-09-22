@@ -15,6 +15,7 @@ shopify_landing_page_analysis separately aggregates Shopify session metrics.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -151,7 +152,8 @@ class AdUniverse:
     #: not a rule of their own, they are the rename the edit log failed
     #: to record, supplied by someone who checked. When the log is fixed
     #: the rule finds them unaided and the row becomes redundant.
-    overrides: dict[tuple[str, str], str] = field(default_factory=dict)
+    overrides: dict[tuple[str, str], list[tuple[str, float | None]]] = field(
+        default_factory=dict)
 
 
 # Use both entity rosters, including direct IDs for ads without a usable name.
@@ -221,7 +223,8 @@ _AD_EDIT_LOG_EXISTS = (
 # adset_id '*' applies account-wide; a real id scopes the mapping to
 # orders from that ad set, which is what makes an ambiguous name usable.
 _OVERRIDE_SQL = (
-    "SELECT utm_content_lower, adset_id, ad_id FROM public.ad_name_override"
+    "SELECT utm_content_lower, adset_id, ad_id, weight "
+    "FROM public.ad_name_override ORDER BY utm_content_lower, adset_id, ad_id"
 )
 
 _OVERRIDE_EXISTS = (
@@ -309,13 +312,53 @@ def _build_ad_universe(
             replace(ad, aliases=tuple(dict.fromkeys((*ad.aliases, *sorted(names))))),
         )
 
-    for utm_lower, adset_id, ad_id in overrides:
+    for utm_lower, adset_id, ad_id, weight in overrides:
         if not utm_lower or ad_id not in universe.by_id:
             # A mapping naming an ad the cascade cannot resolve would
             # produce a match pointing at nothing.
             continue
-        universe.overrides[(utm_lower.strip().lower(), adset_id or "*")] = ad_id
+        universe.overrides.setdefault(
+            (utm_lower.strip().lower(), adset_id or "*"), [],
+        ).append((ad_id, None if weight is None else float(weight)))
     return universe
+
+
+def _pick_weighted(
+    choices: list[tuple[str, float | None]], order_id: str,
+) -> str:
+    """Choose one ad from a weighted key, deterministically per order.
+
+    Two ads in one ad set can carry the SAME name -- two Sep-682 ads are
+    both `SMCP_VRP_UB_US_916_Sep-682_03/10/2025_H0`. No rule can separate
+    them, because nothing in the data distinguishes them. The orders are
+    real and each belongs to exactly one of the two; which one is
+    genuinely unknown.
+
+    So the split is modelled, by spend share. The choice is a hash of the
+    ORDER ID rather than a random draw or a round-robin: it is stable
+    across rebuilds (the same order lands on the same ad every time),
+    needs no stored state, and converges on the requested proportions
+    over any reasonable number of orders. A random draw would reshuffle
+    every ad's revenue on every refresh.
+
+    This is an ESTIMATE and the only place in the cascade that produces
+    one. Everything else either identifies an ad or declines to.
+    """
+    weighted = [(ad, w) for ad, w in choices if w and w > 0]
+    if not weighted:
+        return choices[0][0]
+    if len(weighted) == 1:
+        return weighted[0][0]
+    total = sum(w for _a, w in weighted)
+    # 1e6 buckets: fine enough that a 0.01% weight still lands.
+    bucket = int(hashlib.md5(order_id.encode("utf-8")).hexdigest()[:8], 16) % 1_000_000
+    cutoff = bucket / 1_000_000 * total
+    running = 0.0
+    for ad, w in weighted:
+        running += w
+        if cutoff < running:
+            return ad
+    return weighted[-1][0]
 
 
 async def _load_ad_universe(session: AsyncSession) -> AdUniverse:
@@ -467,6 +510,7 @@ def _global_name_match(utm_content: str, universe: AdUniverse) -> AdMeta | None:
 
 def _attribute_order(
     utm_content: str, utm_term: str, utm_campaign: str, universe: AdUniverse,
+    order_id: str = "",
 ) -> AttributionResult:
     """Direct ID -> terminal strict adset -> terminal campaign -> global name.
 
@@ -505,8 +549,9 @@ def _attribute_order(
         for value in _value_candidates(utm_content):
             key = value.strip().lower()
             for scope in (utm_term.strip(), "*"):
-                ad_id = universe.overrides.get((key, scope)) if scope else None
-                if ad_id:
+                choices = universe.overrides.get((key, scope)) if scope else None
+                if choices:
+                    ad_id = _pick_weighted(choices, order_id or utm_content)
                     return matched("edit_name_match", universe.by_id[ad_id])
 
     adset_ids = {
@@ -715,7 +760,8 @@ async def _refresh_order_attribution(session: AsyncSession) -> int:
 
     rows = []
     for o in orders:
-        result = _attribute_order(o.utm_content, o.utm_term, o.utm_campaign, universe)
+        result = _attribute_order(o.utm_content, o.utm_term, o.utm_campaign, universe,
+                                  order_id=o.order_id or "")
         rows.append({
             "order_id": o.order_id, "name": o.name, "total_price": o.total_price,
             "created_at": o.created_at, "customer_id": o.customer_id,
