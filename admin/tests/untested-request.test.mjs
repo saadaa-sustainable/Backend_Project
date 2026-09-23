@@ -98,7 +98,7 @@ test("a successful request clears its timeout and retains cached results", async
   });
   const params = { media: "graphic", match_state: "matched" };
   assert.deepEqual(await fetchUntestedAssets(params), { rows: [{ id: "asset-1" }] });
-  t.mock.timers.tick(60_000);
+  t.mock.timers.tick(90_000);
   assert.equal(requestSignal.aborted, false);
   assert.deepEqual(await fetchUntestedAssets(params), { rows: [{ id: "asset-1" }] });
   assert.equal(calls, 1);
@@ -142,7 +142,7 @@ test("the matched-ad popup times out and can retry without limiting its returned
   assert.equal(calls, 2);
 });
 
-test("Creative Testing callers receive the shared ten-second analytics timeout", async (t) => {
+test("Creative Testing callers receive the shared analytics timeout", async (t) => {
   t.mock.method(globalThis, "fetch", async (_url, init) => {
     assert.ok(init.signal);
     return Response.json({ asset_id: "GAD-Sep-340", media: "graphic", ads: [] });

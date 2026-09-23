@@ -40,6 +40,31 @@ const callers = [
 ];
 
 for (const [name, load, path] of callers) {
+  // From master: a slow response that eventually arrives must render,
+  // not be cancelled. The bound exists to expose Retry on a stall, not
+  // to cap how long a healthy query may take.
+  test(`${name}: a slow but healthy response still renders without retry`, async (t) => {
+    let calls = 0;
+    let requestSignal;
+    const response = { rows: [{ ad_id: "slow-but-healthy" }], total: 1 };
+    t.mock.method(globalThis, "fetch", async (_url, init) => {
+      calls += 1;
+      requestSignal = init.signal;
+      await new Promise((resolve) => setTimeout(resolve, 12_000));
+      assert.equal(init.signal.aborted, false);
+      return Response.json(response);
+    });
+    const pending = load();
+    await Promise.resolve();
+    t.mock.timers.tick(10_000);
+    assert.equal(requestSignal.aborted, false);
+    t.mock.timers.tick(2_000);
+    assert.deepEqual(await pending, response);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(ANALYTICS_REQUEST_TIMEOUT_MS);
+    assert.equal(requestSignal.aborted, false);
+  });
+
   test(`${name}: one shared request stops at the analytics bound and manual retry succeeds`, async (t) => {
     let calls = 0;
     let requestSignal;
@@ -69,7 +94,7 @@ for (const [name, load, path] of callers) {
     assert.equal(calls, 1);
     assert.deepEqual(await load(), response);
     assert.equal(calls, 2);
-    t.mock.timers.tick(60_000);
+    t.mock.timers.tick(90_000);
     assert.equal(requestSignal.aborted, false);
     assert.deepEqual(await load(), response);
     assert.equal(calls, 2);

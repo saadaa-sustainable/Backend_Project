@@ -133,7 +133,8 @@ const analyticsCache = new RequestCache();
 // Analytics sections should show their Retry control rather than spin
 // forever against a stalled backend -- but the bound has to clear the
 // slowest query that legitimately succeeds, or it converts a slow page
-// into a broken one.
+// into a broken one. The load-time target is not a cancellation
+// deadline.
 //
 // Was 10s. Measured 2026-09-23, /ads-analyse over the full window takes
 // 20.6s: the windowed re-sum, the reach anchors and the attribution
@@ -141,9 +142,10 @@ const analyticsCache = new RequestCache();
 // every time and the section showed Retry, which reads as a backend
 // failure rather than as a slow query.
 //
-// 90s is chosen to be far above the measured worst case rather than
-// just above it, so ordinary variance -- a cold cache, a competing
-// rebuild -- does not start failing requests again.
+// 90s is far above the measured worst case rather than just above it,
+// so ordinary variance does not start failing requests again: a cold
+// cache, a competing rebuild, or Render taking time to wake after idle.
+// Still finite, so a genuinely stalled connection does expose Retry.
 export const ANALYTICS_REQUEST_TIMEOUT_MS = 90_000;
 
 export function clearAnalyticsCache(): void {

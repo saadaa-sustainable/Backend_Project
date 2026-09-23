@@ -1581,6 +1581,7 @@ export function AdsAnalyse() {
   const [accountOptions, setAccountOptions] = useState<Set<string>>(new Set());
   const [statusOptions, setStatusOptions] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [slowLoading, setSlowLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
@@ -1780,6 +1781,15 @@ export function AdsAnalyse() {
   // ── pagination ──────────────────────────────────────────────
   const [page, setPage] = useState(0);
 
+  // A slow response can still succeed. Give feedback without aborting it
+  // or launching duplicate requests while the backend is waking up.
+  useEffect(() => {
+    setSlowLoading(false);
+    if (!loading && !rollupLoading) return;
+    const timer = window.setTimeout(() => setSlowLoading(true), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [loading, rollupLoading]);
+
   // ── fetch data ──────────────────────────────────────────────
   useEffect(() => {
     if (levelToggle === "ad") return;
@@ -1884,10 +1894,9 @@ export function AdsAnalyse() {
     setLoading(true);
     setError(null);
     setFailedLoadMore(false);
-    // Fetch a large first batch so client-side recategorisation +
-    // numeric filters have enough data to be useful without a
-    // per-filter round-trip. 500 rows keeps under 1MB per fetch.
-    fetchAdsAnalyse({ ...filters, limit: 500, offset: 0 })
+    // Load the visible page first. KPI totals and category counts still
+    // cover all matching ads; Load More fetches subsequent 500-row batches.
+    fetchAdsAnalyse({ ...filters, limit: PAGE_SIZE, offset: 0 })
       .then((res) => {
         if (cancelled) return;
         setRows(res.rows);
@@ -2268,6 +2277,12 @@ export function AdsAnalyse() {
           Meta's own per-entity figures, not summable from ads) and the
           F1-F4 verdicts are an ad-level concept that does not apply here.
          ═══════════════════════════════════════════════════════════ */}
+      {slowLoading && (loading || rollupLoading) && (
+        <p role="status" className="text-sm text-text-secondary">
+          This is taking longer than usual. Your data is still loading…
+        </p>
+      )}
+
       {levelToggle !== "ad" && (
         <div className="space-y-2">
           {rollupError && (

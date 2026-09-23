@@ -1201,9 +1201,14 @@ async def warm_ads_analyse_cache() -> None:
     today = date.today()
     try:
         async with session_scope() as session:
-            # Ads Analyse opens with all dates, no copy filter, 500 rows.
+            # Match AdsAnalyse's Lifetime preset (DateRangePicker.DATA_FLOOR),
+            # delivery mode and first-page size. Warming an unbounded request
+            # misses the browser's cache key and repeats all of its SQL.
             # The decorator resolves Query defaults exactly as FastAPI does.
-            await get_ads_analyse(session=session, limit=500)
+            await get_ads_analyse(
+                session=session, limit=100, from_date=date(2026, 1, 1),
+                to_date=today, date_field="delivery",
+            )
     except Exception:
         logging.getLogger(__name__).exception("ads_analyse_warmer_failed")
     for days in (30, 7):
