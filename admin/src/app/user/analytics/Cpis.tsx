@@ -26,7 +26,8 @@ import { ExportButton } from "@/components/ExportButton";
 // sums represent the entire matched SKU set, not just the first page.
 // Total distinct SKUs across every window stays <100, so a single-page
 // fetch is still fast.
-const PAGE_SIZE = 500;
+// Fetch a smaller first page; the table can load additional SKUs on demand.
+const PAGE_SIZE = 250;
 const DISPLAY_PAGE_SIZE = 50;
 
 const SATURATION_Y_METRICS: { value: SaturationYMetric; label: string }[] = [
