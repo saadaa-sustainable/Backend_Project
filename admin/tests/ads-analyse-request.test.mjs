@@ -13,7 +13,7 @@ function asModule(source) {
 const cacheModule = asModule(await readFile(new URL("../src/lib/apiCache.ts", import.meta.url), "utf8"));
 const source = (await readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"))
   .replace('from "./apiCache"', `from "${cacheModule}"`);
-const { ApiError, clearAnalyticsCache, fetchAdsAnalyse, fetchAdsAnalyseRollup } = await import(asModule(source));
+const { ApiError, clearAnalyticsCache, fetchAdsAnalyse, fetchAdsAnalyseRollup, ANALYTICS_REQUEST_TIMEOUT_MS } = await import(asModule(source));
 
 beforeEach((t) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -40,7 +40,10 @@ const callers = [
 ];
 
 for (const [name, load, path] of callers) {
-  test(`${name}: a response taking longer than ten seconds still renders without retry`, async (t) => {
+  // From master: a slow response that eventually arrives must render,
+  // not be cancelled. The bound exists to expose Retry on a stall, not
+  // to cap how long a healthy query may take.
+  test(`${name}: a slow but healthy response still renders without retry`, async (t) => {
     let calls = 0;
     let requestSignal;
     const response = { rows: [{ ad_id: "slow-but-healthy" }], total: 1 };
@@ -58,11 +61,11 @@ for (const [name, load, path] of callers) {
     t.mock.timers.tick(2_000);
     assert.deepEqual(await pending, response);
     assert.equal(calls, 1);
-    t.mock.timers.tick(90_000);
+    t.mock.timers.tick(ANALYTICS_REQUEST_TIMEOUT_MS);
     assert.equal(requestSignal.aborted, false);
   });
 
-  test(`${name}: one shared request stops at 90 seconds and manual retry succeeds`, async (t) => {
+  test(`${name}: one shared request stops at the analytics bound and manual retry succeeds`, async (t) => {
     let calls = 0;
     let requestSignal;
     const response = { rows: [{ ad_id: "ad-1" }], total: 1 };
@@ -75,14 +78,17 @@ for (const [name, load, path] of callers) {
     const outcomes = Promise.allSettled([load(), load()]);
     await Promise.resolve();
     assert.equal(calls, 1);
-    t.mock.timers.tick(89_999);
+    // One tick short of the bound, then over it -- follows the constant
+    // rather than pinning a number it no longer has.
+    t.mock.timers.tick(ANALYTICS_REQUEST_TIMEOUT_MS - 1);
     assert.equal(requestSignal.aborted, false);
     t.mock.timers.tick(1);
     for (const result of await outcomes) {
       assert.equal(result.status, "rejected");
       assert.ok(result.reason instanceof ApiError);
       assert.equal(result.reason.status, 408);
-      assert.match(result.reason.message, /90 seconds/);
+      assert.match(result.reason.message,
+        new RegExp(`${Math.round(ANALYTICS_REQUEST_TIMEOUT_MS / 1000)} seconds`));
     }
     // No automatic retries; the next explicit request can recover.
     assert.equal(calls, 1);
@@ -107,7 +113,7 @@ for (const [name, load, path] of callers) {
     await Promise.resolve();
     await Promise.resolve();
     assert.equal(readingBody, true);
-    t.mock.timers.tick(90_000);
+    t.mock.timers.tick(ANALYTICS_REQUEST_TIMEOUT_MS);
     await rejected;
   });
 

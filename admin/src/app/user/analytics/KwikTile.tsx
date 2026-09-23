@@ -23,6 +23,8 @@
 
 import { ReactNode } from "react";
 
+import { InfoBasis, InfoDot } from "./InfoDot";
+
 export interface KwikTileProps {
   icon?: ReactNode;
   iconColor?: "slate" | "sky" | "emerald" | "amber" | "rose" | "purple" | "teal";
@@ -39,8 +41,12 @@ export interface KwikTileProps {
   delta?: { direction: "up" | "down" | "flat"; label?: string; text: string };
   /** Second small line under everything (e.g. "in Last 30 Days"). */
   subLine?: ReactNode;
-  /** Info tooltip shown on the (i) icon top-right. */
-  info?: string;
+  /** Basis panel on the (i) at top-right: where this tile's number
+   *  comes from. A bare string is still accepted; the structured form
+   *  is preferred because it forces the count and the spend sub-line to
+   *  declare their populations separately, which is the thing readers
+   *  get wrong. */
+  info?: string | InfoBasis;
   /** When set, the whole tile becomes a filter button (CTD's tile-click
    *  behaviour). */
   onClick?: () => void;
@@ -107,14 +113,7 @@ export function KwikTile({
         ) : (
           <div />
         )}
-        {info && (
-          <span
-            title={info}
-            className="flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-border-primary text-[9px] font-semibold text-text-tertiary"
-          >
-            i
-          </span>
-        )}
+        {info && <InfoDot basis={info} />}
       </div>
 
       {/* Row 2: small gray label */}

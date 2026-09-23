@@ -29,6 +29,7 @@ Phase layout mirrors CTD's _refresh_all_dashboard_data.py:
      refresh_master_sku_returns.py          BQ returns -> master_sku silver
      refresh_cpis_by_sku_daily.py           daily CPIS aggregate
      refresh_cpis_utm.py                    windowed CPIS (7/30/90d)
+     refresh_cpis_sku_ad_daily.py           (day, sku, ad) for /cpis-utm
      refresh_ad_product_daily.py            DPA product silver
      refresh_ad_media.py                    ad-media joined silver
 
@@ -291,6 +292,11 @@ PHASE_SILVER = [
     ("cpis_sku_context",      ["scripts/refresh_cpis_sku_context.py"],       600),
     ("silver_returns",        ["scripts/refresh_master_sku_returns.py"],     900),
     ("silver_cpis_daily",     ["scripts/refresh_cpis_by_sku_daily.py"],      900),
+    # (day, master_sku, ad_id) for /cpis-utm. Must run after the
+    # Shopify ingest: the endpoint reads this instead of exploding
+    # line_items per request, so a stale table silently drops the
+    # newest orders from every SKU row.
+    ("silver_cpis_sku_ad",    ["scripts/refresh_cpis_sku_ad_daily.py"],      900),
     ("silver_cpis_utm",       ["scripts/refresh_cpis_utm.py"],              1200),
     ("silver_ad_product",     ["scripts/refresh_ad_product_daily.py"],       600),
     ("silver_ad_media",       ["scripts/refresh_ad_media.py"],               900),

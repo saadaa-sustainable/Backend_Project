@@ -54,7 +54,11 @@ const PRESETS: { key: PresetKey; label: string }[] = [
   { key: "thisMonth", label: "This Month" },
   { key: "lastMonth", label: "Last Month" },
   { key: "last90", label: "Last 90 Days" },
-  { key: "lifetime", label: "Lifetime (from 1 Jan 2026)" },
+  // Just "Lifetime". The floor date used to be spelled out here and
+  // again in the summary line below, which repeated on every screen
+  // what DataFloorNotice already says once, in the place built to
+  // say it.
+  { key: "lifetime", label: "Lifetime" },
   { key: "custom", label: "Custom Range" },
 ];
 
@@ -401,7 +405,7 @@ export function DateRangePicker({
             <div className="mt-3 flex items-center justify-between border-t pt-3" style={{ borderColor: CT.border }}>
               <div className="font-mono text-[13px]" style={{ color: CT.ink }}>
                 {draftPreset === "lifetime"
-                  ? `${fmtDisplay(DATA_FLOOR)}  -  today`
+                  ? "Lifetime"
                   : `${fmtDisplay(draft.from)}  -  ${fmtDisplay(draft.to)}`}
               </div>
               <div className="flex gap-2">

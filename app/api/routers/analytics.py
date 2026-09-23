@@ -78,6 +78,7 @@ class AdLifecycleResponse(BaseModel):
 
 
 @router.get("/ad-lifecycle", response_model=AdLifecycleResponse)
+@cached_analytics(ttl=300.0)
 async def get_ad_lifecycle(
     session: SessionDep,
     account_name: str | None = Query(default=None),
@@ -172,6 +173,7 @@ _ADS_ANALYSE_SELECT = (
     "aps.cost_per_shopify_order, aps.gold_refreshed_at, "
     "aps.f1_pass, aps.f2_pass, aps.f3_pass, aps.f4_pass, "
     "al.reach, al.frequency, al.conv_value, "
+    "COALESCE(bt.budget_type, 'NONE') AS budget_type, "
     "al.ncp_count, al.ftewv_count, al.cost_per_ncp, al.cost_per_ftewv, "
     "al.roas, al.contrib_margin_pct, al.profit_efficiency, al.cpr_1000, al.cpc_link, "
     "al.checkout_compl_pct, al.cr_lc_pct, al.atc_lc_pct, al.ci_atc_pct, "
@@ -346,6 +348,231 @@ _DELIVERED_IN_WINDOW = (
     "AND d.impressions > 0)"
 )
 
+
+
+# ── Meta Ads Audit & Decision Framework ──────────────────────────────
+#
+# Encodes the account's own written framework. Every threshold below is
+# from that document, not chosen here:
+#
+#   SCALE    3D LC ROAS > 2.5 AND 7D LC ROAS > 2.5
+#            An INDEPENDENT rule -- the document is explicit that the
+#            kill/monitor criteria must not be applied to it, so it is
+#            evaluated first and short-circuits.
+#   PAUSE    3D < 1.5 AND 7D < 1.5, and cost per FTEWV is ABOVE the
+#            account's benchmark.
+#   REPORT   the same ROAS failure but cost per FTEWV is BELOW the
+#            benchmark. The document says to report rather than pause:
+#            the ad set is buying cheap first-time visitors even though
+#            revenue has not followed, which is a judgement call for a
+#            person, not an automatic kill.
+#   MONITOR  7D < 1.5 but 3D has recovered above 1.5. Recent
+#            improvement, so do not pause yet.
+#
+# FTEWV benchmark is per account, also from the document.
+_FTEWV_BENCHMARK = {"raho saadaa": 15.0, "fourth ad account - sd": 12.0}
+#: Accounts the document does not name. 15 is the looser of the two it
+#: does, so an unlisted account is never pause-recommended on a
+#: threshold stricter than anything written down.
+_FTEWV_BENCHMARK_DEFAULT = 15.0
+
+#: How recently an ad set or campaign must have been created to be
+#: flagged NEW. Paused entities built in the last few days have not had
+#: a fair run -- they are pipeline, not failures -- and reading them as
+#: judged is the mistake this flag exists to stop. Seven days rather
+#: than the three or four observed, so the flag survives a weekend.
+_NEW_ENTITY_DAYS = 7
+
+_SCALE_ROAS = 2.5
+_KILL_ROAS = 1.5
+
+
+def _ftewv_benchmark(account_name: str | None) -> float:
+    return _FTEWV_BENCHMARK.get((account_name or "").strip().lower(),
+                                _FTEWV_BENCHMARK_DEFAULT)
+
+
+def _ftewv_expensive(spend: float | None, ftewv: float | None,
+                     bench: float) -> bool | None:
+    """Is this window's cost per FTEWV above the account's benchmark?
+
+    -> None when the window says nothing: no spend at all means there is
+    no cost to be over or under a benchmark.
+
+    Spending with ZERO FTEWV is True, not None. The cost per FTEWV is
+    then undefined only in the arithmetic sense -- every rupee bought no
+    first-time engaged visitor at all, which is the worst case the gate
+    exists to catch, not a missing reading.
+    """
+    if not spend:
+        return None
+    if not ftewv:
+        return True
+    return (spend / ftewv) > bench
+
+
+def _decide(d3_roas: float | None, d7_roas: float | None,
+            account_name: str | None, *,
+            d3_spend: float | None = None, d3_ftewv: float | None = None,
+            d7_spend: float | None = None, d7_ftewv: float | None = None,
+            ) -> tuple[str | None, str | None]:
+    """-> (decision, why). None when the inputs cannot support a call.
+
+    Returns None rather than a default verdict when either ROAS window
+    is missing: an ad set that simply did not run in the last 3 days has
+    no 3D ROAS, and calling that "PAUSE" would recommend killing ad sets
+    for being new.
+
+    The kill gate reads cost per FTEWV on BOTH the 3D and the 7D window
+    (2026-09-23). Pausing on the 7D figure alone killed ad sets whose
+    efficiency had already recovered inside the last three days, and
+    pausing on 3D alone would kill on a handful of conversions. An ad
+    set is only a pause when it is over its account's benchmark on both.
+    Where the two windows disagree it is a MONITOR -- something is
+    moving, and the decision can wait a day for them to agree.
+    """
+    if d3_roas is None or d7_roas is None:
+        return None, "not enough recent data"
+    # Independent, and deliberately first.
+    if d3_roas > _SCALE_ROAS and d7_roas > _SCALE_ROAS:
+        return "SCALE", f"3D {d3_roas:.2f} and 7D {d7_roas:.2f} both > {_SCALE_ROAS}"
+    if d3_roas < _KILL_ROAS and d7_roas < _KILL_ROAS:
+        bench = _ftewv_benchmark(account_name)
+        exp3 = _ftewv_expensive(d3_spend, d3_ftewv, bench)
+        exp7 = _ftewv_expensive(d7_spend, d7_ftewv, bench)
+        roas = f"3D {d3_roas:.2f} and 7D {d7_roas:.2f} both < {_KILL_ROAS}"
+
+        def _cpf(spend: float | None, ftewv: float | None) -> str:
+            if not spend:
+                return "no spend"
+            if not ftewv:
+                return "no FTEWV at all"
+            return f"Rs{spend / ftewv:.2f}"
+
+        detail = (f"cost/FTEWV 3D {_cpf(d3_spend, d3_ftewv)}, "
+                  f"7D {_cpf(d7_spend, d7_ftewv)} vs the Rs{bench:.0f} benchmark")
+        # Both windows expensive -> the efficiency case agrees with the
+        # ROAS case, and there is nothing left to wait for.
+        if exp3 and exp7:
+            return "PAUSE", f"{roas}; {detail} -- over on both windows"
+        # Both cheap: the REPORT case from the framework. It is buying
+        # first-time engaged visitors below benchmark despite the ROAS.
+        if exp3 is False and exp7 is False:
+            return "REPORT", (f"{roas}, but {detail} -- under on both windows, "
+                              f"review before pausing")
+        # One window over, the other under (or silent). Not a kill.
+        return "MONITOR", (f"{roas}; {detail} -- the two windows disagree, "
+                           f"so hold rather than pause")
+    if d7_roas < _KILL_ROAS <= d3_roas:
+        return "MONITOR", (f"7D {d7_roas:.2f} < {_KILL_ROAS} but 3D has recovered to "
+                           f"{d3_roas:.2f} -- may be recovering")
+    return "OK", f"3D {d3_roas:.2f}, 7D {d7_roas:.2f} -- no rule triggered"
+
+
+def _decision_sql(level: str) -> str:
+    """SQL mirror of `_decide`, for the WHERE clause.
+
+    Duplicated logic is a real cost, so the two are kept adjacent and the
+    thresholds come from the same module constants. It exists because
+    filtering in Python would only filter the page that was fetched --
+    500 rows of 3,008 -- and a tile saying 150 that reveals 85 is worse
+    than no tile.
+    """
+    bench = ("CASE LOWER(COALESCE(i.account_name, acct.account_name)) "
+             + " ".join(f"WHEN '{k}' THEN {v}" for k, v in _FTEWV_BENCHMARK.items())
+             + f" ELSE {_FTEWV_BENCHMARK_DEFAULT} END")
+    # COALESCE the revenue, do NOT coalesce the spend. An ad set that
+    # spent and earned nothing has a real ROAS of 0 and is a pause
+    # candidate; one that did not spend has no ROAS at all and must stay
+    # UNRATED. Leaving revenue NULL made the first case read as the
+    # second and the SQL filter returned 27 PAUSE against Python's 150.
+    d3 = "(COALESCE(rl.d3_lc_revenue, 0) / NULLIF(rm.d3_spend, 0))"
+    d7 = "(COALESCE(rl.d7_lc_revenue, 0) / NULLIF(rm.d7_spend, 0))"
+
+    # Mirror of `_ftewv_expensive`, per window. NULL when the window has
+    # no spend; TRUE when it spent and produced no FTEWV at all, which
+    # is the worst case and not a missing reading.
+    def expensive(p: int) -> str:
+        return (f"CASE WHEN COALESCE(rm.d{p}_spend, 0) = 0 THEN NULL "
+                f"     WHEN COALESCE(rm.d{p}_ftewv, 0) = 0 THEN TRUE "
+                f"     ELSE (rm.d{p}_spend / rm.d{p}_ftewv) > {bench} END")
+
+    exp3, exp7 = expensive(3), expensive(7)
+    return (
+        f"CASE WHEN {d3} IS NULL OR {d7} IS NULL THEN 'UNRATED' "
+        f"     WHEN {d3} > {_SCALE_ROAS} AND {d7} > {_SCALE_ROAS} THEN 'SCALE' "
+        f"     WHEN {d3} < {_KILL_ROAS} AND {d7} < {_KILL_ROAS} "
+        # Both windows over the benchmark -> pause. Both under ->
+        # report. Anything else (including one window silent) is a
+        # disagreement between the two, and holds as a monitor.
+        f"          THEN CASE WHEN ({exp3}) AND ({exp7}) THEN 'PAUSE' "
+        f"                    WHEN ({exp3}) IS FALSE AND ({exp7}) IS FALSE THEN 'REPORT' "
+        f"                    ELSE 'MONITOR' END "
+        f"     WHEN {d7} < {_KILL_ROAS} AND {d3} >= {_KILL_ROAS} THEN 'MONITOR' "
+        f"     ELSE 'OK' END"
+    )
+
+# ── CBO / ABO: where the budget actually lives ───────────────────────
+#
+# Meta puts a budget at exactly one level. Campaign Budget Optimisation
+# holds it on the campaign and lets Meta move money between ad sets; Ad
+# Set Budget Optimisation holds it on each ad set. Verified mutually
+# exclusive on this account 2026-09-23: 2,257 ad sets CBO, 1,111 ABO,
+# ZERO carrying a budget at both levels, 4 at neither.
+#
+# Ads have no budget of their own at any time -- Meta's model has none --
+# so an ad inherits its ad set's classification.
+#
+# NULLIF(...,'0') because Meta returns the string '0' for "not set" as
+# well as leaving the field absent, and a bare NOT NULL counts '0' as a
+# real budget.
+_BUDGET_TYPE_SQL = """
+    SELECT s.adset_id,
+           s.campaign_id,
+           CASE
+             WHEN NULLIF(c.daily_budget,'0') IS NOT NULL
+               OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO'
+             WHEN NULLIF(s.daily_budget,'0') IS NOT NULL
+               OR NULLIF(s.lifetime_budget,'0') IS NOT NULL THEN 'ABO'
+             ELSE 'NONE'
+           END AS budget_type
+      FROM public.meta_adsets s
+      LEFT JOIN public.meta_campaigns c ON c.campaign_id = s.campaign_id
+"""
+
+#: Campaign grain: a campaign is CBO when it holds the budget itself,
+#: ABO when its ad sets do. Derived from the same source so the two
+#: levels can never disagree about one campaign.
+#: Self-contained predicate on aps.adset_id. The filter has to work
+#: inside the `picked` pre-selection CTE, which selects from
+#: ad_performance_summary alone and has no access to the joined `bt`
+#: alias -- referencing it there fails with "missing FROM-clause entry".
+_BUDGET_TYPE_PRED = """
+    COALESCE((SELECT CASE
+                       WHEN NULLIF(c.daily_budget,'0') IS NOT NULL
+                         OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO'
+                       WHEN NULLIF(s.daily_budget,'0') IS NOT NULL
+                         OR NULLIF(s.lifetime_budget,'0') IS NOT NULL THEN 'ABO'
+                       ELSE 'NONE' END
+                FROM public.meta_adsets s
+                LEFT JOIN public.meta_campaigns c ON c.campaign_id = s.campaign_id
+               WHERE s.adset_id = aps.adset_id), 'NONE')
+"""
+
+_BUDGET_TYPE_CAMPAIGN_SQL = """
+    SELECT c.campaign_id,
+           CASE
+             WHEN NULLIF(c.daily_budget,'0') IS NOT NULL
+               OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO'
+             WHEN EXISTS (SELECT 1 FROM public.meta_adsets s
+                           WHERE s.campaign_id = c.campaign_id
+                             AND (NULLIF(s.daily_budget,'0') IS NOT NULL
+                               OR NULLIF(s.lifetime_budget,'0') IS NOT NULL)) THEN 'ABO'
+             ELSE 'NONE'
+           END AS budget_type
+      FROM public.meta_campaigns c
+"""
+
 # ── de-duplicated reach snapshots (public.ad_reach_cumulative) ────────
 #
 # Reach counts PEOPLE, so it cannot be summed across days: a person who
@@ -516,7 +743,12 @@ _ADS_ANALYSE_FROM_AGG = (
     "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id "
     # Historical tagging. A plain PK join onto a ~14.9k-row table, so it
     # costs nothing next to the joins around it.
-    "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id"
+    "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id "
+    # CBO / ABO. Joined on the AGG clause, not the row clause, so the
+    # filter reaches the count and the category tiles too -- a filter
+    # applied to rows alone makes the table disagree with the number
+    # above it, which has happened in this file before.
+    f"LEFT JOIN ({_BUDGET_TYPE_SQL}) bt ON bt.adset_id = COALESCE(al.adset_id, aps.adset_id)"
 )
 
 # Source timing uses first positive delivery across the full history.
@@ -796,6 +1028,9 @@ class AdsAnalyseRow(BaseModel):
     ltv_reach: float | None
     ltv_frequency: float | None
     first_seen_date: date | None
+    #: 'CBO' | 'ABO' | 'NONE' -- which level holds this ad's budget.
+    #: Ads never hold one themselves, so this is the ad set's answer.
+    budget_type: str | None = None
 
     # ── de-duplicated reach (public.ad_reach_cumulative) ─────────────
     # These five are the only reach numbers on this row Meta itself
@@ -1033,6 +1268,12 @@ async def get_ads_analyse(
     f3_pass: bool | None = Query(default=None),
     f4_pass: bool | None = Query(default=None),
     search: str | None = Query(default=None, description="Matches ad_name, case-insensitive substring."),
+    budget_type: str | None = Query(
+        default=None,
+        description="CBO (budget on the campaign, Meta reallocates between "
+                    "ad sets) or ABO (budget on each ad set). NONE for the "
+                    "handful with neither. Comma-separated to pass several.",
+    ),
     only_with_shopify_orders: bool = Query(default=False),
     content_type: str | None = Query(
         default=None,
@@ -1128,6 +1369,13 @@ async def get_ads_analyse(
     if search:
         base_where.append("aps.ad_name ILIKE :search")
         params["search"] = f"%{search}%"
+    if budget_type:
+        # base_where, not row_where: this has to reach the count and the
+        # category tiles as well as the table.
+        wanted = [v.strip().upper() for v in budget_type.split(",") if v.strip()]
+        if wanted:
+            base_where.append(f"{_BUDGET_TYPE_PRED} = ANY(:budget_type)")
+            params["budget_type"] = wanted
     if only_with_shopify_orders:
         base_where.append("aps.shopify_orders > 0")
     if excl_copy:
@@ -2232,6 +2480,7 @@ _NAME_MISS_SUMMARY_SQL = (
 
 
 @router.get("/last-click-utm/name-misses", response_model=NameMissResponse)
+@cached_analytics(ttl=900.0)
 async def get_name_misses(
     session: SessionDep,
     from_date: date | None = Query(default=None),
@@ -2348,6 +2597,7 @@ class CustomerJourneyResponse(BaseModel):
 
 
 @router.get("/customer-journey", response_model=CustomerJourneyResponse)
+@cached_analytics(ttl=300.0)
 async def get_customer_journey(
     session: SessionDep,
     rfm_group: str | None = Query(default=None),
@@ -3111,6 +3361,7 @@ class CpisResponse(BaseModel):
 
 
 @router.get("/cpis", response_model=CpisResponse)
+@cached_analytics(ttl=300.0)
 async def get_cpis(
     session: SessionDep,
     window: Literal["1d", "7d", "30d"] = Query(default="7d"),
@@ -3129,11 +3380,22 @@ async def get_cpis(
     is why picking 7d used to show the same ad_spend as 30d. Fixed
     2026-08-29.
 
-    NCP-per-window is a proportional approximation:
-       windowed_ncp = lifetime_ncp × (windowed_spend / lifetime_spend)
-    since Silver only carries lifetime NCP per ad, not daily. Accurate
-    when NCP scales roughly linearly with spend within an ad; a full
-    fix requires adding per-day NCP extraction to Silver, deferred.
+    Both windowed ad_spend and windowed ncp_count come from
+    insights_daily_by_ad, which is keyed (ad_id, day) and therefore
+    counts each ad-day once.
+
+    Until 2026-09-23 they came from raw_dump_meta instead, matched on
+    raw_payload->>'ad_id'. That table is an append-only dump and holds
+    the same ad-day several times over -- 7.3x on average, 12x for some
+    ads -- so the spend it reported was the true figure multiplied by
+    however many times the dump had seen it. cost_per_ncp and
+    cost_per_unit_sold are derived from that spend and were inflated
+    with it.
+
+    NCP was additionally a proportional approximation,
+    lifetime_ncp × (windowed_spend / lifetime_spend), which stood in
+    only until Silver carried per-day NCP. It now does, so the real
+    windowed count is summed instead.
     """
     sort_column = _CPIS_SORT_COLUMNS[sort]
 
@@ -3178,28 +3440,41 @@ async def get_cpis(
         JOIN ad_lifecycle al
           ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
       ),
-      -- Windowed spend per ad from raw_dump_meta insights rows within
-      -- the picked window.
+      -- Windowed spend and NCP per ad from the materialised
+      -- insights_daily_by_ad table (scripts/refresh_insights_daily_by_ad.py),
+      -- which is what /creative-testing already reads.
+      --
+      -- This replaced a LEFT JOIN onto raw_dump_meta that matched on
+      -- raw_payload->>'ad_id' and cast raw_payload->>'date_start' to a
+      -- date per row. No index can serve either expression, so every
+      -- request scanned 2.2M JSONB rows across 5.9GB and the endpoint
+      -- took 50s. The typed table has ix_idba_ad_day on (ad_id, day).
+      --
+      -- The window bounds come from the join to `page` rather than the
+      -- two correlated subqueries that were here before, which re-ran
+      -- per matched ad.
       windowed_ad AS (
         SELECT m.master_sku, m.ad_id,
-               COALESCE(SUM(NULLIF(r.raw_payload->>'spend','')::numeric), 0) AS windowed_spend,
+               COALESCE(SUM(i.spend), 0) AS windowed_spend,
+               COALESCE(SUM(i.ncp_count), 0) AS windowed_ncp,
                m.ad_lifetime_spend, m.ad_lifetime_ncp
         FROM matched m
-        LEFT JOIN raw_dump_meta r
-          ON r.object_type = 'insights'
-         AND r.raw_payload->>'ad_id' = m.ad_id
-         AND (r.raw_payload->>'date_start')::date >= (SELECT window_from FROM page WHERE page.master_sku = m.master_sku LIMIT 1)
-         AND (r.raw_payload->>'date_start')::date <= (SELECT window_to FROM page WHERE page.master_sku = m.master_sku LIMIT 1)
+        JOIN page p ON p.master_sku = m.master_sku
+        LEFT JOIN public.insights_daily_by_ad i
+          ON i.ad_id = m.ad_id
+         AND i.day >= p.window_from
+         AND i.day <= p.window_to
         GROUP BY m.master_sku, m.ad_id, m.ad_lifetime_spend, m.ad_lifetime_ncp
       ),
       windowed_sku AS (
+        -- NCP is now the real windowed count, summed per day from
+        -- insights_daily_by_ad. It used to be the proportional
+        -- approximation lifetime_ncp * (windowed_spend /
+        -- lifetime_spend), which this module documented as standing in
+        -- only until Silver carried per-day NCP. It does.
         SELECT master_sku,
                SUM(windowed_spend) AS ad_spend_windowed,
-               SUM(
-                 CASE WHEN ad_lifetime_spend > 0
-                   THEN ad_lifetime_ncp * (windowed_spend / ad_lifetime_spend)
-                   ELSE 0 END
-               ) AS ncp_count_windowed
+               SUM(windowed_ncp)   AS ncp_count_windowed
         FROM windowed_ad
         GROUP BY master_sku
       )
@@ -3979,24 +4254,21 @@ async def get_cpis_utm(
         -- which SKUs on which days. The `day` dimension is crucial for
         -- the day-scoped spend calc below -- an ad's Meta spend counts
         -- for a SKU only on the days that ad actually drove SKU orders.
-        SELECT DISTINCT
-          so.processed_at::date AS day,
-          SUBSTRING(
-            split_part(edge->'node'->>'sku', '_', 1)
-            FROM 1
-            FOR GREATEST(1, char_length(split_part(edge->'node'->>'sku', '_', 1)) - 2)
-          ) AS master_sku,
-          so.utm_content AS ad_id
-        FROM shopify_orders so,
-             LATERAL jsonb_array_elements(so.line_items->'edges') edge
-        WHERE so.processed_at >= (SELECT lo FROM bounds)
-          AND so.processed_at <  (SELECT hi FROM bounds) + integer '1'
-          -- Regex with $/\Z trips SQLAlchemy text() + asyncpg param
-          -- scan; string ops are safer here.
-          AND char_length(so.utm_content) BETWEEN 10 AND 20
-          AND so.utm_content !~ '[^0-9]'
-          AND edge->'node'->>'sku' IS NOT NULL
-          {utm_sku_ads_guard}
+        --
+        -- Read from the materialised mapping
+        -- (scripts/refresh_cpis_sku_ad_daily.py). This was a
+        --   FROM shopify_orders so,
+        --        LATERAL jsonb_array_elements(so.line_items->'edges')
+        -- over the whole picked window, which detoasted and exploded
+        -- every order's line_items on every request: 24s of this
+        -- endpoint's 26s, to rebuild a mapping that only changes when
+        -- orders arrive. The script carries the same SKU parse and the
+        -- same utm_content predicate, so the tuples are identical.
+        SELECT day, master_sku, ad_id
+          FROM public.cpis_sku_ad_daily
+         WHERE day >= (SELECT lo FROM bounds)
+           AND day <= (SELECT hi FROM bounds)
+           {utm_sku_ads_guard}
       ),
       utm_ads AS (
         -- Day-scoped spend rollup (2026-09-02): join each
@@ -5171,6 +5443,7 @@ class InstagramPostsResponse(BaseModel):
 
 
 @router.get("/instagram", response_model=InstagramPostsResponse)
+@cached_analytics(ttl=300.0)
 async def get_instagram_posts(
     session: SessionDep,
     username: str | None = Query(default=None, description="Filter to one IG account username."),
@@ -5330,6 +5603,7 @@ def _fit_power_law(xs: list[float], ys: list[float]) -> tuple[float, float, floa
 
 
 @router.get("/saturation-curve", response_model=SaturationCurveResponse)
+@cached_analytics(ttl=900.0)
 async def get_saturation_curve(
     session: SessionDep,
     y_metric: Literal["ncp_count", "purchases", "ftewv_count"] = Query(default="ncp_count"),
@@ -5520,14 +5794,17 @@ async def get_overview_summary(session: SessionDep) -> OverviewSummaryResponse:
     channel-breakdown,top-landing-pages,top-cpis-skus} instead. Kept
     for backward compat only.
     """
-    import asyncio as _asyncio
-    kpis, cat, chan, lp, cpis = await _asyncio.gather(
-        get_dashboard_kpis(session),
-        get_dashboard_category_breakdown(session),
-        get_dashboard_channel_breakdown(session),
-        get_dashboard_top_landing_pages(session),
-        get_dashboard_top_cpis_skus(session),
-    )
+    # Sequential, not asyncio.gather. One AsyncSession cannot run two
+    # statements at once -- gathering five of them on this session
+    # raised InterfaceError ("another operation is in progress") and
+    # this endpoint returned 500 for every call. The five parts are
+    # individually cached, so the fan-out that replaced this endpoint
+    # is where the parallelism belongs.
+    kpis = await get_dashboard_kpis(session)
+    cat = await get_dashboard_category_breakdown(session)
+    chan = await get_dashboard_channel_breakdown(session)
+    lp = await get_dashboard_top_landing_pages(session)
+    cpis = await get_dashboard_top_cpis_skus(session)
     return OverviewSummaryResponse(
         total_spend=kpis.total_spend,
         total_impressions=kpis.total_impressions,
@@ -5549,13 +5826,17 @@ async def get_overview_summary(session: SessionDep) -> OverviewSummaryResponse:
 # not the ad -- one asset routinely runs in several ads and would
 # otherwise be counted several times.
 #
-# NEW vs ITERATION is decided by the ASSET's own creation date in its
-# register, NOT by the ad's date:
+# NEW vs ITERATION is decided by when the asset was FIRST PUT IN THE
+# AIR, ignoring Meta duplicates -- not by its production date in the
+# register (see _CT_IS_NEW for what that cost):
 #
-#     asset created inside the window   -> counter 0  -> New Creative
-#     asset created before the window   -> counter >=1 -> Iteration
-#     ad name contains "copy"           -> always       Iteration
-#     asset has no creation date        -> always       Iteration
+#     first non-copy ad launched inside the window  -> New Creative
+#     first non-copy ad launched before the window  -> Iteration
+#     every ad for the asset is a "copy"            -> always Iteration
+#
+# The register date is still shown on the row; it just no longer
+# decides the bucket. It answers "when was this made", which is not the
+# same question as "has this been tested before".
 #
 # The copy rule is load-bearing, not a detail. Measured 2026-09-15:
 # 1,833 of 3,911 mapped ads (46%) carry "copy" in the name, and 604 of
@@ -5653,6 +5934,19 @@ _CT_AGG = (
     "                                 BETWEEN :from_date AND :to_date)    AS ads_in_window,"
     "         count(*) FILTER (WHERE m.ad_name NOT ILIKE '%copy%')        AS original_ads,"
     "         min(m.ad_created_date)                                      AS first_ad_date,"
+    # The date this creative was FIRST put in the air, ignoring
+    # Meta duplicates. This is what decides new vs retest -- see
+    # _CT_IS_NEW for why the register date cannot.
+    "         min(m.ad_created_date) FILTER (WHERE m.ad_name NOT ILIKE '%copy%')"
+    "                                                                     AS first_original_ad_date,"
+    # When this creative went live on Meta INSIDE the selected dates --
+    # the first ad carrying it that was built in the window. This is the
+    # date the Timeline column shows: an asset that ran in March and was
+    # put back up this week should read this week, because this week is
+    # what the window is asking about. `ads_in_window > 0` gates every
+    # row, so the filter can never be empty.
+    "         min(m.ad_created_date) FILTER (WHERE m.ad_created_date"
+    "                                 BETWEEN :from_date AND :to_date)    AS launched_in_window,"
     "         max(m.ad_created_date)                                      AS last_ad_date,"
     "         min(m.account_name)                                         AS account_name,"
     "         bool_or(m.name_conflict)                                    AS name_conflict,"
@@ -5676,15 +5970,24 @@ _CT_AGG = (
     "         sum(COALESCE(w.all_clicks, 0))                              AS link_clicks,"
     "         sum(m.spend)                                                AS spend_lifetime,"
     "         sum(m.purchases)                                            AS purchases_lifetime,"
-    # Best verdict any ad of this asset reached. An asset that produced a
-    # Winner in one ad and a Discarded in another is a Winner -- the
-    # creative proved itself at least once. min() over the rank because
-    # rank 1 is the strongest.
-    "         min(CASE m.category"
-    "              WHEN 'Incremental Winner' THEN 1 WHEN 'Winner' THEN 2"
-    "              WHEN 'P0 analysis' THEN 3 WHEN 'P1 analysis' THEN 4"
-    "              WHEN 'P2 analysis' THEN 5 WHEN 'Result Awaited' THEN 6"
-    "              ELSE 7 END)                                             AS cat_rank,"
+    # The verdict of this asset's MOST RECENT ad, not the best one it
+    # ever reached.
+    #
+    # It used to be min() over a rank, i.e. the strongest result any ad
+    # ever produced -- an asset that was a Winner once in March and
+    # Discarded in every test since still read "Winner". That is a claim
+    # about its history, and the column sits beside windowed spend and
+    # a new/retest bucket that are both about now.
+    #
+    # Ordered by the ad's creation date, tie-broken on ad_id so the pick
+    # is stable across rebuilds rather than whichever row the planner
+    # happened to emit first. Capped at :to_date so looking at a past
+    # window cannot surface a verdict from an ad built after it --
+    # `ads_in_window > 0` guarantees at least one ad survives the
+    # filter, so this is never empty.
+    "         (array_agg(m.category ORDER BY m.ad_created_date DESC NULLS LAST,"
+    "                                        m.ad_id DESC)"
+    "            FILTER (WHERE m.ad_created_date <= :to_date))[1]          AS latest_category,"
     "         max(m.ad_name)                                              AS sample_ad_name,"
     "         sum(m.thruplays)                                            AS thruplays,"
     "         sum(COALESCE(w.three_sec_plays, 0))                         AS three_sec_plays,"
@@ -5732,18 +6035,36 @@ _CT_BASE = (
     "WHERE a.ads_in_window > 0"
 )
 
-#: An asset is NEW only if its register creation date falls inside the
-#: window AND at least one non-copy ad carries it. Everything else --
-#: created earlier, only ever copied, or no creation date recorded -- is
-#: an iteration.
-_CT_CATEGORY = (
-    "CASE a.cat_rank WHEN 1 THEN 'Incremental Winner' WHEN 2 THEN 'Winner'"
-    " WHEN 3 THEN 'P0 analysis' WHEN 4 THEN 'P1 analysis' WHEN 5 THEN 'P2 analysis'"
-    " WHEN 6 THEN 'Result Awaited' ELSE 'Discarded' END"
-)
+#: The asset's verdict: the category of its most recent ad. See the agg
+#: for why this is no longer the best verdict it ever reached.
+_CT_CATEGORY = "COALESCE(a.latest_category, 'Discarded')"
 
+#: An asset is NEW in this window when the window contains its FIRST
+#: ever test -- its earliest non-copy ad went live inside it.
+#:
+#: This used to read `d.asset_created BETWEEN :from_date AND :to_date`,
+#: the asset's production date in its register. Those are different
+#: questions, and the gap between them broke the section:
+#:
+#:   * A creative produced on the 15th and first launched on the 20th
+#:     reads as a RETEST on any window starting after the 15th, and is
+#:     then labelled historical_discarded -- "has had its chances and
+#:     never drew an audience" -- on its very first run. GAD-Sep-1589
+#:     is exactly this.
+#:   * Measured 2026-09-23 on a trailing 7 days: of 228 assets tested,
+#:     the register rule called ZERO of them new. Production always
+#:     precedes launch, so a short window can only ever exclude it.
+#:   * 314 of 2,723 mapped assets have no usable register date at all
+#:     (184 no row, 130 a NULL date) and so could never be new whatever
+#:     the window.
+#:
+#: The copy rule the register was protecting is kept, and kept where it
+#: belongs: `first_original_ad_date` ignores ads whose name carries
+#: "copy", so a creative first tested in March and duplicated in
+#: September still dates to March and is still a retest. An asset whose
+#: only ads are copies has no original ad date and is never new.
 _CT_IS_NEW = (
-    "(d.asset_created BETWEEN :from_date AND :to_date AND a.original_ads > 0)"
+    "(a.first_original_ad_date BETWEEN :from_date AND :to_date)"
 )
 
 #: The bar a creative has to clear to count as genuinely tested. An asset
@@ -5823,6 +6144,15 @@ class CreativeTestingRow(BaseModel):
     copy_ads: int
     ads_in_window: int
     first_ad_date: date | None
+    #: Earliest ad for this asset whose name does NOT carry "copy" --
+    #: when it was genuinely first put in the air. Decides new vs
+    #: retest (see _CT_IS_NEW), and stands in for the production date
+    #: on the 314 assets whose register has none.
+    first_original_ad_date: date | None = None
+    #: First ad carrying this asset that was CREATED inside the selected
+    #: window -- when it launched on Meta for this date range. Distinct
+    #: from first_ad_date, which is its first launch ever.
+    launched_in_window: date | None = None
     last_ad_date: date | None
     account_name: str | None
     #: The asset's id appears in an ad that also names another asset.
@@ -5956,6 +6286,11 @@ _CT_MF_FIELDS: dict[str, str] = {
     "account_name": "a.account_name",
     "category": _CT_CATEGORY,
     "kind": _CT_KIND,
+    # ::text because the rule language is all string operators --
+    # equals / starts_with / contains -- and has no >= for a date. As
+    # ISO text, "starts_with 2026-09" reads as "launched in September",
+    # which is the question this field is actually asked.
+    "launched_in_window": "a.launched_in_window::text",
 }
 
 _CT_SORT_COLUMNS: dict[str, str] = {
@@ -5966,6 +6301,7 @@ _CT_SORT_COLUMNS: dict[str, str] = {
     "cost_per_ncp": "CASE WHEN a.ncp_count > 0 THEN a.spend / a.ncp_count END",
     "cost_per_ftewv": "CASE WHEN a.ftewv_count > 0 THEN a.spend / a.ftewv_count END",
     "asset_created": "d.asset_created",
+    "launched_in_window": "a.launched_in_window",
     "last_ad_date": "a.last_ad_date",
     "ads": "a.ads",
 }
@@ -6001,7 +6337,8 @@ async def get_creative_testing(
     ),
     sort: Literal[
         "spend", "impressions", "purchases", "roas",
-        "cost_per_ncp", "cost_per_ftewv", "asset_created", "last_ad_date", "ads",
+        "cost_per_ncp", "cost_per_ftewv", "asset_created", "launched_in_window",
+        "last_ad_date", "ads",
     ] = Query(default="spend"),
     # Cap is high on purpose. The funnel, the Product-Focus and the
     # Creative-Focus strips are all derived client-side from the row set
@@ -6064,7 +6401,8 @@ async def get_creative_testing(
         f"{_CT_CATEGORY} AS category, a.sample_ad_name, "
         f"{_CT_KIND} AS kind, "
         "GREATEST(a.ads - 1, 0) AS iteration_count, "
-        "a.ads, a.copy_ads, a.ads_in_window, a.first_ad_date, a.last_ad_date, "
+        "a.ads, a.copy_ads, a.ads_in_window, a.first_ad_date, a.first_original_ad_date, "
+        "a.launched_in_window, a.last_ad_date, "
         "a.account_name, a.name_conflict, "
         "a.spend, a.impressions, a.purchases, a.conv_value, a.ncp_count, a.ftewv_count, "
         "CASE WHEN a.spend > 0 THEN a.conv_value / a.spend END AS roas, "
@@ -6353,6 +6691,98 @@ def _rolling_metrics_sql(table: str, id_col: str) -> str:
     )
 
 
+#: Creative-level scaling gates, from section 3 of the Meta Ads Audit &
+#: Decision Framework ("Before Pausing: Check for Scalable Creatives").
+#:
+#: The document's core principle is that killing an ad set must not kill
+#: the good creatives inside it, so a PAUSE verdict is only actionable
+#: once you know what is worth lifting out first.
+#:
+#: All four must hold. Cost per FTEWV uses the SAME per-account limit
+#: the ad-set rule uses (Rs15 Raho Saadaa, Rs12 Fourth) -- the document
+#: writes a bare Rs15 in the creative table, which is the Raho figure it
+#: sets out two sections earlier.
+_CREATIVE_SCALE_ROAS = 2.0        # last-click ROAS
+_CREATIVE_SCALE_NC_ROAS = 2.5     # new-customer ROAS
+_CREATIVE_SCALE_CPNCP = 525.0     # cost per new customer purchase
+
+
+def _scalable_creative_sql(level: str) -> str:
+    """Ads inside each entity that qualify for scaling.
+
+    Every figure is windowed on the SAME :from_date/:to_date as the rest
+    of the row. Mixing a rolling creative window into a date-ranged row
+    is the defect class this project keeps hitting, so the user's own
+    date choice governs all four gates.
+
+    New-customer revenue comes from shopify_sales.new_or_returning_customer,
+    joined on the numeric tail of the attribution row's Shopify GID --
+    shopify_order_attribution stores "gid://shopify/Order/123" while
+    shopify_sales stores "123". Measured 2026-09-24: 99.9% of
+    ad-attributed orders join.
+    """
+    parent = "al.adset_id" if level == "adset" else "al.campaign_id"
+    bench = ("CASE LOWER(COALESCE(al.account_name, '')) "
+             + " ".join(f"WHEN '{k}' THEN {v}" for k, v in _FTEWV_BENCHMARK.items())
+             + f" ELSE {_FTEWV_BENCHMARK_DEFAULT} END")
+    return (
+        "SELECT entity_id, COUNT(*) AS scalable_creatives "
+        "  FROM ( "
+        f"   SELECT {parent} AS entity_id, al.ad_id, "
+        "          SUM(i.spend)       AS spend, "
+        "          SUM(i.ncp_count)   AS ncp, "
+        "          SUM(i.ftewv_count) AS ftewv, "
+        f"         MAX({bench})       AS bench, "
+        "          MAX(lc.revenue)    AS revenue, "
+        "          MAX(lc.new_revenue) AS new_revenue "
+        "     FROM public.insights_daily_by_ad i "
+        "     JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id "
+        "     LEFT JOIN ( "
+        "          SELECT a.matched_ad_id AS ad_id, "
+        "                 SUM(a.total_price) AS revenue, "
+        "                 SUM(a.total_price) FILTER (WHERE ss.kind = 'New') AS new_revenue "
+        "            FROM public.shopify_order_attribution a "
+        "            LEFT JOIN (SELECT DISTINCT order_id, new_or_returning_customer AS kind "
+        "                         FROM public.shopify_sales) ss "
+        "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
+        "           WHERE a.matched_ad_id IS NOT NULL "
+        "             AND a.created_at::date BETWEEN :from_date AND :to_date "
+        "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
+        f"    WHERE {parent} IS NOT NULL "
+        "      AND i.day BETWEEN :from_date AND :to_date "
+        f"    GROUP BY {parent}, al.ad_id) x "
+        " WHERE spend > 0 "
+        f"   AND COALESCE(revenue, 0) / spend > {_CREATIVE_SCALE_ROAS} "
+        f"   AND COALESCE(new_revenue, 0) / spend > {_CREATIVE_SCALE_NC_ROAS} "
+        f"   AND ncp > 0 AND spend / ncp < {_CREATIVE_SCALE_CPNCP} "
+        "    AND ftewv > 0 AND spend / ftewv < bench "
+        " GROUP BY entity_id"
+    )
+
+
+def _ncp_rollup_sql(level: str) -> str:
+    """Windowed new-customer purchases per ad set / campaign.
+
+    Meta reports NCP at AD grain only -- neither insights_daily_by_adset
+    nor insights_daily_by_campaign carries the column -- so it is summed
+    from insights_daily_by_ad and attributed to the ad's parent through
+    ad_lifecycle. Every ad belongs to exactly one ad set and one
+    campaign, so nothing is double counted.
+
+    Windowed on the same :from_date/:to_date as the spend beside it, so
+    cost per NCP divides two figures from one period.
+    """
+    parent = "al.adset_id" if level == "adset" else "al.campaign_id"
+    return (
+        f"SELECT {parent} AS entity_id, SUM(i.ncp_count) AS ncp_count "
+        "  FROM public.insights_daily_by_ad i "
+        "  JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id "
+        f" WHERE {parent} IS NOT NULL "
+        "   AND i.day BETWEEN :from_date AND :to_date "
+        f" GROUP BY {parent}"
+    )
+
+
 def _rolling_lc_sql(level: str) -> str:
     """Last-click revenue per rolling window, same mapping the Shopify
     columns use -- utm_term for ad sets, matched_campaign_id for
@@ -6539,6 +6969,40 @@ class RollupRow(BaseModel):
     #: nothing to be over or under, and a 0 would sort among real values
     #: as though it were agreement.
     meta_shop_diff_pct: float | None = None
+    #: 'CBO' | 'ABO' | 'NONE'. At campaign grain, CBO means the campaign
+    #: holds the budget; ABO means its ad sets do.
+    budget_type: str | None = None
+    #: New customer purchases in the window, and spend per one. Meta
+    #: reports NCP only at ad grain, so both are rolled up from
+    #: insights_daily_by_ad through ad_lifecycle's adset_id/campaign_id.
+    ncp_count: float | None = None
+    cost_per_ncp: float | None = None
+    #: Ads inside this entity that meet all four creative-scaling gates
+    #: from section 3 of the framework. Matters most on a PAUSE row: the
+    #: document's principle is that killing a weak ad set must not kill
+    #: the good creatives in it.
+    scalable_creatives: int = 0
+    #: Ad set rows only -- which campaign it sits under.
+    campaign_name: str | None = None
+    #: When Meta created the entity. Not the first day it delivered.
+    created_date: date | None = None
+    #: Created within the last _NEW_ENTITY_DAYS. A paused ad set built
+    #: three days ago has not been judged and should not be read as one
+    #: that failed: 26 ad sets and 5 campaigns created in the last week
+    #: are already non-ACTIVE.
+    is_new_entity: bool = False
+    #: Meta's EFFECTIVE status, not the entity's own switch. An ad set
+    #: reads ACTIVE while its campaign is paused -- Meta reports that as
+    #: CAMPAIGN_PAUSED, and it is not delivering. Measured 2026-09-23:
+    #: 1,471 ad sets are switched on, only 256 are actually running.
+    effective_status: str | None = None
+    #: 'SCALE' | 'PAUSE' | 'MONITOR' | 'REPORT' | 'OK', per the account's
+    #: Meta Ads Audit & Decision Framework. NULL when the ad set lacks a
+    #: 3D or 7D window to judge on.
+    decision: str | None = None
+    #: The arithmetic behind the verdict, so it can be checked rather
+    #: than trusted.
+    decision_reason: str | None = None
 
     #: Rolling 3-day window ending at the data's last date.
     d3_spend: float | None = None
@@ -6586,18 +7050,59 @@ class RollupRow(BaseModel):
     d28_cost_per_ftewv: float | None = None
 
 
+class DecisionSummary(BaseModel):
+    count: int
+    spend: float
+
+
 class RollupResponse(BaseModel):
     level: str
     rows: list[RollupRow]
     total: int
+    #: verdict -> (entities, spend) over EVERY entity matching the
+    #: filters, not just the page that was returned.
+    #:
+    #: Computed server-side on purpose. Deriving these from `rows` would
+    #: describe one page of 500 while claiming to describe all 3,008 ad
+    #: sets -- the same defect that once made the ad-level category tiles
+    #: read "P2 analysis 3" against a real 1,768.
+    decision_counts: dict[str, DecisionSummary] = {}
 
 
 @router.get("/ads-analyse/rollup", response_model=RollupResponse)
+@cached_analytics(ttl=300.0)
 async def get_ads_analyse_rollup(
     session: SessionDep,
     level: Literal["adset", "campaign"] = Query(...),
     account_name: str | None = Query(default=None),
     search: str | None = Query(default=None, description="Substring of the entity name."),
+    budget_type: str | None = Query(
+        default=None,
+        description="CBO (campaign holds the budget) or ABO (ad sets do). "
+                    "Comma-separated to pass several.",
+    ),
+    d3_roas_min: float | None = Query(
+        default=None, description="Minimum 3-day last-click ROAS."),
+    d3_roas_max: float | None = Query(
+        default=None, description="Maximum 3-day last-click ROAS."),
+    d7_roas_min: float | None = Query(
+        default=None, description="Minimum 7-day last-click ROAS."),
+    d7_roas_max: float | None = Query(
+        default=None, description="Maximum 7-day last-click ROAS."),
+    status: str | None = Query(
+        default=None,
+        description="Meta EFFECTIVE delivery status: ACTIVE, PAUSED, "
+                    "CAMPAIGN_PAUSED, ARCHIVED, WITH_ISSUES. This is what is "
+                    "actually delivering, not the entity's own on/off switch "
+                    "-- an ad set under a paused campaign reads ACTIVE on "
+                    "itself but CAMPAIGN_PAUSED here. Comma-separated to pass "
+                    "several.",
+    ),
+    decision: str | None = Query(
+        default=None,
+        description="Framework verdict: SCALE / PAUSE / MONITOR / REPORT / OK "
+                    "/ UNRATED. Comma-separated to pass several.",
+    ),
     sort: Literal[
         "spend", "impressions", "reach", "roas", "ads",
         "shopify_orders", "shopify_revenue", "shopify_roas",
@@ -6629,6 +7134,71 @@ async def get_ads_analyse_rollup(
     if search:
         where.append(f"i.{name_col} ILIKE :search")
         params["search"] = f"%{search}%"
+    if budget_type:
+        wanted = [v.strip().upper() for v in budget_type.split(",") if v.strip()]
+        if wanted:
+            # Inline rather than via the `bt` alias: the count query
+            # below builds its own FROM and would not see the join.
+            src = ("public.meta_adsets s LEFT JOIN public.meta_campaigns c "
+                   "ON c.campaign_id = s.campaign_id"
+                   if level == "adset" else "public.meta_campaigns c")
+            key = "s.adset_id" if level == "adset" else "c.campaign_id"
+            adset_arm = ("WHEN NULLIF(s.daily_budget,'0') IS NOT NULL "
+                         "  OR NULLIF(s.lifetime_budget,'0') IS NOT NULL THEN 'ABO' "
+                         if level == "adset" else
+                         "WHEN EXISTS (SELECT 1 FROM public.meta_adsets s2 "
+                         "              WHERE s2.campaign_id = c.campaign_id "
+                         "                AND (NULLIF(s2.daily_budget,'0') IS NOT NULL "
+                         "                  OR NULLIF(s2.lifetime_budget,'0') IS NOT NULL)) THEN 'ABO' ")
+            where.append(
+                f"COALESCE((SELECT CASE WHEN NULLIF(c.daily_budget,'0') IS NOT NULL "
+                f"  OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO' {adset_arm}"
+                f"  ELSE 'NONE' END FROM {src} WHERE {key} = i.{id_col}), 'NONE') "
+                f"= ANY(:budget_type)")
+            params["budget_type"] = wanted
+    if status:
+        wanted_s = [v.strip().upper() for v in status.split(",") if v.strip()]
+        if wanted_s:
+            # EFFECTIVE status, because that is what "active" has to
+            # mean: an ad set whose own switch is ACTIVE but whose
+            # campaign is paused delivers nothing. Filtering on the
+            # entity's own status would return 1,471 "active" ad sets of
+            # which 1,215 are spending nothing.
+            #
+            # Correlated rather than joined, for the same reason the
+            # budget predicate above is: the count and summary queries
+            # build their own FROM and would not see a join.
+            src, key, col = (
+                ("public.meta_adsets", "adset_id", "adset_effective_status")
+                if level == "adset" else
+                ("public.meta_campaigns", "campaign_id", "campaign_effective_status"))
+            where.append(
+                f"COALESCE((SELECT {col} FROM {src} WHERE {key} = i.{id_col}), "
+                f"         'UNKNOWN') = ANY(:status)")
+            params["status"] = wanted_s
+
+    # Rolling last-click ROAS bounds. Same expressions the verdict rule
+    # reads, so a row can never pass "7D ROAS below 1.5" here and be
+    # rated on a different number. COALESCE the revenue but not the
+    # spend: an entity that spent and earned nothing has a real ROAS of
+    # 0 and must be reachable by a max filter, while one that did not
+    # spend has no ROAS at all and is excluded by any bound.
+    _roas_expr = {
+        3: "(COALESCE(rl.d3_lc_revenue, 0) / NULLIF(rm.d3_spend, 0))",
+        7: "(COALESCE(rl.d7_lc_revenue, 0) / NULLIF(rm.d7_spend, 0))",
+    }
+    roas_clauses: list[str] = []
+    for days, lo, hi in ((3, d3_roas_min, d3_roas_max), (7, d7_roas_min, d7_roas_max)):
+        if lo is not None:
+            roas_clauses.append(f"{_roas_expr[days]} >= :d{days}_roas_min")
+            params[f"d{days}_roas_min"] = lo
+        if hi is not None:
+            roas_clauses.append(f"{_roas_expr[days]} <= :d{days}_roas_max")
+            params[f"d{days}_roas_max"] = hi
+    # Kept out of `where`: these read rm/rl, which only the queries that
+    # join them may reference. Appended beside decision_clause instead.
+    roas_clause = ("" if not roas_clauses else " AND " + " AND ".join(roas_clauses))
+
     where_sql = "WHERE " + " AND ".join(where)
 
     sort_sql = {
@@ -6641,6 +7211,15 @@ async def get_ads_analyse_rollup(
     # Default to the trailing 30 days rather than all time: an unbounded
     # sum would put three years of orders beside a 30-day spend figure
     # and read as a spectacular ROAS.
+    # Defined unconditionally: it is referenced by the row, count and
+    # summary queries regardless of whether a verdict was requested.
+    decision_clause = ""
+    if decision:
+        wanted_d = [v.strip().upper() for v in decision.split(",") if v.strip()]
+        if wanted_d:
+            decision_clause = f" AND {_decision_sql(level)} = ANY(:decision)"
+            params["decision"] = wanted_d
+
     daily_table, daily_id = _ROLLUP_DAILY[level]
     # Anchored on the data, not the clock -- Meta's daily insights land
     # a day in arrears, so `today` would give every entity one empty day
@@ -6669,8 +7248,29 @@ async def get_ads_analyse_rollup(
         # so the column read empty exactly where it mattered. account_id
         # is always present, so fall back to resolving the name from it.
         f"SELECT i.{id_col} AS entity_id, i.{name_col} AS entity_name, "
+        f"       (SELECT {'s.adset_effective_status' if level == 'adset' else 'c.campaign_effective_status'} "
+        f"          FROM {'public.meta_adsets s WHERE s.adset_id' if level == 'adset' else 'public.meta_campaigns c WHERE c.campaign_id'}"
+        f"             = i.{id_col}) AS effective_status, "
+        # Entity creation date, and whether that is recent enough to
+        # mean "not judged yet". Both read the same subquery so the
+        # badge and the date can never disagree.
+        f"       (SELECT {'s2.created_time' if level == 'adset' else 'c2.created_time'}::date "
+        f"          FROM {'public.meta_adsets s2 WHERE s2.adset_id' if level == 'adset' else 'public.meta_campaigns c2 WHERE c2.campaign_id'}"
+        f"             = i.{id_col}) AS created_date, "
+        f"       COALESCE((SELECT {'s3.created_time' if level == 'adset' else 'c3.created_time'}::date "
+        f"          FROM {'public.meta_adsets s3 WHERE s3.adset_id' if level == 'adset' else 'public.meta_campaigns c3 WHERE c3.campaign_id'}"
+        f"             = i.{id_col}) > CAST(:last_date AS date) - {_NEW_ENTITY_DAYS}, false) "
+        f"                                                    AS is_new_entity, "
+        + (f"       (SELECT s4.campaign_name FROM public.meta_adsets s4 "
+           f"          WHERE s4.adset_id = i.{id_col}) AS campaign_name, "
+           if level == "adset" else "       NULL::text AS campaign_name, ")
+        + f"       COALESCE(scal.scalable_creatives, 0)::int AS scalable_creatives, "
+        f"       npc.ncp_count AS ncp_count, "
+        f"       CASE WHEN COALESCE(npc.ncp_count, 0) > 0 "
+        f"            THEN COALESCE(w.spend, i.spend) / npc.ncp_count END AS cost_per_ncp, "
         "        COALESCE(i.account_name, acct.account_name) AS account_name, "
         f"       COALESCE(c.ads, 0)::int AS ads, "
+        "        COALESCE(bt.budget_type, 'NONE') AS budget_type, "
         # The window these figures actually cover is now the one asked
         # for, not whatever the insights row happened to be fetched with.
         "        CAST(:from_date AS date) AS date_start, "
@@ -6708,11 +7308,15 @@ async def get_ads_analyse_rollup(
         f"LEFT JOIN ({_rolling_metrics_sql(daily_table, daily_id)}) rm "
         f"       ON rm.entity_id = i.{id_col} "
         f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_ncp_rollup_sql(level)}) npc ON npc.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_scalable_creative_sql(level)}) scal ON scal.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_BUDGET_TYPE_SQL if level == 'adset' else _BUDGET_TYPE_CAMPAIGN_SQL}) bt "
+        f"       ON bt.{id_col} = i.{id_col} "
         f"LEFT JOIN ({_ROLLUP_SHOPIFY_SQL[level]}) sh ON sh.entity_id = i.{id_col} "
         f"LEFT JOIN (SELECT {id_col}, COUNT(*) AS ads FROM ad_lifecycle "
         f"            WHERE {id_col} IS NOT NULL GROUP BY {id_col}) c "
         f"       ON c.{id_col} = i.{id_col} "
-        f"{where_sql} "
+        f"{where_sql}{decision_clause}{roas_clause} "
         f"ORDER BY {sort_sql} DESC NULLS LAST LIMIT :limit OFFSET :offset"
     )
     rows = [RollupRow(**dict(r._mapping)) for r in await session.execute(text(sql), params)]
@@ -6755,19 +7359,170 @@ async def get_ads_analyse_rollup(
         r.d28_reach_delta = cur - prev
         r.d28_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
 
+        # Framework verdict. Cost/FTEWV is read on BOTH windows: a kill
+        # needs the 3D and the 7D figure to agree that the entity is
+        # over its account's benchmark.
+        r.decision, r.decision_reason = _decide(
+            r.d3_lc_roas, r.d7_lc_roas, r.account_name,
+            d3_spend=r.d3_spend, d3_ftewv=r.d3_ftewv,
+            d7_spend=r.d7_spend, d7_ftewv=r.d7_ftewv)
+
     # Same account join as the row query: where_sql now references
     # `acct`, and a count without it fails with "missing FROM-clause
     # entry" the moment an account filter is applied.
+    count_joins = ""
+    if decision_clause or roas_clause:
+        # The predicate reads rm/rl; without these joins the count fails
+        # with "missing FROM-clause entry" the moment a verdict is picked.
+        count_joins = (
+            f"LEFT JOIN ({_rolling_metrics_sql(daily_table, daily_id)}) rm "
+            f"       ON rm.entity_id = i.{id_col} "
+            f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
+        )
     count_sql = (
         f"SELECT COUNT(*) FROM public.{table} i "
         "LEFT JOIN (SELECT account_id, MIN(account_name) AS account_name "
         "             FROM ad_lifecycle "
         "            WHERE account_id IS NOT NULL AND account_name IS NOT NULL "
         "            GROUP BY account_id) acct ON acct.account_id = i.account_id "
-        f"{where_sql}"
+        f"{count_joins}{where_sql}{decision_clause}{roas_clause}"
     )
     total = int((await session.execute(text(count_sql), params)).scalar() or 0)
-    return RollupResponse(level=level, rows=rows, total=total)
+
+    # Verdict tiles over the whole filter set. Selects only the inputs
+    # `_decide` reads, so it skips the Shopify and reach joins the row
+    # query needs. d3_ftewv joined d7_ftewv here when the kill gate
+    # started reading cost/FTEWV on both windows.
+    summary_sql = (
+        f"SELECT COALESCE(i.account_name, acct.account_name) AS account_name, "
+        f"       COALESCE(w.spend, i.spend) AS spend, "
+        "        rm.d3_spend, rm.d3_ftewv, rm.d7_spend, rm.d7_ftewv, "
+        "        rl.d3_lc_revenue, rl.d7_lc_revenue "
+        f"FROM public.{table} i "
+        "LEFT JOIN (SELECT account_id, MIN(account_name) AS account_name "
+        "             FROM ad_lifecycle "
+        "            WHERE account_id IS NOT NULL AND account_name IS NOT NULL "
+        "            GROUP BY account_id) acct ON acct.account_id = i.account_id "
+        f"LEFT JOIN (SELECT {daily_id} AS entity_id, SUM(spend) AS spend "
+        f"             FROM public.{daily_table} "
+        "            WHERE day BETWEEN :from_date AND :to_date "
+        f"            GROUP BY {daily_id}) w ON w.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_rolling_metrics_sql(daily_table, daily_id)}) rm "
+        f"       ON rm.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
+        # Deliberately WITHOUT decision_clause: the tiles describe every
+        # verdict under the other filters, so selecting one does not
+        # collapse the rest to zero and strand the user.
+        #
+        # roas_clause DOES apply. It narrows which entities are in
+        # scope, the way account or budget level does -- it is not the
+        # dimension the tiles enumerate, so honouring it keeps the tiles
+        # describing the table the user is looking at.
+        f"{where_sql}{roas_clause}"
+    )
+    counts: dict[str, DecisionSummary] = {}
+    for row in await session.execute(text(summary_sql), params):
+        # Same ratios the row path derives, so a tile and a row can never
+        # disagree about one entity's verdict.
+        d3 = (float(row.d3_lc_revenue or 0) / float(row.d3_spend)) if row.d3_spend else None
+        d7 = (float(row.d7_lc_revenue or 0) / float(row.d7_spend)) if row.d7_spend else None
+        verdict, _why = _decide(
+            d3, d7, row.account_name,
+            d3_spend=row.d3_spend, d3_ftewv=row.d3_ftewv,
+            d7_spend=row.d7_spend, d7_ftewv=row.d7_ftewv)
+        key = verdict or "UNRATED"
+        agg = counts.setdefault(key, DecisionSummary(count=0, spend=0.0))
+        agg.count += 1
+        agg.spend += float(row.spend or 0)
+    return RollupResponse(level=level, rows=rows, total=total,
+                          decision_counts=counts)
+
+
+class ScalableCreativeRow(BaseModel):
+    ad_id: str
+    ad_name: str | None
+    spend: float
+    lc_roas: float
+    nc_roas: float
+    cost_per_ncp: float | None
+    cost_per_ftewv: float | None
+    ftewv_benchmark: float
+
+
+class ScalableCreativesResponse(BaseModel):
+    entity_id: str
+    level: str
+    ads: list[ScalableCreativeRow]
+
+
+@router.get("/ads-analyse/rollup/scalable-creatives",
+            response_model=ScalableCreativesResponse)
+@cached_analytics(ttl=300.0)
+async def get_scalable_creatives(
+    session: SessionDep,
+    level: Literal["adset", "campaign"] = Query(...),
+    entity_id: str = Query(..., description="The ad set or campaign to look inside."),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+) -> ScalableCreativesResponse:
+    """The creatives worth lifting out of an ad set before it is paused.
+
+    Section 3 of the Meta Ads Audit & Decision Framework: killing a weak
+    ad set must not kill the good creatives inside it. An ad qualifies
+    only when all four gates hold -- last-click ROAS, new-customer ROAS,
+    cost per new customer, cost per first-time engaged visitor.
+
+    Same window as the table it is opened from, so the numbers here and
+    the count on the row cannot disagree.
+    """
+    params: dict[str, object] = {
+        "entity_id": entity_id,
+        "to_date": to_date or date.today(),
+        "from_date": from_date or ((to_date or date.today()) - timedelta(days=29)),
+    }
+    parent = "al.adset_id" if level == "adset" else "al.campaign_id"
+    bench = ("CASE LOWER(COALESCE(al.account_name, '')) "
+             + " ".join(f"WHEN '{k}' THEN {v}" for k, v in _FTEWV_BENCHMARK.items())
+             + f" ELSE {_FTEWV_BENCHMARK_DEFAULT} END")
+    sql = (
+        "SELECT ad_id, ad_name, spend, "
+        "       COALESCE(revenue, 0) / spend       AS lc_roas, "
+        "       COALESCE(new_revenue, 0) / spend   AS nc_roas, "
+        "       CASE WHEN ncp   > 0 THEN spend / ncp   END AS cost_per_ncp, "
+        "       CASE WHEN ftewv > 0 THEN spend / ftewv END AS cost_per_ftewv, "
+        "       bench AS ftewv_benchmark "
+        "  FROM ( "
+        "   SELECT al.ad_id, MIN(al.ad_name) AS ad_name, "
+        "          SUM(i.spend) AS spend, SUM(i.ncp_count) AS ncp, "
+        "          SUM(i.ftewv_count) AS ftewv, "
+        f"         MAX({bench}) AS bench, "
+        "          MAX(lc.revenue) AS revenue, MAX(lc.new_revenue) AS new_revenue "
+        "     FROM public.insights_daily_by_ad i "
+        "     JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id "
+        "     LEFT JOIN ( "
+        "          SELECT a.matched_ad_id AS ad_id, "
+        "                 SUM(a.total_price) AS revenue, "
+        "                 SUM(a.total_price) FILTER (WHERE ss.kind = 'New') AS new_revenue "
+        "            FROM public.shopify_order_attribution a "
+        "            LEFT JOIN (SELECT DISTINCT order_id, new_or_returning_customer AS kind "
+        "                         FROM public.shopify_sales) ss "
+        "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
+        "           WHERE a.matched_ad_id IS NOT NULL "
+        "             AND a.created_at::date BETWEEN :from_date AND :to_date "
+        "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
+        f"    WHERE {parent} = :entity_id "
+        "      AND i.day BETWEEN :from_date AND :to_date "
+        "     GROUP BY al.ad_id) x "
+        " WHERE spend > 0 "
+        f"   AND COALESCE(revenue, 0) / spend > {_CREATIVE_SCALE_ROAS} "
+        f"   AND COALESCE(new_revenue, 0) / spend > {_CREATIVE_SCALE_NC_ROAS} "
+        f"   AND ncp > 0 AND spend / ncp < {_CREATIVE_SCALE_CPNCP} "
+        "    AND ftewv > 0 AND spend / ftewv < bench "
+        " ORDER BY spend DESC"
+    )
+    rows = [ScalableCreativeRow(**dict(r._mapping))
+            for r in await session.execute(text(sql), params)]
+    return ScalableCreativesResponse(entity_id=entity_id, level=level, ads=rows)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -6809,6 +7564,7 @@ class LaunchesResponse(BaseModel):
 
 
 @router.get("/ads-analyse/launches", response_model=LaunchesResponse)
+@cached_analytics(ttl=900.0)
 async def get_ads_analyse_launches(
     session: SessionDep,
     from_date: date = Query(...),

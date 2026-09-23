@@ -31,8 +31,12 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse } from "@/lib/api";
+import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse,
+  fetchScalableCreatives,
+  ScalableCreativeRow,
+} from "@/lib/api";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { InfoBasis, InfoDot } from "./InfoDot";
 import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
@@ -98,6 +102,45 @@ const CATEGORY_ICON_COLOR: Record<CategoryKey, "emerald" | "amber" | "sky" | "sl
   "Result Awaited": "slate",
   Discarded: "rose",
 };
+/** Plain-language definition of each verdict, for the (i) on its tile.
+ *
+ *  Written without the F1-F4 shorthand and without the threshold
+ *  numbers: the thresholds are editable in the panel above the table,
+ *  so any number repeated here would be wrong the moment someone
+ *  changes one. "Enough people", "the limit" and so on track whatever
+ *  is set. */
+const CATEGORY_RULE: Record<CategoryKey, string> = {
+  "Incremental Winner":
+    "Reached enough people, sold well, and brought in new visitors cheaply. The best result an ad can have.",
+  Winner:
+    "Reached enough people and sold well, but each new visitor cost more than the limit.",
+  "P0 analysis":
+    "Reached enough people and brought visitors in cheaply, but they are not buying yet.",
+  "P1 analysis":
+    "Reached enough people to be judged, and nothing else worked.",
+  "P2 analysis":
+    "Selling well, but too few people have seen it to trust the result yet.",
+  "Result Awaited":
+    "Still new. It is inside its trial period and has not been judged.",
+  Discarded:
+    "Had its run and nothing worked.",
+};
+
+/** Where each tile's two numbers come from.
+ *
+ *  The count and the spend do NOT cover the same set of ads, and the
+ *  card cannot show that, so it is said here. Getting this wrong once
+ *  made a tile read "3" against a real 1,768. */
+function categoryBasis(cat: CategoryKey, thresholdsEdited: boolean): InfoBasis {
+  return {
+    count: thresholdsEdited
+      ? "Only the ads loaded so far, because you changed a threshold. Scroll for more to raise it."
+      : "Every ad that matches the filters above — not only the ones visible in the table.",
+    spend: "Only the ads loaded so far, not the whole list. It is a running total.",
+    rule: CATEGORY_RULE[cat],
+  };
+}
+
 const CATEGORY_ICON: Record<CategoryKey, string> = {
   "Incremental Winner": "★",
   Winner: "★",
@@ -340,6 +383,273 @@ function ReachCell({
       {fmt(value, { maximumFractionDigits: 0 })}
     </span>
   );
+}
+
+/** Framework verdict. Colour carries the urgency, the tooltip carries
+ *  the arithmetic — a verdict nobody can check is a verdict nobody
+ *  should act on. */
+/** The framework's verdicts, in the order it presents them: act, then
+ *  watch, then the ones needing no action. Thresholds live server-side;
+ *  these are labels only. */
+/** What every verdict tile counts and sums. Identical across the six,
+ *  so it is stated once -- the differences live in each tile's `rule`.
+ *
+ *  Both lines exist because the count and the rupee sub-line are NOT on
+ *  the same footing: the count is a server-side figure over the whole
+ *  filter set, while the ROAS that produced the verdict is measured on
+ *  trailing windows that ignore the date range the spend obeys. A reader
+ *  who assumes one window governs the card will misread it. */
+const VERDICT_COUNT_BASIS =
+  "Every ad set or campaign that matches the filters above — not only the " +
+  "ones visible in the table.";
+const VERDICT_SPEND_BASIS =
+  "What they spent during the dates you picked.";
+const VERDICT_NOTE =
+  "R3 / R7 = money back per ₹1 spent, over the last 3 and 7 days. " +
+  "C3 / C7 = ₹ paid per new visitor over the same. " +
+  "L = that account’s limit (₹15 Raho Saadaa, ₹12 Fourth). " +
+  "The 3- and 7-day figures use the most recent days Meta has sent, so they " +
+  "do not move with the dates above.";
+
+function verdictBasis(rule: string): InfoBasis {
+  return {
+    count: VERDICT_COUNT_BASIS,
+    spend: VERDICT_SPEND_BASIS,
+    rule,
+    note: VERDICT_NOTE,
+  };
+}
+
+/** Every verdict the engine can return, written as the condition it
+ *  actually tests.
+ *
+ *  Symbols beat prose here: "both windows above 2.5" and "R3 > 2.5 AND
+ *  R7 > 2.5" say the same thing, but only one of them is impossible to
+ *  read two ways.
+ *
+ *  OK and UNRATED are in this list even though neither has a tile --
+ *  they appear in the Decision column, so their definition has to be
+ *  reachable from somewhere. This is that somewhere.
+ *
+ *  OK's condition is the simplification of "no other rule matched",
+ *  verified exact against the engine on 2026-09-24: 66 ad sets either
+ *  way. It follows because failing the kill branch and the recovery
+ *  branch together forces R7 >= 1.5. */
+const DECISION_RULES: { key: string; label: string; color: string; maths: string }[] = [
+  { key: "SCALE", label: "Scale", color: "#059669",
+    maths: "R3 > 2.5  AND  R7 > 2.5" },
+  { key: "PAUSE", label: "Pause", color: "#E11D48",
+    maths: "R3 < 1.5  AND  R7 < 1.5  AND  C3 > L  AND  C7 > L" },
+  { key: "MONITOR", label: "Monitor", color: "#D97706",
+    maths: "R7 < 1.5 ≤ R3   — or —   R3 < 1.5  AND  R7 < 1.5  AND  exactly one of C3, C7 > L" },
+  { key: "REPORT", label: "Report", color: "#1D4ED8",
+    maths: "R3 < 1.5  AND  R7 < 1.5  AND  C3 ≤ L  AND  C7 ≤ L" },
+  { key: "OK", label: "No action", color: "#64748B",
+    maths: "R7 ≥ 1.5  AND  NOT (R3 > 2.5 AND R7 > 2.5)   — nothing else matched" },
+  { key: "UNRATED", label: "No verdict", color: "#94A3B8",
+    maths: "R3 or R7 does not exist — it did not spend in that window" },
+];
+
+const DECISION_TILES: { key: string; label: string; color: string; basis: InfoBasis }[] = [
+  { key: "SCALE", label: "Scale", color: "#059669",
+    basis: verdictBasis("R3 > 2.5  AND  R7 > 2.5") },
+  { key: "PAUSE", label: "Pause", color: "#E11D48",
+    basis: verdictBasis("R3 < 1.5  AND  R7 < 1.5  AND  C3 > L  AND  C7 > L") },
+  { key: "MONITOR", label: "Monitor", color: "#D97706",
+    basis: verdictBasis(
+      "R7 < 1.5 ≤ R3,  or  R3 < 1.5 AND R7 < 1.5 with exactly one of " +
+      "C3, C7 above L. The two windows disagree, so the call waits.") },
+  { key: "REPORT", label: "Report", color: "#1D4ED8",
+    basis: verdictBasis("R3 < 1.5  AND  R7 < 1.5  AND  C3 ≤ L  AND  C7 ≤ L") },
+  // OK and UNRATED have no tile -- every tile names something to DO,
+  // and those two name its absence. Their definitions live in
+  // DECISION_RULES, shown under the tiles.
+];
+
+/** The full rule table, always reachable under the verdict tiles.
+ *
+ *  Closed by default: it is a reference, not part of the flow. */
+function DecisionRules() {
+  return (
+    <details className="mb-3 rounded-lg border border-border-primary bg-white px-3 py-2">
+      <summary className="cursor-pointer select-none text-[11px] font-semibold uppercase tracking-wide text-text-tertiary">
+        How each verdict is decided
+      </summary>
+      <div className="mt-2 space-y-1.5">
+        {DECISION_RULES.map((r) => (
+          <div key={r.key} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="w-24 shrink-0 text-[11px] font-bold uppercase" style={{ color: r.color }}>
+              {r.label}
+            </span>
+            <code className="num text-[11px] text-text-primary">{r.maths}</code>
+          </div>
+        ))}
+        <p className="border-t border-border-primary pt-1.5 text-[11px] leading-snug text-text-tertiary">
+          <strong className="text-text-secondary">R3 / R7</strong> — money back per ₹1 spent, over the
+          last 3 and 7 days. <strong className="text-text-secondary">C3 / C7</strong> — ₹ paid per new
+          visitor over the same. <strong className="text-text-secondary">L</strong> — that account’s
+          limit (₹15 Raho Saadaa, ₹12 Fourth). Spending a whole window with no new visitors counts
+          as C &gt; L. The 3- and 7-day figures use the most recent days Meta has sent, so they do
+          not move with the dates picked above.
+        </p>
+      </div>
+    </details>
+  );
+}
+
+/** Section 3 of the audit framework, made clickable.
+ *
+ *  "We kill weak ad sets, but we do not kill good creatives." A PAUSE
+ *  verdict is only actionable once you know what is worth lifting out
+ *  first, so the count on the row opens the list of ads that cleared
+ *  all four gates, with the numbers that got them there. */
+function ScalableCreativesDrawer({
+  level, entityId, entityName, fromDate, toDate, onClose,
+}: {
+  level: "adset" | "campaign";
+  entityId: string;
+  entityName: string | null;
+  fromDate: string;
+  toDate: string;
+  onClose: () => void;
+}) {
+  const [ads, setAds] = useState<ScalableCreativeRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    fetchScalableCreatives({ level, entity_id: entityId, from_date: fromDate, to_date: toDate })
+      .then((r) => { if (live) setAds(r.ads); })
+      .catch((e) => { if (live) setError(e instanceof Error ? e.message : "Could not load"); });
+    return () => { live = false; };
+  }, [level, entityId, fromDate, toDate]);
+
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
+      <div
+        className="h-full w-[38rem] max-w-full overflow-y-auto bg-white p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-1 flex items-start justify-between gap-3">
+          <h3 className="text-sm font-semibold text-text-primary">Creatives worth scaling</h3>
+          <button onClick={onClose} className="text-xs text-text-tertiary hover:text-text-primary">
+            Close
+          </button>
+        </div>
+        <p className="mb-3 text-[11px] leading-snug text-text-tertiary">
+          Inside <strong className="text-text-secondary">{entityName ?? entityId}</strong>, over the
+          dates selected. An ad appears only if it clears all four:
+          {" "}LC&nbsp;ROAS&nbsp;&gt;&nbsp;2, new-customer&nbsp;ROAS&nbsp;&gt;&nbsp;2.5,
+          {" "}cost/NCP&nbsp;&lt;&nbsp;₹525, cost/FTEWV&nbsp;&lt;&nbsp;the account limit.
+        </p>
+        {error && <div className="text-xs text-error-text">{error}</div>}
+        {!ads && !error && <div className="text-xs text-text-tertiary">Loading…</div>}
+        {ads?.length === 0 && (
+          <div className="rounded-md border border-border-primary bg-bg-muted p-3 text-xs text-text-secondary">
+            No creative here clears all four gates. Nothing to rescue before pausing.
+          </div>
+        )}
+        {ads?.map((a) => (
+          <div key={a.ad_id} className="mb-2 rounded-lg border border-border-primary p-3">
+            <div className="mb-1.5 text-[12px] font-medium text-text-primary">{a.ad_name ?? a.ad_id}</div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+              <Metric label="Spend" value={`₹${money(a.spend)}`} pass />
+              <Metric label="LC ROAS" value={a.lc_roas.toFixed(2)} bar="> 2" pass />
+              <Metric label="New-cust. ROAS" value={a.nc_roas.toFixed(2)} bar="> 2.5" pass />
+              <Metric label="Cost / NCP" value={`₹${num2(a.cost_per_ncp)}`} bar="< ₹525" pass />
+              <Metric label="Cost / FTEWV" value={`₹${num2(a.cost_per_ftewv)}`}
+                      bar={`< ₹${a.ftewv_benchmark.toFixed(0)}`} pass />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, bar, pass }: {
+  label: string; value: string; bar?: string; pass?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="text-text-tertiary">{label}</span>
+      <span className="flex items-baseline gap-1">
+        <span className={"num font-semibold " + (pass ? "text-success-text" : "text-text-primary")}>
+          {value}
+        </span>
+        {bar && <span className="text-[10px] text-text-tertiary">{bar}</span>}
+      </span>
+    </div>
+  );
+}
+
+function DecisionBadge({ v, why }: { v: string | null; why: string | null }) {
+  if (!v) return <span className="text-text-tertiary" title={why ?? undefined}>—</span>;
+  const cls: Record<string, string> = {
+    SCALE: "bg-emerald-100 text-emerald-800",
+    PAUSE: "bg-rose-100 text-rose-800",
+    MONITOR: "bg-amber-100 text-amber-800",
+    REPORT: "bg-info-bg text-info-text",
+    OK: "bg-bg-muted text-text-secondary",
+  };
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${cls[v] ?? ""}`}
+          title={why ?? undefined}>
+      {v}
+    </span>
+  );
+}
+
+/** Flags an ad set or campaign Meta created in the last 7 days.
+ *
+ *  It sits beside the status badge on purpose. 26 ad sets and 5
+ *  campaigns built in the last week are already non-ACTIVE, and a
+ *  paused entity three days old has not been judged -- it is pipeline,
+ *  not a failure. Without this the two are indistinguishable in the
+ *  table, and the older one is the only reading anyone makes. */
+function NewEntityBadge() {
+  return (
+    <span
+      className="ml-1 rounded bg-info-bg px-1 py-0.5 text-[9px] font-bold uppercase text-info-text"
+      title={"Created in the last 7 days. Too new to judge — if it is paused, "
+           + "that is not necessarily a verdict on its performance."}
+    >
+      new
+    </span>
+  );
+}
+
+/** Effective delivery status. Only ACTIVE is green: CAMPAIGN_PAUSED
+ *  looks like an on switch in Meta's UI but delivers nothing, so it is
+ *  coloured with the other stopped states rather than the running one. */
+function StatusBadge({ v }: { v: string | null }) {
+  if (!v) return <span className="text-text-tertiary">—</span>;
+  const cls: Record<string, string> = {
+    ACTIVE: "bg-emerald-100 text-emerald-800",
+    PAUSED: "bg-bg-muted text-text-secondary",
+    CAMPAIGN_PAUSED: "bg-amber-100 text-amber-800",
+    WITH_ISSUES: "bg-rose-100 text-rose-800",
+    ARCHIVED: "bg-slate-200 text-slate-600",
+  };
+  const label = v === "CAMPAIGN_PAUSED" ? "CAMP. PAUSED" : v;
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls[v] ?? "bg-bg-muted text-text-secondary"}`}
+          title={v === "CAMPAIGN_PAUSED"
+            ? "Switched on, but its campaign is paused — it is not delivering."
+            : undefined}>
+      {label}
+    </span>
+  );
+}
+
+function BudgetBadge({ v }: { v: string | null }) {
+  if (!v || v === "NONE") return <span className="text-text-tertiary">—</span>;
+  // CBO and ABO are a structural fact about the account, not a verdict,
+  // so both get a neutral tint rather than good/bad colouring.
+  const cls = v === "CBO"
+    ? "bg-accent-purple/15 text-accent-purple"
+    : "bg-info-bg text-info-text";
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls}`}>{v}</span>;
 }
 
 function FBadge({ pass, name }: { pass: boolean | null; name: string }) {
@@ -791,6 +1101,96 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <span className="num whitespace-nowrap">{r.entity_id}</span> },
   { key: "account_name", header: "Account", group: "Identity", defaultVisible: true,
     render: (r) => <>{r.account_name ?? "—"}</> },
+  // First after the name: this is the column the section exists to
+  // answer. Hover gives the numbers behind it.
+  { key: "decision", header: "Decision", group: "Identity", defaultVisible: true,
+    render: (r) => <DecisionBadge v={r.decision} why={r.decision_reason} /> },
+  { key: "budget_type", header: "Budget", group: "Identity", defaultVisible: true,
+    render: (r) => <BudgetBadge v={r.budget_type} /> },
+  { key: "scalable_creatives", header: "Scale-worthy", group: "Identity", defaultVisible: true, align: "right",
+    title: "Ads inside this ad set or campaign that clear all four creative-scaling "
+         + "gates from the audit framework: LC ROAS > 2, new-customer ROAS > 2.5, "
+         + "cost per new customer < ₹525, cost per first-time visitor < the account "
+         + "limit. On a Pause row these are the creatives to lift out before you "
+         + "switch it off — the framework's rule is that killing a weak ad set must "
+         + "not kill the good creatives in it. Click to see them.",
+    render: (r) => {
+      const n = r.scalable_creatives ?? 0;
+      if (n === 0) return <span className="text-text-tertiary">—</span>;
+      // Loud only where it changes a decision: a Pause row with a
+      // creative still worth keeping is the case the rule exists for.
+      const urgent = r.decision === "PAUSE";
+      return (
+        <button
+          type="button"
+          data-scalable={r.entity_id}
+          className={"rounded px-1.5 py-0.5 text-[11px] font-bold " + (urgent
+            ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
+            : "bg-bg-muted text-text-secondary hover:bg-border-primary")}
+          title={urgent
+            ? `${n} creative(s) here still qualify for scaling — lift them out before pausing.`
+            : `${n} creative(s) here qualify for scaling.`}
+        >
+          {n}
+        </button>
+      );
+    } },
+  { key: "campaign_name", header: "Campaign", group: "Identity", defaultVisible: true,
+    title: "The campaign this ad set sits under. Blank on campaign rows, which "
+         + "are already the campaign.",
+    render: (r) => (
+      <span className="block max-w-[18rem] truncate text-[12px]" title={r.campaign_name ?? ""}>
+        {r.campaign_name ?? "—"}
+      </span>
+    ) },
+  { key: "created_date", header: "Created", group: "Identity", defaultVisible: true, align: "right",
+    title: "When Meta created this entity — not the first day it delivered. "
+         + "Entities under 7 days old are badged NEW beside their status.",
+    render: (r) => (
+      <span className="text-[12px] text-text-tertiary">{r.created_date ?? "—"}</span>
+    ) },
+  { key: "effective_status", header: "Status", group: "Identity", defaultVisible: true,
+    title: "Meta's EFFECTIVE status — whether it is actually delivering, not "
+         + "whether it is switched on. An ad set under a paused campaign reads "
+         + "ACTIVE on itself and CAMPAIGN_PAUSED here.",
+    render: (r) => (
+      <span className="whitespace-nowrap">
+        <StatusBadge v={r.effective_status} />
+        {r.is_new_entity && <NewEntityBadge />}
+      </span>
+    ) },
+  // The four inputs the verdict is computed from, on by default so the
+  // call can be audited without opening the column picker.
+  { key: "d3_lc_roas_v", header: "3D ROAS", group: "Identity", defaultVisible: true, align: "right",
+    render: (r) => <span className="num">{num2(r.d3_lc_roas)}</span> },
+  { key: "d7_lc_roas_v", header: "7D ROAS", group: "Identity", defaultVisible: true, align: "right",
+    render: (r) => <span className="num">{num2(r.d7_lc_roas)}</span> },
+  // The two values the Pause/Monitor/Report split is decided on, so
+  // they say whose number it is: this entity's own spend / its own
+  // FTEWV, per window. The benchmark they are compared against is the
+  // per-account one, and that is the ONLY part of the rule that is not
+  // entity-level. Both are shown because a kill now needs BOTH windows
+  // to agree -- seeing only one of them cannot explain the verdict.
+  { key: "ncp_count", header: "NCP", group: "Identity", defaultVisible: true, align: "right",
+    title: "New customer purchases inside the selected dates. Meta reports NCP at "
+         + "ad grain only, so this is summed from the ad-level daily table through "
+         + "each ad's parent — every ad has exactly one, so nothing double-counts.",
+    render: (r) => <span className="num">{num2(r.ncp_count)}</span> },
+  { key: "cost_per_ncp", header: "Cost/NCP", group: "Identity", defaultVisible: true, align: "right",
+    title: "Spend in the selected dates ÷ new customer purchases in the same "
+         + "dates. Both sides share the window, so the ratio divides like for like.",
+    render: (r) => <span className="num">₹{num2(r.cost_per_ncp)}</span> },
+  { key: "d3_cost_per_ftewv_v", header: "3D ₹/FTEWV", group: "Identity", defaultVisible: true, align: "right",
+    title: "This entity's own 3-day spend ÷ its own FTEWV — not an account average. "
+         + "A pause needs THIS and the 7D figure both above the account's benchmark: "
+         + "₹15 in Raho Saadaa, ₹12 in Fourth Ad Account - SD.",
+    render: (r) => <span className="num">₹{num2(r.d3_cost_per_ftewv)}</span> },
+  { key: "d7_cost_per_ftewv_v", header: "7D ₹/FTEWV", group: "Identity", defaultVisible: true, align: "right",
+    title: "This entity's own 7-day spend ÷ its own FTEWV — not an account average. "
+         + "A pause needs THIS and the 3D figure both above the account's benchmark: "
+         + "₹15 in Raho Saadaa, ₹12 in Fourth Ad Account - SD. If the two windows "
+         + "disagree the verdict is Monitor, not Pause.",
+    render: (r) => <span className="num">₹{num2(r.d7_cost_per_ftewv)}</span> },
   { key: "ads", header: "Ads", group: "Identity", defaultVisible: true, align: "right",
     render: (r) => <>{r.ads.toLocaleString("en-IN")}</> },
 
@@ -992,6 +1392,8 @@ const COLUMNS: ColDef[] = [
     render: (r) => <FBadge pass={r.f3_pass} name="F3" /> },
   { key: "f4_pass", header: "F4", kind: "flag", group: "Category", defaultVisible: true,
     render: (r) => <FBadge pass={r.f4_pass} name="F4" /> },
+  { key: "budget_type", header: "Budget", kind: "cat", group: "Category", defaultVisible: true,
+    render: (r) => <BudgetBadge v={r.budget_type} /> },
   { key: "ad_status", header: "Ad Status", kind: "status", group: "Category", defaultVisible: true,
     render: (r) => <StatusPill status={r.ad_effective_status ?? r.ad_status} /> },
   // Delivery
@@ -1247,6 +1649,32 @@ export function AdsAnalyse() {
   // A tri-state string rather than boolean|undefined so it binds
   // straight to a <select> without the false/undefined ambiguity.
   const [assetFilter, setAssetFilter] = useState<"" | "yes" | "no">("");
+  // CBO / ABO. Shared by the ad table and both rollup levels so one
+  // choice survives switching between them -- the classification is a
+  // property of the account structure, not of the grain being viewed.
+  const [budgetType, setBudgetType] = useState<"" | "CBO" | "ABO" | "NONE">("");
+  // Meta's EFFECTIVE delivery status. Rollup levels only: the ad table
+  // has its own `adStatus` control reading a different column.
+  //
+  // "Active" here means actually delivering. An ad set switched on
+  // under a paused campaign reports ACTIVE on itself but Meta calls it
+  // CAMPAIGN_PAUSED, and it spends nothing -- 1,471 ad sets are
+  // switched on, 255 are running.
+  const [statusFilter, setStatusFilter] = useState<string>("");
+  // Rolling last-click ROAS bounds, the rollup's answer to the F1-F4
+  // threshold panel on the ad table. Blank means "no bound" -- 0 is a
+  // real value (spent, earned nothing), so these are strings until they
+  // reach the request.
+  const [roasBounds, setRoasBounds] = useState<Record<string, string>>({
+    d3_roas_min: "", d3_roas_max: "", d7_roas_min: "", d7_roas_max: "",
+  });
+  // Which entity's scalable-creative list is open, if any.
+  const [scalableFor, setScalableFor] =
+    useState<{ id: string; name: string | null } | null>(null);
+  // Framework verdict filter, driven by the tiles above the table.
+  const [decisionFilter, setDecisionFilter] = useState<string>("");
+  const [decisionCounts, setDecisionCounts] =
+    useState<Record<string, { count: number; spend: number }>>({});
   // Date range window -- when both are set, spend / impressions /
   // purchases / conv_value / roas in the response are overwritten
   // with values summed from Bronze raw_dump_meta within the window.
@@ -1373,6 +1801,14 @@ export function AdsAnalyse() {
       account_name: account || undefined,
       search: debouncedRollupSearch || undefined,
       sort: rollupSort,
+      budget_type: budgetType || undefined,
+      status: statusFilter || undefined,
+      ...Object.fromEntries(
+        Object.entries(roasBounds)
+          .filter(([, v]) => v.trim() !== "" && Number.isFinite(Number(v)))
+          .map(([k, v]) => [k, Number(v)]),
+      ),
+      decision: decisionFilter || undefined,
       limit: 500,
       // The Shopify columns follow the section's own date range, so the
       // rollup answers the same question the ad level does.
@@ -1383,6 +1819,7 @@ export function AdsAnalyse() {
         if (cancelled) return;
         setRollupRows(res.rows);
         setRollupTotal(res.total);
+        setDecisionCounts(res.decision_counts ?? {});
       })
       .catch((err: unknown) => {
         if (!cancelled) setRollupError(err instanceof ApiError ? err.message : "Could not reach the analytics backend. Please retry.");
@@ -1391,7 +1828,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, fromDate, toDate]);
+  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, fromDate, toDate, budgetType, statusFilter, roasBounds, decisionFilter]);
 
   const filters = useMemo(
     () => ({
@@ -1403,6 +1840,7 @@ export function AdsAnalyse() {
       ad_effective_status: adStatus || undefined,
       only_with_shopify_orders: onlyWithOrders,
       has_asset_id: assetFilter === "" ? undefined : assetFilter === "yes",
+      budget_type: budgetType || undefined,
       multi_filter: multiFilter ? JSON.stringify(multiFilter) : undefined,
       // Only send both together -- one without the other has no meaning
       // on the server side (the overlay/filter branch keys on both being set).
@@ -1410,7 +1848,7 @@ export function AdsAnalyse() {
       to_date: fromDate && toDate ? toDate : undefined,
       date_field: fromDate && toDate ? dateField : undefined,
     }),
-    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, multiFilter, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, budgetType, multiFilter, fromDate, toDate, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -1742,6 +2180,93 @@ export function AdsAnalyse() {
                 <option value="shopify_roas">Shopify ROAS</option>
               </CardSelect>
             </FilterCard>
+            {/* Same `budgetType` state the ad view uses, so the choice
+                survives switching level -- CBO/ABO is a property of the
+                account's structure, not of the grain being looked at.
+                The verdict tiles recompute against it server-side. */}
+            {/* Meta's effective status. "Active" is deliberately the
+                delivering set, not the switched-on set -- see the
+                option labels. */}
+            <FilterCard label="Delivery status">
+              <CardSelect value={statusFilter} onChange={setStatusFilter}>
+                <option value="">All statuses</option>
+                <option value="ACTIVE">Active — delivering</option>
+                <option value="PAUSED">Paused</option>
+                {levelToggle === "adset" && (
+                  <option value="CAMPAIGN_PAUSED">Campaign paused — on, but not running</option>
+                )}
+                {levelToggle === "adset" && (
+                  <option value="WITH_ISSUES">With issues</option>
+                )}
+                <option value="ARCHIVED">Archived</option>
+              </CardSelect>
+            </FilterCard>
+            <FilterCard label="Budget level">
+              <CardSelect
+                value={budgetType}
+                onChange={(v) => setBudgetType(v as "" | "CBO" | "ABO" | "NONE")}
+              >
+                <option value="">All budgets</option>
+                <option value="CBO">CBO — campaign holds it</option>
+                <option value="ABO">ABO — ad set holds it</option>
+                <option value="NONE">No budget set</option>
+              </CardSelect>
+            </FilterCard>
+            {/* Last-click ROAS bounds -- the rollup's counterpart to the
+                F1-F4 threshold panel on the ad table: type the numbers
+                rather than pick a preset bucket.
+
+                Laid out as two ranges rather than four labelled boxes.
+                "3D min / 3D max" spent half the card's width restating
+                a word the heading already said, and left the inputs too
+                narrow to read a value in.
+
+                Empty means no bound, and that is deliberately NOT the
+                same as 0: an entity that spent and earned nothing has a
+                real ROAS of 0 and must stay reachable by a max bound. */}
+            <FilterCard label="Last-click ROAS">
+              <div className="space-y-1.5">
+                {([["d3_roas_min", "d3_roas_max", "3D"],
+                   ["d7_roas_min", "d7_roas_max", "7D"]] as const).map(
+                  ([minKey, maxKey, label]) => (
+                    <div key={label} className="flex items-center gap-1.5">
+                      <span className="w-6 shrink-0 text-[11px] font-semibold text-text-tertiary">
+                        {label}
+                      </span>
+                      {([minKey, maxKey] as const).map((key, i) => (
+                        <div key={key} className="flex flex-1 items-center gap-1.5">
+                          {i === 1 && <span className="text-text-tertiary">–</span>}
+                          <input
+                            type="number"
+                            step="0.1"
+                            min="0"
+                            inputMode="decimal"
+                            aria-label={`${label} last-click ROAS ${i === 0 ? "minimum" : "maximum"}`}
+                            value={roasBounds[key]}
+                            onChange={(e) =>
+                              setRoasBounds((prev) => ({ ...prev, [key]: e.target.value }))}
+                            placeholder={i === 0 ? "min" : "max"}
+                            className="w-full min-w-0 rounded-md border bg-white px-2 py-1.5 text-xs tabular-nums"
+                            style={{ borderColor: AE.border, color: AE.ink }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ),
+                )}
+                {Object.values(roasBounds).some((v) => v.trim() !== "") && (
+                  <button
+                    type="button"
+                    onClick={() => setRoasBounds({
+                      d3_roas_min: "", d3_roas_max: "", d7_roas_min: "", d7_roas_max: "",
+                    })}
+                    className="text-[11px] text-text-tertiary underline underline-offset-2 hover:text-text-primary"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </FilterCard>
           </>
         )}
       </div>
@@ -1858,6 +2383,55 @@ export function AdsAnalyse() {
             </div>
           )}
 
+          {/* Framework verdicts. Counts come from the server over EVERY
+              matching entity -- deriving them from the 500 loaded rows
+              would describe a page while claiming to describe 3,008.
+              Clicking filters the table server-side for the same reason. */}
+          {/* Four across, not six: the OK and UNRATED tiles were dropped. */}
+          <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {DECISION_TILES.map((t) => {
+              const d = decisionCounts[t.key] ?? { count: 0, spend: 0 };
+              const on = decisionFilter === t.key;
+              return (
+                // The (i) is a SIBLING of the button, not a child: the
+                // tile is itself a button, and nesting one inside
+                // another is invalid HTML. As a sibling it also cannot
+                // bubble a click into the filter.
+                <div key={t.key} className="relative">
+                  <button
+                    onClick={() => setDecisionFilter(on ? "" : t.key)}
+                    className={
+                      "w-full rounded-lg border bg-white p-2.5 text-left shadow-sm transition " +
+                      (on ? "ring-2 ring-offset-1 " : "hover:bg-bg-muted ") +
+                      (d.count === 0 ? "opacity-50 " : "")
+                    }
+                    style={on ? { borderColor: t.color, boxShadow: `0 0 0 1px ${t.color}` } : undefined}
+                  >
+                    {/* pr-5 keeps the label clear of the dot above it. */}
+                    <div className="pr-5 text-[10px] font-semibold uppercase tracking-wide"
+                         style={{ color: t.color }}>{t.label}</div>
+                    <div className="num text-lg font-bold">{d.count.toLocaleString("en-IN")}</div>
+                    <div className="text-[10px] text-text-tertiary">₹{money(d.spend)}</div>
+                  </button>
+                  <span className="absolute right-2 top-2">
+                    <InfoDot basis={t.basis} />
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <DecisionRules />
+          {scalableFor && (
+            <ScalableCreativesDrawer
+              level={levelToggle === "adset" ? "adset" : "campaign"}
+              entityId={scalableFor.id}
+              entityName={scalableFor.name}
+              fromDate={fromDate}
+              toDate={toDate}
+              onClose={() => setScalableFor(null)}
+            />
+          )}
+
           <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
             <table className="ae-table w-full min-w-full text-sm">
               <thead className="bg-bg-muted text-left text-[11px] uppercase tracking-wide text-text-tertiary">
@@ -1892,7 +2466,18 @@ export function AdsAnalyse() {
                 )}
                 {!rollupLoading &&
                   rollupFiltered.map((r) => (
-                    <tr key={r.entity_id} className="border-t border-border-soft hover:bg-bg-surface">
+                    <tr
+                      key={r.entity_id}
+                      className="border-t border-border-soft hover:bg-bg-surface"
+                      // The column definitions are module-level, so the
+                      // Scale-worthy button cannot reach component state
+                      // directly. It tags itself and the row opens the
+                      // drawer -- one handler instead of one per cell.
+                      onClick={(e) => {
+                        const hit = (e.target as HTMLElement).closest("[data-scalable]");
+                        if (hit) setScalableFor({ id: r.entity_id, name: r.entity_name });
+                      }}
+                    >
                       {rollupCols.map((c) => (
                         <td
                           key={c.key}
@@ -1999,6 +2584,20 @@ export function AdsAnalyse() {
             <option value="no">No asset ID</option>
           </select>
         </label>
+        <label className="flex items-center gap-1.5 text-xs">
+          Budget
+          <select
+            value={budgetType}
+            onChange={(e) => setBudgetType(e.target.value as "" | "CBO" | "ABO" | "NONE")}
+            className="rounded-md border border-border-primary px-2 py-1 text-xs"
+            title="Where the budget is set. CBO: on the campaign, so Meta moves money between its ad sets. ABO: on each ad set, so the split is fixed. Mutually exclusive — no entity has both."
+          >
+            <option value="">All budgets</option>
+            <option value="CBO">CBO (campaign)</option>
+            <option value="ABO">ABO (ad set)</option>
+            <option value="NONE">No budget set</option>
+          </select>
+        </label>
         {/* The F1-F4 threshold popover was removed 2026-09-16: those
             controls now sit in their own labelled cards above, matching
             the legacy layout. Two editors bound to the same state would
@@ -2076,6 +2675,7 @@ export function AdsAnalyse() {
               label={cat}
               value={count.toLocaleString()}
               subLine={`₹${money(spend)}`}
+              info={categoryBasis(cat, thresholdsChanged)}
               active={selected}
               onClick={() => setCategoryFilter(selected ? "" : cat)}
             />

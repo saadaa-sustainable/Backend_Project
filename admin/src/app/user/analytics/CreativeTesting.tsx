@@ -281,6 +281,8 @@ type AssetColDef = {
   group: string;
   /** Lifetime columns are marked in the picker and header tooltip. */
   lifetime?: boolean;
+  /** Header tooltip, for a column whose provenance is not obvious. */
+  title?: string;
   defaultVisible?: boolean;
   align?: "left" | "right";
   render: (r: CreativeTestingRow) => React.ReactNode;
@@ -310,26 +312,32 @@ const yn = (b: boolean | null | undefined) =>
  *  computes it. These sat in `title` attributes, which meant the
  *  definition only existed if you happened to hover -- and the 50k rule
  *  in particular is not guessable from the label. */
+/** Plain-language definition behind each tab's (i).
+ *
+ *  `rule` used to restate the SQL. It now says the same thing in words
+ *  a non-technical reader can act on -- the editable numbers live in
+ *  the threshold panel, and the fixed ones are spelled out where they
+ *  matter. */
 const BUCKET_INFO: Record<string, { what: string; rule: string; note?: string }> = {
   all: {
-    what: "Every asset with at least one ad CREATED inside the selected dates.",
-    rule: "ads_in_window > 0",
-    note: "An asset that only ran older ads during this window does not appear — this counts creatives that were PUT INTO test here, not everything that happened to spend.",
+    what: "Every creative that was put into a new ad during the dates you picked.",
+    rule: "At least one of its ads was built inside these dates.",
+    note: "A creative that only kept running older ads will not appear. This counts what was newly tested, not everything that spent money.",
   },
   new: {
-    what: "The asset's first real test: it was produced inside this window and ran as a genuine ad rather than only as a copy.",
-    rule: "register creation date is inside the window AND at least one non-\u201ccopy\u201d ad carries it",
-    note: "Creation date comes from the video / graphic / influencer register, not from any ad date.",
+    what: "A creative being tested for the very first time.",
+    rule: "Its earliest real ad went live inside these dates. Duplicated ads do not count as a first test.",
+    note: "Based on when it first ran on Meta, not on when the creative was made — those can be months apart.",
   },
   historical_discarded: {
-    what: "Retested, and across ALL its ads it has still never reached 50,000 impressions in its LIFETIME — put back in the air again and again without ever clearing the bare minimum.",
-    rule: "not new AND SUM(impressions) over every ad that ever carried the asset < 50,000",
-    note: "Deliberately lifetime, not the selected dates. The question is whether the creative has ever had a fair run, and a single month cannot answer that.",
+    what: "Tested before, and still never seen by enough people to judge it.",
+    rule: "Not a first test, and across every ad it has ever run it still has not reached 50,000 views.",
+    note: "Counts its whole history, not just these dates — the question is whether it ever had a fair run, and a few weeks cannot answer that.",
   },
   refresh_discarded: {
-    what: "Retested and past the 50,000 lifetime impression mark across all its ads — it cleared the bare minimum, so its performance figures carry weight.",
-    rule: "not new AND SUM(impressions) over every ad that ever carried the asset >= 50,000",
-    note: "The 50k test asks whether a creative got a fair run, NOT whether it was discarded: most assets here hold a Winner or live-analysis verdict.",
+    what: "Tested before, and seen by enough people for its numbers to mean something.",
+    rule: "Not a first test, and across all its ads it has passed 50,000 views.",
+    note: "Being here is not a bad result. It only means the creative got a fair run — many in this group are winners.",
   },
 };
 
@@ -416,6 +424,35 @@ function InfoDot({ id }: { id: string }) {
   );
 }
 
+/** The creative's production date.
+ *
+ *  It comes from the asset register, and the register does not always
+ *  carry one: 62 of 1,588 graphic rows have a blank asset_date (the
+ *  whole GAD-Dec and GAD-Jun batches among them), and some assets --
+ *  ITE-FEB-25, ITE-SEP-273 -- have no register row at all. Those
+ *  rendered as an em dash, which reads as "this creative has no date"
+ *  when the truth is "nobody filled it in upstream".
+ *
+ *  So fall back to the day it was first put in the air. Marked with ~
+ *  and explained on hover, never silently: a derived date must not be
+ *  mistakable for a recorded one. */
+function CreatedCell({ r }: { r: CreativeTestingRow }) {
+  if (r.asset_created) {
+    return <span className="text-[12px] text-text-tertiary">{r.asset_created}</span>;
+  }
+  const launched = r.first_original_ad_date ?? r.first_ad_date;
+  if (!launched) return <span className="text-[12px] text-text-tertiary">—</span>;
+  return (
+    <span
+      className="cursor-help text-[12px] italic text-text-tertiary"
+      title={`No production date on record for ${r.asset_id}. Showing when it was `
+           + `first put in the air (${launched}) instead.`}
+    >
+      ~{launched}
+    </span>
+  );
+}
+
 const ASSET_COLUMNS: AssetColDef[] = [
   // ---- Identity -----------------------------------------------------
   { key: "preview_thumb", header: "Preview", group: "Identity", defaultVisible: true,
@@ -465,9 +502,34 @@ const ASSET_COLUMNS: AssetColDef[] = [
     render: (r) => <span className="text-[12px]">{r.account_name ?? "—"}</span> },
 
   // ---- Timeline -----------------------------------------------------
-  { key: "asset_created", header: "Created", group: "Timeline", defaultVisible: true, align: "right",
-    render: (r) => <span className="text-[12px] text-text-tertiary">{r.asset_created ?? "—"}</span> },
-  { key: "first_ad_date", header: "First ad", group: "Timeline", align: "right",
+  // The headline date: when this creative went live on Meta INSIDE the
+  // selected range. An asset first tested in 2025 and put back up this
+  // week reads this week, because this week is what the window asks
+  // about. Matches Meta Ads Manager's "Date created" for that ad.
+  { key: "launched_in_window", header: "Launched", group: "Timeline", defaultVisible: true, align: "right",
+    title: "When this creative went live on Meta within the selected dates — the "
+         + "first ad carrying it that was built in the range. This is the date "
+         + "Meta Ads Manager shows as \u201cDate created\u201d for that ad.",
+    render: (r) => (
+      <span className="text-[12px] text-text-tertiary">{r.launched_in_window ?? "—"}</span>
+    ) },
+  // Off by default now. It answers "when was the creative made", which
+  // is a different event -- an influencer post dates to the day it went
+  // up on Instagram, months before any ad carried it.
+  { key: "asset_created", header: "Asset created", group: "Timeline", align: "right",
+    title: "When the CREATIVE was made — production date for a video, asset date "
+         + "for a graphic, the day it went up for an influencer post. This is NOT "
+         + "Meta's \u201cDate created\u201d, which is when the ad was built: that is "
+         + "the \u201cFirst ad live\u201d column. Where the register carries no date, "
+         + "the first launch date stands in, prefixed with ~.",
+    render: (r) => <CreatedCell r={r} /> },
+  // On by default: without it the only date on screen was the asset's,
+  // which is not the number Meta shows, and the table read as wrong
+  // whenever the two diverged.
+  { key: "first_ad_date", header: "First ad ever", group: "Timeline", defaultVisible: true, align: "right",
+    title: "The earliest ad carrying this creative, across all time. Differs from "
+         + "\u201cLaunched\u201d when the asset is being retested: first run in 2025, "
+         + "back up this week.",
     render: (r) => <span className="text-[12px] text-text-tertiary">{r.first_ad_date ?? "—"}</span> },
   { key: "last_ad_date", header: "Last ad", group: "Timeline", align: "right",
     render: (r) => <span className="text-[12px] text-text-tertiary">{r.last_ad_date ?? "—"}</span> },
@@ -594,6 +656,7 @@ const ASSET_FILTER_FIELDS = [
   { key: "category", label: "Category" },
   { key: "kind", label: "Kind" },
   { key: "account_name", label: "Account" },
+  { key: "launched_in_window", label: "Launched (in range)" },
 ];
 
 const CTYPES: CtypeKey[] = ["IFAD", "Graphic AD", "VID", "STATIC"];
@@ -888,7 +951,12 @@ export function CreativeTesting() {
             [
               ["historical_discarded", "Historical Discarded", histCount,
                `Retested, and across ALL its ads it has still never reached ${IMPRESSION_FLOOR.toLocaleString("en-IN")} impressions in its lifetime \u2014 not just in this window. Put back in the air again and again and never cleared the bare minimum.`],
-              ["refresh_discarded", "Refresh Discarded", refreshCount,
+              // Labelled "Retested", not "Refresh Discarded". These
+              // creatives were NOT discarded -- they cleared the
+              // impression floor, which is what makes their numbers
+              // worth reading in the first place. The key stays
+              // refresh_discarded because the API filters on it.
+              ["refresh_discarded", "Retested", refreshCount,
                `Retested and past the ${IMPRESSION_FLOOR.toLocaleString("en-IN")} lifetime impression mark across all its ads. It cleared the bare minimum, so its numbers are worth reading.`],
             ] as [KindTab, string, number, string][]
           ).map(([key, label, count, hint]) => {
@@ -1342,7 +1410,7 @@ export function CreativeTesting() {
                   className={"px-3 py-2 whitespace-nowrap " + (c.align === "right" ? "text-right" : "")}
                   title={c.lifetime
                     ? "LIFETIME — the date filter cannot scope this metric; no daily source carries it."
-                    : undefined}
+                    : c.title}
                 >
                   {c.header}
                   {c.lifetime && <span className="ml-1 opacity-50" title="Lifetime, not windowed">∞</span>}
