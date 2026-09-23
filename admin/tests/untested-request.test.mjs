@@ -13,7 +13,7 @@ function asModule(source) {
 const cacheModule = asModule(await readFile(new URL("../src/lib/apiCache.ts", import.meta.url), "utf8"));
 const apiSource = (await readFile(new URL("../src/lib/api.ts", import.meta.url), "utf8"))
   .replace('from "./apiCache"', `from "${cacheModule}"`);
-const { ApiError, clearAnalyticsCache, fetchUntestedAssets, fetchCreativeTestingAds, fetchTables } = await import(asModule(apiSource));
+const { ApiError, clearAnalyticsCache, fetchUntestedAssets, fetchCreativeTestingAds, fetchTables, ANALYTICS_REQUEST_TIMEOUT_MS } = await import(asModule(apiSource));
 
 beforeEach((t) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -33,7 +33,7 @@ function rejectOnAbort(signal) {
   });
 }
 
-test("a shared Untested request times out at 10 seconds and a subsequent retry can succeed", async (t) => {
+test("a shared Untested request times out at the analytics bound and a subsequent retry can succeed", async (t) => {
   let calls = 0;
   let requestSignal;
   const response = { media: "video", rows: [], total_rows: 0 };
@@ -50,7 +50,9 @@ test("a shared Untested request times out at 10 seconds and a subsequent retry c
   const results = Promise.allSettled([fetchUntestedAssets(params), fetchUntestedAssets(params)]);
   await Promise.resolve();
   assert.equal(calls, 1);
-  t.mock.timers.tick(9_999);
+  // One tick short of the bound, then over it -- follows the constant
+  // rather than pinning a number the constant no longer has.
+  t.mock.timers.tick(ANALYTICS_REQUEST_TIMEOUT_MS - 1);
   assert.equal(requestSignal.aborted, false);
   t.mock.timers.tick(1);
   assert.equal(requestSignal.aborted, true);
@@ -58,7 +60,8 @@ test("a shared Untested request times out at 10 seconds and a subsequent retry c
     assert.equal(result.status, "rejected");
     assert.ok(result.reason instanceof ApiError);
     assert.equal(result.reason.status, 408);
-    assert.match(result.reason.message, /10 seconds/);
+    assert.match(result.reason.message,
+        new RegExp(`${Math.round(ANALYTICS_REQUEST_TIMEOUT_MS / 1000)} seconds`));
   }
 
   assert.deepEqual(await fetchUntestedAssets(params), response);
@@ -81,7 +84,7 @@ test("the timeout also covers a response body that stalls after headers arrive",
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(readingBody, true);
-  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(ANALYTICS_REQUEST_TIMEOUT_MS);
   await rejected;
 });
 

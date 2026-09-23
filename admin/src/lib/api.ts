@@ -130,10 +130,21 @@ class ApiError extends Error {
 }
 
 const analyticsCache = new RequestCache();
-// Analytics sections should either render within the product's ten-second
-// budget or show their Retry control. A stalled backend must never leave the
-// whole analytics page spinning indefinitely.
-export const ANALYTICS_REQUEST_TIMEOUT_MS = 10_000;
+// Analytics sections should show their Retry control rather than spin
+// forever against a stalled backend -- but the bound has to clear the
+// slowest query that legitimately succeeds, or it converts a slow page
+// into a broken one.
+//
+// Was 10s. Measured 2026-09-23, /ads-analyse over the full window takes
+// 20.6s: the windowed re-sum, the reach anchors and the attribution
+// join are each real work over ~6k ads. At 10s that request was aborted
+// every time and the section showed Retry, which reads as a backend
+// failure rather than as a slow query.
+//
+// 90s is chosen to be far above the measured worst case rather than
+// just above it, so ordinary variance -- a cold cache, a competing
+// rebuild -- does not start failing requests again.
+export const ANALYTICS_REQUEST_TIMEOUT_MS = 90_000;
 
 export function clearAnalyticsCache(): void {
   analyticsCache.clear();
@@ -2005,6 +2016,16 @@ export interface CreativeTestingRow {
   copy_ads: number;
   ads_in_window: number;
   first_ad_date: string | null;
+  /** First ad carrying this asset that was CREATED inside the selected
+   *  date range — when the creative went live on Meta for this window.
+   *  Distinct from first_ad_date, which is its first launch ever: an
+   *  asset that ran in 2025 and was put back up this week reports this
+   *  week here and 2025 there. */
+  launched_in_window: string | null;
+  /** Earliest ad for this asset whose name does NOT contain "copy" —
+   *  when the creative was genuinely first put in the air. Used as
+   *  the stand-in when the register carries no production date. */
+  first_original_ad_date: string | null;
   last_ad_date: string | null;
   account_name: string | null;
   name_conflict: boolean | null;
@@ -2232,6 +2253,34 @@ export interface RollupRow {
    *  exclusive — no entity carries a budget at both levels. Ads never
    *  hold one, so an ad reports its ad set's answer. */
   budget_type: string | null;
+  /** New customer purchases in the window, and spend per one. Meta
+   *  reports NCP at ad grain only, so both are rolled up from the
+   *  ad-level daily table through each ad's parent. */
+  ncp_count: number | null;
+  cost_per_ncp: number | null;
+  /** Ads inside this entity that clear all four creative-scaling gates
+   *  from the audit framework. Matters most on a PAUSE row: killing a
+   *  weak ad set must not kill the good creatives inside it. */
+  scalable_creatives: number;
+  /** Ad set rows only — the campaign it sits under. */
+  campaign_name: string | null;
+  /** When Meta created the entity, not when it first delivered. */
+  created_date: string | null;
+  /** Created within the last 7 days. A paused ad set built three days
+   *  ago has not been judged and must not be read as one that failed. */
+  is_new_entity: boolean;
+  /** Meta's EFFECTIVE delivery status, not the entity's own on/off
+   *  switch: 'ACTIVE' | 'PAUSED' | 'CAMPAIGN_PAUSED' | 'ARCHIVED' |
+   *  'WITH_ISSUES'. An ad set switched on under a paused campaign
+   *  reports ACTIVE on itself and CAMPAIGN_PAUSED here — it delivers
+   *  nothing. 1,471 ad sets are switched on; 255 actually run. */
+  effective_status: string | null;
+  /** 'SCALE' | 'PAUSE' | 'MONITOR' | 'REPORT' | 'OK' from the Meta Ads
+   *  Audit & Decision Framework, or null when there is no 3D/7D window
+   *  to judge on. */
+  decision: string | null;
+  /** The arithmetic behind the verdict. */
+  decision_reason: string | null;
 
   /** Rolling 3-day window ending at the data's last date, not today. */
   d3_spend: number | null;
@@ -2279,10 +2328,44 @@ export interface RollupRow {
   d28_cost_per_ftewv: number | null;
 }
 
+export interface DecisionSummary {
+  count: number;
+  spend: number;
+}
+
 export interface RollupResponse {
   level: "adset" | "campaign";
+  /** verdict -> totals over EVERY matching entity, not just the page.
+   *  Unaffected by the decision filter, so selecting one verdict does
+   *  not collapse the other tiles to zero. */
+  decision_counts?: Record<string, DecisionSummary>;
   rows: RollupRow[];
   total: number;
+}
+
+export interface ScalableCreativeRow {
+  ad_id: string;
+  ad_name: string | null;
+  spend: number;
+  lc_roas: number;
+  nc_roas: number;
+  cost_per_ncp: number | null;
+  cost_per_ftewv: number | null;
+  ftewv_benchmark: number;
+}
+
+/** The creatives worth lifting out of an ad set or campaign before it
+ *  is paused. Same window as the table it is opened from. */
+export function fetchScalableCreatives(params: {
+  level: "adset" | "campaign";
+  entity_id: string;
+  from_date?: string;
+  to_date?: string;
+}): Promise<{ entity_id: string; level: string; ads: ScalableCreativeRow[] }> {
+  const qs = new URLSearchParams({ level: params.level, entity_id: params.entity_id });
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  return request(`/admin/analytics/ads-analyse/rollup/scalable-creatives?${qs}`);
 }
 
 export function fetchAdsAnalyseRollup(params: {
@@ -2292,6 +2375,17 @@ export function fetchAdsAnalyseRollup(params: {
   sort?: string;
   /** 'CBO' | 'ABO' | 'NONE', or comma-separated for several. */
   budget_type?: string;
+  /** EFFECTIVE delivery status: ACTIVE | PAUSED | CAMPAIGN_PAUSED |
+   *  ARCHIVED | WITH_ISSUES. Comma-separated for several. */
+  status?: string;
+  /** Rolling last-click ROAS bounds. Same expressions the verdict rule
+   *  reads, so 3D>=2.5 + 7D>=2.5 returns exactly the SCALE set. */
+  d3_roas_min?: number;
+  d3_roas_max?: number;
+  d7_roas_min?: number;
+  d7_roas_max?: number;
+  /** SCALE | PAUSE | MONITOR | REPORT | OK | UNRATED. */
+  decision?: string;
   limit?: number;
   /** Window for the Shopify last-click columns, on the ORDER's date.
    *  Defaults server-side to the trailing 30 days — an unbounded sum
@@ -2304,6 +2398,13 @@ export function fetchAdsAnalyseRollup(params: {
   if (params.search) qs.set("search", params.search);
   if (params.sort) qs.set("sort", params.sort);
   if (params.budget_type) qs.set("budget_type", params.budget_type);
+  if (params.status) qs.set("status", params.status);
+  for (const k of ["d3_roas_min", "d3_roas_max", "d7_roas_min", "d7_roas_max"] as const) {
+    // 0 is a real bound (an entity that spent and earned nothing), so
+    // test for undefined rather than falsiness.
+    if (params[k] !== undefined) qs.set(k, String(params[k]));
+  }
+  if (params.decision) qs.set("decision", params.decision);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
