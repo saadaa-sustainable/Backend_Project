@@ -130,10 +130,10 @@ class ApiError extends Error {
 }
 
 const analyticsCache = new RequestCache();
-// Analytics sections should either render within the product's ten-second
-// budget or show their Retry control. A stalled backend must never leave the
-// whole analytics page spinning indefinitely.
-export const ANALYTICS_REQUEST_TIMEOUT_MS = 10_000;
+// The load-time target is not a cancellation deadline. Render can need time
+// to wake after idle; let a healthy slow response finish without retrying it.
+// Keep a finite deadline so a stalled connection still exposes Retry.
+export const ANALYTICS_REQUEST_TIMEOUT_MS = 90_000;
 
 export function clearAnalyticsCache(): void {
   analyticsCache.clear();

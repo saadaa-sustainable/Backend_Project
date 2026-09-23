@@ -33,7 +33,7 @@ function rejectOnAbort(signal) {
   });
 }
 
-test("a shared Untested request times out at 10 seconds and a subsequent retry can succeed", async (t) => {
+test("a shared Untested request times out at 90 seconds and a subsequent retry can succeed", async (t) => {
   let calls = 0;
   let requestSignal;
   const response = { media: "video", rows: [], total_rows: 0 };
@@ -50,7 +50,7 @@ test("a shared Untested request times out at 10 seconds and a subsequent retry c
   const results = Promise.allSettled([fetchUntestedAssets(params), fetchUntestedAssets(params)]);
   await Promise.resolve();
   assert.equal(calls, 1);
-  t.mock.timers.tick(9_999);
+  t.mock.timers.tick(89_999);
   assert.equal(requestSignal.aborted, false);
   t.mock.timers.tick(1);
   assert.equal(requestSignal.aborted, true);
@@ -58,7 +58,7 @@ test("a shared Untested request times out at 10 seconds and a subsequent retry c
     assert.equal(result.status, "rejected");
     assert.ok(result.reason instanceof ApiError);
     assert.equal(result.reason.status, 408);
-    assert.match(result.reason.message, /10 seconds/);
+    assert.match(result.reason.message, /90 seconds/);
   }
 
   assert.deepEqual(await fetchUntestedAssets(params), response);
@@ -81,7 +81,7 @@ test("the timeout also covers a response body that stalls after headers arrive",
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(readingBody, true);
-  t.mock.timers.tick(10_000);
+  t.mock.timers.tick(90_000);
   await rejected;
 });
 
@@ -95,7 +95,7 @@ test("a successful request clears its timeout and retains cached results", async
   });
   const params = { media: "graphic", match_state: "matched" };
   assert.deepEqual(await fetchUntestedAssets(params), { rows: [{ id: "asset-1" }] });
-  t.mock.timers.tick(60_000);
+  t.mock.timers.tick(90_000);
   assert.equal(requestSignal.aborted, false);
   assert.deepEqual(await fetchUntestedAssets(params), { rows: [{ id: "asset-1" }] });
   assert.equal(calls, 1);
@@ -139,7 +139,7 @@ test("the matched-ad popup times out and can retry without limiting its returned
   assert.equal(calls, 2);
 });
 
-test("Creative Testing callers receive the shared ten-second analytics timeout", async (t) => {
+test("Creative Testing callers receive the shared analytics timeout", async (t) => {
   t.mock.method(globalThis, "fetch", async (_url, init) => {
     assert.ok(init.signal);
     return Response.json({ asset_id: "GAD-Sep-340", media: "graphic", ads: [] });

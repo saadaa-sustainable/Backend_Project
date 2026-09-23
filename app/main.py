@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.error_handlers import register_error_handlers
+from app.api.middleware import AnalyticsGZipMiddleware
 from app.api.routers.admin import router as admin_router
 from app.api.routers.analytics import router as analytics_router
 from app.api.routers.assistant import router as assistant_router
@@ -67,6 +68,10 @@ def create_app() -> FastAPI:
     )
 
     register_error_handlers(app)
+
+    # Analytics responses contain many repeated field names. Compress large
+    # JSON bodies to reduce download time, with modest CPU cost on Render.
+    app.add_middleware(AnalyticsGZipMiddleware, minimum_size=1000, compresslevel=3)
 
     # The Next.js admin app (admin/) runs on a different origin in dev
     # (localhost:3000 -> localhost:8000) -- restricted to the admin app's
