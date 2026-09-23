@@ -459,7 +459,9 @@ const COLS: ColDef[] = [
 // ─────────────────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 100;
-const BATCH_SIZE = 1000;
+// Keep the first response small enough to render quickly. The existing
+// Load More control fetches subsequent batches without changing the table.
+const BATCH_SIZE = 500;
 
 export function LastClickUtm() {
   // Data

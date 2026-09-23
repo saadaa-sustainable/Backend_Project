@@ -130,6 +130,10 @@ class ApiError extends Error {
 }
 
 const analyticsCache = new RequestCache();
+// Analytics sections should either render within the product's ten-second
+// budget or show their Retry control. A stalled backend must never leave the
+// whole analytics page spinning indefinitely.
+export const ANALYTICS_REQUEST_TIMEOUT_MS = 10_000;
 
 export function clearAnalyticsCache(): void {
   analyticsCache.clear();
@@ -140,14 +144,17 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
   const analyticsRead = path.startsWith("/admin/analytics/") && (
     method === "GET" || (method === "POST" && path === "/admin/analytics/cpis-utm/spend-trends")
   );
+  const effectiveTimeoutMs = analyticsRead
+    ? timeoutMs ?? ANALYTICS_REQUEST_TIMEOUT_MS
+    : timeoutMs;
   // Browser memory only: never share a user's response through SSR or
   // a public HTTP cache. Include headers and request body in the key.
   if (analyticsRead && typeof window !== "undefined" && !init?.signal && init?.cache !== "reload") {
     const key = JSON.stringify([API_BASE_URL, method, path, init?.body ?? null,
-      [...new Headers(init?.headers).entries()].sort(), timeoutMs ?? null]);
-    return analyticsCache.get(key, () => fetchResponse<T>(path, init, timeoutMs));
+      [...new Headers(init?.headers).entries()].sort(), effectiveTimeoutMs ?? null]);
+    return analyticsCache.get(key, () => fetchResponse<T>(path, init, effectiveTimeoutMs));
   }
-  const result = await fetchResponse<T>(path, init, timeoutMs);
+  const result = await fetchResponse<T>(path, init, effectiveTimeoutMs);
   if (method !== "GET" && !analyticsRead) clearAnalyticsCache();
   return result;
 }
@@ -845,7 +852,7 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
   const s = qs.toString();
-  return request<AdsAnalyseResponse>(`/admin/analytics/ads-analyse${s ? `?${s}` : ""}`, undefined, 30_000);
+  return request<AdsAnalyseResponse>(`/admin/analytics/ads-analyse${s ? `?${s}` : ""}`);
 }
 
 // ---------------------------------------------------------------------
@@ -1891,7 +1898,7 @@ export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
   if (params.match_state) q.set("match_state", params.match_state);
   const qs = q.toString();
-  return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`, undefined, 30_000);
+  return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
 }
 
 // Dashboard tab -- per-widget fetchers. Fire in parallel and render
@@ -2284,7 +2291,7 @@ export function fetchAdsAnalyseRollup(params: {
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
-  return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`, undefined, 30_000);
+  return request<RollupResponse>(`/admin/analytics/ads-analyse/rollup?${qs}`);
 }
 
 // ---------------------------------------------------------------------
