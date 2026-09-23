@@ -172,6 +172,7 @@ _ADS_ANALYSE_SELECT = (
     "aps.cost_per_shopify_order, aps.gold_refreshed_at, "
     "aps.f1_pass, aps.f2_pass, aps.f3_pass, aps.f4_pass, "
     "al.reach, al.frequency, al.conv_value, "
+    "COALESCE(bt.budget_type, 'NONE') AS budget_type, "
     "al.ncp_count, al.ftewv_count, al.cost_per_ncp, al.cost_per_ftewv, "
     "al.roas, al.contrib_margin_pct, al.profit_efficiency, al.cpr_1000, al.cpc_link, "
     "al.checkout_compl_pct, al.cr_lc_pct, al.atc_lc_pct, al.ci_atc_pct, "
@@ -346,6 +347,68 @@ _DELIVERED_IN_WINDOW = (
     "AND d.impressions > 0)"
 )
 
+
+# ── CBO / ABO: where the budget actually lives ───────────────────────
+#
+# Meta puts a budget at exactly one level. Campaign Budget Optimisation
+# holds it on the campaign and lets Meta move money between ad sets; Ad
+# Set Budget Optimisation holds it on each ad set. Verified mutually
+# exclusive on this account 2026-09-23: 2,257 ad sets CBO, 1,111 ABO,
+# ZERO carrying a budget at both levels, 4 at neither.
+#
+# Ads have no budget of their own at any time -- Meta's model has none --
+# so an ad inherits its ad set's classification.
+#
+# NULLIF(...,'0') because Meta returns the string '0' for "not set" as
+# well as leaving the field absent, and a bare NOT NULL counts '0' as a
+# real budget.
+_BUDGET_TYPE_SQL = """
+    SELECT s.adset_id,
+           s.campaign_id,
+           CASE
+             WHEN NULLIF(c.daily_budget,'0') IS NOT NULL
+               OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO'
+             WHEN NULLIF(s.daily_budget,'0') IS NOT NULL
+               OR NULLIF(s.lifetime_budget,'0') IS NOT NULL THEN 'ABO'
+             ELSE 'NONE'
+           END AS budget_type
+      FROM public.meta_adsets s
+      LEFT JOIN public.meta_campaigns c ON c.campaign_id = s.campaign_id
+"""
+
+#: Campaign grain: a campaign is CBO when it holds the budget itself,
+#: ABO when its ad sets do. Derived from the same source so the two
+#: levels can never disagree about one campaign.
+#: Self-contained predicate on aps.adset_id. The filter has to work
+#: inside the `picked` pre-selection CTE, which selects from
+#: ad_performance_summary alone and has no access to the joined `bt`
+#: alias -- referencing it there fails with "missing FROM-clause entry".
+_BUDGET_TYPE_PRED = """
+    COALESCE((SELECT CASE
+                       WHEN NULLIF(c.daily_budget,'0') IS NOT NULL
+                         OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO'
+                       WHEN NULLIF(s.daily_budget,'0') IS NOT NULL
+                         OR NULLIF(s.lifetime_budget,'0') IS NOT NULL THEN 'ABO'
+                       ELSE 'NONE' END
+                FROM public.meta_adsets s
+                LEFT JOIN public.meta_campaigns c ON c.campaign_id = s.campaign_id
+               WHERE s.adset_id = aps.adset_id), 'NONE')
+"""
+
+_BUDGET_TYPE_CAMPAIGN_SQL = """
+    SELECT c.campaign_id,
+           CASE
+             WHEN NULLIF(c.daily_budget,'0') IS NOT NULL
+               OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO'
+             WHEN EXISTS (SELECT 1 FROM public.meta_adsets s
+                           WHERE s.campaign_id = c.campaign_id
+                             AND (NULLIF(s.daily_budget,'0') IS NOT NULL
+                               OR NULLIF(s.lifetime_budget,'0') IS NOT NULL)) THEN 'ABO'
+             ELSE 'NONE'
+           END AS budget_type
+      FROM public.meta_campaigns c
+"""
+
 # ── de-duplicated reach snapshots (public.ad_reach_cumulative) ────────
 #
 # Reach counts PEOPLE, so it cannot be summed across days: a person who
@@ -516,7 +579,12 @@ _ADS_ANALYSE_FROM_AGG = (
     "LEFT JOIN ad_lifecycle al ON al.ad_id = aps.ad_id "
     # Historical tagging. A plain PK join onto a ~14.9k-row table, so it
     # costs nothing next to the joins around it.
-    "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id"
+    "LEFT JOIN public.ad_history_milestones ahm ON ahm.ad_id = aps.ad_id "
+    # CBO / ABO. Joined on the AGG clause, not the row clause, so the
+    # filter reaches the count and the category tiles too -- a filter
+    # applied to rows alone makes the table disagree with the number
+    # above it, which has happened in this file before.
+    f"LEFT JOIN ({_BUDGET_TYPE_SQL}) bt ON bt.adset_id = COALESCE(al.adset_id, aps.adset_id)"
 )
 
 # Source timing uses first positive delivery across the full history.
@@ -796,6 +864,9 @@ class AdsAnalyseRow(BaseModel):
     ltv_reach: float | None
     ltv_frequency: float | None
     first_seen_date: date | None
+    #: 'CBO' | 'ABO' | 'NONE' -- which level holds this ad's budget.
+    #: Ads never hold one themselves, so this is the ad set's answer.
+    budget_type: str | None = None
 
     # ── de-duplicated reach (public.ad_reach_cumulative) ─────────────
     # These five are the only reach numbers on this row Meta itself
@@ -1028,6 +1099,12 @@ async def get_ads_analyse(
     f3_pass: bool | None = Query(default=None),
     f4_pass: bool | None = Query(default=None),
     search: str | None = Query(default=None, description="Matches ad_name, case-insensitive substring."),
+    budget_type: str | None = Query(
+        default=None,
+        description="CBO (budget on the campaign, Meta reallocates between "
+                    "ad sets) or ABO (budget on each ad set). NONE for the "
+                    "handful with neither. Comma-separated to pass several.",
+    ),
     only_with_shopify_orders: bool = Query(default=False),
     content_type: str | None = Query(
         default=None,
@@ -1123,6 +1200,13 @@ async def get_ads_analyse(
     if search:
         base_where.append("aps.ad_name ILIKE :search")
         params["search"] = f"%{search}%"
+    if budget_type:
+        # base_where, not row_where: this has to reach the count and the
+        # category tiles as well as the table.
+        wanted = [v.strip().upper() for v in budget_type.split(",") if v.strip()]
+        if wanted:
+            base_where.append(f"{_BUDGET_TYPE_PRED} = ANY(:budget_type)")
+            params["budget_type"] = wanted
     if only_with_shopify_orders:
         base_where.append("aps.shopify_orders > 0")
     if excl_copy:
@@ -6534,6 +6618,9 @@ class RollupRow(BaseModel):
     #: nothing to be over or under, and a 0 would sort among real values
     #: as though it were agreement.
     meta_shop_diff_pct: float | None = None
+    #: 'CBO' | 'ABO' | 'NONE'. At campaign grain, CBO means the campaign
+    #: holds the budget; ABO means its ad sets do.
+    budget_type: str | None = None
 
     #: Rolling 3-day window ending at the data's last date.
     d3_spend: float | None = None
@@ -6593,6 +6680,11 @@ async def get_ads_analyse_rollup(
     level: Literal["adset", "campaign"] = Query(...),
     account_name: str | None = Query(default=None),
     search: str | None = Query(default=None, description="Substring of the entity name."),
+    budget_type: str | None = Query(
+        default=None,
+        description="CBO (campaign holds the budget) or ABO (ad sets do). "
+                    "Comma-separated to pass several.",
+    ),
     sort: Literal[
         "spend", "impressions", "reach", "roas", "ads",
         "shopify_orders", "shopify_revenue", "shopify_roas",
@@ -6624,6 +6716,28 @@ async def get_ads_analyse_rollup(
     if search:
         where.append(f"i.{name_col} ILIKE :search")
         params["search"] = f"%{search}%"
+    if budget_type:
+        wanted = [v.strip().upper() for v in budget_type.split(",") if v.strip()]
+        if wanted:
+            # Inline rather than via the `bt` alias: the count query
+            # below builds its own FROM and would not see the join.
+            src = ("public.meta_adsets s LEFT JOIN public.meta_campaigns c "
+                   "ON c.campaign_id = s.campaign_id"
+                   if level == "adset" else "public.meta_campaigns c")
+            key = "s.adset_id" if level == "adset" else "c.campaign_id"
+            adset_arm = ("WHEN NULLIF(s.daily_budget,'0') IS NOT NULL "
+                         "  OR NULLIF(s.lifetime_budget,'0') IS NOT NULL THEN 'ABO' "
+                         if level == "adset" else
+                         "WHEN EXISTS (SELECT 1 FROM public.meta_adsets s2 "
+                         "              WHERE s2.campaign_id = c.campaign_id "
+                         "                AND (NULLIF(s2.daily_budget,'0') IS NOT NULL "
+                         "                  OR NULLIF(s2.lifetime_budget,'0') IS NOT NULL)) THEN 'ABO' ")
+            where.append(
+                f"COALESCE((SELECT CASE WHEN NULLIF(c.daily_budget,'0') IS NOT NULL "
+                f"  OR NULLIF(c.lifetime_budget,'0') IS NOT NULL THEN 'CBO' {adset_arm}"
+                f"  ELSE 'NONE' END FROM {src} WHERE {key} = i.{id_col}), 'NONE') "
+                f"= ANY(:budget_type)")
+            params["budget_type"] = wanted
     where_sql = "WHERE " + " AND ".join(where)
 
     sort_sql = {
@@ -6666,6 +6780,7 @@ async def get_ads_analyse_rollup(
         f"SELECT i.{id_col} AS entity_id, i.{name_col} AS entity_name, "
         "        COALESCE(i.account_name, acct.account_name) AS account_name, "
         f"       COALESCE(c.ads, 0)::int AS ads, "
+        "        COALESCE(bt.budget_type, 'NONE') AS budget_type, "
         # The window these figures actually cover is now the one asked
         # for, not whatever the insights row happened to be fetched with.
         "        CAST(:from_date AS date) AS date_start, "
@@ -6703,6 +6818,8 @@ async def get_ads_analyse_rollup(
         f"LEFT JOIN ({_rolling_metrics_sql(daily_table, daily_id)}) rm "
         f"       ON rm.entity_id = i.{id_col} "
         f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_BUDGET_TYPE_SQL if level == 'adset' else _BUDGET_TYPE_CAMPAIGN_SQL}) bt "
+        f"       ON bt.{id_col} = i.{id_col} "
         f"LEFT JOIN ({_ROLLUP_SHOPIFY_SQL[level]}) sh ON sh.entity_id = i.{id_col} "
         f"LEFT JOIN (SELECT {id_col}, COUNT(*) AS ads FROM ad_lifecycle "
         f"            WHERE {id_col} IS NOT NULL GROUP BY {id_col}) c "

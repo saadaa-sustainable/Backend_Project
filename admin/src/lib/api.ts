@@ -673,6 +673,11 @@ export interface AdsAnalyseRow {
   ltv_reach: number | null;
   ltv_frequency: number | null;
   first_seen_date: string | null;
+  /** Which level holds the budget: 'CBO' (campaign, Meta reallocates
+   *  between ad sets), 'ABO' (each ad set), or 'NONE'. Verified mutually
+   *  exclusive — no entity carries a budget at both levels. Ads never
+   *  hold one, so an ad reports its ad set's answer. */
+  budget_type: string | null;
   /**
    * De-duplicated reach, from public.ad_reach_cumulative.
    *
@@ -812,6 +817,8 @@ export interface AdsAnalyseParams {
    * undefined = no filter. Applied server-side to base_where, so the
    * count, category tiles and KPI strip move with the table. */
   has_asset_id?: boolean;
+  /** 'CBO' | 'ABO' | 'NONE', or comma-separated for several. */
+  budget_type?: string;
   /** Multi-Filter rules, JSON-encoded. Compiled and evaluated
    *  server-side -- fields and operators are whitelisted there. */
   multi_filter?: string;
@@ -844,6 +851,7 @@ export function fetchAdsAnalyse(params: AdsAnalyseParams = {}): Promise<AdsAnaly
   // Explicit undefined check: `false` is a real filter value here
   // (show only ads with an EMPTY Asset ID), not "unset".
   if (params.has_asset_id !== undefined) qs.set("has_asset_id", String(params.has_asset_id));
+  if (params.budget_type) qs.set("budget_type", params.budget_type);
   if (params.multi_filter) qs.set("multi_filter", params.multi_filter);
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
@@ -2219,6 +2227,11 @@ export interface RollupRow {
    *  the fleet gap over 2026 is ~1.49x, so around -33% is ordinary.
    *  NULL when there is no Meta conversion value to compare against. */
   meta_shop_diff_pct: number | null;
+  /** Which level holds the budget: 'CBO' (campaign, Meta reallocates
+   *  between ad sets), 'ABO' (each ad set), or 'NONE'. Verified mutually
+   *  exclusive — no entity carries a budget at both levels. Ads never
+   *  hold one, so an ad reports its ad set's answer. */
+  budget_type: string | null;
 
   /** Rolling 3-day window ending at the data's last date, not today. */
   d3_spend: number | null;
@@ -2277,6 +2290,8 @@ export function fetchAdsAnalyseRollup(params: {
   account_name?: string;
   search?: string;
   sort?: string;
+  /** 'CBO' | 'ABO' | 'NONE', or comma-separated for several. */
+  budget_type?: string;
   limit?: number;
   /** Window for the Shopify last-click columns, on the ORDER's date.
    *  Defaults server-side to the trailing 30 days — an unbounded sum
@@ -2288,6 +2303,7 @@ export function fetchAdsAnalyseRollup(params: {
   if (params.account_name) qs.set("account_name", params.account_name);
   if (params.search) qs.set("search", params.search);
   if (params.sort) qs.set("sort", params.sort);
+  if (params.budget_type) qs.set("budget_type", params.budget_type);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);

@@ -342,6 +342,16 @@ function ReachCell({
   );
 }
 
+function BudgetBadge({ v }: { v: string | null }) {
+  if (!v || v === "NONE") return <span className="text-text-tertiary">—</span>;
+  // CBO and ABO are a structural fact about the account, not a verdict,
+  // so both get a neutral tint rather than good/bad colouring.
+  const cls = v === "CBO"
+    ? "bg-accent-purple/15 text-accent-purple"
+    : "bg-info-bg text-info-text";
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls}`}>{v}</span>;
+}
+
 function FBadge({ pass, name }: { pass: boolean | null; name: string }) {
   const cls = pass === null ? "u" : pass ? "y" : "n";
   const label = pass === null ? "unknown" : pass ? "passed" : "failed";
@@ -791,6 +801,8 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <span className="num whitespace-nowrap">{r.entity_id}</span> },
   { key: "account_name", header: "Account", group: "Identity", defaultVisible: true,
     render: (r) => <>{r.account_name ?? "—"}</> },
+  { key: "budget_type", header: "Budget", group: "Identity", defaultVisible: true,
+    render: (r) => <BudgetBadge v={r.budget_type} /> },
   { key: "ads", header: "Ads", group: "Identity", defaultVisible: true, align: "right",
     render: (r) => <>{r.ads.toLocaleString("en-IN")}</> },
 
@@ -992,6 +1004,8 @@ const COLUMNS: ColDef[] = [
     render: (r) => <FBadge pass={r.f3_pass} name="F3" /> },
   { key: "f4_pass", header: "F4", kind: "flag", group: "Category", defaultVisible: true,
     render: (r) => <FBadge pass={r.f4_pass} name="F4" /> },
+  { key: "budget_type", header: "Budget", kind: "cat", group: "Category", defaultVisible: true,
+    render: (r) => <BudgetBadge v={r.budget_type} /> },
   { key: "ad_status", header: "Ad Status", kind: "status", group: "Category", defaultVisible: true,
     render: (r) => <StatusPill status={r.ad_effective_status ?? r.ad_status} /> },
   // Delivery
@@ -1246,6 +1260,10 @@ export function AdsAnalyse() {
   // A tri-state string rather than boolean|undefined so it binds
   // straight to a <select> without the false/undefined ambiguity.
   const [assetFilter, setAssetFilter] = useState<"" | "yes" | "no">("");
+  // CBO / ABO. Shared by the ad table and both rollup levels so one
+  // choice survives switching between them -- the classification is a
+  // property of the account structure, not of the grain being viewed.
+  const [budgetType, setBudgetType] = useState<"" | "CBO" | "ABO" | "NONE">("");
   // Date range window -- when both are set, spend / impressions /
   // purchases / conv_value / roas in the response are overwritten
   // with values summed from Bronze raw_dump_meta within the window.
@@ -1363,6 +1381,7 @@ export function AdsAnalyse() {
       account_name: account || undefined,
       search: debouncedRollupSearch || undefined,
       sort: rollupSort,
+      budget_type: budgetType || undefined,
       limit: 500,
       // The Shopify columns follow the section's own date range, so the
       // rollup answers the same question the ad level does.
@@ -1381,7 +1400,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, fromDate, toDate]);
+  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, fromDate, toDate, budgetType]);
 
   const filters = useMemo(
     () => ({
@@ -1393,6 +1412,7 @@ export function AdsAnalyse() {
       ad_effective_status: adStatus || undefined,
       only_with_shopify_orders: onlyWithOrders,
       has_asset_id: assetFilter === "" ? undefined : assetFilter === "yes",
+      budget_type: budgetType || undefined,
       multi_filter: multiFilter ? JSON.stringify(multiFilter) : undefined,
       // Only send both together -- one without the other has no meaning
       // on the server side (the overlay/filter branch keys on both being set).
@@ -1400,7 +1420,7 @@ export function AdsAnalyse() {
       to_date: fromDate && toDate ? toDate : undefined,
       date_field: fromDate && toDate ? dateField : undefined,
     }),
-    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, multiFilter, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, budgetType, multiFilter, fromDate, toDate, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -1982,6 +2002,20 @@ export function AdsAnalyse() {
             <option value="">All ads</option>
             <option value="yes">Has asset ID</option>
             <option value="no">No asset ID</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5 text-xs">
+          Budget
+          <select
+            value={budgetType}
+            onChange={(e) => setBudgetType(e.target.value as "" | "CBO" | "ABO" | "NONE")}
+            className="rounded-md border border-border-primary px-2 py-1 text-xs"
+            title="Where the budget is set. CBO: on the campaign, so Meta moves money between its ad sets. ABO: on each ad set, so the split is fixed. Mutually exclusive — no entity has both."
+          >
+            <option value="">All budgets</option>
+            <option value="CBO">CBO (campaign)</option>
+            <option value="ABO">ABO (ad set)</option>
+            <option value="NONE">No budget set</option>
           </select>
         </label>
         {/* The F1-F4 threshold popover was removed 2026-09-16: those
