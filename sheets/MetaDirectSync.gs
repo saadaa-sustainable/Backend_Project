@@ -29,16 +29,21 @@
 // different order between pages, which silently duplicates some rows
 // and drops others.
 //
-// daily_90d is OFF by default. It is 100,816 rows x 36 columns = 3.6M
-// cells, about 101 API pages, and on a consumer Google account the
-// 6-minute execution cap will usually kill it. Turn it on only on
-// Workspace (30-minute cap), and watch the sheet's 10M-cell ceiling:
-// all four together come to roughly 5.2M.
+// daily_90d is the big one: 100,816 rows x 36 columns = 3.6M cells
+// over ~101 API pages. It is enabled because _syncView streams each
+// page straight to the sheet instead of accumulating every row first,
+// so memory stays flat and the time is roughly linear.
+//
+// Two ceilings still apply. Apps Script caps a single execution at 6
+// minutes on a consumer Google account and 30 on Workspace, and a
+// spreadsheet holds 10M cells -- all four tabs come to about 5.2M. If
+// this run starts timing out, set enabled:false here rather than
+// letting it fail every night.
 var VIEWS = [
   { view: 'meta_direct_active_30d', tab: 'Active 30d', order: 'ad_id',      enabled: true  },
   { view: 'meta_direct_active_90d', tab: 'Active 90d', order: 'ad_id',      enabled: true  },
   { view: 'meta_direct_daily_30d',  tab: 'Daily 30d',  order: 'date,ad_id', enabled: true  },
-  { view: 'meta_direct_daily_90d',  tab: 'Daily 90d',  order: 'date,ad_id', enabled: false }
+  { view: 'meta_direct_daily_90d',  tab: 'Daily 90d',  order: 'date,ad_id', enabled: true  }
 ];
 
 var PAGE = 1000;          // PostgREST's own maximum per request
@@ -72,38 +77,70 @@ function _fetchPage(cfg, view, order, offset) {
   return JSON.parse(res.getContentText());
 }
 
-/** Replace one tab with the full contents of one view. */
-function _syncView(cfg, spec) {
-  var rows = [];
-  for (var offset = 0; ; offset += PAGE) {
-    var page = _fetchPage(cfg, spec.view, spec.order, offset);
-    rows = rows.concat(page);
-    if (page.length < PAGE) break;       // short page means the last one
-    if (offset > 500000) throw new Error(spec.view + ': runaway pagination');
+/** Make sure the sheet is physically big enough to be written to.
+ *
+ *  A new sheet is 1000 rows x 26 columns and clear() does not change
+ *  that, so getRange() past those bounds throws "The coordinates or
+ *  dimensions of the range are invalid". Daily 30d is 41,807 rows x 36
+ *  columns, so every daily view needs this before its first write.
+ */
+function _ensureSize(sh, rows, cols) {
+  var needRows = rows + 1;                       // +1 for the header
+  if (sh.getMaxRows() < needRows) {
+    sh.insertRowsAfter(sh.getMaxRows(), needRows - sh.getMaxRows());
   }
+  if (sh.getMaxColumns() < cols) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
+  }
+}
 
+/** Replace one tab with the full contents of one view.
+ *
+ *  Each page is written as it arrives rather than accumulated and
+ *  written at the end. Holding 100k objects in memory and then
+ *  rows.concat(page) per page -- which reallocates the whole array
+ *  every time -- is what made the 90-day view unsafe to enable.
+ *  Streaming keeps memory flat and the wall time roughly linear.
+ */
+function _syncView(cfg, spec) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName(spec.tab) || ss.insertSheet(spec.tab);
   sh.clear();
 
-  if (!rows.length) {
+  var headers = null;
+  var written = 0;
+
+  for (var offset = 0; ; offset += PAGE) {
+    var page = _fetchPage(cfg, spec.view, spec.order, offset);
+
+    if (page.length) {
+      if (!headers) {
+        headers = Object.keys(page[0]);
+        _ensureSize(sh, PAGE, headers.length);
+        sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+        sh.setFrozenRows(1);
+      }
+      // Grow before the write, not after: the range has to exist first.
+      _ensureSize(sh, written + page.length, headers.length);
+      var values = page.map(function (r) {
+        return headers.map(function (h) { return r[h] === null ? '' : r[h]; });
+      });
+      sh.getRange(written + 2, 1, values.length, headers.length).setValues(values);
+      written += values.length;
+    }
+
+    if (page.length < PAGE) break;       // short page means the last one
+    if (offset > 500000) throw new Error(spec.view + ': runaway pagination');
+  }
+
+  if (!written) {
     sh.getRange(1, 1).setValue('No rows returned for ' + spec.view);
-    return 0;
+  } else {
+    // Trim the empty tail a previous, larger run may have left behind.
+    var extra = sh.getMaxRows() - (written + 1);
+    if (extra > 0) sh.deleteRows(written + 2, extra);
   }
-
-  var headers = Object.keys(rows[0]);
-  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-  sh.setFrozenRows(1);
-
-  // Written in chunks: one setValues call with 100k rows is the usual
-  // way this script dies.
-  for (var i = 0; i < rows.length; i += WRITE_CHUNK) {
-    var slice = rows.slice(i, i + WRITE_CHUNK).map(function (r) {
-      return headers.map(function (h) { return r[h] === null ? '' : r[h]; });
-    });
-    sh.getRange(i + 2, 1, slice.length, headers.length).setValues(slice);
-  }
-  return rows.length;
+  return written;
 }
 
 /** The entry point. This is what the nightly trigger calls. */

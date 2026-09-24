@@ -53,20 +53,28 @@ of trading.
 
 A Google Sheet holds 10M cells; all four come to ~5.2M.
 
-`Daily 90d` is disabled in the `VIEWS` array. It is ~101 API pages and
-3.6M cells, which will usually exceed the **6-minute** execution cap on
-a consumer Google account. On Workspace the cap is 30 minutes and it
-should complete — flip `enabled: true` to try.
+All four are enabled. `_syncView` writes each page to the sheet as it
+arrives rather than accumulating every row first, so memory stays flat
+and the time is roughly linear in row count.
 
-If you need 90-day history on a consumer account, the better answer is
-a pivot off `Daily 30d` plus `Active 90d`, rather than 100k raw rows in
-a spreadsheet.
+Two ceilings still apply: Apps Script caps one execution at **6
+minutes** on a consumer account and **30 minutes** on Workspace, and a
+spreadsheet holds 10M cells. If `Daily 90d` starts timing out, set
+`enabled: false` for it rather than letting it fail nightly.
+
+100k raw rows is also awkward to actually read. A pivot over
+`Daily 30d` plus `Active 90d` usually answers the same questions more
+legibly.
 
 ## Notes
 
 - Pagination is `limit`/`offset` with an explicit `order`. The sort is
   load-bearing: without it PostgREST can return rows in a different
   order between pages, silently duplicating some and dropping others.
-- Each view is written in 5,000-row chunks. A single `setValues` call
-  with 100k rows is the usual way this kind of script dies.
+- Each page is written as it arrives. Accumulating 100k objects and
+  calling `setValues` once is the usual way this kind of script dies.
+- The sheet is grown before each write. A new sheet is 1000 rows × 26
+  columns and `clear()` does not change that, so writing 36–40 columns
+  fails with *"The coordinates or dimensions of the range are invalid"*
+  unless the sheet is expanded first.
 - One view failing does not stop the others; failures land in **Status**.
