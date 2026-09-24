@@ -30,6 +30,7 @@ Phase layout mirrors CTD's _refresh_all_dashboard_data.py:
      refresh_cpis_by_sku_daily.py           daily CPIS aggregate
      refresh_cpis_utm.py                    windowed CPIS (7/30/90d)
      refresh_cpis_sku_ad_daily.py           (day, sku, ad) for /cpis-utm
+     refresh_snapshot_views.py              meta_direct_* founder snapshots
      refresh_ad_product_daily.py            DPA product silver
      refresh_ad_media.py                    ad-media joined silver
 
@@ -333,6 +334,15 @@ PHASE_SILVER = [
     # and the Landing Page Analysis tab was serving a fixed 30d snapshot
     # that ended two weeks in the past.
     ("landing_page_gold",     ["scripts/refresh_landing_page_gold.py"],      900),
+    # LAST on purpose. The meta_direct_* snapshots are materialized
+    # views feeding a founder-facing Google Sheet, so they must be
+    # rebuilt only once Meta insights, Shopify and the attribution
+    # rebuild have all landed. Run earlier and the sheet shows
+    # yesterday's numbers under today's window.
+    #
+    # REFRESH ... CONCURRENTLY, so a sheet pulling mid-refresh is never
+    # locked out. ~30s for all four.
+    ("snapshot_views",        ["scripts/refresh_snapshot_views.py"],         900),
 ]
 
 

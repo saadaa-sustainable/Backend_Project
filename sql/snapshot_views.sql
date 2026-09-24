@@ -31,9 +31,13 @@
 -- ---------------------------------------------------------------------
 
 DROP VIEW IF EXISTS public.meta_direct_active_30d;
+DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_active_30d;
 DROP VIEW IF EXISTS public.meta_direct_active_90d;
+DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_active_90d;
 DROP VIEW IF EXISTS public.meta_direct_daily_30d;
+DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_daily_30d;
 DROP VIEW IF EXISTS public.meta_direct_daily_90d;
+DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_daily_90d;
 
 -- The newest day the Meta insights actually cover. Every view below
 -- anchors on this so spend and orders always describe the same dates.
@@ -46,7 +50,7 @@ COMMENT ON VIEW public.meta_direct_data_through IS
 -- =====================================================================
 -- meta_direct_active_30d -- one row per ACTIVE ad, last 30 days
 -- =====================================================================
-CREATE OR REPLACE VIEW public.meta_direct_active_30d AS
+CREATE MATERIALIZED VIEW public.meta_direct_active_30d AS
 WITH win AS (
   SELECT (SELECT MAX(day) FROM public.insights_daily_by_ad) - 29 AS since,
          (SELECT MAX(day) FROM public.insights_daily_by_ad)              AS until
@@ -164,13 +168,13 @@ SELECT al.account_name,
   LEFT JOIN shop    USING (ad_id)
  WHERE UPPER(COALESCE(al.ad_status, '')) = 'ACTIVE';
 
-COMMENT ON VIEW public.meta_direct_active_30d IS
+COMMENT ON MATERIALIZED VIEW public.meta_direct_active_30d IS
   'One row per ACTIVE ad over the last 30 days of DATA. Shopify columns come from this project''s corrected last-click attribution. reach_daily_sum is a SUM of daily reach and overcounts people; reach_unique_to_date is the de-duplicated figure.';
 
 -- =====================================================================
 -- meta_direct_active_90d -- one row per ACTIVE ad, last 90 days
 -- =====================================================================
-CREATE OR REPLACE VIEW public.meta_direct_active_90d AS
+CREATE MATERIALIZED VIEW public.meta_direct_active_90d AS
 WITH win AS (
   SELECT (SELECT MAX(day) FROM public.insights_daily_by_ad) - 89 AS since,
          (SELECT MAX(day) FROM public.insights_daily_by_ad)              AS until
@@ -288,13 +292,13 @@ SELECT al.account_name,
   LEFT JOIN shop    USING (ad_id)
  WHERE UPPER(COALESCE(al.ad_status, '')) = 'ACTIVE';
 
-COMMENT ON VIEW public.meta_direct_active_90d IS
+COMMENT ON MATERIALIZED VIEW public.meta_direct_active_90d IS
   'One row per ACTIVE ad over the last 90 days of DATA. Shopify columns come from this project''s corrected last-click attribution. reach_daily_sum is a SUM of daily reach and overcounts people; reach_unique_to_date is the de-duplicated figure.';
 
 -- =====================================================================
 -- meta_direct_daily_30d -- one row per ad per day, last 30 days
 -- =====================================================================
-CREATE OR REPLACE VIEW public.meta_direct_daily_30d AS
+CREATE MATERIALIZED VIEW public.meta_direct_daily_30d AS
 WITH win AS (
   SELECT (SELECT MAX(day) FROM public.insights_daily_by_ad) - 29 AS since,
          (SELECT MAX(day) FROM public.insights_daily_by_ad)              AS until
@@ -365,13 +369,13 @@ SELECT i.day                                             AS date,
  WHERE i.day BETWEEN win.since AND win.until
    AND i.impressions IS NOT NULL AND i.impressions > 0;
 
-COMMENT ON VIEW public.meta_direct_daily_30d IS
+COMMENT ON MATERIALIZED VIEW public.meta_direct_daily_30d IS
   'One row per ad per day over the last 30 days of DATA. Shopify columns come from this project''s corrected last-click attribution.';
 
 -- =====================================================================
 -- meta_direct_daily_90d -- one row per ad per day, last 90 days
 -- =====================================================================
-CREATE OR REPLACE VIEW public.meta_direct_daily_90d AS
+CREATE MATERIALIZED VIEW public.meta_direct_daily_90d AS
 WITH win AS (
   SELECT (SELECT MAX(day) FROM public.insights_daily_by_ad) - 89 AS since,
          (SELECT MAX(day) FROM public.insights_daily_by_ad)              AS until
@@ -442,7 +446,7 @@ SELECT i.day                                             AS date,
  WHERE i.day BETWEEN win.since AND win.until
    AND i.impressions IS NOT NULL AND i.impressions > 0;
 
-COMMENT ON VIEW public.meta_direct_daily_90d IS
+COMMENT ON MATERIALIZED VIEW public.meta_direct_daily_90d IS
   'One row per ad per day over the last 90 days of DATA. Shopify columns come from this project''s corrected last-click attribution.';
 
 -- ---------------------------------------------------------------------
@@ -478,3 +482,25 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.meta_direct_active_90d   FROM 
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.meta_direct_daily_30d    FROM authenticated;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.meta_direct_daily_90d    FROM authenticated;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.meta_direct_data_through FROM authenticated;
+
+
+-- ---------------------------------------------------------------------
+-- Refresh support.
+--
+-- These are MATERIALIZED views: a plain view recomputes on every read,
+-- and meta_direct_daily_90d is 100k rows that take ~9s to build --
+-- which a Google Sheet would pay on every page of 1,000 rows it pulls.
+--
+-- Each carries a UNIQUE index so the nightly job can use REFRESH
+-- MATERIALIZED VIEW CONCURRENTLY. Without CONCURRENTLY the refresh
+-- holds an ACCESS EXCLUSIVE lock and any sheet pulling at that moment
+-- blocks until it finishes.
+-- ---------------------------------------------------------------------
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_active_30d ON public.meta_direct_active_30d (ad_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_active_90d ON public.meta_direct_active_90d (ad_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_daily_30d  ON public.meta_direct_daily_30d  (ad_id, date);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_daily_90d  ON public.meta_direct_daily_90d  (ad_id, date);
+
+-- Sheets filter and sort by date far more than anything else.
+CREATE INDEX IF NOT EXISTS ix_mdir_daily_30d_date ON public.meta_direct_daily_30d (date);
+CREATE INDEX IF NOT EXISTS ix_mdir_daily_90d_date ON public.meta_direct_daily_90d (date);
