@@ -7230,17 +7230,36 @@ async def get_ads_analyse_rollup(
     params["from_date"] = from_date or (params["to_date"] - timedelta(days=29))
 
     params["reach_level"] = level
-    # Every Meta figure now comes from the daily grain summed over the
+    # Every Meta figure comes from the daily grain summed over the
     # REQUESTED window, so it shares a period with the Shopify columns
-    # beside it. `i` is still joined for identity and as a fallback for
-    # entities the daily table has not seen.
-    m = "COALESCE(w.{0}, i.{0})"
+    # beside it.
+    #
+    # The fallback is 0, NOT the lifetime figure on `i`. It used to be
+    # `COALESCE(w.x, i.x)`, justified as covering "entities the daily
+    # table has not seen" -- but the daily tables run from 2025-12-31,
+    # before the 2026-01-01 data floor, so no window inside the picker's
+    # range is uncovered. What the fallback actually caught was
+    # entities with NO ACTIVITY IN THE WINDOW, and for those it printed
+    # their whole lifetime spend under the window's own date_start and
+    # date_stop.
+    #
+    # Measured 2026-09-24 on a 7-day window: 114 ad sets and 20
+    # campaigns reported lifetime as window, inflating 7-day ad set
+    # spend by 82% (Rs 48.9L shown against a true Rs 26.9L). A paused
+    # ad set reported Rs 2.95L of spend and 1.36M impressions for a week
+    # in which Meta charged nothing. The error was largest on the
+    # shortest windows -- exactly the ones the pause and scale rules
+    # read -- and vanished on the lifetime preset, where the window
+    # covers everything and the fallback never fires.
+    #
+    # An entity that did not run in the window spent nothing in it. 0 is
+    # the answer.
+    m = "COALESCE(w.{0}, 0)"
     spend, impr = m.format("spend"), m.format("impressions")
-    # Reach deliberately does NOT fall back to i.reach: that value
-    # describes the insights row's own window, and silently mixing it in
-    # is the mismatch this whole change removes.
+    # Reach was already correct: it never fell back to i.reach, because
+    # that value describes the insights row's own window.
     reach = "rw.reach"
-    clicks = "COALESCE(w.clicks, i.clicks)"
+    clicks = "COALESCE(w.clicks, 0)"
 
     sql = (
         # account_name is NULL on a good share of the insights rows --
@@ -7267,7 +7286,7 @@ async def get_ads_analyse_rollup(
         + f"       COALESCE(scal.scalable_creatives, 0)::int AS scalable_creatives, "
         f"       npc.ncp_count AS ncp_count, "
         f"       CASE WHEN COALESCE(npc.ncp_count, 0) > 0 "
-        f"            THEN COALESCE(w.spend, i.spend) / npc.ncp_count END AS cost_per_ncp, "
+        f"            THEN COALESCE(w.spend, 0) / npc.ncp_count END AS cost_per_ncp, "
         "        COALESCE(i.account_name, acct.account_name) AS account_name, "
         f"       COALESCE(c.ads, 0)::int AS ads, "
         "        COALESCE(bt.budget_type, 'NONE') AS budget_type, "
@@ -7280,11 +7299,11 @@ async def get_ads_analyse_rollup(
         f"       {clicks} AS clicks, "
         f"       CASE WHEN {impr} > 0 THEN {clicks} * 100.0 / {impr} END AS ctr, "
         f"       CASE WHEN {impr} > 0 THEN {spend} * 1000.0 / {impr} END AS cpm, "
-        f"       COALESCE(w.purchases, {purchases}) AS purchases, "
-        f"       COALESCE(w.conv_value, {conv_value}) AS conv_value, "
-        f"       CASE WHEN {spend} > 0 THEN COALESCE(w.conv_value, {conv_value}) / {spend} END AS roas, "
-        f"       CASE WHEN COALESCE(w.purchases, {purchases}) > 0 "
-        f"            THEN {spend} / COALESCE(w.purchases, {purchases}) END AS cost_per_purchase, "
+        f"       COALESCE(w.purchases, 0) AS purchases, "
+        f"       COALESCE(w.conv_value, 0) AS conv_value, "
+        f"       CASE WHEN {spend} > 0 THEN COALESCE(w.conv_value, 0) / {spend} END AS roas, "
+        f"       CASE WHEN COALESCE(w.purchases, 0) > 0 "
+        f"            THEN {spend} / COALESCE(w.purchases, 0) END AS cost_per_purchase, "
         f"       CASE WHEN {reach} > 0 THEN {spend} * 1000.0 / {reach} END AS cpr_1000, "
         "        COALESCE(sh.shopify_orders, 0)::int AS shopify_orders, "
         "        COALESCE(sh.shopify_revenue, 0) AS shopify_revenue, "
@@ -7395,7 +7414,7 @@ async def get_ads_analyse_rollup(
     # started reading cost/FTEWV on both windows.
     summary_sql = (
         f"SELECT COALESCE(i.account_name, acct.account_name) AS account_name, "
-        f"       COALESCE(w.spend, i.spend) AS spend, "
+        f"       COALESCE(w.spend, 0) AS spend, "
         "        rm.d3_spend, rm.d3_ftewv, rm.d7_spend, rm.d7_ftewv, "
         "        rl.d3_lc_revenue, rl.d7_lc_revenue "
         f"FROM public.{table} i "
