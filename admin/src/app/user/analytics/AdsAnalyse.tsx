@@ -34,6 +34,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AdsAnalyseRow, AdsAnalyseTotals, ApiError, fetchAdsAnalyse,
   fetchScalableCreatives,
   ScalableCreativeRow,
+  fetchCpisDataFreshness,
 } from "@/lib/api";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { InfoBasis, InfoDot } from "./InfoDot";
@@ -1684,9 +1685,31 @@ export function AdsAnalyse() {
   // Shopify orders that only exist for 2026. `Lifetime` now resolves to
   // a real bounded range (see DATA_FLOOR), and it has to be applied on
   // first load, not only after someone opens the picker and hits Apply.
-  const [fromDate, setFromDate] = useState(() => resolvePreset("lifetime").from);
-  const [toDate, setToDate] = useState(() => resolvePreset("lifetime").to);
+  const [rawFrom, setFromDate] = useState(() => resolvePreset("lifetime").from);
+  const [rawTo, setToDate] = useState(() => resolvePreset("lifetime").to);
   const [datePreset, setDatePreset] = useState<string>("lifetime");
+  // The newest day Meta's insights actually cover. Presets are anchored
+  // on it rather than on the clock: Meta reports a day in arrears, so a
+  // clock-anchored "Last 7 Days" asks for a window whose last day does
+  // not exist and silently sums six days against Meta's seven -- a
+  // whole day of spend missing from every row.
+  const [dataThrough, setDataThrough] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    fetchCpisDataFreshness()
+      .then((f) => { if (live && f.max_meta_day) setDataThrough(f.max_meta_day); })
+      .catch(() => { /* fall back to the clock; the picker still works */ });
+    return () => { live = false; };
+  }, []);
+  // The window the page actually queries. Derived, not stored: once the
+  // anchor arrives every preset re-resolves against the data instead of
+  // the clock, without a second render pass writing state back.
+  //
+  // A custom range is the user's own choice and is never re-anchored.
+  const { from: winFrom, to: winTo } = useMemo(() => {
+    if (!dataThrough || datePreset === "custom") return { from: rawFrom, to: rawTo };
+    return resolvePreset(datePreset as Parameters<typeof resolvePreset>[0], dataThrough);
+  }, [dataThrough, datePreset, rawFrom, rawTo]);
 
   // ── F1..F4 thresholds ────────────────────────────────────────
   const [thresholds, setThresholds] = useState<FThresholds>(DEFAULT_THRESHOLDS);
@@ -1812,8 +1835,8 @@ export function AdsAnalyse() {
       limit: 500,
       // The Shopify columns follow the section's own date range, so the
       // rollup answers the same question the ad level does.
-      from_date: fromDate || undefined,
-      to_date: toDate || undefined,
+      from_date: winFrom || undefined,
+      to_date: winTo || undefined,
     })
       .then((res) => {
         if (cancelled) return;
@@ -1828,7 +1851,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, fromDate, toDate, budgetType, statusFilter, roasBounds, decisionFilter]);
+  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, winFrom, winTo, budgetType, statusFilter, roasBounds, decisionFilter]);
 
   const filters = useMemo(
     () => ({
@@ -1844,11 +1867,11 @@ export function AdsAnalyse() {
       multi_filter: multiFilter ? JSON.stringify(multiFilter) : undefined,
       // Only send both together -- one without the other has no meaning
       // on the server side (the overlay/filter branch keys on both being set).
-      from_date: fromDate && toDate ? fromDate : undefined,
-      to_date: fromDate && toDate ? toDate : undefined,
-      date_field: fromDate && toDate ? dateField : undefined,
+      from_date: winFrom && winTo ? winFrom : undefined,
+      to_date: winFrom && winTo ? winTo : undefined,
+      date_field: winFrom && winTo ? dateField : undefined,
     }),
-    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, budgetType, multiFilter, fromDate, toDate, dateField],
+    [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, budgetType, multiFilter, winFrom, winTo, dateField],
   );
 
   // sessionStorage cache -- /ads-analyse takes several seconds cold,
@@ -2140,8 +2163,9 @@ export function AdsAnalyse() {
 
         <FilterCard label="Date range">
           <DateRangePicker
-            value={{ from: fromDate, to: toDate }}
+            value={{ from: winFrom, to: winTo }}
             preset={datePreset}
+            anchor={dataThrough}
             // Opens rightwards. This card is third of six, so hanging the
             // ~700px panel off its RIGHT edge pushed the preset rail off
             // the left of the viewport entirely -- the calendar showed
@@ -2426,8 +2450,8 @@ export function AdsAnalyse() {
               level={levelToggle === "adset" ? "adset" : "campaign"}
               entityId={scalableFor.id}
               entityName={scalableFor.name}
-              fromDate={fromDate}
-              toDate={toDate}
+              fromDate={winFrom}
+              toDate={winTo}
               onClose={() => setScalableFor(null)}
             />
           )}
@@ -2688,8 +2712,8 @@ export function AdsAnalyse() {
           rows -- while presenting themselves as a view of the whole
           filter set. This one aggregates server-side. */}
       <AdsLaunchChart
-        fromDate={fromDate}
-        toDate={toDate}
+        fromDate={winFrom}
+        toDate={winTo}
         accountName={account || undefined}
         category={categoryFilter || undefined}
         adStatus={adStatus || undefined}

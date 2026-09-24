@@ -96,8 +96,34 @@ function fmtDisplay(s: string) {
   return `${d}/${m}/${y}`;
 }
 
-export function resolvePreset(key: PresetKey): DateRange {
-  const today = new Date();
+/** Parse an ISO date into a LOCAL Date.
+ *
+ *  `new Date("2026-09-23")` parses as UTC midnight, which is the
+ *  previous day in any timezone behind UTC and would shift every
+ *  preset by one more day. Building from the parts keeps it local, the
+ *  same basis `iso()` writes with. */
+function fromIso(s: string): Date {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+/** Resolve a preset to a concrete range.
+ *
+ *  `anchor` is the newest day the data actually covers. It matters:
+ *  Meta lands its insights a day in arrears, so "Last 7 Days" measured
+ *  off the clock asks for a window whose final day does not exist yet
+ *  and quietly sums six days against Meta's seven.
+ *
+ *  Measured 2026-09-24 on NCP_ASC-7DC+1DEV_CP_Jan2025: Meta Ads
+ *  Manager reported Rs 74,401 for its last 7 days; the clock-anchored
+ *  window (18-24 Sep) summed Rs 64,425 because we hold nothing for the
+ *  24th. Anchored on the data (17-23 Sep) it is Rs 75,062, which is the
+ *  same seven days Meta counted.
+ *
+ *  The rolling 3D/7D decision columns already anchor this way. Falls
+ *  back to the clock when the caller has no freshness figure yet. */
+export function resolvePreset(key: PresetKey, anchor?: string | null): DateRange {
+  const today = anchor ? fromIso(anchor) : new Date();
   switch (key) {
     case "today":
       return { from: iso(today), to: iso(today) };
@@ -205,10 +231,15 @@ export function DateRangePicker({
   onApply,
   align = "right",
   accent,
+  anchor,
 }: {
   value: DateRange;
   preset: string;
   onApply: (range: DateRange, preset: string) => void;
+  /** Newest day the data actually covers. Presets resolve against it
+   *  instead of the clock, because Meta lands its insights a day in
+   *  arrears -- see resolvePreset. Omitted, the clock is used. */
+  anchor?: string | null;
   /** Which edge the panel hangs from. The panel is ~500px wide, so a
    *  trigger near the LEFT of its container must open leftwards or the
    *  first month lands off-screen. Default keeps existing callers. */
@@ -337,7 +368,7 @@ export function DateRangePicker({
                   onClick={() => {
                     setDraftPreset(p.key);
                     if (p.key !== "custom") {
-                      const r = resolvePreset(p.key);
+                      const r = resolvePreset(p.key, anchor);
                       setDraft(r);
                       if (r.to) setLeftMonth(addMonths(startOfMonth(new Date(r.to)), -1));
                     }
@@ -423,7 +454,7 @@ export function DateRangePicker({
                     // half-open window the server would read as unbounded.
                     const r =
                       draftPreset === "lifetime"
-                        ? resolvePreset("lifetime")
+                        ? resolvePreset("lifetime", anchor)
                         : draft.from && !draft.to
                           ? { from: draft.from, to: draft.from }
                           : draft;
