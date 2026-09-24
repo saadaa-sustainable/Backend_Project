@@ -130,6 +130,10 @@ PHASE_INGEST = [
     #       reads raw_payload directly and dedups on (ad_id, date_start).
     #       This is the historical behaviour; unchanged.
     #
+    #   daily (time_increment=1, adset + campaign) -> the entity daily
+    #       tables. Added 2026-09-24: without it those tables were built
+    #       by dividing a 15-day total across 15 days.
+    #
     #   lifetime (all_days, all three levels) -> ad_insights /
     #       adset_insights / campaign_insights, whose primary key is the
     #       bare entity id. Feeding those from the daily fetch produces
@@ -158,6 +162,27 @@ PHASE_INGEST = [
                                "--roster-only"],                            1800),
     ("meta_insights_15d",     ["scripts/ingest_last_15_days.py",
                                "--levels", "ad"],                           2700),
+    # DAILY rows for adset and campaign. Without this they were fetched
+    # only at all_days, so their "daily" table was the 15-day total
+    # divided by 15 -- refresh_insights_daily_by_entity spreads any
+    # multi-day Bronze row evenly across its days.
+    #
+    # The damage was real: 132 of 268 ad sets carried byte-identical
+    # spend on 22 and 23 Sep because both days were one sixteenth of the
+    # same block, and NCP_ASC-7DC+1DEV_CP_Jan2025 read Rs 75,062 for
+    # 17-23 Sep against Meta's Rs 74,401. With true daily rows it reads
+    # Rs 74,401.61 -- 61 paise out over a week.
+    #
+    # chunk-days 1 because the size of each request is what makes this
+    # endpoint fail, not the number of them: ad-level daily over a
+    # 15-day span returns HTTP 500 error_code 1. Ad set and campaign are
+    # far lighter (3.4k and 575 entities against ~20k ads) and a
+    # one-day chunk returns in about two seconds per account.
+    ("meta_insights_daily_entity",
+                              ["scripts/ingest_last_15_days.py",
+                               "--levels", "adset,campaign",
+                               "--time-increment", "1",
+                               "--chunk-days", "1"],                        2700),
     ("meta_insights_lifetime",["scripts/ingest_last_15_days.py",
                                "--levels", "campaign,adset,ad",
                                "--time-increment", "all_days"],             2700),
