@@ -84,11 +84,14 @@ const ORIGIN_LABELS: Record<
   },
   influencer: {
     all: "All influencer assets",
-    database: "DAM Project",
+    // Influencer assets live in creatorhub, not the DAM, and the
+    // historical label below already said so -- calling the live half
+    // "DAM Project" made one register read as two systems.
+    database: "Creator Hub Project",
     // NOT "from Sheets": influencer history lives in creatorhub too.
     historical: "Historical · creatorhub archive",
     databaseHint:
-      "Creator posts recorded in the DAM Project.",
+      "Creator posts recorded in the Creator Hub Project.",
     historicalHint:
       "creatorhub historic_posts and cleaned_data: the same Supabase project, but its archive tables rather than the live one. No spreadsheet involved.",
   },
@@ -111,7 +114,8 @@ export function UntestedAssets() {
   // DOM keeps the export whole (it still reads every filtered row) while
   // the browser only ever holds a screenful.
   const [page, setPage] = useState(0);
-  // Each media tab opens on the DAM Project, with historical assets
+  // Each media tab opens on its live register -- the DAM Project, or
+  // the Creator Hub Project on influencer -- with historical assets
   // available through the visible source filter.
   const [originFilter, setOriginFilter] = useState<"all" | "database" | "historical">("database");
   // Testing status filters the loaded register locally. Cards continue
@@ -536,7 +540,7 @@ export function UntestedAssets() {
               <tr>
                 <td colSpan={columnCount} className="px-3 py-6 text-center text-text-secondary">
                   {originFilter === "database" && data?.from_database === 0
-                    ? "No DAM Project assets match this view. Select Historical or All to browse other sources."
+                    ? `No ${ORIGIN_LABELS[media].database} assets match this view. Select Historical or All to browse other sources.`
                     : `No ${populationLabel} ${media} assets match the current filters.`}
                 </td>
               </tr>
