@@ -13,73 +13,95 @@
    a second mechanical rename pass across every file that references it --
    its value is the primary blue now, not yellow. */
 :root {
-  /* Palette: kwikengage.ai. Screenshot-derived (2026-08-31). Sidebar is
-     a very dark blue-navy, main canvas is a neutral very-light gray, one
-     bright blue for CTAs, and pale muted greens/reds/ambers for status
-     pills. Token names are intentionally unchanged from the earlier
-     Snowflake/Databricks pass (accent-yellow, sb-*, etc.) so every
-     component wired to them picks up the new look with no per-component
-     rename churn. */
-  --background: #F4F6F9;
-  --foreground: #111827;
+  /* THE VIENNA METHOD -- Isotype, Otto Neurath and Gerd Arntz, 1925-34.
+     Chosen 2026-09-26 as the analytics surface's visual world; the
+     direction contract lives in .impeccable/surfaces/.
 
-  --bg-base: #F4F6F9;
-  --bg-surface: #EEF0F5;
-  --bg-white: #ffffff;
-  --bg-muted: #EEF0F5;
+     The grammar: one mark, one unit. Rules, never boxes. Flat colour
+     fields that carry a count, not badges scattered for decoration.
+     Nothing on this surface wears a border AND a shadow.
 
-  --text-primary: #111827;
-  --text-secondary: #6B7280;
-  --text-tertiary: #9CA3AF;
-  --text-link: #3B6BF5;
+     SIGNAL RED IS RESERVED BY LAW. --error-* carries it, and nothing
+     decorative may use it, so red appearing anywhere on the surface is
+     information: a rule fired. The moment red becomes a hover state or
+     a chart series, the reservation is gone and so is the meaning.
 
-  --border-primary: #E5E7EB;
-  --border-soft: #EEF0F3;
-  --border-mid: #D1D5DB;
+     Token NAMES are unchanged from the previous two passes (the
+     kwikengage port, and the Snowflake/Databricks one before it) so the
+     whole Analytics section re-themes from this file alone.
+     `--accent-yellow` is historical and has been neither yellow nor
+     renamed since 2026-08-27; it is the primary accent, now Vienna blue.
 
-  /* Primary accent -- CTAs, active states, links. Kept the historical
-     var name `accent-yellow` (see file docstring above). Value is now
-     kwikengage's exact CTA blue. */
-  --accent-yellow: #3B6BF5;
-  --accent-yellow-hover: #2952DE;
-  --accent-yellow-bg: #EEF3FF;
-  --accent-amber: #A7BFF9;
+     GROUND: #F9F8F6, not the darker paper the world suggests. The
+     project's categorical chart palette was CVD-validated against a
+     #F8FAFC canvas on a lightness band, so every ink sits at a similar
+     luminance by design. A warmer, darker ground pushed #16A34A to
+     2.89:1 -- under the 3:1 floor -- and darkening that green to
+     compensate would have moved it off the band the validation rests
+     on. The ground was mine to choose and the palette was not, so the
+     ground moved. Weakest ink now clears at 3.11:1, palette untouched. */
 
-  /* Status pills — pale bg + dark text pattern from kwikengage's table
-     "Completed" cell (2026-08-31 screenshot). */
-  --success-text: #2E7D32;
-  --success-mid: #16a34a;
-  --success-bg: #E6F7EA;
-  --warning-text: #B45309;
-  --warning-mid: #D97706;
-  --warning-bg: #FFF7ED;
-  --warning-border: #FED7AA;
-  --error-text: #B91C1C;
-  --error-mid: #DC2626;
-  --error-bg: #FEF2F2;
-  --info-text: #1D4ED8;
-  --info-mid: #3B6BF5;
-  --info-bg: #EEF3FF;
+  --background: #F9F8F6;
+  --foreground: #14120E;
 
-  --accent-purple: #7c3aed;
-  --accent-purple-bg: #F5F3FF;
-  --accent-pink: #DB2777;
-  --accent-pink-bg: #FDF2F8;
-  --accent-indigo: #4F46E5;
-  --accent-indigo-bg: #EEF2FF;
+  /* Paper, and the recessed field a verdict band is printed onto. */
+  --bg-base: #F9F8F6;
+  --bg-surface: #F2F0EB;
+  --bg-white: #FFFFFF;
+  --bg-muted: #EFEDE7;
 
-  /* Sidebar -- KwikEngage dark navy. `sb-surface` is a slightly lighter
-     panel used for active-item highlight, and `sb-section` is the very
-     muted gray used for the small uppercase section labels
-     ("MARKETING & RETENTION", "AUDIENCE", ...). */
-  --sb-bg: #22263D;
-  --sb-surface: #2E3352;
-  --sb-text: #C8CCD4;
-  --sb-text-muted: #8B94A6;
-  --sb-section: #6B7290;
-  --sb-active: #3B6BF5;
-  --sb-active-bg: #2E3352;
-  --sb-border: #2A2F4A;
+  --text-primary: #14120E;
+  --text-secondary: #57534A;
+  --text-tertiary: #716D64;
+  --text-link: #1D4E89;
+
+  /* Hairlines. The only structure this surface has. */
+  --border-primary: #E0DCD2;
+  --border-soft: #EBE8E0;
+  --border-mid: #C9C3B5;
+
+  /* Vienna blue: interactive, current selection, state indicator. Never
+     decoration. (Name is historical -- see the note above.) */
+  --accent-yellow: #1D4E89;
+  --accent-yellow-hover: #16406F;
+  --accent-yellow-bg: #E7EDF5;
+  --accent-amber: #8E6608;
+
+  /* Flat fields, mixed toward the paper rather than toward white, so a
+     band reads as printed on the sheet instead of floating over it.
+     Every pair below is >= 4.5:1 on its own field. */
+  --success-text: #2F6B3A;
+  --success-mid: #16A34A;
+  --success-bg: #E7EDE2;
+  --warning-text: #7A5206;
+  --warning-mid: #B45309;
+  --warning-bg: #F4EBD8;
+  --warning-border: #E0CFA6;
+  --error-text: #9E0C24;
+  --error-mid: #C8102E;
+  --error-bg: #F6E3E4;
+  --info-text: #1D4E89;
+  --info-mid: #2563EB;
+  --info-bg: #E4EAF2;
+
+  --accent-purple: #7C3AED;
+  --accent-purple-bg: #EEE9F7;
+  --accent-pink: #B02A6B;
+  --accent-pink-bg: #F5E4EC;
+  --accent-indigo: #3F3BB0;
+  --accent-indigo-bg: #E6E5F2;
+
+  /* The ink panel. Warm black, not navy -- printer's ink on the same
+     sheet, not a different material. Active state is ochre because red
+     is spent on the fired rule. */
+  --sb-bg: #1C1A16;
+  --sb-surface: #2A2721;
+  --sb-text: #E4E0D7;
+  --sb-text-muted: #A39D91;
+  --sb-section: #8C8675;
+  --sb-active: #D9A33A;
+  --sb-active-bg: #2A2721;
+  --sb-border: #322E27;
 }
 
 @theme inline {
@@ -145,11 +167,59 @@ body {
   font-feature-settings: "cv11", "ss01";
 }
 
-/* Numeric/data cells read better tabular (fixed-width digits) so columns
-   of numbers align -- standard in every data-platform grid this section
-   takes cues from. */
+/* ---------------------------------------------------------------------
+   Browser surfaces.
+
+   The parts nobody draws still carry the design. Selection, caret, focus
+   ring, scrollbars and the numerals in a data cell all ship with browser
+   defaults that belong to no design system, and on a paper ground the
+   stock blue selection and blue focus ring are the two loudest things on
+   screen -- both of them arriving from Chrome rather than from here.
+   --------------------------------------------------------------------- */
+
+::selection {
+  background: var(--accent-yellow-bg);
+  color: var(--text-primary);
+}
+
+:root {
+  caret-color: var(--accent-yellow);
+  accent-color: var(--accent-yellow);
+  /* Firefox */
+  scrollbar-color: var(--border-mid) transparent;
+  scrollbar-width: thin;
+}
+
+/* WebKit. A scrollbar on a paper ground should read as a printed rule
+   that happens to move, not as a floating grey capsule. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-mid);
+  border: 3px solid var(--bg-base);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* One focus ring for the whole surface, offset so it never sits on the
+   hairline it is marking. :focus-visible only -- a mouse click on a
+   table row should not ring. */
+:focus-visible {
+  outline: 2px solid var(--accent-yellow);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Isotype's rule: a figure is a measured thing. Every numeral on this
+   surface is tabular and slashed-zero by default, so columns align
+   without each component remembering to ask. The utility class stays
+   for markup that already names it. */
+body {
+  font-variant-numeric: tabular-nums slashed-zero;
+}
 .tabular-nums {
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 /* Indeterminate progress bar -- used while a fetch source is "running" and
@@ -194,13 +264,13 @@ body {
   line-height: 1.1;
   white-space: nowrap;
 }
-.cat-iw       { background: #d1fae5; color: #065f46; }
-.cat-winner   { background: #d1fae5; color: #065f46; }
-.cat-priority { background: #fef3c7; color: #92400e; }
-.cat-a1       { background: #dbeafe; color: #1e40af; }
-.cat-a2       { background: #dbeafe; color: #1e40af; }
-.cat-ra       { background: #e2e8f0; color: #475569; }
-.cat-disc     { background: #fee2e2; color: #991b1b; }
+.cat-iw       { background: var(--success-bg); color: var(--success-text); }
+.cat-winner   { background: var(--success-bg); color: var(--success-text); }
+.cat-priority { background: var(--warning-bg); color: var(--warning-text); }
+.cat-a1       { background: var(--info-bg);    color: var(--info-text); }
+.cat-a2       { background: var(--info-bg);    color: var(--info-text); }
+.cat-ra       { background: var(--bg-muted);   color: var(--text-secondary); }
+.cat-disc     { background: var(--error-bg);   color: var(--error-text); }
 
 .cat-tile {
   display: flex;
@@ -208,26 +278,32 @@ body {
   align-items: flex-start;
   gap: 0.15rem;
   padding: 0.5rem 0.75rem;
-  border-radius: 0.5rem;
-  border: 1px solid transparent;
+  border: 0;
+  /* One hairline, on the baseline the tiles sit along. Elevation is
+     declared once, and it is a rule -- never a rule plus a shadow. */
+  border-bottom: 1px solid var(--border-primary);
   cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease;
-  background: #fff;
+  transition: background-color 150ms ease, border-color 150ms ease;
+  background: transparent;
   text-align: left;
 }
-.cat-tile:hover { background: #f8fafc; }
+.cat-tile:hover { background: var(--bg-surface); }
+/* Selected is a heavier rule in ink, not a box and not a shadow. */
 .cat-tile-selected {
-  border-color: #0f172a;
-  background: #f1f5f9;
-  box-shadow: 0 0 0 1px #0f172a inset;
+  background: var(--bg-surface);
+  border-bottom-color: var(--text-primary);
+  box-shadow: inset 0 -2px 0 0 var(--text-primary);
 }
-.cat-tile-iw       { border-left: 3px solid #10b981; }
-.cat-tile-winner   { border-left: 3px solid #10b981; }
-.cat-tile-priority { border-left: 3px solid #f59e0b; }
-.cat-tile-a1       { border-left: 3px solid #3b82f6; }
-.cat-tile-a2       { border-left: 3px solid #3b82f6; }
-.cat-tile-ra       { border-left: 3px solid #94a3b8; }
-.cat-tile-disc     { border-left: 3px solid #ef4444; }
+/* The category's colour rides as a short rule under the label rather
+   than a 3px bar down the side: same information, and it stops every
+   tile from wearing a coloured spine. */
+.cat-tile-iw       { box-shadow: inset 0 -2px 0 0 var(--success-mid); }
+.cat-tile-winner   { box-shadow: inset 0 -2px 0 0 var(--success-mid); }
+.cat-tile-priority { box-shadow: inset 0 -2px 0 0 var(--warning-mid); }
+.cat-tile-a1       { box-shadow: inset 0 -2px 0 0 var(--info-mid); }
+.cat-tile-a2       { box-shadow: inset 0 -2px 0 0 var(--info-mid); }
+.cat-tile-ra       { box-shadow: inset 0 -2px 0 0 var(--border-mid); }
+.cat-tile-disc     { box-shadow: inset 0 -2px 0 0 var(--error-mid); }
 
 .ae-flag {
   display: inline-flex;
@@ -240,21 +316,21 @@ body {
   font-weight: 600;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.ae-flag.y { background: #d1fae5; color: #065f46; }
-.ae-flag.n { background: #fee2e2; color: #991b1b; }
-.ae-flag.u { background: #f1f5f9; color: #94a3b8; }
+.ae-flag.y { background: var(--success-bg); color: var(--success-text); }
+.ae-flag.n { background: var(--error-bg); color: var(--error-text); }
+.ae-flag.u { background: var(--bg-muted); color: var(--text-tertiary); }
 
 .ae-status {
   display: inline-flex;
   align-items: center;
   padding: 0.1rem 0.45rem;
   border-radius: 0.25rem;
-  background: #e2e8f0;
-  color: #475569;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
   font-size: 0.7rem;
   font-weight: 500;
 }
-.ae-status.active { background: #d1fae5; color: #065f46; }
+.ae-status.active { background: var(--success-bg); color: var(--success-text); }
 
 .lp-badge {
   display: inline-flex;
@@ -265,19 +341,19 @@ body {
   font-weight: 600;
   margin-right: 0.35rem;
 }
-.lp-coll  { background: #f3e8ff; color: #6b21a8; }
-.lp-prod  { background: #f3e8ff; color: #6b21a8; }
-.lp-page  { background: #dbeafe; color: #1e40af; }
-.lp-home  { background: #d1fae5; color: #065f46; }
-.lp-blog  { background: #ffedd5; color: #9a3412; }
-.lp-other { background: #e2e8f0; color: #475569; }
+.lp-coll  { background: var(--accent-purple-bg); color: var(--accent-purple); }
+.lp-prod  { background: var(--accent-purple-bg); color: var(--accent-purple); }
+.lp-page  { background: var(--info-bg); color: var(--info-text); }
+.lp-home  { background: var(--success-bg); color: var(--success-text); }
+.lp-blog  { background: var(--warning-bg); color: var(--warning-text); }
+.lp-other { background: var(--bg-muted); color: var(--text-secondary); }
 
 /* Sticky-header table for the wide Ads Analyse layout so the column
    headers stay pinned as the user scrolls right through 68 columns. */
 .ae-table thead th {
   position: sticky;
   top: 0;
-  background: #f8fafc;
+  background: var(--bg-surface);
   z-index: 1;
   /* Headers never wrap. The nowrap rule below only covered tbody, so
      while every DATA cell stayed on one line the headers broke across
@@ -310,28 +386,28 @@ body {
   gap: 0.2rem;
   padding: 0.5rem 0.65rem;
   border-radius: 0.5rem;
-  border: 1px solid #e2e8f0;
-  border-left-width: 3px;
+  border: 1px solid var(--border-primary);
+  border-left-width: 1px;
   background: #fff;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
   text-align: left;
 }
-.ai-channel-tile:hover { background: #f8fafc; }
+.ai-channel-tile:hover { background: var(--bg-surface); }
 .ai-channel-tile.selected {
-  background: #f1f5f9;
-  box-shadow: 0 0 0 1px #0f172a inset;
+  background: var(--bg-surface);
+  box-shadow: inset 0 0 0 1px var(--text-primary);
 }
-.ai-ch-total     { border-left-color: #0f172a; }
-.ai-ch-meta      { border-left-color: #1877F2; }
-.ai-ch-google    { border-left-color: #34A853; }
-.ai-ch-ig        { border-left-color: #E1306C; }
-.ai-ch-retention { border-left-color: #8B5CF6; }
-.ai-ch-collab    { border-left-color: #F59E0B; }
-.ai-ch-ai        { border-left-color: #10B981; }
-.ai-ch-direct    { border-left-color: #14B8A6; }
-.ai-ch-loyalty   { border-left-color: #EF4444; }
-.ai-ch-other     { border-left-color: #9A9384; }
+.ai-ch-total     { border-left-color: var(--text-primary); }
+.ai-ch-meta      { border-left-color: var(--info-mid); }
+.ai-ch-google    { border-left-color: var(--success-mid); }
+.ai-ch-ig        { border-left-color: var(--accent-pink); }
+.ai-ch-retention { border-left-color: var(--accent-purple); }
+.ai-ch-collab    { border-left-color: var(--warning-mid); }
+.ai-ch-ai        { border-left-color: var(--accent-indigo); }
+.ai-ch-direct    { border-left-color: var(--accent-yellow); }
+.ai-ch-loyalty   { border-left-color: var(--error-mid); }
+.ai-ch-other     { border-left-color: var(--text-tertiary); }
 
 /* Tier badges — Backend_Project's tier taxonomy styled with CTD's
    color intent (ad-level → green, adset-scoped → blue, weaker → amber,
@@ -345,17 +421,17 @@ body {
   font-weight: 600;
   white-space: nowrap;
 }
-.ai-tier-ad_direct      { background: #E0F0E5; color: #2E7755; }
-.ai-tier-ad_name_match  { background: #d1fae5; color: #065f46; }
-.ai-tier-adset_scoped   { background: #dbeafe; color: #1e40af; }
-.ai-tier-adset_only     { background: #fef3c7; color: #92400e; }
+.ai-tier-ad_direct      { background: var(--success-bg); color: var(--success-text); }
+.ai-tier-ad_name_match  { background: var(--success-bg); color: var(--success-text); }
+.ai-tier-adset_scoped   { background: var(--info-bg); color: var(--info-text); }
+.ai-tier-adset_only     { background: var(--warning-bg); color: var(--warning-text); }
 /* Edit Name Match: violet, deliberately distinct from the two blue
    adset tiers -- it IS the adset branch, but resolved on a name the
    ad no longer has, which is worth reading at a glance. */
-.ai-tier-edit_name_match{ background: #ede9fe; color: #5b21b6; }
-.ai-tier-campaign_only  { background: #ffedd5; color: #9a3412; }
-.ai-tier-unmatched      { background: #e2e8f0; color: #475569; }
-.ai-tier-none           { background: #f1f5f9; color: #94a3b8; }
+.ai-tier-edit_name_match{ background: var(--accent-purple-bg); color: var(--accent-purple); }
+.ai-tier-campaign_only  { background: var(--warning-bg); color: var(--warning-text); }
+.ai-tier-unmatched      { background: var(--bg-muted); color: var(--text-secondary); }
+.ai-tier-none           { background: var(--bg-muted); color: var(--text-tertiary); }
 
 .ai-status {
   display: inline-flex;
@@ -363,13 +439,13 @@ body {
   padding: 0.05rem 0.35rem;
   border-radius: 0.2rem;
   font-size: 0.65rem;
-  background: #e2e8f0;
-  color: #475569;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
 }
-.ai-status.active { background: #d1fae5; color: #065f46; }
+.ai-status.active { background: var(--success-bg); color: var(--success-text); }
 
-.ai-in-pill  { background: #dbeafe; color: #1e40af; }
-.ai-ex-pill  { background: #fee2e2; color: #991b1b; }
+.ai-in-pill  { background: var(--info-bg); color: var(--info-text); }
+.ai-ex-pill  { background: var(--error-bg); color: var(--error-text); }
 
 /* Creative Testing asset inspector.
    The table is column-driven and can carry 65 columns, so it must size

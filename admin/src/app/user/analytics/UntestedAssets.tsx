@@ -84,11 +84,14 @@ const ORIGIN_LABELS: Record<
   },
   influencer: {
     all: "All influencer assets",
-    database: "DAM Project",
+    // Influencer assets live in creatorhub, not the DAM, and the
+    // historical label below already said so -- calling the live half
+    // "DAM Project" made one register read as two systems.
+    database: "Creator Hub Project",
     // NOT "from Sheets": influencer history lives in creatorhub too.
     historical: "Historical · creatorhub archive",
     databaseHint:
-      "Creator posts recorded in the DAM Project.",
+      "Creator posts recorded in the Creator Hub Project.",
     historicalHint:
       "creatorhub historic_posts and cleaned_data: the same Supabase project, but its archive tables rather than the live one. No spreadsheet involved.",
   },
@@ -111,12 +114,13 @@ export function UntestedAssets() {
   // DOM keeps the export whole (it still reads every filtered row) while
   // the browser only ever holds a screenful.
   const [page, setPage] = useState(0);
-  // Each media tab opens on the DAM Project, with historical assets
+  // Each media tab opens on its live register -- the DAM Project, or
+  // the Creator Hub Project on influencer -- with historical assets
   // available through the visible source filter.
   const [originFilter, setOriginFilter] = useState<"all" | "database" | "historical">("database");
   // Testing status filters the loaded register locally. Cards continue
   // to summarize every asset in the selected source.
-  const [matchState, setMatchState] = useState<"untested" | "matched" | "all">("all");
+  const [matchState, setMatchState] = useState<"untested" | "matched" | "pending" | "all">("all");
 
   function beginLoad() {
     setLoading(true);
@@ -159,17 +163,45 @@ export function UntestedAssets() {
     return Array.from(s).sort();
   }, [data, kindFilter]);
 
+  // What "has a file" means, in one place, so the cards and the table
+  // can never disagree about which assets exist here.
+  // An empty string is not a link -- the registers are hand-maintained
+  // and a cleared cell arrives as '' rather than null.
+  const hasLink = (r: UntestedAssetRow) => !!(r.link && r.link.trim());
+
   // KPI scope: the selected media and source, independent of table filters.
   const sourceRows = useMemo(() => {
     if (!data) return [] as UntestedAssetRow[];
     return data.rows.filter((row) => originFilter === "all" || row.origin === originFilter);
   }, [data, originFilter]);
 
+  // Video and graphic describe only assets the register holds a link
+  // for: an asset with no file cannot be put in an ad, so counting it
+  // would overstate what anyone can act on.
+  //
+  // Influencer is different, and deliberately so. There a missing link
+  // is not noise to be hidden -- it is the dominant state, 12,314 of
+  // 14,709 posts, and it has its own name: Pending. A category that is
+  // counted has to have rows behind it, so the whole register is in
+  // scope here.
+  const scopeRows = useMemo(
+    () => (media === "influencer" ? sourceRows : sourceRows.filter(hasLink)),
+    [sourceRows, media]);
+
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return sourceRows.filter((r) => {
-      if (matchState === "untested" && r.matched_ads !== 0) return false;
+    return scopeRows.filter((r) => {
+      // These have to mean exactly what the cards above count, or
+      // picking "Not Tested" shows 13,453 rows under a card reading
+      // 1,139 and there is nothing on screen to explain the gap.
+      //   Tested      the id appears in an ad name
+      //   Not Tested  a link exists, but the id matches no ad
+      //   Pending     no link yet (influencer only; elsewhere those
+      //               rows are out of scope entirely)
       if (matchState === "matched" && r.matched_ads <= 0) return false;
+      if (matchState === "untested"
+          && !(r.matched_ads === 0 && (media !== "influencer" || hasLink(r)))) return false;
+      if (matchState === "pending" && !(r.matched_ads === 0 && !hasLink(r))) return false;
       if (media !== "influencer") {
         if (skuFilter === "matched" && !r.matched_master_sku) return false;
         if (skuFilter === "unmatched" && r.matched_master_sku) return false;
@@ -182,26 +214,43 @@ export function UntestedAssets() {
         .toLowerCase();
       return hay.includes(q);
     });
-  }, [sourceRows, matchState, media, skuFilter, kindFilter, search]);
+  }, [scopeRows, matchState, media, skuFilter, kindFilter, search]);
 
-  // Summarize the complete selected source, before table filters and paging.
-  const metrics = useMemo(() => {
+  // Summarize a population. One definition of "tested", used by both
+  // card rows, so they cannot count it differently.
+  const summarise = (rows: UntestedAssetRow[]) => {
     let tested = 0;
+    let notTested = 0;
+    let pending = 0;
     let matchedAds = 0;
     let withSku = 0;
-    for (const row of sourceRows) {
+    for (const row of rows) {
+      // Tested wins over Pending. 45 influencer posts match an ad but
+      // carry no link: they demonstrably ran, so the missing link is a
+      // register gap rather than an open testing question, and filing
+      // them under Pending would ask someone to chase work already
+      // done. Without a precedence they would be counted twice and the
+      // three buckets would not sum to the total.
       if (row.matched_ads > 0) tested += 1;
+      else if (hasLink(row)) notTested += 1;
+      else pending += 1;
       matchedAds += row.matched_ads;
       if (row.matched_master_sku) withSku += 1;
     }
-    return {
-      total: sourceRows.length,
-      tested,
-      notTested: sourceRows.length - tested,
-      matchedAds,
-      withSku,
-    };
-  }, [sourceRows]);
+    return { total: rows.length, tested, notTested, pending, matchedAds, withSku };
+  };
+
+  // The card rows are per-SOURCE and deliberately do NOT follow the
+  // Source switch: that switch chooses what the TABLE lists, while the
+  // cards exist to show both populations at once. Both are narrowed to
+  // assets that have a link, the same rule the table uses.
+  const inScope = (r: UntestedAssetRow) => media === "influencer" || hasLink(r);
+  const damMetrics = useMemo(
+    () => summarise((data?.rows ?? []).filter((r) => r.origin === "database" && inScope(r))),
+    [data, media]);
+  const histMetrics = useMemo(
+    () => summarise((data?.rows ?? []).filter((r) => r.origin === "historical" && inScope(r))),
+    [data, media]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   // Clamp rather than reset to 0: narrowing a filter while deep in the
@@ -228,7 +277,7 @@ export function UntestedAssets() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold text-text-primary">Untested Assets</h2>
+        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Untested Assets</h2>
         <p className="text-sm text-text-secondary">
           Browse registered assets and filter by whether they have run in a Meta ad.
           Click a tested asset to view its matched ads and their performance.
@@ -251,6 +300,10 @@ export function UntestedAssets() {
                 beginLoad();
                 setMedia(t.value);
                 setKindFilter("all");
+                // Pending only exists on influencer. Carrying it to
+                // another tab would show an empty table under a filter
+                // that tab does not offer.
+                if (t.value !== "influencer") setMatchState("all");
                 setOriginFilter("database");
                 setPage(0);
               }}
@@ -268,44 +321,33 @@ export function UntestedAssets() {
         })}
       </div>
 
-      {/* Cards summarize the source; testing status filters only the table. */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <KpiTile
-          label="Total Assets"
-          value={data ? fmtInt(metrics.total) : "—"}
-          hint="All assets in the selected source"
-        />
-        <KpiTile
-          label="Not Tested"
-          value={data ? fmtInt(metrics.notTested) : "—"}
-          hint={loading ? "Loading…" : "Assets with no matched ads in the selected source"}
-        />
-        <KpiTile
-          label="Tested"
-          value={data ? fmtInt(metrics.tested) : "—"}
-          hint={data && metrics.total
-            ? `${Math.round((metrics.tested / metrics.total) * 100)}% of assets in the selected source have been tested`
-            : "Assets with at least one matched ad in the selected source"}
-        />
-        <KpiTile
-          label="Matched Ads"
-          value={data ? fmtInt(metrics.matchedAds) : "—"}
-          hint="Ads matched to assets in the selected source"
-        />
-        {showSkuColumns ? (
-          <KpiTile
-            label="SKU Matched"
-            value={data ? `${fmtInt(metrics.withSku)} / ${fmtInt(metrics.total)}` : "—"}
-            hint="Assets with a catalog SKU in the selected source"
-          />
-        ) : (
-          <KpiTile
-            label="SKU Matched"
-            value="No SKU mapping"
-            hint="Influencer nomenclature (SIF-…) doesn't carry a product SKU code"
-          />
-        )}
-      </div>
+      {/* One row per source, both always visible.
+          They answer different questions and used to share a single row
+          that changed under the Source switch: DAM Project is the live
+          backlog someone can action today, Historical is the sheet-era
+          archive whose ids may predate the naming convention the
+          matcher relies on. Reading one set of numbers without knowing
+          which of the two it described was the problem.
+
+          Graphic has no DAM Project rows at all, so that row reads zero
+          there -- the honest answer, and it says where the graphics
+          actually live. */}
+      <KpiRow
+        title={ORIGIN_LABELS[media].database}
+        m={damMetrics}
+        showSkuColumns={showSkuColumns}
+        loading={loading}
+        ready={!!data}
+        showPending={media === "influencer"}
+      />
+      <KpiRow
+        title={ORIGIN_LABELS[media].historical}
+        m={histMetrics}
+        showSkuColumns={showSkuColumns}
+        loading={loading}
+        ready={!!data}
+        showPending={media === "influencer"}
+      />
 
       {/* Testing status narrows the selected source without changing it. */}
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
@@ -313,8 +355,16 @@ export function UntestedAssets() {
         <div className="flex overflow-hidden rounded border border-border-primary">
           {([
             ["all", ORIGIN_LABELS[media].all, "Every asset this media type holds, matched or not."],
-            ["untested", "Not Tested", "Assets with no matched ads."],
-            ["matched", "Tested", "Assets with at least one matched ad."],
+            ["matched", "Tested", "The asset id appears in an ad name."],
+            ["untested", "Not Tested",
+              media === "influencer"
+                ? "Post link present, but the id matches no ad."
+                : "Assets with no matched ads."],
+            // Only influencer counts link-less rows, so only influencer
+            // can filter to them.
+            ...(media === "influencer"
+              ? [["pending", "Pending", "No post link yet — nothing to test until one is added."] as const]
+              : []),
           ] as const).map(([v, label, hint]) => (
             <button
               key={v}
@@ -327,7 +377,7 @@ export function UntestedAssets() {
               }}
               className={
                 // accent-yellow is this theme's real accent token (it is
-                // blue, #3B6BF5 -- the name is a leftover). `accent-primary`
+                // blue, #1D4E89 -- the name is a leftover). `accent-primary`
                 // does not exist, so it rendered white-on-transparent and
                 // the selected option was invisible.
                 "px-3 py-1 text-xs font-medium transition-colors " +
@@ -434,7 +484,7 @@ export function UntestedAssets() {
       </div>
 
       {error && (
-        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-border-primary bg-error-bg px-3 py-2 text-sm text-error-text">
           <span>{error}</span>
           <button
             type="button"
@@ -443,7 +493,7 @@ export function UntestedAssets() {
               setRetryCount((count) => count + 1);
             }}
             disabled={loading}
-            className="shrink-0 rounded border border-red-300 px-3 py-1 font-medium hover:bg-red-100 disabled:opacity-40"
+            className="shrink-0 rounded border border-border-primary px-3 py-1 font-medium hover:bg-error-bg disabled:opacity-40"
           >
             Retry
           </button>
@@ -490,7 +540,7 @@ export function UntestedAssets() {
               <tr>
                 <td colSpan={columnCount} className="px-3 py-6 text-center text-text-secondary">
                   {originFilter === "database" && data?.from_database === 0
-                    ? "No DAM Project assets match this view. Select Historical or All to browse other sources."
+                    ? `No ${ORIGIN_LABELS[media].database} assets match this view. Select Historical or All to browse other sources.`
                     : `No ${populationLabel} ${media} assets match the current filters.`}
                 </td>
               </tr>
@@ -539,7 +589,7 @@ export function UntestedAssets() {
                       <Td className="font-mono">{r.candidate_master_sku ?? "—"}</Td>
                       <Td>
                         {r.matched_master_sku ? (
-                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[11px] text-emerald-800">
+                          <span className="rounded bg-success-bg px-1.5 py-0.5 font-mono text-[11px] text-success-text">
                             {r.matched_master_sku}
                           </span>
                         ) : (
@@ -569,8 +619,8 @@ export function UntestedAssets() {
                         className={
                           "whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] " +
                           (r.origin === "database"
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                            : "border-slate-200 bg-slate-100 text-slate-600")
+                            ? "border-border-primary bg-success-bg text-success-text"
+                            : "border-border-primary bg-bg-muted text-text-secondary")
                         }
                       >
                         {r.origin === "database"
@@ -652,6 +702,87 @@ export function UntestedAssets() {
           onClose={() => setOpenAsset(null)}
         />
       )}
+    </div>
+  );
+}
+
+type RowMetrics = {
+  total: number; tested: number; notTested: number; pending: number;
+  matchedAds: number; withSku: number;
+};
+
+/** One labelled row of KPI cards for a single source.
+ *
+ *  Influencer reads differently from the other two. There a post with
+ *  no link is the dominant state rather than an edge case -- 12,314 of
+ *  14,709 -- so it gets its own card, Pending, and the row drops the
+ *  SKU card, which only ever said "No SKU mapping" because SIF-…
+ *  nomenclature carries no product code.
+ *
+ *      Total = Tested + Not Tested + Pending, always. */
+function KpiRow({ title, m, showSkuColumns, loading, ready, showPending }: {
+  title: string;
+  m: RowMetrics;
+  showSkuColumns: boolean;
+  loading: boolean;
+  ready: boolean;
+  showPending?: boolean;
+}) {
+  const v = (n: number) => (ready ? fmtInt(n) : "\u2014");
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+        {title}
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {/* Counts assets the register holds a LINK for, because that is
+            the only set anyone can act on -- an asset with no file
+            cannot be put in an ad. One number: the register's own row
+            count is deliberately not shown beside it, because two
+            totals on one card got the bigger one read as the backlog. */}
+        <KpiTile
+          label="Total Assets"
+          value={v(m.total)}
+          hint={showPending ? "Every post in this source" : "Assets with a link"}
+        />
+        <KpiTile
+          label="Tested"
+          value={v(m.tested)}
+          hint={ready && m.total
+            ? `${Math.round((m.tested / m.total) * 100)}% \u2014 the asset id appears in an ad name`
+            : "The asset id appears in an ad name"}
+        />
+        <KpiTile
+          label="Not Tested"
+          value={v(m.notTested)}
+          hint={loading
+            ? "Loading\u2026"
+            : showPending
+              ? "Post link present, but the id matches no ad"
+              : "Assets with no matched ads"}
+        />
+        {showPending && (
+          <KpiTile
+            label="Pending"
+            value={v(m.pending)}
+            hint="No post link yet \u2014 nothing to test until one is added"
+          />
+        )}
+        <KpiTile label="Matched Ads" value={v(m.matchedAds)} hint="Ads matched to these assets" />
+        {showPending ? null : showSkuColumns ? (
+          <KpiTile
+            label="SKU Matched"
+            value={ready ? `${fmtInt(m.withSku)} / ${fmtInt(m.total)}` : "\u2014"}
+            hint="Assets with a catalog SKU"
+          />
+        ) : (
+          <KpiTile
+            label="SKU Matched"
+            value="No SKU mapping"
+            hint="Influencer nomenclature (SIF-\u2026) doesn't carry a product SKU code"
+          />
+        )}
+      </div>
     </div>
   );
 }

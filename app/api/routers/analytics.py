@@ -5015,6 +5015,18 @@ class UntestedAssetsResponse(BaseModel):
     register_total: int = 0
     matched_assets: int = 0
     matched_ads: int = 0
+    #: The DAM population: assets the register actually holds a link
+    #: for. This is the denominator that matters operationally -- an
+    #: asset with no link cannot be tested, because there is no file to
+    #: put in an ad, so counting it as "untested backlog" overstates
+    #: what the team can act on.
+    dam_total: int = 0
+    #: The DAM split. dam_tested + dam_untested == dam_total always.
+    dam_tested: int = 0
+    dam_untested: int = 0
+    #: Register rows with no link at all -- present so dam_total can be
+    #: read against the whole register without arithmetic.
+    without_link: int = 0
     rows: list[UntestedAssetRow]
     computed_at: datetime
 
@@ -5060,6 +5072,21 @@ _UNTESTED_COVERAGE_SQL: dict[str, str] = {
           LEFT JOIN public.ad_asset_map m ON m.asset_id = r.post_id
     """,
 }
+
+#: An asset is "in the DAM" when the register holds a link for it.
+#: `b.link` is the normalised primary link across the three media --
+#: link_to_asset on content_asset_register, edited_link on the iterated
+#: video register, link_1/creative on graphics, post_link on influencer
+#: posts -- so this is one predicate rather than four.
+#:
+#: Written once and read by BOTH the has_link filter and the dam_*
+#: counts. Two spellings would let the tile say 180 while the filtered
+#: table showed a different number, and nothing on screen would say why.
+#:
+#: An empty string is not a link. The registers are hand-maintained and
+#: a cleared cell arrives as '' rather than NULL, so a bare IS NOT NULL
+#: counts blanks as assets that have a file.
+_HAS_LINK = "(b.link IS NOT NULL AND btrim(b.link) <> '')"
 
 _UNTESTED_SQL: dict[str, str] = {
     "video": """
@@ -5249,6 +5276,15 @@ async def get_untested_assets(
                     "the matched_ads column worth reading.",
     ),
     has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows. Ignored for influencer (which has no SKU derivation)."),
+    has_link: bool | None = Query(
+        default=None,
+        description="The DAM filter. true = only assets the register holds a "
+                    "link for, which is the population that can actually be "
+                    "tested; false = only those with no link, which is a data "
+                    "gap to chase rather than a testing backlog. Omitted "
+                    "returns both. Combines with match_state, so "
+                    "has_link=true&match_state=untested is the real backlog.",
+    ),
 ) -> UntestedAssetsResponse:
     base_select = _UNTESTED_SQL[media]
 
@@ -5257,6 +5293,10 @@ async def get_untested_assets(
         outer_filters.append("b.matched_ads = 0")
     elif match_state == "matched":
         outer_filters.append("b.matched_ads > 0")
+    if has_link is True:
+        outer_filters.append(_HAS_LINK)
+    elif has_link is False:
+        outer_filters.append(f"NOT {_HAS_LINK}")
     if has_sku is True and media != "influencer":
         outer_filters.append("cpis.master_sku IS NOT NULL")
     elif has_sku is False and media != "influencer":
@@ -5315,7 +5355,37 @@ async def get_untested_assets(
         )
         for r in result
     ]
-    cov = (await session.execute(text(_UNTESTED_COVERAGE_SQL[media]))).one()
+    # Register coverage and the DAM split, in ONE round trip.
+    #
+    # Both are aggregates over the whole register and neither looks at
+    # `where_clause`, so the tiles describe the register rather than
+    # whatever the current filters left behind -- the defect that once
+    # had the ad-level category tiles report "3" against a real 1,768.
+    #
+    # Deliberately not a second execute(). This endpoint already costs
+    # two round trips and tests/test_untested_loading.py pins that, for
+    # the same reason this branch exists: every extra trip is paid on
+    # every load. cov and dam are one row.
+    #
+    # The DAM half reads `base` rather than _UNTESTED_COVERAGE_SQL
+    # because only base carries the normalised `link` column, and
+    # counting it off a different query is how a tile and a table start
+    # disagreeing.
+    cov = (await session.execute(text(f"""
+        WITH base AS ({base_select}),
+             cov AS ({_UNTESTED_COVERAGE_SQL[media]}),
+             dam AS (
+               SELECT COUNT(*) FILTER (WHERE {_HAS_LINK})                       AS dam_total,
+                      COUNT(*) FILTER (WHERE {_HAS_LINK} AND b.matched_ads > 0) AS dam_tested,
+                      COUNT(*) FILTER (WHERE {_HAS_LINK} AND b.matched_ads = 0) AS dam_untested,
+                      COUNT(*) FILTER (WHERE NOT {_HAS_LINK})                   AS without_link
+                 FROM base b
+             )
+        SELECT cov.register_total, cov.matched_assets, cov.matched_ads,
+               dam.dam_total, dam.dam_tested, dam.dam_untested, dam.without_link
+          FROM cov CROSS JOIN dam
+    """))).one()
+    dam = cov
     matched = sum(1 for r in rows if r.matched_master_sku)
     from_db = sum(1 for r in rows if r.origin == "database")
     return UntestedAssetsResponse(
@@ -5328,6 +5398,10 @@ async def get_untested_assets(
         register_total=int(cov.register_total or 0),
         matched_assets=int(cov.matched_assets or 0),
         matched_ads=int(cov.matched_ads or 0),
+        dam_total=int(dam.dam_total or 0),
+        dam_tested=int(dam.dam_tested or 0),
+        dam_untested=int(dam.dam_untested or 0),
+        without_link=int(dam.without_link or 0),
         rows=rows,
         computed_at=datetime.now(timezone.utc),
     )
@@ -7069,6 +7143,25 @@ class RollupResponse(BaseModel):
     decision_counts: dict[str, DecisionSummary] = {}
 
 
+def _is_new_entity_sql(level: str, id_col: str) -> str:
+    """Whether Meta created this entity inside the last _NEW_ENTITY_DAYS.
+
+    Correlated, not joined: the count and summary queries build their
+    own FROM and would not see a join -- the same reason the budget and
+    status predicates are written this way.
+
+    Factored out because the badge in the SELECT and the filter in the
+    WHERE have to be the same expression. If they drift, "exclude new"
+    hides rows that are not badged new, which is worse than either
+    behaviour on its own because nothing on screen explains it.
+    """
+    src, key = (("public.meta_adsets", "adset_id") if level == "adset"
+                else ("public.meta_campaigns", "campaign_id"))
+    return (f"COALESCE((SELECT n.created_time::date FROM {src} n "
+            f"           WHERE n.{key} = i.{id_col}) "
+            f"         > CAST(:last_date AS date) - {_NEW_ENTITY_DAYS}, false)")
+
+
 @router.get("/ads-analyse/rollup", response_model=RollupResponse)
 @cached_analytics(ttl=300.0)
 async def get_ads_analyse_rollup(
@@ -7102,6 +7195,16 @@ async def get_ads_analyse_rollup(
         default=None,
         description="Framework verdict: SCALE / PAUSE / MONITOR / REPORT / OK "
                     "/ UNRATED. Comma-separated to pass several.",
+    ),
+    new_entities: Literal["exclude", "only"] | None = Query(
+        default=None,
+        description=f"How to treat entities Meta created in the last "
+                    f"{_NEW_ENTITY_DAYS} days -- the ones carrying the NEW "
+                    f"badge. 'exclude' drops them, 'only' keeps just them, "
+                    f"omitted keeps everything. A new ad set has not had time "
+                    f"to be judged, so leaving it in drags down any average "
+                    f"read across the table and makes a deliberate pause look "
+                    f"like a failure.",
     ),
     sort: Literal[
         "spend", "impressions", "reach", "roas", "ads",
@@ -7156,6 +7259,11 @@ async def get_ads_analyse_rollup(
                 f"  ELSE 'NONE' END FROM {src} WHERE {key} = i.{id_col}), 'NONE') "
                 f"= ANY(:budget_type)")
             params["budget_type"] = wanted
+    if new_entities:
+        # Same expression the is_new_entity badge is built from, so a
+        # hidden row is always a badged row.
+        expr = _is_new_entity_sql(level, id_col)
+        where.append(expr if new_entities == "only" else f"NOT {expr}")
     if status:
         wanted_s = [v.strip().upper() for v in status.split(",") if v.strip()]
         if wanted_s:
@@ -7276,10 +7384,7 @@ async def get_ads_analyse_rollup(
         f"       (SELECT {'s2.created_time' if level == 'adset' else 'c2.created_time'}::date "
         f"          FROM {'public.meta_adsets s2 WHERE s2.adset_id' if level == 'adset' else 'public.meta_campaigns c2 WHERE c2.campaign_id'}"
         f"             = i.{id_col}) AS created_date, "
-        f"       COALESCE((SELECT {'s3.created_time' if level == 'adset' else 'c3.created_time'}::date "
-        f"          FROM {'public.meta_adsets s3 WHERE s3.adset_id' if level == 'adset' else 'public.meta_campaigns c3 WHERE c3.campaign_id'}"
-        f"             = i.{id_col}) > CAST(:last_date AS date) - {_NEW_ENTITY_DAYS}, false) "
-        f"                                                    AS is_new_entity, "
+        f"       {_is_new_entity_sql(level, id_col)} AS is_new_entity, "
         + (f"       (SELECT s4.campaign_name FROM public.meta_adsets s4 "
            f"          WHERE s4.adset_id = i.{id_col}) AS campaign_name, "
            if level == "adset" else "       NULL::text AS campaign_name, ")

@@ -1901,6 +1901,15 @@ export interface UntestedAssetsResponse {
   register_total: number;
   matched_assets: number;
   matched_ads: number;
+  /** The DAM population: assets the register holds a link for. An asset
+   *  with no link cannot be tested, so it is a data gap rather than a
+   *  testing backlog. dam_tested + dam_untested === dam_total. */
+  dam_total: number;
+  dam_tested: number;
+  dam_untested: number;
+  /** Register rows with no link at all. dam_total + without_link ===
+   *  total_rows when match_state is "all". */
+  without_link: number;
   rows: UntestedAssetRow[];
   computed_at: string;
 }
@@ -1911,12 +1920,16 @@ export interface UntestedAssetsParams {
    *  matched_ads column worth reading. */
   match_state?: "untested" | "matched" | "all";
   has_sku?: boolean;
+  /** The DAM filter. true = only assets with a link (the set that
+   *  can actually be tested), false = only those without. */
+  has_link?: boolean;
 }
 
 export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<UntestedAssetsResponse> {
   const q = new URLSearchParams();
   if (params.media) q.set("media", params.media);
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
+  if (params.has_link !== undefined) q.set("has_link", String(params.has_link));
   if (params.match_state) q.set("match_state", params.match_state);
   const qs = q.toString();
   return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);
@@ -2388,6 +2401,11 @@ export function fetchAdsAnalyseRollup(params: {
   d7_roas_max?: number;
   /** SCALE | PAUSE | MONITOR | REPORT | OK | UNRATED. */
   decision?: string;
+  /** Entities Meta created in the last 7 days -- the ones carrying the
+   *  NEW badge. 'exclude' drops them, 'only' keeps just them, omitted
+   *  keeps everything. They have not had time to be judged, so leaving
+   *  them in drags any average read across the table. */
+  new_entities?: "exclude" | "only";
   limit?: number;
   /** Window for the Shopify last-click columns, on the ORDER's date.
    *  Defaults server-side to the trailing 30 days — an unbounded sum
@@ -2407,6 +2425,7 @@ export function fetchAdsAnalyseRollup(params: {
     if (params[k] !== undefined) qs.set(k, String(params[k]));
   }
   if (params.decision) qs.set("decision", params.decision);
+  if (params.new_entities) qs.set("new_entities", params.new_entities);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);

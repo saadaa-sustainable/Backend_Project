@@ -64,3 +64,8 @@ exports/**/*.json
 # They are lists of creator handles and the campaigns they ran, which is
 # not something this PUBLIC repo should carry.
 data/
+
+# Impeccable design-skill workspace. PRODUCT.md and the surface briefs
+# are committed; the installed skill and its scratch are not.
+.agents/skills/
+.impeccable/mocks/

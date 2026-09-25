@@ -703,7 +703,7 @@ export function LastClickUtm() {
          ═══════════════════════════════════════════════════════════════ */}
       <div className="flex flex-wrap items-center gap-3">
         <div>
-          <h2 className="text-base font-semibold">Last Click UTM analysis</h2>
+          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Last Click UTM analysis</h2>
           <p className="text-xs text-text-secondary">step-wise UTM matches from shopify_order_attribution ({total.toLocaleString()} orders in range)</p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -1172,7 +1172,7 @@ function Segmented({
           className={
             "px-2.5 py-1 text-xs transition-colors " +
             (value === o.key
-              ? "bg-slate-900 text-white"
+              ? "bg-text-primary text-white"
               : "bg-white text-text-primary hover:bg-bg-muted")
           }
         >
@@ -1240,13 +1240,13 @@ function AdvancedFiltersButton(p: AdvancedFiltersButtonProps) {
         className={
           "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors " +
           (activeCount > 0
-            ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+            ? "border-border-primary bg-warning-bg text-warning-text hover:bg-warning-bg"
             : "border-border-primary bg-white text-text-primary hover:bg-bg-muted")
         }
       >
         <span>Advanced filters</span>
         {activeCount > 0 && (
-          <span className="rounded-full bg-amber-200 px-1.5 py-0.5 text-[9px] font-semibold">
+          <span className="rounded-full bg-warning-bg px-1.5 py-0.5 text-[9px] font-semibold">
             {activeCount}
           </span>
         )}

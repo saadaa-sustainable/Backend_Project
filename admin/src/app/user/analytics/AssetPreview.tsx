@@ -118,19 +118,19 @@ export function AssetPreviewCell({ asset }: { asset: Asset }) {
         onClick={() => setOpen(true)}
         aria-label={`Preview asset ${asset.asset_id}`}
         title={preview.href ? `Preview ${asset.asset_id}` : "No preview link available"}
-        className="group relative flex h-16 w-24 items-center justify-center overflow-hidden rounded-md border border-[#E8E2D5] bg-[#FAF8F3] text-[#B07E12] transition-colors hover:border-[#B07E12] focus-visible:outline-2 focus-visible:outline-[#B07E12] disabled:cursor-default disabled:text-[#9A9384] disabled:hover:border-[#E8E2D5]"
+        className="group relative flex h-16 w-24 items-center justify-center overflow-hidden rounded-md border border-[#E0DCD2] bg-[#F9F8F6] text-[#8E6608] transition-colors hover:border-[#8E6608] focus-visible:outline-2 focus-visible:outline-[#8E6608] disabled:cursor-default disabled:text-[#716D64] disabled:hover:border-[#E0DCD2]"
       >
         {showThumbnail ? (
           <PreviewImage src={preview.thumbnail!} alt="" sizes="96px" className="object-cover" onError={() => setFailedThumbnail(preview.thumbnail)} />
         ) : (
           <span aria-hidden="true" className="text-xl">{asset.media === "graphic" ? "▧" : "▶"}</span>
         )}
-        <span className="absolute inset-x-0 bottom-0 bg-[#3A362E]/75 py-0.5 text-[9px] font-medium text-white">{preview.href ? "Preview" : "Unavailable"}</span>
+        <span className="absolute inset-x-0 bottom-0 bg-[#14120E]/75 py-0.5 text-[9px] font-medium text-white">{preview.href ? "Preview" : "Unavailable"}</span>
       </button>
       {preview.href ? (
-        <a href={preview.href} target="_blank" rel="noopener noreferrer" aria-label={`Open preview for ${asset.asset_id}`} className="whitespace-nowrap text-[11px] font-medium text-[#B07E12] underline underline-offset-2 hover:text-[#93680E]">Open preview ↗</a>
+        <a href={preview.href} target="_blank" rel="noopener noreferrer" aria-label={`Open preview for ${asset.asset_id}`} className="whitespace-nowrap text-[11px] font-medium text-[#8E6608] underline underline-offset-2 hover:text-[#8E6608]">Open preview ↗</a>
       ) : (
-        <span className="text-[11px] text-[#9A9384]">No preview link</span>
+        <span className="text-[11px] text-[#716D64]">No preview link</span>
       )}
       {open && preview.href && <PreviewDialog key={`${asset.asset_id}:${preview.src}`} item={{ id: asset.asset_id, media: asset.media, label: "Asset" }} preview={preview} onClose={() => setOpen(false)} />}
     </div>

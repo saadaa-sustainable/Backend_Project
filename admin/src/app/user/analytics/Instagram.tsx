@@ -18,6 +18,8 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+
+import { IconComment, IconHeart, IconReach } from "./Icons";
 import {
   ApiError,
   InstagramPostRow,
@@ -40,9 +42,9 @@ const SORT_OPTIONS: { value: InstagramSort; label: string }[] = [
 ];
 
 const MEDIA_TYPE_COLORS: Record<string, string> = {
-  IMAGE: "bg-sky-100 text-sky-800",
-  VIDEO: "bg-purple-100 text-purple-800",
-  CAROUSEL_ALBUM: "bg-emerald-100 text-emerald-800",
+  IMAGE: "bg-info-bg text-info-text",
+  VIDEO: "bg-accent-purple-bg text-accent-purple",
+  CAROUSEL_ALBUM: "bg-success-bg text-success-text",
 };
 
 function fmtInt(n: number | null | undefined) {
@@ -145,7 +147,7 @@ export function Instagram() {
       {/* Header + freshness banner */}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h2 className="text-base font-semibold">Instagram content</h2>
+          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Instagram content</h2>
           <p className="text-xs text-text-secondary">
             Per-post Silver read over <code className="rounded bg-bg-muted px-1 py-0.5 text-[10px]">insta_data</code> —
             engagement counts, insights reach/views, media metadata.
@@ -156,8 +158,8 @@ export function Instagram() {
             className={
               "rounded-full px-3 py-1 text-xs " +
               (staleness > 3
-                ? "bg-amber-100 text-amber-900"
-                : "bg-emerald-100 text-emerald-900")
+                ? "bg-warning-bg text-warning-text"
+                : "bg-success-bg text-success-text")
             }
             title={`Silver last flattened ${summary?.silver_last_ingested_at ?? "?"}`}
           >
@@ -177,8 +179,8 @@ export function Instagram() {
               className={
                 "flex items-center gap-3 rounded-lg border p-2 text-left shadow-sm transition-colors " +
                 (username === p.username
-                  ? "border-slate-900 bg-slate-50"
-                  : "border-border-primary bg-white hover:border-slate-400")
+                  ? "border-text-primary bg-bg-surface"
+                  : "border-border-primary bg-white hover:border-border-primary")
               }
               title={username === p.username ? "Click to clear filter" : `Filter to @${p.username}`}
             >
@@ -190,7 +192,7 @@ export function Instagram() {
                   className="h-11 w-11 rounded-full object-cover"
                 />
               ) : (
-                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-slate-200 text-xs text-slate-500">
+                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-bg-muted text-xs text-text-secondary">
                   IG
                 </div>
               )}
@@ -227,13 +229,13 @@ export function Instagram() {
             onClick={() => setMediaType("")}
             className={
               "rounded-full border px-3 py-1 text-xs " +
-              (mediaType === "" ? "border-slate-900 bg-slate-900 text-white" : "border-border-primary bg-white hover:bg-bg-muted")
+              (mediaType === "" ? "border-text-primary bg-text-primary text-white" : "border-border-primary bg-white hover:bg-bg-muted")
             }
           >
             All ({summary.total_posts})
           </button>
           {Object.entries(summary.media_type_counts).map(([mt, count]) => {
-            const cls = MEDIA_TYPE_COLORS[mt] ?? "bg-slate-100 text-slate-700";
+            const cls = MEDIA_TYPE_COLORS[mt] ?? "bg-bg-muted text-text-secondary";
             const active = mediaType === mt;
             return (
               <button
@@ -242,7 +244,7 @@ export function Instagram() {
                 className={
                   "rounded-full border px-3 py-1 text-xs " +
                   (active
-                    ? "border-slate-900 " + cls
+                    ? "border-text-primary " + cls
                     : "border-border-primary bg-white hover:bg-bg-muted")
                 }
               >
@@ -354,18 +356,18 @@ function Tile({ label, value, hint }: { label: string; value: string; hint?: str
 
 function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) {
   const thumb = r.thumbnail_url ?? r.media_url;
-  const mediaTypeCls = MEDIA_TYPE_COLORS[r.media_type ?? ""] ?? "bg-slate-100 text-slate-700";
+  const mediaTypeCls = MEDIA_TYPE_COLORS[r.media_type ?? ""] ?? "bg-bg-muted text-text-secondary";
   return (
     <button
       onClick={onClick}
       className="group flex flex-col overflow-hidden rounded-lg border border-border-primary bg-white text-left shadow-sm transition-shadow hover:shadow-md"
     >
-      <div className="relative aspect-square w-full bg-slate-100">
+      <div className="relative aspect-square w-full bg-bg-muted">
         {thumb ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={thumb} alt="" className="h-full w-full object-cover" loading="lazy" />
         ) : (
-          <div className="flex h-full items-center justify-center text-xs text-slate-400">
+          <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
             no thumbnail
           </div>
         )}
@@ -373,7 +375,7 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
           {r.media_type ?? "?"}
         </span>
         {r.media_product_type && r.media_product_type !== "FEED" && (
-          <span className="absolute right-2 top-2 rounded-full bg-slate-900 px-2 py-0.5 text-[9px] font-semibold text-white">
+          <span className="absolute right-2 top-2 rounded-full bg-text-primary px-2 py-0.5 text-[9px] font-semibold text-white">
             {r.media_product_type}
           </span>
         )}
@@ -387,9 +389,17 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
           {r.caption ?? <span className="text-text-tertiary italic">no caption</span>}
         </p>
         <div className="mt-1 flex items-center gap-3 text-[10px] font-mono text-text-secondary">
-          <span title="Likes">♥ {fmtInt(r.like_count)}</span>
-          <span title="Comments">💬 {fmtInt(r.comments_count)}</span>
-          {r.insights_reach !== null && <span title="Reach">👁 {fmtInt(r.insights_reach)}</span>}
+          <span className="inline-flex items-center gap-1" title="Likes">
+            <IconHeart /> {fmtInt(r.like_count)}
+          </span>
+          <span className="inline-flex items-center gap-1" title="Comments">
+            <IconComment /> {fmtInt(r.comments_count)}
+          </span>
+          {r.insights_reach !== null && (
+            <span className="inline-flex items-center gap-1" title="Reach">
+              <IconReach /> {fmtInt(r.insights_reach)}
+            </span>
+          )}
         </div>
       </div>
     </button>
@@ -441,7 +451,7 @@ function PostDrawer({ r, onClose }: { r: InstagramPostRow; onClose: () => void }
           />
         )}
         {r.caption && (
-          <p className="mb-3 whitespace-pre-wrap rounded-md bg-slate-50 p-2 text-xs text-text-primary">
+          <p className="mb-3 whitespace-pre-wrap rounded-md bg-bg-surface p-2 text-xs text-text-primary">
             {r.caption}
           </p>
         )}

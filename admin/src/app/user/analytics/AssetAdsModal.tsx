@@ -27,22 +27,22 @@ import { AdPreviewLinks, DestinationLink } from "./AdLinks";
 import { getAdPopupTheme, type AdPopupAppearance } from "@/lib/adPopupTheme";
 
 const CAT_COLOR: Record<string, string> = {
-  "Incremental Winner": "#15803D",
-  Winner: "#2E7D32",
-  "P0 analysis": "#3B6BF5",
-  "P1 analysis": "#D97706",
-  "P2 analysis": "#8B5A2B",
-  "Result Awaited": "#C9A227",
-  Discarded: "#C0392B",
+  "Incremental Winner": "#2F6B3A",
+  Winner: "#2F6B3A",
+  "P0 analysis": "#1D4E89",
+  "P1 analysis": "#B45309",
+  "P2 analysis": "#8E6608",
+  "Result Awaited": "#8E6608",
+  Discarded: "#9E0C24",
 };
 
 const STATUS_COLOR: Record<string, string> = {
-  ACTIVE: "#2E7D32",
-  PAUSED: "#D97706",
-  ADSET_PAUSED: "#D97706",
-  CAMPAIGN_PAUSED: "#D97706",
-  ARCHIVED: "#9A9384",
-  DELETED: "#C0392B",
+  ACTIVE: "#2F6B3A",
+  PAUSED: "#B45309",
+  ADSET_PAUSED: "#B45309",
+  CAMPAIGN_PAUSED: "#B45309",
+  ARCHIVED: "#716D64",
+  DELETED: "#9E0C24",
 };
 
 function money(n: number | null | undefined) {
@@ -74,9 +74,9 @@ function Flag({ label, on, appearance }: {
     <span
       className="rounded px-1.5 py-0.5 text-[10px] font-medium"
       style={{
-        backgroundColor: on ? "#EAF5EC" : colors.mutedSurface,
-        color: on ? "#2E7D32" : colors.muted,
-        border: `1px solid ${on ? "#BFDFC6" : colors.border}`,
+        backgroundColor: on ? "#E7EDE2" : colors.mutedSurface,
+        color: on ? "#2F6B3A" : colors.muted,
+        border: `1px solid ${on ? "#E7EDE2" : colors.border}`,
       }}
     >
       {label} {on ? "✓" : "✕"}
@@ -212,7 +212,7 @@ function AssetAdsDialog({
         )}
         {error && (
           <div className="px-5 py-6 text-sm">
-            <p role="alert" className="text-rose-700">{error}</p>
+            <p role="alert" className="text-error-text">{error}</p>
             <button type="button" onClick={retry} className="mt-3 rounded-md border px-3 py-1.5 focus-visible:outline-2 focus-visible:outline-[var(--asset-ad-focus)]" style={{ borderColor: colors.border, backgroundColor: colors.surface, color: colors.accent }}>
               Retry loading ads
             </button>
