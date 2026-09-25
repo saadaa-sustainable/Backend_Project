@@ -117,11 +117,6 @@ export function UntestedAssets() {
   // Testing status filters the loaded register locally. Cards continue
   // to summarize every asset in the selected source.
   const [matchState, setMatchState] = useState<"untested" | "matched" | "all">("all");
-  // The DAM filter. An asset the register holds no link for cannot be
-  // tested -- there is no file to put in an ad -- so counting it in the
-  // untested backlog overstates what anyone can act on. Influencer is
-  // the extreme case: 12,359 of 14,709 posts carry no link at all.
-  const [linkFilter, setLinkFilter] = useState<"all" | "with" | "without">("with");
 
   function beginLoad() {
     setLoading(true);
@@ -164,9 +159,8 @@ export function UntestedAssets() {
     return Array.from(s).sort();
   }, [data, kindFilter]);
 
-  // What "in the DAM" means, in one place. The tiles and the table both
-  // read this: two spellings would let a tile say 723 while the filtered
-  // table showed something else, with nothing on screen to explain it.
+  // What "has a file" means, in one place, so the cards and the table
+  // can never disagree about which assets exist here.
   // An empty string is not a link -- the registers are hand-maintained
   // and a cleared cell arrives as '' rather than null.
   const hasLink = (r: UntestedAssetRow) => !!(r.link && r.link.trim());
@@ -177,13 +171,18 @@ export function UntestedAssets() {
     return data.rows.filter((row) => originFilter === "all" || row.origin === originFilter);
   }, [data, originFilter]);
 
-  // The population the cards describe. Origin and the DAM filter both
-  // change WHICH ASSETS are in scope, so the cards follow them; testing
-  // status only changes which of those are shown, so it does not.
-  const scopeRows = useMemo(() => {
-    if (linkFilter === "all") return sourceRows;
-    return sourceRows.filter((r) => (linkFilter === "with" ? hasLink(r) : !hasLink(r)));
-  }, [sourceRows, linkFilter]);
+  // The population everything here describes: assets the register holds
+  // a link for. An asset with no link cannot be tested -- there is no
+  // file to put in an ad -- so counting it would overstate what anyone
+  // can act on. On influencer that is most of the register: 12,359 of
+  // 14,709 posts carry no link at all.
+  //
+  // Not a filter. Those rows are a data-quality problem for whoever
+  // maintains the register, not a testing backlog for whoever reads
+  // this section, and the endpoint still exposes them via has_link=false
+  // for anyone who needs to chase them.
+  const scopeRows = useMemo(
+    () => sourceRows.filter(hasLink), [sourceRows]);
 
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -204,9 +203,9 @@ export function UntestedAssets() {
     });
   }, [scopeRows, matchState, media, skuFilter, kindFilter, search]);
 
-  // Summarize the population in scope -- source AND the DAM filter,
-  // both of which change WHICH assets exist here -- before the table
-  // filters and paging, which only change which of them are shown.
+  // Summarize the population in scope -- the selected source, always
+  // narrowed to assets that have a link -- before the table filters
+  // and paging, which only change which of those are shown.
   const metrics = useMemo(() => {
     let tested = 0;
     let matchedAds = 0;
@@ -302,11 +301,7 @@ export function UntestedAssets() {
         <KpiTile
           label="Total Assets"
           value={data ? fmtInt(metrics.total) : "—"}
-          hint={linkFilter === "with"
-            ? "Assets with a link in the selected source"
-            : linkFilter === "without"
-              ? "Assets with NO link — a data gap, not a testing backlog"
-              : "Every register row, with or without a link"}
+          hint="Assets with a link in the selected source"
         />
         <KpiTile
           label="Not Tested"
@@ -365,37 +360,6 @@ export function UntestedAssets() {
                 // the selected option was invisible.
                 "px-3 py-1 text-xs font-medium transition-colors " +
                 (matchState === v
-                  ? "bg-accent-yellow text-white"
-                  : "bg-bg-white text-text-secondary hover:text-text-primary hover:bg-bg-muted")
-              }
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        {/* The DAM filter. Unlike testing status this changes the
-            POPULATION, so the cards above follow it -- picking "In DAM"
-            rescopes Total / Tested / Not Tested to assets that have a
-            file, which is the only set anyone can act on. */}
-        <label className="ml-2 text-xs font-medium text-text-secondary">DAM:</label>
-        <div className="flex overflow-hidden rounded border border-border-primary">
-          {([
-            ["all", "All", "Every asset in the register, with or without a link."],
-            ["with", "In DAM", "Only assets the register holds a link for."],
-            ["without", "No link", "Only assets with no link — a data gap to chase, not a testing backlog."],
-          ] as const).map(([v, label, hint]) => (
-            <button
-              key={v}
-              title={hint}
-              aria-pressed={linkFilter === v}
-              onClick={() => {
-                if (linkFilter === v) return;
-                setLinkFilter(v);
-                setPage(0);
-              }}
-              className={
-                "px-3 py-1 text-xs font-medium transition-colors " +
-                (linkFilter === v
                   ? "bg-accent-yellow text-white"
                   : "bg-bg-white text-text-secondary hover:text-text-primary hover:bg-bg-muted")
               }
