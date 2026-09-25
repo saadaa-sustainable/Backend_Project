@@ -121,7 +121,7 @@ export function UntestedAssets() {
   // tested -- there is no file to put in an ad -- so counting it in the
   // untested backlog overstates what anyone can act on. Influencer is
   // the extreme case: 12,359 of 14,709 posts carry no link at all.
-  const [linkFilter, setLinkFilter] = useState<"all" | "with" | "without">("all");
+  const [linkFilter, setLinkFilter] = useState<"all" | "with" | "without">("with");
 
   function beginLoad() {
     setLoading(true);
@@ -214,17 +214,12 @@ export function UntestedAssets() {
       matchedAds += row.matched_ads;
       if (row.matched_master_sku) withSku += 1;
     }
-    // The DAM split is counted over sourceRows, NOT scopeRows, so the
-    // card keeps reporting the size of the DAM after the DAM filter is
-    // applied. Counting it over the scope would make it restate
-    // `total` the moment anyone used it.
+    // Counted over sourceRows, NOT scopeRows: the hint on the Total
+    // card states how much of the register has a link at all, and that
+    // has to stay true when the DAM filter narrows the scope. Counting
+    // it over the scope would make it restate `total`.
     let damTotal = 0;
-    let damTested = 0;
-    for (const row of sourceRows) {
-      if (!hasLink(row)) continue;
-      damTotal += 1;
-      if (row.matched_ads > 0) damTested += 1;
-    }
+    for (const row of sourceRows) if (hasLink(row)) damTotal += 1;
     return {
       total: scopeRows.length,
       tested,
@@ -232,8 +227,6 @@ export function UntestedAssets() {
       matchedAds,
       withSku,
       damTotal,
-      damTested,
-      damNotTested: damTotal - damTested,
     };
   }, [sourceRows, scopeRows]);
 
@@ -303,11 +296,25 @@ export function UntestedAssets() {
       </div>
 
       {/* Cards summarize the source; testing status filters only the table. */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {/* Counts assets the register holds a LINK for, because that is
+            the only set anyone can act on -- an asset with no file
+            cannot be put in an ad. The register's own row count goes in
+            the hint rather than beside this as a second total, since
+            two totals on one row is what made people read the bigger
+            one as the backlog. */}
         <KpiTile
           label="Total Assets"
           value={data ? fmtInt(metrics.total) : "—"}
-          hint="All assets in the selected source"
+          hint={!data
+            ? "Assets with a link in the selected source"
+            : linkFilter === "with"
+              ? `Assets with a link · ${fmtInt(metrics.damTotal)} of `
+                + `${fmtInt(sourceRows.length)} register rows have one`
+              : linkFilter === "without"
+                ? `Assets with NO link — a data gap, not a testing backlog`
+                : `Every register row, linked or not · only `
+                  + `${fmtInt(metrics.damTotal)} have a link`}
         />
         <KpiTile
           label="Not Tested"
@@ -320,15 +327,6 @@ export function UntestedAssets() {
           hint={data && metrics.total
             ? `${Math.round((metrics.tested / metrics.total) * 100)}% of assets in the selected source have been tested`
             : "Assets with at least one matched ad in the selected source"}
-        />
-        <KpiTile
-          label="In DAM"
-          value={data ? fmtInt(metrics.damTotal) : "—"}
-          hint={data
-            ? `${fmtInt(metrics.damTested)} tested · ${fmtInt(metrics.damNotTested)} not tested`
-              + " — assets the register holds a link for. The rest have no"
-              + " file to put in an ad, so they are a data gap, not a backlog."
-            : "Assets the register holds a link for"}
         />
         <KpiTile
           label="Matched Ads"
