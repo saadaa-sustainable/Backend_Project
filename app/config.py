@@ -242,6 +242,14 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
 
+    #: Shared secret EasyEcom sends back as the `Access-Token` header on
+    #: every webhook. Unset means the receiver refuses everything: a
+    #: webhook URL is public, so without this anyone who learns the path
+    #: could post fabricated delivery events into the warehouse.
+    easyecom_webhook_token: str | None = Field(
+        default=None, alias="EASYECOM_WEBHOOK_TOKEN"
+    )
+
     meta: MetaAPISettings = Field(default_factory=lambda: MetaAPISettings())  # type: ignore[call-arg]
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
