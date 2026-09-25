@@ -7069,6 +7069,25 @@ class RollupResponse(BaseModel):
     decision_counts: dict[str, DecisionSummary] = {}
 
 
+def _is_new_entity_sql(level: str, id_col: str) -> str:
+    """Whether Meta created this entity inside the last _NEW_ENTITY_DAYS.
+
+    Correlated, not joined: the count and summary queries build their
+    own FROM and would not see a join -- the same reason the budget and
+    status predicates are written this way.
+
+    Factored out because the badge in the SELECT and the filter in the
+    WHERE have to be the same expression. If they drift, "exclude new"
+    hides rows that are not badged new, which is worse than either
+    behaviour on its own because nothing on screen explains it.
+    """
+    src, key = (("public.meta_adsets", "adset_id") if level == "adset"
+                else ("public.meta_campaigns", "campaign_id"))
+    return (f"COALESCE((SELECT n.created_time::date FROM {src} n "
+            f"           WHERE n.{key} = i.{id_col}) "
+            f"         > CAST(:last_date AS date) - {_NEW_ENTITY_DAYS}, false)")
+
+
 @router.get("/ads-analyse/rollup", response_model=RollupResponse)
 @cached_analytics(ttl=300.0)
 async def get_ads_analyse_rollup(
@@ -7102,6 +7121,16 @@ async def get_ads_analyse_rollup(
         default=None,
         description="Framework verdict: SCALE / PAUSE / MONITOR / REPORT / OK "
                     "/ UNRATED. Comma-separated to pass several.",
+    ),
+    new_entities: Literal["exclude", "only"] | None = Query(
+        default=None,
+        description=f"How to treat entities Meta created in the last "
+                    f"{_NEW_ENTITY_DAYS} days -- the ones carrying the NEW "
+                    f"badge. 'exclude' drops them, 'only' keeps just them, "
+                    f"omitted keeps everything. A new ad set has not had time "
+                    f"to be judged, so leaving it in drags down any average "
+                    f"read across the table and makes a deliberate pause look "
+                    f"like a failure.",
     ),
     sort: Literal[
         "spend", "impressions", "reach", "roas", "ads",
@@ -7156,6 +7185,11 @@ async def get_ads_analyse_rollup(
                 f"  ELSE 'NONE' END FROM {src} WHERE {key} = i.{id_col}), 'NONE') "
                 f"= ANY(:budget_type)")
             params["budget_type"] = wanted
+    if new_entities:
+        # Same expression the is_new_entity badge is built from, so a
+        # hidden row is always a badged row.
+        expr = _is_new_entity_sql(level, id_col)
+        where.append(expr if new_entities == "only" else f"NOT {expr}")
     if status:
         wanted_s = [v.strip().upper() for v in status.split(",") if v.strip()]
         if wanted_s:
@@ -7276,10 +7310,7 @@ async def get_ads_analyse_rollup(
         f"       (SELECT {'s2.created_time' if level == 'adset' else 'c2.created_time'}::date "
         f"          FROM {'public.meta_adsets s2 WHERE s2.adset_id' if level == 'adset' else 'public.meta_campaigns c2 WHERE c2.campaign_id'}"
         f"             = i.{id_col}) AS created_date, "
-        f"       COALESCE((SELECT {'s3.created_time' if level == 'adset' else 'c3.created_time'}::date "
-        f"          FROM {'public.meta_adsets s3 WHERE s3.adset_id' if level == 'adset' else 'public.meta_campaigns c3 WHERE c3.campaign_id'}"
-        f"             = i.{id_col}) > CAST(:last_date AS date) - {_NEW_ENTITY_DAYS}, false) "
-        f"                                                    AS is_new_entity, "
+        f"       {_is_new_entity_sql(level, id_col)} AS is_new_entity, "
         + (f"       (SELECT s4.campaign_name FROM public.meta_adsets s4 "
            f"          WHERE s4.adset_id = i.{id_col}) AS campaign_name, "
            if level == "adset" else "       NULL::text AS campaign_name, ")

@@ -2388,6 +2388,11 @@ export function fetchAdsAnalyseRollup(params: {
   d7_roas_max?: number;
   /** SCALE | PAUSE | MONITOR | REPORT | OK | UNRATED. */
   decision?: string;
+  /** Entities Meta created in the last 7 days -- the ones carrying the
+   *  NEW badge. 'exclude' drops them, 'only' keeps just them, omitted
+   *  keeps everything. They have not had time to be judged, so leaving
+   *  them in drags any average read across the table. */
+  new_entities?: "exclude" | "only";
   limit?: number;
   /** Window for the Shopify last-click columns, on the ORDER's date.
    *  Defaults server-side to the trailing 30 days — an unbounded sum
@@ -2407,6 +2412,7 @@ export function fetchAdsAnalyseRollup(params: {
     if (params[k] !== undefined) qs.set(k, String(params[k]));
   }
   if (params.decision) qs.set("decision", params.decision);
+  if (params.new_entities) qs.set("new_entities", params.new_entities);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);

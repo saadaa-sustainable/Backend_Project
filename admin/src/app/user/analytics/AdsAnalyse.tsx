@@ -1654,6 +1654,10 @@ export function AdsAnalyse() {
   // choice survives switching between them -- the classification is a
   // property of the account structure, not of the grain being viewed.
   const [budgetType, setBudgetType] = useState<"" | "CBO" | "ABO" | "NONE">("");
+  // Ad sets and campaigns Meta created in the last 7 days -- the ones
+  // wearing the NEW badge. Rollup-only: at ad grain "new" is a
+  // different question, answered by the F1-F4 category.
+  const [newEntities, setNewEntities] = useState<"" | "exclude" | "only">("");
   // Meta's EFFECTIVE delivery status. Rollup levels only: the ad table
   // has its own `adStatus` control reading a different column.
   //
@@ -1832,6 +1836,7 @@ export function AdsAnalyse() {
           .map(([k, v]) => [k, Number(v)]),
       ),
       decision: decisionFilter || undefined,
+      new_entities: newEntities || undefined,
       limit: 500,
       // The Shopify columns follow the section's own date range, so the
       // rollup answers the same question the ad level does.
@@ -1851,7 +1856,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, winFrom, winTo, budgetType, statusFilter, roasBounds, decisionFilter]);
+  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, winFrom, winTo, budgetType, statusFilter, roasBounds, decisionFilter, newEntities]);
 
   const filters = useMemo(
     () => ({
@@ -2223,6 +2228,22 @@ export function AdsAnalyse() {
                   <option value="WITH_ISSUES">With issues</option>
                 )}
                 <option value="ARCHIVED">Archived</option>
+              </CardSelect>
+            </FilterCard>
+            {/* Newly created entities. A pause on something three days
+                old is a decision not to continue a test, not a verdict
+                on performance -- and 36 ad sets and 10 campaigns are
+                currently inside that window, enough to move any average
+                read across the table. "Only new" is the other half of
+                the same question: what did we just launch? */}
+            <FilterCard label="New ad sets & campaigns">
+              <CardSelect
+                value={newEntities}
+                onChange={(v) => setNewEntities(v as "" | "exclude" | "only")}
+              >
+                <option value="">Include new</option>
+                <option value="exclude">Exclude new — created in last 7 days</option>
+                <option value="only">Only new — created in last 7 days</option>
               </CardSelect>
             </FilterCard>
             <FilterCard label="Budget level">
