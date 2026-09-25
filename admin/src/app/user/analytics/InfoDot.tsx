@@ -52,12 +52,12 @@ function BasisBody({ basis }: { basis: InfoBasis }) {
         v ? (
           <div key={k} className="mb-1.5 last:mb-0">
             <span className="font-semibold text-white">{k}: </span>
-            <span className="text-slate-300">{v}</span>
+            <span className="text-text-tertiary">{v}</span>
           </div>
         ) : null,
       )}
       {basis.note && (
-        <div className="mt-2 border-t border-slate-700 pt-1.5 text-slate-400">
+        <div className="mt-2 border-t border-border-primary pt-1.5 text-text-tertiary">
           {basis.note}
         </div>
       )}
@@ -86,8 +86,8 @@ export function InfoDot({ basis }: { basis: string | InfoBasis }) {
         className={
           "flex h-4 w-4 cursor-help items-center justify-center rounded-full border text-[9px] font-semibold leading-none transition " +
           (open
-            ? "border-slate-700 bg-slate-800 text-white"
-            : "border-border-primary text-text-tertiary hover:border-slate-500 hover:text-text-secondary")
+            ? "border-border-primary bg-text-primary text-white"
+            : "border-border-primary text-text-tertiary hover:border-border-primary hover:text-text-secondary")
         }
       >
         i
@@ -98,7 +98,7 @@ export function InfoDot({ basis }: { basis: string | InfoBasis }) {
           // right-0 so the panel opens leftward from a dot that always
           // sits at the tile's top-right -- the last column of a
           // six-wide grid would otherwise run off the viewport.
-          className="pointer-events-none absolute right-0 top-5 z-30 w-64 rounded-lg bg-slate-900 p-2.5 text-left text-[11px] font-normal normal-case leading-snug tracking-normal text-slate-300 shadow-lg"
+          className="pointer-events-none absolute right-0 top-5 z-30 w-64 rounded-lg bg-text-primary p-2.5 text-left text-[11px] font-normal normal-case leading-snug tracking-normal text-text-tertiary shadow-lg"
         >
           {typeof basis === "string" ? basis : <BasisBody basis={basis} />}
         </span>

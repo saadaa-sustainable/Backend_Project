@@ -127,7 +127,7 @@ export function AdsLaunchChart({
               className={
                 "px-2.5 py-1 text-xs " +
                 (basis === key
-                  ? "bg-slate-900 text-white"
+                  ? "bg-text-primary text-white"
                   : "text-text-primary hover:bg-bg-muted")
               }
             >
@@ -137,7 +137,7 @@ export function AdsLaunchChart({
         </div>
       </div>
 
-      {error && <div className="py-6 text-center text-sm text-rose-700">{error}</div>}
+      {error && <div className="py-6 text-center text-sm text-error-text">{error}</div>}
       {loading && !error && (
         <div className="py-10 text-center text-sm text-text-tertiary">Loading…</div>
       )}

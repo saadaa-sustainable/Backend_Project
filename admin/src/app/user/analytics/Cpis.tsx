@@ -815,7 +815,7 @@ function CpisView() {
         />
         {fromDate && toDate && (
           <span
-            className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-800"
+            className="rounded-full bg-info-bg px-2 py-0.5 text-[10px] font-semibold text-info-text"
             title="Daily-sum path (cpis_by_sku_daily) for this exact date range"
           >
             windowed
@@ -823,7 +823,7 @@ function CpisView() {
         )}
         {freshness && (
           <span
-            className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800"
+            className="rounded-full bg-success-bg px-2 py-0.5 text-[10px] font-semibold text-success-text"
             title={
               `Meta insights through ${freshness.max_meta_day ?? "-"}` +
               ` · Shopify orders through ${freshness.max_orders_day ?? "-"}` +
@@ -879,7 +879,7 @@ function CpisView() {
               }
               className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                 attributionMode === mode
-                  ? "bg-slate-900 text-white"
+                  ? "bg-text-primary text-white"
                   : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
               }`}
             >
@@ -903,7 +903,7 @@ function CpisView() {
               }
               className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                 spendMatchMode === mode
-                  ? "bg-slate-900 text-white"
+                  ? "bg-text-primary text-white"
                   : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
               }`}
             >
@@ -1599,7 +1599,7 @@ function MatchedAdsModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-text-primary/50 p-4"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -1640,7 +1640,7 @@ function MatchedAdsModal({
                 onClick={() => setStatusFilter(s)}
                 className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                   statusFilter === s
-                    ? "bg-slate-900 text-white"
+                    ? "bg-text-primary text-white"
                     : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
                 }`}
               >

@@ -484,7 +484,7 @@ export function UntestedAssets() {
       </div>
 
       {error && (
-        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-border-primary bg-error-bg px-3 py-2 text-sm text-error-text">
           <span>{error}</span>
           <button
             type="button"
@@ -493,7 +493,7 @@ export function UntestedAssets() {
               setRetryCount((count) => count + 1);
             }}
             disabled={loading}
-            className="shrink-0 rounded border border-red-300 px-3 py-1 font-medium hover:bg-red-100 disabled:opacity-40"
+            className="shrink-0 rounded border border-border-primary px-3 py-1 font-medium hover:bg-error-bg disabled:opacity-40"
           >
             Retry
           </button>
@@ -589,7 +589,7 @@ export function UntestedAssets() {
                       <Td className="font-mono">{r.candidate_master_sku ?? "—"}</Td>
                       <Td>
                         {r.matched_master_sku ? (
-                          <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[11px] text-emerald-800">
+                          <span className="rounded bg-success-bg px-1.5 py-0.5 font-mono text-[11px] text-success-text">
                             {r.matched_master_sku}
                           </span>
                         ) : (
@@ -619,8 +619,8 @@ export function UntestedAssets() {
                         className={
                           "whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] " +
                           (r.origin === "database"
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                            : "border-slate-200 bg-slate-100 text-slate-600")
+                            ? "border-border-primary bg-success-bg text-success-text"
+                            : "border-border-primary bg-bg-muted text-text-secondary")
                         }
                       >
                         {r.origin === "database"

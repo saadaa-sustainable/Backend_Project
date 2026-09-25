@@ -480,7 +480,7 @@ const ASSET_COLUMNS: AssetColDef[] = [
       <span className="font-mono text-[12px]">
         {r.asset_id}
         {r.name_conflict && (
-          <span className="ml-1 rounded border border-amber-300 bg-amber-100 px-1 text-[10px] text-amber-900"
+          <span className="ml-1 rounded border border-border-primary bg-warning-bg px-1 text-[10px] text-warning-text"
                 title="An ad naming this asset also names another one.">⚠</span>
         )}
       </span>
@@ -496,13 +496,21 @@ const ASSET_COLUMNS: AssetColDef[] = [
   { key: "media", header: "Media", group: "Identity", defaultVisible: true,
     render: (r) => {
       const mm = r.media ? MEDIA_META[r.media] : null;
-      return mm ? <span className={`rounded border px-1.5 py-0.5 text-[11px] ${mm.cls}`}>{mm.icon} {mm.label}</span> : null;
+      return mm ? (
+        <span
+          className={`inline-flex w-fit items-center gap-1 whitespace-nowrap rounded
+                      border px-1.5 py-0.5 align-middle text-[11px] leading-none ${mm.cls}`}
+        >
+          {mm.icon}
+          {mm.label}
+        </span>
+      ) : null;
     } },
   { key: "kind", header: "Kind", group: "Identity", defaultVisible: true,
     render: (r) => r.kind === "new" ? (
-      <span className="rounded border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-800">New</span>
+      <span className="rounded border border-border-primary bg-success-bg px-1.5 py-0.5 text-[11px] text-success-text">New</span>
     ) : (
-      <span className="rounded border border-amber-200 bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-900"
+      <span className="rounded border border-border-primary bg-warning-bg px-1.5 py-0.5 text-[11px] text-warning-text"
             title={`Reused ${r.iteration_count}× beyond its first outing`}>Iter ×{r.iteration_count}</span>
     ) },
   { key: "category", header: "Category", group: "Identity", defaultVisible: true,
@@ -936,7 +944,7 @@ export function CreativeTesting() {
               className={
                 "rounded-lg border px-3 py-2 text-left transition-colors " +
                 (active
-                  ? "border-emerald-400 bg-emerald-50 text-emerald-900"
+                  ? "border-border-primary bg-success-bg text-success-text"
                   : "border-border-primary bg-white hover:bg-bg-muted")
               }
             >
@@ -985,7 +993,7 @@ export function CreativeTesting() {
                 className={
                   "rounded-lg border px-3 py-2 text-left transition-colors " +
                   (active
-                    ? "border-emerald-400 bg-emerald-50 text-emerald-900"
+                    ? "border-border-primary bg-success-bg text-success-text"
                     : "border-border-primary bg-white hover:bg-bg-muted")
                 }
               >
@@ -1316,7 +1324,7 @@ export function CreativeTesting() {
       </div>
 
       {error && (
-        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+        <div className="rounded-lg border border-border-primary bg-error-bg p-3 text-sm text-error-text">
           {error}
         </div>
       )}

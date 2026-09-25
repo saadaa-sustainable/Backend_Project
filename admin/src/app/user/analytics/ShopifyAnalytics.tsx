@@ -315,7 +315,7 @@ export function ShopifyAnalytics() {
                     className={
                       "px-2.5 py-1 text-xs transition-colors " +
                       (metric === m.key
-                        ? "bg-slate-900 text-white"
+                        ? "bg-text-primary text-white"
                         : "bg-white text-text-primary hover:bg-bg-muted")
                     }
                   >

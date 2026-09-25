@@ -212,7 +212,7 @@ function AssetAdsDialog({
         )}
         {error && (
           <div className="px-5 py-6 text-sm">
-            <p role="alert" className="text-rose-700">{error}</p>
+            <p role="alert" className="text-error-text">{error}</p>
             <button type="button" onClick={retry} className="mt-3 rounded-md border px-3 py-1.5 focus-visible:outline-2 focus-visible:outline-[var(--asset-ad-focus)]" style={{ borderColor: colors.border, backgroundColor: colors.surface, color: colors.accent }}>
               Retry loading ads
             </button>

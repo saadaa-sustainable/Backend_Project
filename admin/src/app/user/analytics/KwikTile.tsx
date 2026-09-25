@@ -57,7 +57,7 @@ export interface KwikTileProps {
  *  kwikengage's colored circles which are the visual anchor of each
  *  KPI card. */
 const ICON_BG: Record<NonNullable<KwikTileProps["iconColor"]>, string> = {
-  slate: "bg-slate-700 text-white",
+  slate: "bg-bg-muted text-white",
   sky: "bg-[#1D4E89] text-white",
   emerald: "bg-[#2F6B3A] text-white",
   amber: "bg-[#B45309] text-white",
@@ -97,7 +97,7 @@ export function KwikTile({
   const wrapperCls =
     "group flex flex-col gap-2 rounded-lg border p-4 transition-all " +
     (active
-      ? "border-slate-900 bg-slate-50 shadow-sm"
+      ? "border-text-primary bg-bg-surface shadow-sm"
       : "border-border-primary bg-white hover:border-border-mid hover:shadow-sm");
 
   const inner = (

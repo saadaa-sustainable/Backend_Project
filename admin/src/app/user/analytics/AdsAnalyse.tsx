@@ -587,9 +587,9 @@ function Metric({ label, value, bar, pass }: {
 function DecisionBadge({ v, why }: { v: string | null; why: string | null }) {
   if (!v) return <span className="text-text-tertiary" title={why ?? undefined}>—</span>;
   const cls: Record<string, string> = {
-    SCALE: "bg-emerald-100 text-emerald-800",
-    PAUSE: "bg-rose-100 text-rose-800",
-    MONITOR: "bg-amber-100 text-amber-800",
+    SCALE: "bg-success-bg text-success-text",
+    PAUSE: "bg-error-bg text-error-text",
+    MONITOR: "bg-warning-bg text-warning-text",
     REPORT: "bg-info-bg text-info-text",
     OK: "bg-bg-muted text-text-secondary",
   };
@@ -626,11 +626,11 @@ function NewEntityBadge() {
 function StatusBadge({ v }: { v: string | null }) {
   if (!v) return <span className="text-text-tertiary">—</span>;
   const cls: Record<string, string> = {
-    ACTIVE: "bg-emerald-100 text-emerald-800",
+    ACTIVE: "bg-success-bg text-success-text",
     PAUSED: "bg-bg-muted text-text-secondary",
-    CAMPAIGN_PAUSED: "bg-amber-100 text-amber-800",
-    WITH_ISSUES: "bg-rose-100 text-rose-800",
-    ARCHIVED: "bg-slate-200 text-slate-600",
+    CAMPAIGN_PAUSED: "bg-warning-bg text-warning-text",
+    WITH_ISSUES: "bg-error-bg text-error-text",
+    ARCHIVED: "bg-bg-muted text-text-secondary",
   };
   const label = v === "CAMPAIGN_PAUSED" ? "CAMP. PAUSED" : v;
   return (
@@ -734,7 +734,7 @@ function AssetIdCell({ row }: { row: AdsAnalyseRow }) {
       <span className="font-mono text-[11px]">{row.asset_id}</span>
       {row.asset_name_conflict && (
         <span
-          className="rounded border border-amber-300 bg-amber-100 px-1 text-[10px] font-medium text-amber-900"
+          className="rounded border border-border-primary bg-warning-bg px-1 text-[10px] font-medium text-warning-text"
           title="This ad name resolves to more than one registered asset. A winner was picked deterministically — worth a human check."
         >
           ⚠ multi
@@ -821,7 +821,7 @@ function MiniEmbed({
   const scale = size / geom.width;
 
   return (
-    <div ref={box} className="relative h-full w-full overflow-hidden bg-slate-100">
+    <div ref={box} className="relative h-full w-full overflow-hidden bg-bg-muted">
       {visible && (
         <iframe
           src={src}
@@ -877,7 +877,7 @@ function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
     return (
       <div
         style={{ width: PREVIEW_PX, height: PREVIEW_PX }}
-        className="flex items-center justify-center rounded bg-slate-100 text-[9px] text-slate-400"
+        className="flex items-center justify-center rounded bg-bg-muted text-[9px] text-text-tertiary"
         title="No preview available — ad has no IG permalink, no FB story_id, and no cached thumbnail"
       >
         —
@@ -890,7 +890,7 @@ function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(true); }}
         style={{ width: PREVIEW_PX, height: PREVIEW_PX }}
-        className="group relative overflow-hidden rounded ring-1 ring-slate-200 hover:ring-slate-400"
+        className="group relative overflow-hidden rounded ring-1 border-border-primary hover:border-border-primary"
         title={
           igEmbedUrl
             ? "Instagram post — click for iframe preview"
@@ -936,7 +936,7 @@ function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
             title={row.ad_name ?? "Facebook post preview"}
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center bg-slate-100 text-[9px] text-slate-400">
+          <div className="flex h-full w-full items-center justify-center bg-bg-muted text-[9px] text-text-tertiary">
             —
           </div>
         )}
@@ -1126,7 +1126,7 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
           type="button"
           data-scalable={r.entity_id}
           className={"rounded px-1.5 py-0.5 text-[11px] font-bold " + (urgent
-            ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
+            ? "bg-warning-bg text-warning-text hover:bg-warning-bg"
             : "bg-bg-muted text-text-secondary hover:bg-border-primary")}
           title={urgent
             ? `${n} creative(s) here still qualify for scaling — lift them out before pausing.`
@@ -1240,8 +1240,8 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => (
       <span className={
         r.meta_shop_diff_pct == null ? "" :
-        r.meta_shop_diff_pct < -20 ? "text-rose-600" :
-        r.meta_shop_diff_pct > 20 ? "text-emerald-600" : ""
+        r.meta_shop_diff_pct < -20 ? "text-error-text" :
+        r.meta_shop_diff_pct > 20 ? "text-success-text" : ""
       }>
         {r.meta_shop_diff_pct == null ? "—" : `${pct(r.meta_shop_diff_pct)}%`}
       </span>
@@ -1259,9 +1259,9 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "d3_reach_proxy", header: "3D Reach Proxy", group: "Rolling 3D", align: "right",
     render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d3_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d3_reach_delta", header: "3D Reach Δ", group: "Rolling 3D", align: "right",
-    render: (r) => <span className={"num " + ((r.d3_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d3_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d3_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+    render: (r) => <span className={"num " + ((r.d3_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d3_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d3_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d3_reach_delta_pct", header: "3D Reach Δ%", group: "Rolling 3D", align: "right",
-    render: (r) => <span className={"num " + ((r.d3_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d3_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d3_reach_delta_pct)}%</span> },
+    render: (r) => <span className={"num " + ((r.d3_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d3_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d3_reach_delta_pct)}%</span> },
   { key: "d3_ftewv", header: "3D FTEWV", group: "Rolling 3D", align: "right",
     render: (r) => <span className="num">{fmt(r.d3_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d3_cost_per_ftewv", header: "3D Cost/FTEWV", group: "Rolling 3D", align: "right",
@@ -1275,9 +1275,9 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "d7_reach_proxy", header: "7D Reach Proxy", group: "Rolling 7D", align: "right",
     render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d7_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d7_reach_delta", header: "7D Reach Δ", group: "Rolling 7D", align: "right",
-    render: (r) => <span className={"num " + ((r.d7_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d7_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d7_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+    render: (r) => <span className={"num " + ((r.d7_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d7_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d7_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d7_reach_delta_pct", header: "7D Reach Δ%", group: "Rolling 7D", align: "right",
-    render: (r) => <span className={"num " + ((r.d7_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d7_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d7_reach_delta_pct)}%</span> },
+    render: (r) => <span className={"num " + ((r.d7_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d7_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d7_reach_delta_pct)}%</span> },
   { key: "d7_ftewv", header: "7D FTEWV", group: "Rolling 7D", align: "right",
     render: (r) => <span className="num">{fmt(r.d7_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d7_cost_per_ftewv", header: "7D Cost/FTEWV", group: "Rolling 7D", align: "right",
@@ -1291,9 +1291,9 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "d14_reach_proxy", header: "14D Reach Proxy", group: "Rolling 14D", align: "right",
     render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d14_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d14_reach_delta", header: "14D Reach Δ", group: "Rolling 14D", align: "right",
-    render: (r) => <span className={"num " + ((r.d14_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d14_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d14_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+    render: (r) => <span className={"num " + ((r.d14_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d14_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d14_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d14_reach_delta_pct", header: "14D Reach Δ%", group: "Rolling 14D", align: "right",
-    render: (r) => <span className={"num " + ((r.d14_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d14_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d14_reach_delta_pct)}%</span> },
+    render: (r) => <span className={"num " + ((r.d14_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d14_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d14_reach_delta_pct)}%</span> },
   { key: "d14_ftewv", header: "14D FTEWV", group: "Rolling 14D", align: "right",
     render: (r) => <span className="num">{fmt(r.d14_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d14_cost_per_ftewv", header: "14D Cost/FTEWV", group: "Rolling 14D", align: "right",
@@ -1307,9 +1307,9 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "d28_reach_proxy", header: "28D Reach Proxy", group: "Rolling 28D", align: "right",
     render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d28_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d28_reach_delta", header: "28D Reach Δ", group: "Rolling 28D", align: "right",
-    render: (r) => <span className={"num " + ((r.d28_reach_delta ?? 0) < 0 ? "text-rose-600" : (r.d28_reach_delta ?? 0) > 0 ? "text-emerald-600" : "")}>{fmt(r.d28_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
+    render: (r) => <span className={"num " + ((r.d28_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d28_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d28_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d28_reach_delta_pct", header: "28D Reach Δ%", group: "Rolling 28D", align: "right",
-    render: (r) => <span className={"num " + ((r.d28_reach_delta_pct ?? 0) < 0 ? "text-rose-600" : (r.d28_reach_delta_pct ?? 0) > 0 ? "text-emerald-600" : "")}>{pct(r.d28_reach_delta_pct)}%</span> },
+    render: (r) => <span className={"num " + ((r.d28_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d28_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d28_reach_delta_pct)}%</span> },
   { key: "d28_ftewv", header: "28D FTEWV", group: "Rolling 28D", align: "right",
     render: (r) => <span className="num">{fmt(r.d28_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d28_cost_per_ftewv", header: "28D Cost/FTEWV", group: "Rolling 28D", align: "right",
@@ -1483,9 +1483,9 @@ const COLUMNS: ColDef[] = [
           (r.meta_shop_diff_pct === null
             ? ""
             : r.meta_shop_diff_pct < -20
-              ? "text-rose-600"
+              ? "text-error-text"
               : r.meta_shop_diff_pct > 20
-                ? "text-emerald-600"
+                ? "text-success-text"
                 : "")
         }
       >
@@ -2079,7 +2079,7 @@ export function AdsAnalyse() {
               className={
                 "px-3 py-1 text-xs first:rounded-l-md last:rounded-r-md " +
                 (levelToggle === lv
-                  ? "bg-slate-900 text-white"
+                  ? "bg-text-primary text-white"
                   : "text-text-primary hover:bg-bg-muted")
               }
             >
@@ -2331,7 +2331,7 @@ export function AdsAnalyse() {
       {levelToggle !== "ad" && (
         <div className="space-y-2">
           {rollupError && (
-            <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+            <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-border-primary bg-error-bg p-3 text-sm text-error-text">
               <span>{rollupError}</span>
               <button type="button" onClick={() => setRollupRetryCount((count) => count + 1)} disabled={rollupLoading}
                 className="shrink-0 rounded border border-current px-3 py-1 font-medium disabled:opacity-40">
@@ -2668,7 +2668,7 @@ export function AdsAnalyse() {
           >
             ⚙ Inspector
             {numericFilters.length > 0 && (
-              <span className="ml-1 rounded bg-yellow-200 px-1 text-yellow-900">
+              <span className="ml-1 rounded bg-warning-bg px-1 text-warning-text">
                 {numericFilters.length}
               </span>
             )}
@@ -2924,7 +2924,7 @@ export function AdsAnalyse() {
                   onClick={() => setInspectorTab(tab)}
                   className={
                     "px-3 py-1.5 text-sm " +
-                    (inspectorTab === tab ? "border-b-2 border-slate-900 font-medium" : "text-text-secondary")
+                    (inspectorTab === tab ? "border-b-2 border-text-primary font-medium" : "text-text-secondary")
                   }
                 >
                   {tab === "metrics" ? "Metrics" : `Filters (${numericFilters.length})`}
@@ -3042,7 +3042,7 @@ function NumericFiltersPanel({
             onChange={(e) => update(idx, { value: parseFloat(e.target.value) || 0 })}
             className="w-24 rounded border px-1 py-0.5 text-xs"
           />
-          <button onClick={() => onChange(filters.filter((_, i) => i !== idx))} className="rounded px-1 text-rose-600 hover:bg-rose-50">
+          <button onClick={() => onChange(filters.filter((_, i) => i !== idx))} className="rounded px-1 text-error-text hover:bg-error-bg">
             ✕
           </button>
         </div>
