@@ -64,6 +64,14 @@ services:
         sync: false
       - key: DATABASE_URL_SYNC
         sync: false
+      # Shared secret EasyEcom echoes back as the `Access-Token` header
+      # on every webhook. Must be the SAME string pasted into
+      # EasyEcom's Webhook Settings. Unset => /webhooks/easyecom/*
+      # returns 503 and refuses everything, which is deliberate: the
+      # URL is public, so the secret is the only thing between EasyEcom
+      # and anyone who learns the path.
+      - key: EASYECOM_WEBHOOK_TOKEN
+        sync: false
 
       # Numbered per-account creds. If only one account is deployed,
       # remove the 2 / 3 pairs -- otherwise leave them blank in the
