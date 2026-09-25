@@ -11,10 +11,16 @@ actually collected.
         ?start_date=YYYY-MM-DD HH:MM:SS
         &end_date=YYYY-MM-DD HH:MM:SS
     x-api-key:     <account key>
-    Authorization: Bearer <jwt>
+    Authorization: Bearer <jwt>      scripts/mint_easyecom_jwt.py
 
-Paged by an opaque cursor returned as data.nextUrl, followed until it
-stops coming back.
+Both headers are mandatory; either one missing is a flat 401 "Invalid
+Api token." Paged by an opaque cursor returned as data.nextUrl, followed
+until it stops coming back.
+
+The window and the token's location_key are the ONLY things that decide
+which orders come back -- V2.1 getAllOrders has no marketplace
+parameter. A channel that appears to be missing is usually one of those
+two, not a broken key. See mint_easyecom_jwt.py.
 
 
 THE GRAIN IS invoice_id, NOT order_id
@@ -324,9 +330,9 @@ def fetch(path: str, key: str, jwt: str | None, *, tries: int = 4) -> dict:
             if e.code in (401, 403):
                 raise SystemExit(
                     f"[auth] HTTP {e.code} from EasyEcom.\n  {body}\n"
-                    "  The JWT is short lived -- mint a fresh one and set\n"
-                    "  EASYECOM_JWT, and check EASYECOM_API_KEY is the\n"
-                    "  account key from Settings -> API."
+                    "  EasyEcom needs BOTH headers -- x-api-key AND a\n"
+                    "  Bearer JWT. Mint the JWT (valid 90 days) with:\n"
+                    "      ./.venv/bin/python scripts/mint_easyecom_jwt.py"
                 )
             if e.code == 429 or e.code >= 500:
                 if attempt == tries:
