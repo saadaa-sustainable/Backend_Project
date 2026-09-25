@@ -29,14 +29,37 @@ Verified by switching into the role and trying each operation:
 
 A leaked key buys junk rows in a landing table. Nothing readable.
 
+## ⚠ The signing-key migration changes this
+
+Checked 2026-09-25: this project has moved to **asymmetric** JWT
+signing. Its JWKS publishes one key, `ES256` (EC P-256), and Supabase
+holds the private half — so a token for the *current* key cannot be
+minted outside Supabase at all.
+
+The HS256 shared secrets survive only as **previous keys**, kept to
+verify tokens that have not yet expired, with Supabase's own advice
+being *"Revoke once all tokens have expired."*
+
+That leaves the PostgREST route needing a token signed by a key that is
+on its way out. It works today and stops the moment that key is
+revoked — silently, from the dashboard, with no deploy involved.
+
+**So the Edge Function is now the better path**, not just the safer
+one: `supabase/functions/easyecom-webhook/` needs no Supabase-signed
+token, because deployed `--no-verify-jwt` it checks a shared secret of
+our own. The signing-key migration does not touch it.
+
+Use the steps below only as a stopgap, with a short expiry you intend
+to re-issue.
+
 ## 2. Mint the key
 
 ```bash
 ./.venv/bin/python scripts/mint_easyecom_key.py
 ```
 
-It asks for the **JWT Secret** from Supabase → Settings → API → JWT
-Settings. That is the long random string with no dots — *not* the anon
+It asks for the **Legacy JWT Secret** from Supabase → Settings → API →
+JWT Keys → *Legacy JWT Secret* tab. That is the long random string with no dots — *not* the anon
 or service_role key. It is read from a prompt, never stored.
 
 ## 3. Configure EasyEcom

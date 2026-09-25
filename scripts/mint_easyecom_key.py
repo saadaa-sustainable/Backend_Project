@@ -12,8 +12,30 @@ This exists so EasyEcom can be pointed straight at
 without giving it service_role, which would grant read and write on
 every table in the project and bypass row-level security.
 
+READ THIS BEFORE USING IT (2026-09-25).
+
+This project has migrated to ASYMMETRIC JWT signing. Its JWKS
+publishes exactly one key, an EC P-256 / ES256, and Supabase holds the
+private half -- so a token for the current key cannot be minted here
+at all.
+
+The HS256 shared secrets still exist, but only as PREVIOUS keys.
+Supabase keeps those to verify tokens that have not yet expired and
+says plainly: "Revoke once all tokens have expired." A token signed
+here is therefore valid only until that revocation, and a long-lived
+one makes rotating the key a breaking change for the webhook.
+
+So this mints a token against a key that is already on its way out.
+Use it only as a short-lived stopgap, with an expiry you are happy to
+re-issue before, and never set it and forget it.
+
+The durable route is supabase/functions/easyecom-webhook/, which needs
+no Supabase-signed token: deployed --no-verify-jwt, it checks a plain
+shared secret of our own, so the signing-key migration does not touch
+it.
+
 The JWT secret comes from the Supabase dashboard:
-  Settings > API > JWT Settings > JWT Secret
+  Settings > API > JWT Keys > Legacy JWT Secret
 It is NOT the anon or service_role key, and it is NOT stored here --
 pass it on stdin so it never lands in shell history or a file.
 
@@ -33,7 +55,10 @@ except ImportError:                                   # pragma: no cover
     sys.exit("PyJWT is required:  ./.venv/bin/pip install PyJWT")
 
 ROLE = "easyecom_webhook"
-YEARS = 5
+#: Deliberately short. The signing key this uses is a PREVIOUS key
+#: that Supabase expects to be revoked, so a long expiry only buys a
+#: silent failure later.
+DAYS = 90
 
 
 def main() -> int:
@@ -52,23 +77,21 @@ def main() -> int:
             "role": ROLE,
             "iss": "supabase",
             "iat": int(now.timestamp()),
-            # Long-lived on purpose: rotating it means editing the
-            # webhook config in EasyEcom by hand. The blast radius is
-            # one INSERT on one table, which is what makes that
-            # acceptable.
-            "exp": int((now + dt.timedelta(days=365 * YEARS)).timestamp()),
+            "exp": int((now + dt.timedelta(days=DAYS)).timestamp()),
         },
         secret,
         algorithm="HS256",
     )
     print("\n" + "=" * 62)
-    print(f"API key for EasyEcom (role={ROLE}, valid {YEARS} years):\n")
+    print(f"API key for EasyEcom (role={ROLE}, valid {DAYS} days):\n")
     print(token)
     print("=" * 62)
     print(
         "\nPaste it into EasyEcom's Webhook Settings token field.\n"
-        "Treat it as a credential, but note the worst it can do is add\n"
-        "rows to webhook_events -- it cannot read anything back."
+        "The worst it can do is add rows to webhook_events -- it cannot\n"
+        "read anything back.\n\n"
+        "It is signed with a PREVIOUS key. It stops working the moment\n"
+        "that key is revoked in Settings > API > JWT Keys."
     )
     return 0
 
