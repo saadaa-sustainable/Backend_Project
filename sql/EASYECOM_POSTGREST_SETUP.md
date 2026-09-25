@@ -1,12 +1,38 @@
 # Pointing EasyEcom straight at PostgREST
 
-No Edge Function, no Render. EasyEcom POSTs directly to
-`/rest/v1/webhook_events`.
+> **THIS ROUTE DOES NOT WORK ON THIS PROJECT. Tested 2026-09-25.**
+>
+> A key minted for the least-privilege `easyecom_webhook` role is
+> rejected before PostgREST ever sees it:
+>
+> ```
+> HTTP/2 401
+> sb-error-code: UNAUTHORIZED_INVALID_API_KEY
+> sb-jwt-alg:    HS256          <- the gateway parsed our token fine
+> sb-jwt-iss:    supabase
+> {"message":"Invalid API key",
+>  "hint":"Double check your Supabase `anon` or `service_role` API key."}
+> ```
+>
+> The signature is not the issue. Supabase's gateway validates the key
+> against its registry of **issued project keys** before routing to
+> PostgREST, so a self-signed JWT never reaches the `role` claim that
+> would select the restricted role. This project has also moved to
+> asymmetric ES256 signing, leaving both HS256 secrets as previous
+> keys, so there is no secret that can mint a key the gateway accepts.
+>
+> Only anon, service_role and the new sb_publishable_ / sb_secret_ keys
+> are accepted, and none of them can be scoped to a single table. Using
+> service_role would hand EasyEcom read and write on every table.
+>
+> **Use `supabase/functions/easyecom-webhook/` instead.** It needs no
+> Supabase-issued key: deployed `--no-verify-jwt` it checks a shared
+> secret of our own, and the gateway does not police function auth.
+>
+> The SQL below still applies and the role still exists -- it is a
+> sound least-privilege target for anything that connects to Postgres
+> directly. It is only the PostgREST route to it that is closed.
 
-The risk with this route is the key. `service_role` in a third party's
-settings grants read and write on **every table in the project** and
-bypasses row-level security. So instead we mint a key whose Postgres
-role can do exactly one thing.
 
 ## 1. Create the role (already applied)
 

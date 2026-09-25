@@ -12,7 +12,18 @@ This exists so EasyEcom can be pointed straight at
 without giving it service_role, which would grant read and write on
 every table in the project and bypass row-level security.
 
-READ THIS BEFORE USING IT (2026-09-25).
+DOES NOT WORK ON THIS PROJECT. Tested 2026-09-25 -- the minted key is
+rejected with HTTP 401 UNAUTHORIZED_INVALID_API_KEY before PostgREST
+sees it, because Supabase's gateway checks the key against its
+registry of issued project keys and a self-signed JWT is not in it.
+The response headers confirm the token itself parsed fine
+(sb-jwt-alg: HS256, sb-jwt-iss: supabase).
+
+Kept for the record and in case a future project still accepts
+gateway-side self-signed keys. For EasyEcom, use
+supabase/functions/easyecom-webhook/ instead.
+
+Original note follows.
 
 This project has migrated to ASYMMETRIC JWT signing. Its JWKS
 publishes exactly one key, an EC P-256 / ES256, and Supabase holds the
