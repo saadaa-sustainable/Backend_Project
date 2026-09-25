@@ -62,3 +62,67 @@ thing: appending a row to `webhook_events`.
 
 The token is compared in constant time, and is deliberately not among
 the headers stored beside the payload.
+
+---
+
+## Deploying, step by step
+
+The CLI is installed (`brew install supabase/tap/supabase`) and
+`supabase/config.toml` is committed, so the function's project ref and
+`verify_jwt = false` are already set.
+
+**1. Log in.** Interactive — run it yourself; it opens a browser:
+
+```
+supabase login
+```
+
+**2. Pick a shared secret** and set it as the function's env var. This
+is *not* any Supabase key: it is a string you invent, and it is the
+only thing authenticating EasyEcom.
+
+```bash
+supabase secrets set EASYECOM_WEBHOOK_TOKEN="$(openssl rand -base64 32)" \
+  --project-ref gtcdyfmlvglzpiwzklhx
+```
+
+Print it afterwards to paste into EasyEcom:
+
+```bash
+supabase secrets list --project-ref gtcdyfmlvglzpiwzklhx
+```
+
+(If it shows only a digest, generate the string first, keep it, and
+pass it explicitly.)
+
+**3. Deploy.**
+
+```bash
+supabase functions deploy easyecom-webhook \
+  --project-ref gtcdyfmlvglzpiwzklhx --no-verify-jwt
+```
+
+**4. Smoke-test it before touching EasyEcom.**
+
+```bash
+curl -i -X POST \
+  'https://gtcdyfmlvglzpiwzklhx.supabase.co/functions/v1/easyecom-webhook/tracking' \
+  -H 'Access-Token: <THE SECRET>' \
+  -H 'Content-Type: application/json' \
+  -d '{"order_id":12345,"status":"delivered","awb":"TEST123"}'
+```
+
+Expect `200 {"received":true,"event":"tracking","id":N}`. Note the body
+is EasyEcom-shaped on purpose — unlike the PostgREST route, an
+arbitrary payload is accepted and wrapped.
+
+Then confirm it landed:
+
+```sql
+select id, event, payload, received_at
+from webhook_events order by id desc limit 5;
+```
+
+**5. Repoint EasyEcom.** In the webhook row, replace the URL with the
+functions URL above (last path segment matching the event) and replace
+the minted key in the token field with this shared secret.

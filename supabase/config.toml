@@ -1,0 +1,14 @@
+# Minimal Supabase CLI config.
+#
+# Only what `supabase functions deploy` needs. Deliberately no local
+# stack configuration (db / studio / auth ports): nothing here runs a
+# local Supabase, and carrying settings we do not use invites someone
+# to trust them.
+project_id = "gtcdyfmlvglzpiwzklhx"
+
+[functions.easyecom-webhook]
+# EasyEcom cannot send a Supabase JWT alongside its own auth header, so
+# the platform's JWT check is off and the function verifies
+# EASYECOM_WEBHOOK_TOKEN itself. Auth is not skipped -- it is moved
+# into the function. Same as passing --no-verify-jwt on deploy.
+verify_jwt = false
