@@ -203,26 +203,30 @@ export function UntestedAssets() {
     });
   }, [scopeRows, matchState, media, skuFilter, kindFilter, search]);
 
-  // Summarize the population in scope -- the selected source, always
-  // narrowed to assets that have a link -- before the table filters
-  // and paging, which only change which of those are shown.
-  const metrics = useMemo(() => {
+  // Summarize a population. One definition of "tested", used by both
+  // card rows, so they cannot count it differently.
+  const summarise = (rows: UntestedAssetRow[]) => {
     let tested = 0;
     let matchedAds = 0;
     let withSku = 0;
-    for (const row of scopeRows) {
+    for (const row of rows) {
       if (row.matched_ads > 0) tested += 1;
       matchedAds += row.matched_ads;
       if (row.matched_master_sku) withSku += 1;
     }
-    return {
-      total: scopeRows.length,
-      tested,
-      notTested: scopeRows.length - tested,
-      matchedAds,
-      withSku,
-    };
-  }, [scopeRows]);
+    return { total: rows.length, tested, notTested: rows.length - tested, matchedAds, withSku };
+  };
+
+  // The card rows are per-SOURCE and deliberately do NOT follow the
+  // Source switch: that switch chooses what the TABLE lists, while the
+  // cards exist to show both populations at once. Both are narrowed to
+  // assets that have a link, the same rule the table uses.
+  const damMetrics = useMemo(
+    () => summarise((data?.rows ?? []).filter((r) => r.origin === "database" && hasLink(r))),
+    [data]);
+  const histMetrics = useMemo(
+    () => summarise((data?.rows ?? []).filter((r) => r.origin === "historical" && hasLink(r))),
+    [data]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   // Clamp rather than reset to 0: narrowing a filter while deep in the
@@ -289,51 +293,31 @@ export function UntestedAssets() {
         })}
       </div>
 
-      {/* Cards summarize the source; testing status filters only the table. */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        {/* Counts assets the register holds a LINK for, because that is
-            the only set anyone can act on -- an asset with no file
-            cannot be put in an ad. ONE number: the register's own row
-            count is deliberately not shown beside it, because two
-            totals on the same card got the bigger one read as the
-            backlog. The hint says which population is being counted,
-            never how big another one is. */}
-        <KpiTile
-          label="Total Assets"
-          value={data ? fmtInt(metrics.total) : "—"}
-          hint="Assets with a link in the selected source"
-        />
-        <KpiTile
-          label="Not Tested"
-          value={data ? fmtInt(metrics.notTested) : "—"}
-          hint={loading ? "Loading…" : "Assets with no matched ads in the selected source"}
-        />
-        <KpiTile
-          label="Tested"
-          value={data ? fmtInt(metrics.tested) : "—"}
-          hint={data && metrics.total
-            ? `${Math.round((metrics.tested / metrics.total) * 100)}% of assets in the selected source have been tested`
-            : "Assets with at least one matched ad in the selected source"}
-        />
-        <KpiTile
-          label="Matched Ads"
-          value={data ? fmtInt(metrics.matchedAds) : "—"}
-          hint="Ads matched to assets in the selected source"
-        />
-        {showSkuColumns ? (
-          <KpiTile
-            label="SKU Matched"
-            value={data ? `${fmtInt(metrics.withSku)} / ${fmtInt(metrics.total)}` : "—"}
-            hint="Assets with a catalog SKU in the selected source"
-          />
-        ) : (
-          <KpiTile
-            label="SKU Matched"
-            value="No SKU mapping"
-            hint="Influencer nomenclature (SIF-…) doesn't carry a product SKU code"
-          />
-        )}
-      </div>
+      {/* One row per source, both always visible.
+          They answer different questions and used to share a single row
+          that changed under the Source switch: DAM Project is the live
+          backlog someone can action today, Historical is the sheet-era
+          archive whose ids may predate the naming convention the
+          matcher relies on. Reading one set of numbers without knowing
+          which of the two it described was the problem.
+
+          Graphic has no DAM Project rows at all, so that row reads zero
+          there -- the honest answer, and it says where the graphics
+          actually live. */}
+      <KpiRow
+        title={ORIGIN_LABELS[media].database}
+        m={damMetrics}
+        showSkuColumns={showSkuColumns}
+        loading={loading}
+        ready={!!data}
+      />
+      <KpiRow
+        title={ORIGIN_LABELS[media].historical}
+        m={histMetrics}
+        showSkuColumns={showSkuColumns}
+        loading={loading}
+        ready={!!data}
+      />
 
       {/* Testing status narrows the selected source without changing it. */}
       <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
@@ -680,6 +664,62 @@ export function UntestedAssets() {
           onClose={() => setOpenAsset(null)}
         />
       )}
+    </div>
+  );
+}
+
+type RowMetrics = {
+  total: number; tested: number; notTested: number; matchedAds: number; withSku: number;
+};
+
+/** One labelled row of KPI cards for a single source. */
+function KpiRow({ title, m, showSkuColumns, loading, ready }: {
+  title: string;
+  m: RowMetrics;
+  showSkuColumns: boolean;
+  loading: boolean;
+  ready: boolean;
+}) {
+  const v = (n: number) => (ready ? fmtInt(n) : "\u2014");
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+        {title}
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        {/* Counts assets the register holds a LINK for, because that is
+            the only set anyone can act on -- an asset with no file
+            cannot be put in an ad. One number: the register's own row
+            count is deliberately not shown beside it, because two
+            totals on one card got the bigger one read as the backlog. */}
+        <KpiTile label="Total Assets" value={v(m.total)} hint="Assets with a link" />
+        <KpiTile
+          label="Not Tested"
+          value={v(m.notTested)}
+          hint={loading ? "Loading\u2026" : "Assets with no matched ads"}
+        />
+        <KpiTile
+          label="Tested"
+          value={v(m.tested)}
+          hint={ready && m.total
+            ? `${Math.round((m.tested / m.total) * 100)}% of these assets have been tested`
+            : "Assets with at least one matched ad"}
+        />
+        <KpiTile label="Matched Ads" value={v(m.matchedAds)} hint="Ads matched to these assets" />
+        {showSkuColumns ? (
+          <KpiTile
+            label="SKU Matched"
+            value={ready ? `${fmtInt(m.withSku)} / ${fmtInt(m.total)}` : "\u2014"}
+            hint="Assets with a catalog SKU"
+          />
+        ) : (
+          <KpiTile
+            label="SKU Matched"
+            value="No SKU mapping"
+            hint="Influencer nomenclature (SIF-\u2026) doesn't carry a product SKU code"
+          />
+        )}
+      </div>
     </div>
   );
 }
