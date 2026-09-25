@@ -59,7 +59,12 @@ def results(media="video", match_state="all"):
     elif match_state == "matched":
         rows = [row for row in rows if row.matched_ads > 0]
     coverage = MagicMock()
-    coverage.one.return_value = SimpleNamespace(register_total=2, matched_assets=1, matched_ads=2)
+    # Coverage and the DAM split come back on ONE row, in one round
+    # trip -- see the CROSS JOIN in the endpoint. Both fixture rows carry
+    # a link and row 1 is the one with matched_ads > 0.
+    coverage.one.return_value = SimpleNamespace(
+        register_total=2, matched_assets=1, matched_ads=2,
+        dam_total=2, dam_tested=1, dam_untested=1, without_link=0)
     return [rows, coverage]
 
 
@@ -76,6 +81,11 @@ async def test_media_populations_serialize_and_reuse_successful_response(client,
     assert data["register_total"] == 2  # Register coverage ignores the population filter.
     assert data["matched_assets"] == 1
     assert data["matched_ads"] == 2
+    # Counted over the whole register, like register_total -- so they do
+    # not move when match_state narrows the rows.
+    assert data["dam_total"] == 2
+    assert data["dam_tested"] + data["dam_untested"] == data["dam_total"]
+    assert data["without_link"] == 0
     assert data["from_database"] + data["from_historical"] == data["total_rows"]
     assert data["with_sku_match"] + data["without_sku_match"] == data["total_rows"]
     assert all(row["media"] == media for row in data["rows"])

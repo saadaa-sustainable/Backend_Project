@@ -1901,6 +1901,15 @@ export interface UntestedAssetsResponse {
   register_total: number;
   matched_assets: number;
   matched_ads: number;
+  /** The DAM population: assets the register holds a link for. An asset
+   *  with no link cannot be tested, so it is a data gap rather than a
+   *  testing backlog. dam_tested + dam_untested === dam_total. */
+  dam_total: number;
+  dam_tested: number;
+  dam_untested: number;
+  /** Register rows with no link at all. dam_total + without_link ===
+   *  total_rows when match_state is "all". */
+  without_link: number;
   rows: UntestedAssetRow[];
   computed_at: string;
 }
@@ -1911,12 +1920,16 @@ export interface UntestedAssetsParams {
    *  matched_ads column worth reading. */
   match_state?: "untested" | "matched" | "all";
   has_sku?: boolean;
+  /** The DAM filter. true = only assets with a link (the set that
+   *  can actually be tested), false = only those without. */
+  has_link?: boolean;
 }
 
 export function fetchUntestedAssets(params: UntestedAssetsParams = {}): Promise<UntestedAssetsResponse> {
   const q = new URLSearchParams();
   if (params.media) q.set("media", params.media);
   if (params.has_sku !== undefined) q.set("has_sku", String(params.has_sku));
+  if (params.has_link !== undefined) q.set("has_link", String(params.has_link));
   if (params.match_state) q.set("match_state", params.match_state);
   const qs = q.toString();
   return request<UntestedAssetsResponse>(`/admin/analytics/untested${qs ? `?${qs}` : ""}`);

@@ -5015,6 +5015,18 @@ class UntestedAssetsResponse(BaseModel):
     register_total: int = 0
     matched_assets: int = 0
     matched_ads: int = 0
+    #: The DAM population: assets the register actually holds a link
+    #: for. This is the denominator that matters operationally -- an
+    #: asset with no link cannot be tested, because there is no file to
+    #: put in an ad, so counting it as "untested backlog" overstates
+    #: what the team can act on.
+    dam_total: int = 0
+    #: The DAM split. dam_tested + dam_untested == dam_total always.
+    dam_tested: int = 0
+    dam_untested: int = 0
+    #: Register rows with no link at all -- present so dam_total can be
+    #: read against the whole register without arithmetic.
+    without_link: int = 0
     rows: list[UntestedAssetRow]
     computed_at: datetime
 
@@ -5060,6 +5072,21 @@ _UNTESTED_COVERAGE_SQL: dict[str, str] = {
           LEFT JOIN public.ad_asset_map m ON m.asset_id = r.post_id
     """,
 }
+
+#: An asset is "in the DAM" when the register holds a link for it.
+#: `b.link` is the normalised primary link across the three media --
+#: link_to_asset on content_asset_register, edited_link on the iterated
+#: video register, link_1/creative on graphics, post_link on influencer
+#: posts -- so this is one predicate rather than four.
+#:
+#: Written once and read by BOTH the has_link filter and the dam_*
+#: counts. Two spellings would let the tile say 180 while the filtered
+#: table showed a different number, and nothing on screen would say why.
+#:
+#: An empty string is not a link. The registers are hand-maintained and
+#: a cleared cell arrives as '' rather than NULL, so a bare IS NOT NULL
+#: counts blanks as assets that have a file.
+_HAS_LINK = "(b.link IS NOT NULL AND btrim(b.link) <> '')"
 
 _UNTESTED_SQL: dict[str, str] = {
     "video": """
@@ -5249,6 +5276,15 @@ async def get_untested_assets(
                     "the matched_ads column worth reading.",
     ),
     has_sku: bool | None = Query(default=None, description="If true, only rows whose SKU prefix matches a catalog SKU. If false, only unmatched rows. Ignored for influencer (which has no SKU derivation)."),
+    has_link: bool | None = Query(
+        default=None,
+        description="The DAM filter. true = only assets the register holds a "
+                    "link for, which is the population that can actually be "
+                    "tested; false = only those with no link, which is a data "
+                    "gap to chase rather than a testing backlog. Omitted "
+                    "returns both. Combines with match_state, so "
+                    "has_link=true&match_state=untested is the real backlog.",
+    ),
 ) -> UntestedAssetsResponse:
     base_select = _UNTESTED_SQL[media]
 
@@ -5257,6 +5293,10 @@ async def get_untested_assets(
         outer_filters.append("b.matched_ads = 0")
     elif match_state == "matched":
         outer_filters.append("b.matched_ads > 0")
+    if has_link is True:
+        outer_filters.append(_HAS_LINK)
+    elif has_link is False:
+        outer_filters.append(f"NOT {_HAS_LINK}")
     if has_sku is True and media != "influencer":
         outer_filters.append("cpis.master_sku IS NOT NULL")
     elif has_sku is False and media != "influencer":
@@ -5315,7 +5355,37 @@ async def get_untested_assets(
         )
         for r in result
     ]
-    cov = (await session.execute(text(_UNTESTED_COVERAGE_SQL[media]))).one()
+    # Register coverage and the DAM split, in ONE round trip.
+    #
+    # Both are aggregates over the whole register and neither looks at
+    # `where_clause`, so the tiles describe the register rather than
+    # whatever the current filters left behind -- the defect that once
+    # had the ad-level category tiles report "3" against a real 1,768.
+    #
+    # Deliberately not a second execute(). This endpoint already costs
+    # two round trips and tests/test_untested_loading.py pins that, for
+    # the same reason this branch exists: every extra trip is paid on
+    # every load. cov and dam are one row.
+    #
+    # The DAM half reads `base` rather than _UNTESTED_COVERAGE_SQL
+    # because only base carries the normalised `link` column, and
+    # counting it off a different query is how a tile and a table start
+    # disagreeing.
+    cov = (await session.execute(text(f"""
+        WITH base AS ({base_select}),
+             cov AS ({_UNTESTED_COVERAGE_SQL[media]}),
+             dam AS (
+               SELECT COUNT(*) FILTER (WHERE {_HAS_LINK})                       AS dam_total,
+                      COUNT(*) FILTER (WHERE {_HAS_LINK} AND b.matched_ads > 0) AS dam_tested,
+                      COUNT(*) FILTER (WHERE {_HAS_LINK} AND b.matched_ads = 0) AS dam_untested,
+                      COUNT(*) FILTER (WHERE NOT {_HAS_LINK})                   AS without_link
+                 FROM base b
+             )
+        SELECT cov.register_total, cov.matched_assets, cov.matched_ads,
+               dam.dam_total, dam.dam_tested, dam.dam_untested, dam.without_link
+          FROM cov CROSS JOIN dam
+    """))).one()
+    dam = cov
     matched = sum(1 for r in rows if r.matched_master_sku)
     from_db = sum(1 for r in rows if r.origin == "database")
     return UntestedAssetsResponse(
@@ -5328,6 +5398,10 @@ async def get_untested_assets(
         register_total=int(cov.register_total or 0),
         matched_assets=int(cov.matched_assets or 0),
         matched_ads=int(cov.matched_ads or 0),
+        dam_total=int(dam.dam_total or 0),
+        dam_tested=int(dam.dam_tested or 0),
+        dam_untested=int(dam.dam_untested or 0),
+        without_link=int(dam.without_link or 0),
         rows=rows,
         computed_at=datetime.now(timezone.utc),
     )
