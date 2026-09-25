@@ -48,6 +48,9 @@ load_dotenv(ROOT / ".env", override=True)
 import psycopg2  # noqa: E402
 import psycopg2.extras  # noqa: E402
 
+import csv  # noqa: E402
+import io  # noqa: E402
+
 DEST = os.environ["DATABASE_URL_SYNC"].replace("postgresql+psycopg2://", "postgresql://").split("?")[0]
 SRC = os.environ["SUPABASE_DB_URL"]
 
@@ -102,20 +105,45 @@ SELECT "Merchant Order ID"                                  AS order_id,
        NULLIF(NULLIF(BTRIM("Utm Campaign"), ''), 'NA')      AS utm_campaign,
        NULLIF(NULLIF(BTRIM("Utm Term"),     ''), 'NA')      AS utm_term,
        NULLIF(NULLIF(BTRIM("Utm Content"),  ''), 'NA')      AS utm_content,
-       "Grand Total", "Total Discount", "Cod Charges", "MRP Total",
-       "Payment Method", "Payment Status", "Merchant Order Status",
-       "Order Shipment Status", "RTO Risk", "RTO Score", "RTO Remark",
-       "AWB Number", "Customer Type - Gokwik", "Customer Type - Merchant",
-       "Billing City", "Billing State", "Coupon Code", "Landing Page"
+       "Grand Total"             AS grand_total,
+       "Total Discount"          AS total_discount,
+       "Cod Charges"             AS cod_charges,
+       "MRP Total"               AS mrp_total,
+       "Payment Method"          AS payment_method,
+       "Payment Status"          AS payment_status,
+       "Merchant Order Status"   AS merchant_order_status,
+       "Order Shipment Status"   AS order_shipment_status,
+       "RTO Risk"                AS rto_risk,
+       "RTO Score"               AS rto_score,
+       "RTO Remark"              AS rto_remark,
+       "AWB Number"              AS awb_number,
+       "Customer Type - Gokwik"  AS customer_type_gokwik,
+       "Customer Type - Merchant" AS customer_type_merchant,
+       "Billing City"            AS billing_city,
+       "Billing State"           AS billing_state,
+       "Coupon Code"             AS coupon_code,
+       "Landing Page"            AS landing_page
   FROM "Gokwik_order_data"
  WHERE {DATE_OK}
    AND {DATE_EXPR} BETWEEN %(since)s::date AND %(until)s::date
    AND "Merchant Order ID" ~ '^[0-9]+$'
+   AND "Merchant Order ID" > %(after)s
  ORDER BY "Merchant Order ID"
- LIMIT %(lim)s OFFSET %(off)s
+ LIMIT %(lim)s
 """
 
-COLS = 28  # every column in DDL except ingested_at
+#: Target columns for COPY, in the SELECT's order. Named explicitly so
+#: a change to either list fails loudly instead of silently shifting
+#: every value one column left.
+COPY_COLS = [
+    "order_id", "order_gid", "order_name", "order_date",
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "grand_total", "total_discount", "cod_charges", "mrp_total",
+    "payment_method", "payment_status", "merchant_order_status",
+    "order_shipment_status", "rto_risk", "rto_score", "rto_remark",
+    "awb_number", "customer_type_gokwik", "customer_type_merchant",
+    "billing_city", "billing_state", "coupon_code", "landing_page",
+]
 
 
 def main() -> int:
@@ -133,31 +161,49 @@ def main() -> int:
             dc.execute(DDL)
         dest.commit()
 
-        total, off = 0, 0
+        # KEYSET pagination, one fresh source connection per chunk.
+        #
+        # Two earlier shapes failed. LIMIT/OFFSET re-scanned and
+        # re-sorted all 326k rows for every page and then discarded the
+        # first `off` of them, so cost grew per page and it stalled at
+        # 160,000. A server-side cursor fixed that but held the source
+        # connection open across the whole read, and the Supabase pooler
+        # closed it while it sat idle during a write:
+        #     psycopg2.OperationalError: SSL connection has been closed
+        #
+        # Paginating on the key itself is linear AND needs no long-lived
+        # connection, so neither failure applies. "Merchant Order ID" is
+        # the primary key here and verified unique, so > last_id can
+        # never skip or repeat a row.
+        total, after = 0, ""
         while True:
-            # A fresh source connection per chunk: the pooler drops a
-            # connection that sits idle while we write the previous one.
             src = psycopg2.connect(SRC)
             try:
                 with src.cursor() as sc:
                     sc.execute("SET statement_timeout = '600s'")
                     sc.execute(SELECT, {"since": args.since, "until": args.until,
-                                        "lim": CHUNK, "off": off})
+                                        "after": after, "lim": CHUNK})
                     rows = sc.fetchall()
             finally:
                 src.close()
             if not rows:
                 break
+
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            for r in rows:
+                w.writerow(["\\N" if v is None else v for v in r])
+            buf.seek(0)
             with dest.cursor() as dc:
-                psycopg2.extras.execute_values(
-                    dc,
-                    "INSERT INTO public.gokwik_orders_new VALUES %s "
-                    "ON CONFLICT (order_id) DO NOTHING",
-                    rows, page_size=2000,
+                dc.copy_expert(
+                    "COPY public.gokwik_orders_new (" + ", ".join(COPY_COLS) + ") "
+                    "FROM STDIN WITH (FORMAT csv, NULL '\\N')",
+                    buf,
                 )
             dest.commit()
+
             total += len(rows)
-            off += CHUNK
+            after = rows[-1][0]          # order_id, the sort key
             print(f"  {total:>7,} rows  ({time.time() - t0:>5.0f}s)", flush=True)
             if len(rows) < CHUNK:
                 break
