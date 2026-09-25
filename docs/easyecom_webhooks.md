@@ -53,6 +53,33 @@ on. Entirely camelCase and keyed differently again:
 used for SKU-level analysis; join back to `easyecom_orders` on
 `invoiceId` for that.
 
+## Four ids, and only one of them crosses to Shopify
+
+A worked example, EasyEcom order 621950008:
+
+| field | value | good for |
+|---|---|---|
+| `order_id` / `orderId` | `621950008` | EasyEcom only. **Not in Shopify.** |
+| `invoice_id` / `invoiceId` | `744713615` | EasyEcom only. Our shipment key. |
+| `reference_code` | `1542926` | the bridge |
+| Shopify order name | `#1542926` | `reference_code` with a `#` |
+| Shopify order id | `gid://shopify/Order/7324097380598` | Shopify's own |
+
+Searching Shopify for an EasyEcom `order_id` returns nothing, which
+looks like missing data and is not. `reference_code` is the ONLY field
+that crosses, and it is the Shopify order NAME rather than its id, so
+the join is
+
+    regexp_replace(shopify_order_attribution.name, '\D', '', 'g')
+        = easyecom_shipments.reference_code
+
+`easyecom_shipments.order_name` stores the `#`-prefixed form so the
+lookup can go either way without a regex.
+
+Note the camelCase split: tracking sends `orderId`/`invoiceId`, every
+other event sends `order_id`/`invoice_id`. `reference_code` is spelled
+the same everywhere.
+
 ## Routing
 
 The receiver takes the event from the LAST PATH SEGMENT of the URL:
