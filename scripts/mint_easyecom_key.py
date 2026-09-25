@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import datetime as dt
 import getpass
+import re
 import sys
 
 try:
@@ -62,13 +63,43 @@ DAYS = 90
 
 
 def main() -> int:
-    secret = getpass.getpass("Supabase JWT Secret (Settings > API): ").strip()
+    print(
+        "Supabase dashboard > Settings > API > JWT Keys > 'Legacy JWT Secret' tab.\n"
+        "Copy the long random string there -- NOT the URL, NOT a Key ID UUID,\n"
+        "NOT the anon or service_role key.\n"
+    )
+    secret = getpass.getpass("Legacy JWT Secret: ").strip()
+
+    # Each of these is a thing someone actually reaches for first. Say
+    # which one it is rather than failing later with a bad signature.
     if not secret:
-        return print("No secret given.") or 1
+        return print("Nothing entered.") or 1
+    if secret.lower().startswith(("http://", "https://")):
+        return print(
+            "That is a URL. The secret is a value inside the dashboard page,\n"
+            "under Settings > API > JWT Keys > Legacy JWT Secret."
+        ) or 1
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", secret):
+        return print(
+            "That is a Key ID (the UUID in the JWT Signing Keys table).\n"
+            "It identifies a key; it is not the key. Open the\n"
+            "'Legacy JWT Secret' tab instead."
+        ) or 1
     if secret.count(".") == 2:
         return print(
-            "That looks like an anon/service_role KEY, not the JWT SECRET.\n"
-            "The secret is the long random string under JWT Settings, with no dots."
+            "That is a JWT -- an anon or service_role KEY, not the SECRET\n"
+            "they are signed with. The secret has no dots."
+        ) or 1
+    if secret.startswith(("sb_publishable_", "sb_secret_")):
+        return print(
+            "That is one of the new-style API keys. Those cannot sign a\n"
+            "token; use the Legacy JWT Secret."
+        ) or 1
+    if len(secret) < 32:
+        return print(
+            f"That is only {len(secret)} characters. The legacy secret is a long\n"
+            "random string, normally 40 or more."
         ) or 1
 
     now = dt.datetime.now(tz=dt.timezone.utc)
