@@ -437,30 +437,30 @@ function verdictBasis(rule: string): InfoBasis {
  *  way. It follows because failing the kill branch and the recovery
  *  branch together forces R7 >= 1.5. */
 const DECISION_RULES: { key: string; label: string; color: string; maths: string }[] = [
-  { key: "SCALE", label: "Scale", color: "#059669",
+  { key: "SCALE", label: "Scale", color: "#2F6B3A",
     maths: "R3 > 2.5  AND  R7 > 2.5" },
-  { key: "PAUSE", label: "Pause", color: "#E11D48",
+  { key: "PAUSE", label: "Pause", color: "#C8102E",
     maths: "R3 < 1.5  AND  R7 < 1.5  AND  C3 > L  AND  C7 > L" },
-  { key: "MONITOR", label: "Monitor", color: "#D97706",
+  { key: "MONITOR", label: "Monitor", color: "#B45309",
     maths: "R7 < 1.5 ≤ R3   — or —   R3 < 1.5  AND  R7 < 1.5  AND  exactly one of C3, C7 > L" },
-  { key: "REPORT", label: "Report", color: "#1D4ED8",
+  { key: "REPORT", label: "Report", color: "#1D4E89",
     maths: "R3 < 1.5  AND  R7 < 1.5  AND  C3 ≤ L  AND  C7 ≤ L" },
-  { key: "OK", label: "No action", color: "#64748B",
+  { key: "OK", label: "No action", color: "#57534A",
     maths: "R7 ≥ 1.5  AND  NOT (R3 > 2.5 AND R7 > 2.5)   — nothing else matched" },
-  { key: "UNRATED", label: "No verdict", color: "#94A3B8",
+  { key: "UNRATED", label: "No verdict", color: "#716D64",
     maths: "R3 or R7 does not exist — it did not spend in that window" },
 ];
 
 const DECISION_TILES: { key: string; label: string; color: string; basis: InfoBasis }[] = [
-  { key: "SCALE", label: "Scale", color: "#059669",
+  { key: "SCALE", label: "Scale", color: "#2F6B3A",
     basis: verdictBasis("R3 > 2.5  AND  R7 > 2.5") },
-  { key: "PAUSE", label: "Pause", color: "#E11D48",
+  { key: "PAUSE", label: "Pause", color: "#C8102E",
     basis: verdictBasis("R3 < 1.5  AND  R7 < 1.5  AND  C3 > L  AND  C7 > L") },
-  { key: "MONITOR", label: "Monitor", color: "#D97706",
+  { key: "MONITOR", label: "Monitor", color: "#B45309",
     basis: verdictBasis(
       "R7 < 1.5 ≤ R3,  or  R3 < 1.5 AND R7 < 1.5 with exactly one of " +
       "C3, C7 above L. The two windows disagree, so the call waits.") },
-  { key: "REPORT", label: "Report", color: "#1D4ED8",
+  { key: "REPORT", label: "Report", color: "#1D4E89",
     basis: verdictBasis("R3 < 1.5  AND  R7 < 1.5  AND  C3 ≤ L  AND  C7 ≤ L") },
   // OK and UNRATED have no tile -- every tile names something to DO,
   // and those two name its absence. Their definitions live in

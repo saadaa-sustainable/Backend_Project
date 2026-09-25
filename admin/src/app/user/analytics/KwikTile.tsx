@@ -58,10 +58,10 @@ export interface KwikTileProps {
  *  KPI card. */
 const ICON_BG: Record<NonNullable<KwikTileProps["iconColor"]>, string> = {
   slate: "bg-slate-700 text-white",
-  sky: "bg-[#3B6BF5] text-white",
-  emerald: "bg-[#2E7D32] text-white",
-  amber: "bg-[#D97706] text-white",
-  rose: "bg-[#DC2626] text-white",
+  sky: "bg-[#1D4E89] text-white",
+  emerald: "bg-[#2F6B3A] text-white",
+  amber: "bg-[#B45309] text-white",
+  rose: "bg-[#C8102E] text-white",
   purple: "bg-[#7C3AED] text-white",
   teal: "bg-[#0891B2] text-white",
 };

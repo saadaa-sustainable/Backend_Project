@@ -377,7 +377,7 @@ export function UntestedAssets() {
               }}
               className={
                 // accent-yellow is this theme's real accent token (it is
-                // blue, #3B6BF5 -- the name is a leftover). `accent-primary`
+                // blue, #1D4E89 -- the name is a leftover). `accent-primary`
                 // does not exist, so it rendered white-on-transparent and
                 // the selected option was invisible.
                 "px-3 py-1 text-xs font-medium transition-colors " +

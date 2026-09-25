@@ -140,10 +140,10 @@ const CAT_MATRIX: {
 function MarkCell({ mark, note }: { mark: Mark; note?: string }) {
   const style =
     mark === "pass"
-      ? { bg: "#EAF3EC", fg: "#2E7755", border: "#CBE3D3", glyph: "\u2713" }
+      ? { bg: "#E7EDE2", fg: "#2F6B3A", border: "#E7EDE2", glyph: "\u2713" }
       : mark === "either"
-        ? { bg: "#FDF6E3", fg: "#B07E12", border: theme.warningBg, glyph: "~" }
-        : { bg: "transparent", fg: "#B8B2A4", border: "transparent", glyph: "\u2014" };
+        ? { bg: "#F4EBD8", fg: "#8E6608", border: theme.warningBg, glyph: "~" }
+        : { bg: "transparent", fg: "#716D64", border: "transparent", glyph: "\u2014" };
   return (
     <div className="flex flex-col items-center gap-0.5">
       <span
@@ -179,7 +179,7 @@ function Callout({ icon, children }: { icon: string; children: React.ReactNode }
   return (
     <div
       className="mb-2 flex gap-3 rounded-lg border p-3 text-sm leading-relaxed"
-      style={{ backgroundColor: "#FDF9EC", borderColor: theme.warningBg, color: CT.ink }}
+      style={{ backgroundColor: "#F4EBD8", borderColor: theme.warningBg, color: CT.ink }}
     >
       <span className="shrink-0" style={{ color: CT.goldDeep }}>{icon}</span>
       <div>{children}</div>
@@ -215,22 +215,22 @@ const CATEGORY_ORDER: CategoryKey[] = [
 ];
 
 const CAT_ACCENT: Record<CategoryKey, string> = {
-  "Incremental Winner": "#15803D",
-  Winner: "#2E7D32",
-  "P0 analysis": "#3B6BF5",
-  "P1 analysis": "#D97706",
-  "P2 analysis": "#8B5A2B",
-  "Result Awaited": "#C9A227",
-  Discarded: "#C0392B",
+  "Incremental Winner": "#2F6B3A",
+  Winner: "#2F6B3A",
+  "P0 analysis": "#1D4E89",
+  "P1 analysis": "#B45309",
+  "P2 analysis": "#8E6608",
+  "Result Awaited": "#8E6608",
+  Discarded: "#9E0C24",
 };
 
 /** Funnel column groups, matching CTD's two-row header. */
 const FUNNEL_GROUPS: { label: string; cats: CategoryKey[]; tint: string }[] = [
-  { label: "Winner", cats: ["Incremental Winner", "Winner"], tint: "#EFF5EF" },
-  { label: "P0 analysis", cats: ["P0 analysis"], tint: "#EEF3FF" },
-  { label: "P1 / P2 analysis", cats: ["P1 analysis", "P2 analysis"], tint: "#F5F1EA" },
+  { label: "Winner", cats: ["Incremental Winner", "Winner"], tint: "#E7EDE2" },
+  { label: "P0 analysis", cats: ["P0 analysis"], tint: "#E4EAF2" },
+  { label: "P1 / P2 analysis", cats: ["P1 analysis", "P2 analysis"], tint: "#F2F0EB" },
   { label: "Awaited", cats: ["Result Awaited"], tint: theme.accentYellowBg },
-  { label: "Discarded", cats: ["Discarded"], tint: "#FBEFEC" },
+  { label: "Discarded", cats: ["Discarded"], tint: "#F6E3E4" },
 ];
 const FUNNEL_SHORT: Record<CategoryKey, string> = {
   "Incremental Winner": "Inc. Winner",
@@ -264,11 +264,11 @@ const PRODUCT_FOCUS_ORDER: ProductFocusKey[] = [
   "Others",
 ];
 const PRODUCT_FOCUS_COLOR: Record<ProductFocusKey, string> = {
-  Home: "#3B6BF5",
+  Home: "#1D4E89",
   Category: "#0891B2",
-  Collection: "#2E7D32",
-  Product: "#D97706",
-  Others: "#9A9384",
+  Collection: "#2F6B3A",
+  Product: "#B45309",
+  Others: "#716D64",
 };
 function detectProductFocus(name: string | null | undefined): ProductFocusKey {
   const n = (name || "").toUpperCase();
@@ -680,9 +680,9 @@ const ASSET_FILTER_FIELDS = [
 const CTYPES: CtypeKey[] = ["IFAD", "Graphic AD", "VID", "STATIC"];
 const CREATIVE_FOCUS_COLOR: Record<string, string> = {
   IFAD: "#7C3AED",
-  "Graphic AD": "#D97706",
+  "Graphic AD": "#B45309",
   VID: "#0891B2",
-  STATIC: "#9A9384",
+  STATIC: "#716D64",
 };
 /** Asset media is a stronger signal than the ad name here — the asset
  *  register already knows what kind of thing it is. Fall back to CTD's
@@ -871,7 +871,7 @@ export function CreativeTesting() {
             // the right edge put the first month off-screen.
             align="left"
             // The section's own gold, not the app token -- which is named
-            // accentYellow but is #3B6BF5, a blue nothing else here uses.
+            // accentYellow but is #1D4E89, a blue nothing else here uses.
             accent={{ solid: CT.goldFill, soft: theme.warningBg }}
             onApply={(r, pk) => {
               setFromDate(r.from);
@@ -1094,7 +1094,7 @@ export function CreativeTesting() {
               >
                 <div
                   className="text-[10px] font-semibold uppercase tracking-wider"
-                  style={{ color: hi ? "#F6E7C4" : CT.muted }}
+                  style={{ color: hi ? "#F4EBD8" : CT.muted }}
                 >
                   {label}
                 </div>
@@ -1198,7 +1198,7 @@ export function CreativeTesting() {
                               </div>
                               <div
                                 className="mt-1 h-1 w-full rounded"
-                                style={{ backgroundColor: "#EFEDE6" }}
+                                style={{ backgroundColor: "#EFEDE7" }}
                               >
                                 <div
                                   className="h-1 rounded"

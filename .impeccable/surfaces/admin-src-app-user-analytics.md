@@ -33,8 +33,19 @@ OWN-WORLD: Isotype. Paper `#F2F0EB`, ink `#14120E`, signal red
 `#C8102E` reserved by law for a fired rule, Vienna blue `#1D4E89` and
 ochre `#D99A00` for data only. Rules, never boxes: hairlines separate
 rows and sections, and nothing on the surface carries both a border and
-a shadow. Geometric sans throughout, tabular numerals everywhere a
-figure appears. Drawn pictograms, never glyphs or emoji. The existing
+a shadow.
+
+TRANSLATION, named: the world wants geometric sans and the build keeps
+Geist, a workhorse grotesque. Geometric faces earn their character from
+circular bowls and narrow apertures, and both cost legibility at the
+11-13px this product's tables run at -- against a PRODUCT.md constraint
+the user pinned explicitly ("table density"). The world's voice is
+carried instead by Isotype's own label register: small caps, tracked
+out, above every column and field. The face is the concession; the
+voice is not.
+
+Tabular, slashed-zero numerals everywhere a figure appears, set on the
+body element so no component has to remember. Drawn pictograms, never glyphs or emoji. The existing
 CVD-validated chart palette survives as the data inks.
 
 STORY: A buyer lands on the account's verdict bands, sees where the rule
