@@ -703,7 +703,7 @@ export function LastClickUtm() {
          ═══════════════════════════════════════════════════════════════ */}
       <div className="flex flex-wrap items-center gap-3">
         <div>
-          <h2 className="text-base font-semibold">Last Click UTM analysis</h2>
+          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Last Click UTM analysis</h2>
           <p className="text-xs text-text-secondary">step-wise UTM matches from shopify_order_attribution ({total.toLocaleString()} orders in range)</p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">

@@ -277,7 +277,7 @@ export function UntestedAssets() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold text-text-primary">Untested Assets</h2>
+        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Untested Assets</h2>
         <p className="text-sm text-text-secondary">
           Browse registered assets and filter by whether they have run in a Meta ad.
           Click a tested asset to view its matched ads and their performance.

@@ -51,19 +51,32 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { AssetAdsModal } from "./AssetAdsModal";
 import { AssetPreviewCell } from "./AssetPreview";
 import { AdPreviewLinks, DestinationLink } from "./AdLinks";
+import { theme } from "@/lib/theme";
+import { IconGraphic, IconInfluencer, IconVideo } from "./Icons";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
 
 /** CTD's cream/gold palette. Scoped here rather than pushed into the
  *  app's design tokens, which are blue-based for every other tab. */
+/** Creative Testing's palette, retired into the surface's world
+ *  (2026-09-26). It used to be its own cream-and-gold identity in
+ *  hard-coded hex -- which is exactly why this section looked unlike
+ *  every other one, and why it was the section people liked. The look
+ *  it had is now the whole surface's look, so the section joins it
+ *  rather than keeping a private copy.
+ *
+ *  The KEYS are unchanged so the ~100 inline styles that reference them
+ *  need no edit; only what they resolve to moved. `gold` is the
+ *  interactive accent, which in this world is Vienna blue, and
+ *  `goldFill` is the ochre reserved for data fills. */
 const CT = {
-  cream: "#FAF8F3",
-  border: "#E8E2D5",
-  muted: "#9A9384",
-  gold: "#C9A227",
-  goldDeep: "#B07E12",
-  goldFill: "#B8860B",
-  ink: "#3A362E",
+  cream: theme.bgBase,
+  border: theme.borderPrimary,
+  muted: theme.textTertiary,
+  gold: theme.accentYellow,
+  goldDeep: "#16406F",
+  goldFill: "#8E6608",
+  ink: theme.textPrimary,
 };
 
 /** The category matrix, exactly as `ad_lifecycle`'s CASE evaluates it
@@ -129,7 +142,7 @@ function MarkCell({ mark, note }: { mark: Mark; note?: string }) {
     mark === "pass"
       ? { bg: "#EAF3EC", fg: "#2E7755", border: "#CBE3D3", glyph: "\u2713" }
       : mark === "either"
-        ? { bg: "#FDF6E3", fg: "#B07E12", border: "#EBDCB4", glyph: "~" }
+        ? { bg: "#FDF6E3", fg: "#B07E12", border: theme.warningBg, glyph: "~" }
         : { bg: "transparent", fg: "#B8B2A4", border: "transparent", glyph: "\u2014" };
   return (
     <div className="flex flex-col items-center gap-0.5">
@@ -166,7 +179,7 @@ function Callout({ icon, children }: { icon: string; children: React.ReactNode }
   return (
     <div
       className="mb-2 flex gap-3 rounded-lg border p-3 text-sm leading-relaxed"
-      style={{ backgroundColor: "#FDF9EC", borderColor: "#EBDCB4", color: CT.ink }}
+      style={{ backgroundColor: "#FDF9EC", borderColor: theme.warningBg, color: CT.ink }}
     >
       <span className="shrink-0" style={{ color: CT.goldDeep }}>{icon}</span>
       <div>{children}</div>
@@ -216,7 +229,7 @@ const FUNNEL_GROUPS: { label: string; cats: CategoryKey[]; tint: string }[] = [
   { label: "Winner", cats: ["Incremental Winner", "Winner"], tint: "#EFF5EF" },
   { label: "P0 analysis", cats: ["P0 analysis"], tint: "#EEF3FF" },
   { label: "P1 / P2 analysis", cats: ["P1 analysis", "P2 analysis"], tint: "#F5F1EA" },
-  { label: "Awaited", cats: ["Result Awaited"], tint: "#FDF8E8" },
+  { label: "Awaited", cats: ["Result Awaited"], tint: theme.accentYellowBg },
   { label: "Discarded", cats: ["Discarded"], tint: "#FBEFEC" },
 ];
 const FUNNEL_SHORT: Record<CategoryKey, string> = {
@@ -229,10 +242,15 @@ const FUNNEL_SHORT: Record<CategoryKey, string> = {
   Discarded: "Discarded",
 };
 
-const MEDIA_META: Record<MediaKey, { icon: string; label: string; cls: string }> = {
-  video: { icon: "🎬", label: "Video", cls: "bg-violet-100 text-violet-800 border-violet-200" },
-  graphic: { icon: "🖼", label: "Graphic", cls: "bg-sky-100 text-sky-800 border-sky-200" },
-  influencer: { icon: "👤", label: "Influencer", cls: "bg-rose-100 text-rose-800 border-rose-200" },
+const MEDIA_META: Record<MediaKey, { icon: React.ReactNode; label: string; cls: string }> = {
+  // Tailwind's violet/sky/rose are off this surface's palette -- the
+  // media chips now print on the world's own fields.
+  video: { icon: <IconVideo />, label: "Video",
+           cls: "bg-accent-purple-bg text-accent-purple border-transparent" },
+  graphic: { icon: <IconGraphic />, label: "Graphic",
+             cls: "bg-info-bg text-info-text border-transparent" },
+  influencer: { icon: <IconInfluencer />, label: "Influencer",
+                cls: "bg-warning-bg text-warning-text border-transparent" },
 };
 
 
@@ -373,8 +391,8 @@ function InfoDot({ id }: { id: string }) {
         className="ml-0.5 inline-flex h-[18px] w-[18px] cursor-pointer items-center justify-center rounded-full border font-semibold leading-none transition-colors hover:brightness-95"
         style={{
           borderColor: open ? CT.ink : CT.muted,
-          color: open ? "#FFFFFF" : CT.ink,
-          backgroundColor: open ? CT.ink : "#FFFFFF",
+          color: open ? theme.bgWhite : CT.ink,
+          backgroundColor: open ? CT.ink : theme.bgWhite,
           fontSize: "11px",
         }}
       >
@@ -399,7 +417,7 @@ function InfoDot({ id }: { id: string }) {
               // Explicit, not a utility: this panel sits over the table
               // and over other tiles, and anything less than fully
               // opaque let their numbers read through the definition.
-              backgroundColor: "#FFFFFF",
+              backgroundColor: theme.bgWhite,
               letterSpacing: "normal",
             }}
           >
@@ -818,9 +836,7 @@ export function CreativeTesting() {
       {/* ── page header ───────────────────────────────────────── */}
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight" style={{ color: CT.ink }}>
-            Creative Testing <span style={{ color: CT.muted }}>—</span> Analytics
-          </h2>
+          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Creative Testing</h2>
           <p className="text-xs" style={{ color: CT.muted }}>
             uniquely tested assets · powered by ad_asset_map (asset grain, not ad grain)
           </p>
@@ -856,7 +872,7 @@ export function CreativeTesting() {
             align="left"
             // The section's own gold, not the app token -- which is named
             // accentYellow but is #3B6BF5, a blue nothing else here uses.
-            accent={{ solid: CT.goldFill, soft: "#FBF3DF" }}
+            accent={{ solid: CT.goldFill, soft: theme.warningBg }}
             onApply={(r, pk) => {
               setFromDate(r.from);
               setToDate(r.to);
@@ -874,9 +890,9 @@ export function CreativeTesting() {
           className="rounded-md border border-border-primary px-2 py-1 text-sm"
         >
           <option value="">All media</option>
-          <option value="video">🎬 Video</option>
-          <option value="graphic">🖼 Graphic</option>
-          <option value="influencer">👤 Influencer</option>
+          <option value="video">Video</option>
+          <option value="graphic">Graphic</option>
+          <option value="influencer">Influencer</option>
         </select>
         <input
           value={search}
@@ -1049,7 +1065,7 @@ export function CreativeTesting() {
             </div>
             <div
               className="rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wider"
-              style={{ borderColor: CT.gold, color: CT.goldDeep, backgroundColor: "#FDF8E8" }}
+              style={{ borderColor: CT.gold, color: CT.goldDeep, backgroundColor: theme.accentYellowBg }}
             >
               sum &amp; avg · {fromDate} → {toDate} ·{" "}
               {totals.assets.toLocaleString("en-IN")} assets
@@ -1073,7 +1089,7 @@ export function CreativeTesting() {
                 className="border-b border-r p-4 last:border-r-0"
                 style={{
                   borderColor: CT.border,
-                  backgroundColor: hi ? CT.goldFill : "#FFFFFF",
+                  backgroundColor: hi ? CT.goldFill : theme.bgWhite,
                 }}
               >
                 <div
@@ -1084,11 +1100,11 @@ export function CreativeTesting() {
                 </div>
                 <div
                   className="mt-1 text-2xl font-bold tracking-tight"
-                  style={{ color: hi ? "#FFFFFF" : CT.ink }}
+                  style={{ color: hi ? theme.bgWhite : CT.ink }}
                 >
                   {value}
                 </div>
-                <div className="mt-1 text-[10px]" style={{ color: hi ? "#F0DDB4" : CT.goldDeep }}>
+                <div className="mt-1 text-[10px]" style={{ color: hi ? theme.bgBase : CT.goldDeep }}>
                   {formula}
                 </div>
               </div>
@@ -1249,7 +1265,7 @@ export function CreativeTesting() {
                     className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs"
                     style={{
                       borderColor: CT.border,
-                      backgroundColor: n ? "#FFFFFF" : CT.cream,
+                      backgroundColor: n ? theme.bgWhite : CT.cream,
                       color: n ? CT.ink : CT.muted,
                     }}
                   >
@@ -1462,7 +1478,7 @@ export function CreativeTesting() {
                     }
                     className="cursor-pointer border-t transition-colors"
                     style={{ borderColor: CT.border }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "#FDF8E8")}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = theme.accentYellowBg)}
                     onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "")}
                   >
                     {visibleCols.map((c) => (
@@ -1560,7 +1576,7 @@ export function CreativeTesting() {
                     F2 — ROAS
                     <span
                       className="rounded px-1.5 py-0.5 text-[10px] font-bold"
-                      style={{ backgroundColor: "#EBDCB4", color: CT.goldDeep }}
+                      style={{ backgroundColor: theme.warningBg, color: CT.goldDeep }}
                     >
                       OR
                     </span>

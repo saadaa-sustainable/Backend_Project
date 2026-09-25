@@ -148,7 +148,7 @@ export function ShopifyAnalytics() {
       {/* header */}
       <div className="flex flex-wrap items-end gap-3">
         <div>
-          <h2 className="text-base font-semibold">Shopify Analytics</h2>
+          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Shopify Analytics</h2>
           <p className="text-xs text-text-secondary">
             Customer acquisition by day, from the mirrored ShopifyQL <code>sales</code> dataset
             {data && data.excluded_channels.length > 0 && (

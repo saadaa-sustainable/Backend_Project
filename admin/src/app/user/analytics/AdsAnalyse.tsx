@@ -2065,7 +2065,7 @@ export function AdsAnalyse() {
         {/* Was "Creative Testing" -- a leftover from the CTD port that
             became actively wrong once Creative Testing existed as its
             own tab. */}
-        <h2 className="text-base font-semibold text-text-primary">Ads Analyse</h2>
+        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Ads Analyse</h2>
         <div className="inline-flex rounded-md border border-border-primary bg-white shadow-sm">
           {(["ad", "adset", "campaign"] as const).map((lv) => (
             <button

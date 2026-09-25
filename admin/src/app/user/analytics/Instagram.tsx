@@ -18,6 +18,8 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+
+import { IconComment, IconHeart, IconReach } from "./Icons";
 import {
   ApiError,
   InstagramPostRow,
@@ -145,7 +147,7 @@ export function Instagram() {
       {/* Header + freshness banner */}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h2 className="text-base font-semibold">Instagram content</h2>
+          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Instagram content</h2>
           <p className="text-xs text-text-secondary">
             Per-post Silver read over <code className="rounded bg-bg-muted px-1 py-0.5 text-[10px]">insta_data</code> —
             engagement counts, insights reach/views, media metadata.
@@ -387,9 +389,17 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
           {r.caption ?? <span className="text-text-tertiary italic">no caption</span>}
         </p>
         <div className="mt-1 flex items-center gap-3 text-[10px] font-mono text-text-secondary">
-          <span title="Likes">♥ {fmtInt(r.like_count)}</span>
-          <span title="Comments">💬 {fmtInt(r.comments_count)}</span>
-          {r.insights_reach !== null && <span title="Reach">👁 {fmtInt(r.insights_reach)}</span>}
+          <span className="inline-flex items-center gap-1" title="Likes">
+            <IconHeart /> {fmtInt(r.like_count)}
+          </span>
+          <span className="inline-flex items-center gap-1" title="Comments">
+            <IconComment /> {fmtInt(r.comments_count)}
+          </span>
+          {r.insights_reach !== null && (
+            <span className="inline-flex items-center gap-1" title="Reach">
+              <IconReach /> {fmtInt(r.insights_reach)}
+            </span>
+          )}
         </div>
       </div>
     </button>
