@@ -204,7 +204,9 @@ export function UntestedAssets() {
     });
   }, [scopeRows, matchState, media, skuFilter, kindFilter, search]);
 
-  // Summarize the complete selected source, before table filters and paging.
+  // Summarize the population in scope -- source AND the DAM filter,
+  // both of which change WHICH assets exist here -- before the table
+  // filters and paging, which only change which of them are shown.
   const metrics = useMemo(() => {
     let tested = 0;
     let matchedAds = 0;
@@ -214,21 +216,14 @@ export function UntestedAssets() {
       matchedAds += row.matched_ads;
       if (row.matched_master_sku) withSku += 1;
     }
-    // Counted over sourceRows, NOT scopeRows: the hint on the Total
-    // card states how much of the register has a link at all, and that
-    // has to stay true when the DAM filter narrows the scope. Counting
-    // it over the scope would make it restate `total`.
-    let damTotal = 0;
-    for (const row of sourceRows) if (hasLink(row)) damTotal += 1;
     return {
       total: scopeRows.length,
       tested,
       notTested: scopeRows.length - tested,
       matchedAds,
       withSku,
-      damTotal,
     };
-  }, [sourceRows, scopeRows]);
+  }, [scopeRows]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   // Clamp rather than reset to 0: narrowing a filter while deep in the
@@ -299,22 +294,19 @@ export function UntestedAssets() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {/* Counts assets the register holds a LINK for, because that is
             the only set anyone can act on -- an asset with no file
-            cannot be put in an ad. The register's own row count goes in
-            the hint rather than beside this as a second total, since
-            two totals on one row is what made people read the bigger
-            one as the backlog. */}
+            cannot be put in an ad. ONE number: the register's own row
+            count is deliberately not shown beside it, because two
+            totals on the same card got the bigger one read as the
+            backlog. The hint says which population is being counted,
+            never how big another one is. */}
         <KpiTile
           label="Total Assets"
           value={data ? fmtInt(metrics.total) : "—"}
-          hint={!data
+          hint={linkFilter === "with"
             ? "Assets with a link in the selected source"
-            : linkFilter === "with"
-              ? `Assets with a link · ${fmtInt(metrics.damTotal)} of `
-                + `${fmtInt(sourceRows.length)} register rows have one`
-              : linkFilter === "without"
-                ? `Assets with NO link — a data gap, not a testing backlog`
-                : `Every register row, linked or not · only `
-                  + `${fmtInt(metrics.damTotal)} have a link`}
+            : linkFilter === "without"
+              ? "Assets with NO link — a data gap, not a testing backlog"
+              : "Every register row, with or without a link"}
         />
         <KpiTile
           label="Not Tested"
