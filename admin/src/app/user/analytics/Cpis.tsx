@@ -519,6 +519,7 @@ function CpisView() {
             attributedSpend={attributedSpend}
             untetheredSpend={untetheredSpend}
             untetheredParts={untetheredParts}
+            dayMatched={Boolean(fromDate && toDate)}
             windowLabel={
               fromDate && toDate
                 ? `${fromDate} → ${toDate}`
@@ -1577,9 +1578,17 @@ function CpisKpiStrip({
   attributedSpend,
   untetheredSpend,
   untetheredParts,
+  dayMatched,
 }: {
   rows: CpisUtmRow[];
   windowLabel: string;
+  /** A custom date range matches spend to orders DAY BY DAY; the preset
+   *  windows match across the whole window. Same 30 days picked the two
+   *  ways can differ by a fifth -- measured 2026-09-26: 93% attributed
+   *  on the 30d preset against 72% on the same dates from the calendar,
+   *  the gap being spend that converted on a later day than it spent.
+   *  Neither is wrong, so the tile says which one it is doing. */
+  dayMatched: boolean;
   spendMatchMode: "ad_name" | "utm_id";
   metaTotalSpend: number | null;
   attributedSpend: number | null;
@@ -1689,6 +1698,7 @@ function CpisKpiStrip({
           isFractional
             ? attrRate !== null && metaTotalSpend !== null
               ? `${attrRate.toFixed(0)}% of ${fmtINRCompact(metaTotalSpend)} Meta spend`
+                + (dayMatched ? " \u00b7 same-day matching" : "")
               : windowLabel
             : `${rows.length} loaded rows \u2014 does not add up`
         }
