@@ -7,17 +7,13 @@ import {
   CpisUtmRow,
   CpisUtmSort,
   CpisUtmWindow,
-  SaturationCurveResponse,
-  SaturationYMetric,
   fetchCpisDataFreshness,
   fetchCpisMatchedAds,
   fetchCpisSpendTrends,
   fetchCpisUtm,
-  fetchSaturationCurve,
   type CpisDataFreshness,
   type CpisSpendTrendResponse,
 } from "@/lib/api";
-import { SaturationCurveChart } from "./charts/SaturationCurveChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
@@ -30,203 +26,7 @@ import { ExportButton } from "@/components/ExportButton";
 const PAGE_SIZE = 250;
 const DISPLAY_PAGE_SIZE = 50;
 
-const SATURATION_Y_METRICS: { value: SaturationYMetric; label: string }[] = [
-  { value: "ncp_count", label: "NCP" },
-  { value: "purchases", label: "Purchases" },
-  { value: "ftewv_count", label: "First-time EWV" },
-];
 
-/** Details of a single clicked ad on the saturation curve. Kept in
- *  parent state so the drilldown panel stays anchored to the selection
- *  when the chart re-fits after control changes. */
-interface SelectedAd {
-  ad_id: string;
-  ad_name: string | null;
-  spend: number;
-  y: number;
-  y_label: string;
-}
-
-function SaturationCurveSection({ masterSkuFilter }: { masterSkuFilter: string | null }) {
-  const [yMetric, setYMetric] = useState<SaturationYMetric>("ncp_count");
-  const [scopeToSku, setScopeToSku] = useState(false);
-  const [data, setData] = useState<SaturationCurveResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedAd, setSelectedAd] = useState<SelectedAd | null>(null);
-
-  const masterSku = scopeToSku ? masterSkuFilter ?? undefined : undefined;
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setSelectedAd(null); // clear drilldown on refit
-    fetchSaturationCurve({ y_metric: yMetric, master_sku: masterSku })
-      .then((res) => !cancelled && setData(res))
-      .catch((err: unknown) => !cancelled && setError(err instanceof ApiError ? err.message : "Could not compute the saturation curve."))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [yMetric, masterSku]);
-
-  // Chart AXIS labels only -- these stay abbreviated on purpose, since a
-  // y-axis tick reading "₹1,27,11,045" does not fit. Every table cell and
-  // tile now shows the full figure.
-  const fmtINR = (n: number) => {
-    const abs = Math.abs(n);
-    if (abs >= 1e7) return `₹${(n / 1e7).toFixed(2)}Cr`;
-    if (abs >= 1e5) return `₹${(n / 1e5).toFixed(2)}L`;
-    if (abs >= 1e3) return `₹${(n / 1e3).toFixed(1)}K`;
-    return `₹${Math.round(n)}`;
-  };
-
-  return (
-    <div className="flex flex-col gap-3 rounded-lg border border-border-primary bg-white shadow-sm p-4">
-      <div>
-        <h3 className="text-sm font-medium text-text-primary">Saturation curve</h3>
-        <p className="mt-1 text-xs text-text-secondary">
-          Real-time fit (log-log regression, computed in Python on every selection) of ad spend vs. conversions
-          across {scopeToSku && masterSkuFilter ? `ads matching ${masterSkuFilter}` : "every ad"} — where the curve
-          bends down is where more spend stops paying off proportionally. <strong>Click any dot to drill in.</strong>
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex overflow-hidden rounded-md border border-border-primary">
-          {SATURATION_Y_METRICS.map((m) => (
-            <button
-              key={m.value}
-              onClick={() => setYMetric(m.value)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                yMetric === m.value ? "bg-accent-yellow text-text-primary" : "bg-white text-text-secondary hover:bg-bg-surface"
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        {masterSkuFilter && (
-          <label className="flex items-center gap-1.5 text-xs text-text-secondary">
-            <input type="checkbox" checked={scopeToSku} onChange={(e) => setScopeToSku(e.target.checked)} />
-            Scope to <span className="font-mono">{masterSkuFilter}</span> only
-          </label>
-        )}
-        {data && (
-          <span className="ml-auto text-xs text-text-tertiary">
-            {data.points.length} ads · {data.excluded_zero_or_missing} excluded (zero spend/{data.y_label.toLowerCase()})
-          </span>
-        )}
-      </div>
-
-      {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-xs text-error-text">{error}</div>}
-      {loading ? (
-        <p className="text-xs text-text-secondary">Fitting curve…</p>
-      ) : data ? (
-        <>
-          {data.fit ? (
-            <p className="text-xs text-text-secondary">
-              Fit: y = {data.fit.a.toFixed(4)} · spend<sup>{data.fit.b.toFixed(3)}</sup> (R² = {data.fit.r_squared.toFixed(3)}) —{" "}
-              {data.fit.is_saturating ? (
-                <span className="font-medium text-warning-text">exponent &lt; 1: real diminishing returns signal</span>
-              ) : (
-                <span className="text-text-tertiary">exponent ≥ 1: no saturation signal in this data</span>
-              )}
-            </p>
-          ) : (
-            <p className="text-xs text-text-tertiary">Not enough ads with both spend and {data.y_label} to fit a curve (need 5+).</p>
-          )}
-          <SaturationCurveChart
-            points={data.points
-              .filter((p) => p.spend > 0 && p.y > 0)
-              .map((p) => ({
-                label: p.ad_name ?? p.ad_id,
-                x: p.spend,
-                y: p.y,
-                meta: { ad_id: p.ad_id, ad_name: p.ad_name },
-              }))}
-            curve={data.fit?.curve_points ?? null}
-            xLabel="Ad spend"
-            yLabel={data.y_label}
-            selectedLabel={selectedAd ? (selectedAd.ad_name ?? selectedAd.ad_id) : null}
-            onPointClick={(p) => {
-              const meta = p.meta as { ad_id: string; ad_name: string | null } | undefined;
-              if (!meta) return;
-              setSelectedAd({
-                ad_id: meta.ad_id,
-                ad_name: meta.ad_name,
-                spend: p.x,
-                y: p.y,
-                y_label: data.y_label,
-              });
-            }}
-          />
-          {selectedAd && (
-            <div className="mt-2 rounded-lg border border-accent-yellow bg-accent-yellow-bg/30 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-[11px] uppercase tracking-wider text-text-tertiary">Selected ad</div>
-                  <div className="mt-1 truncate text-[13px] font-medium text-text-primary" title={selectedAd.ad_name ?? undefined}>
-                    {selectedAd.ad_name ?? <span className="text-text-tertiary">(unnamed)</span>}
-                  </div>
-                  <div className="mt-0.5 font-mono text-[10px] text-text-tertiary">ad_id: {selectedAd.ad_id}</div>
-                </div>
-                <button
-                  onClick={() => setSelectedAd(null)}
-                  className="rounded p-1 text-text-tertiary hover:bg-white hover:text-text-primary"
-                  aria-label="Clear selection"
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Spend</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold text-text-primary">{fmtINR(selectedAd.spend)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">{selectedAd.y_label}</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold text-text-primary">
-                    {selectedAd.y.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Cost / {selectedAd.y_label}</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold text-text-primary">
-                    {selectedAd.y > 0 ? fmtINR(selectedAd.spend / selectedAd.y) : "—"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Position vs. fit</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold">
-                    {data.fit ? (() => {
-                      const predicted = data.fit.a * Math.pow(selectedAd.spend, data.fit.b);
-                      const ratio = selectedAd.y / predicted;
-                      return (
-                        <span className={ratio >= 1.2 ? "text-success-text" : ratio <= 0.8 ? "text-error-text" : "text-warning-text"}>
-                          {(ratio * 100).toFixed(0)}%
-                          <span className="ml-1 text-[10px] text-text-tertiary">
-                            {ratio >= 1.2 ? "above" : ratio <= 0.8 ? "below" : "near"}
-                          </span>
-                        </span>
-                      );
-                    })() : (
-                      <span className="text-text-tertiary">—</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <p className="mt-2 text-[11px] text-text-tertiary">
-                &quot;Position vs. fit&quot; is this ad&apos;s actual {selectedAd.y_label} divided by what the fitted saturation curve predicts at this spend level.
-                &gt;120% = the ad outperforms peers; &lt;80% = underperforms — a triage signal for whether more spend is worth it.
-              </p>
-            </div>
-          )}
-        </>
-      ) : null}
-    </div>
-  );
-}
 
 const UTM_WINDOWS: CpisUtmWindow[] = ["7d", "30d", "90d"];
 // Sort options exposed in the UI. These still map to columns on the base
@@ -567,10 +367,9 @@ function CpisView() {
     };
   }, []);
   // Collapse toggles for each of the three analytics blocks (KPI strip,
-  // saturation curve, main table). Default: everything open. Merchant
+  // main table). Default: everything open. Merchant
   // can fold anything they don't need so the section stops eating scroll.
   const [openKpi, setOpenKpi] = useState(true);
-  const [openSaturation, setOpenSaturation] = useState(true);
   const [openTable, setOpenTable] = useState(true);
   // Row-click drilldown -- opens the ads modal for the clicked master
   // SKU showing every name-matched ad's status / category / spend /
@@ -729,21 +528,11 @@ function CpisView() {
         )}
       </CollapsibleSection>
 
-      {/* Collapsible saturation curve. */}
-      <CollapsibleSection
-        title="Saturation curve"
-        subtitle="Spend vs conversions -- shape of diminishing returns across all ads"
-        open={openSaturation}
-        onToggle={() => setOpenSaturation((v) => !v)}
-      >
-        <SaturationCurveSection masterSkuFilter={null} />
-      </CollapsibleSection>
-
       {/* Collapsible "Analytics table" block. Wraps the filter bar +
           main SKU-level table so the merchant can fold the whole
           scrolling grid away when they only care about the top
           summary cards above. Toggled independently from KPI /
-          Saturation. */}
+          the table. */}
       <CollapsibleSection
         title="Analytics table"
         subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
@@ -1500,7 +1289,7 @@ function CpisView() {
 }
 
 /** Accordion-style section header with a chevron toggle. Used to fold
- *  the KPI strip / saturation curve / main table so the CPIS page stops
+ *  the KPI strip / main table so the CPIS page stops
  *  eating scroll when the merchant isn't looking at one of them. */
 function CollapsibleSection({
   title,
