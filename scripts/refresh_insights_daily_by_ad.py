@@ -94,22 +94,29 @@ CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
 #               canonical copy per period, preferring most-recent
 #               ingested so a late correction wins over an earlier estimate.
 #
-#   expanded    Meta returns a mix of granularities in the same dump:
-#               true daily rows (date_start = date_stop), plus weekly
-#               and monthly summaries. generate_series expands each row
-#               into per-day slices, pro-rating spend / conv_value / ncp
-#               / impressions / clicks evenly across the range's days.
+#   daily       Meta returns a mix of granularities in the same dump:
+#               true daily rows (date_start = date_stop) from
+#               meta_insights_15d, plus all_days summaries from
+#               meta_insights_lifetime. Keep only the daily rows, at
+#               face value. See the long note on the CTE itself for why
+#               the summaries must not be spread across their days.
 #
-#   best        For each (ad_id, day) multiple sources may exist -- the
-#               true daily row AND a weekly summary that includes that
-#               day. DISTINCT ON keeps the highest-granularity slice
-#               (shortest range_days) so a daily row always beats the
-#               weekly slice it would double with. Pro-rated weekly
-#               slices only survive on days that had no daily row.
+#   best        Belt and braces. raw_dedup already keys on
+#               (ad_id, date_start, date_stop), so restricting to
+#               date_start = date_stop leaves at most one row per
+#               (ad_id, day) already.
 #
-# Result: row count = distinct (ad_id, day) tuples. A day with a true
-# daily row carries Meta's own figure for it; a day without carries its
-# share of whatever the covering summary did not already account for.
+# Result: row count = distinct (ad_id, day) tuples, each carrying Meta's
+# own figure for that day and nothing else.
+#
+# ONE statement, and it must stay that way by being cheap rather than by
+# being split up. The version that pro-rated summaries expanded 17,986
+# blocks across 15 days each and then deduplicated; it ran past the
+# 3600s statement timeout, Postgres cancelled it, and the client never
+# noticed -- it sat on a half-open socket at 0% CPU until killed. The
+# pooler dropping long-running connections is a known property of this
+# database (it did the same to the GoKwik ingest). Reading only daily
+# rows does no expansion at all and finishes in ~165s.
 REBUILD_SQL = """
 WITH ncp_ids AS (
     SELECT DISTINCT raw_payload ->> 'id' AS id
@@ -215,96 +222,65 @@ extracted AS (
       COALESCE((raw_payload->'video_avg_time_watched_actions'->0->>'value')::numeric, 0) AS video_play_time
     FROM raw_dedup
 ),
--- A true daily row is authoritative for its day. Anything longer is a
--- SUMMARY OVER ITS WHOLE RANGE, so it may only supply the days no
--- daily row covers -- and only the spend those days actually account
--- for.
+-- ONE ROW PER AD PER DAY, TAKEN ONLY FROM META'S OWN DAILY ROWS.
 --
--- This used to divide a summary by its full range and hand every
--- uncovered day that flat average. When 10 of a 15-day summary's days
--- already had daily rows, the remaining 5 each still received
--- total/15, so the same spend was counted twice: once as itself, once
--- inside the summary's average.
+-- Bronze holds two kinds of insights row and they are not two views of
+-- the same thing:
 --
--- Measured 2026-08-28..09-24 against Ads Manager at ad level across
--- both live accounts (Rs 1,16,28,012):
+--   date_start = date_stop   meta_insights_15d, time_increment=1.
+--                            Meta's figure FOR THAT DAY.
+--   date_start < date_stop   meta_insights_lifetime, all_days. The
+--                            same days aggregated, fetched for
+--                            ad_lifecycle's lifetime rollup.
 --
---     true daily rows only        Rs 1,11,21,641   -4.4%
---     flat-average fill (old)     Rs 1,21,88,770   +4.8%
+-- This used to read both and spread every multi-day row across its
+-- days. That counts each day twice -- once as itself, once inside
+-- every all_days block covering it -- and Meta returns those blocks as
+-- ROLLING trailing windows (7-21, 8-22, 9-23 Sep), so the overlap
+-- compounds. Worked example, ad 120228929233370422: a 15-day block of
+-- Rs 10.96 whose only delivering day already had a daily row of Rs
+-- 10.96 became Rs 21.19, a 93% overstatement.
 --
--- The fill is right in principle -- the uncovered days did carry real
--- spend -- but it injected Rs 10,67,129 where the gap was Rs 5,06,371,
--- roughly double. The residual is now the summary MINUS whatever its
--- own daily rows already account for, spread across the uncovered days
--- alone.
+-- Dropping the all_days rows loses no coverage: every month from
+-- 2025-12 onward carries daily rows, and an ad-day with no daily row
+-- is a day Meta reported no delivery for -- time_increment=1 returns a
+-- row per day the ad actually ran. Spreading a summary onto those days
+-- invents spend rather than recovering it. Measured directly: the
+-- residual the summaries hold beyond what daily rows already account
+-- for is Rs 26 across 33,888 of them, against the Rs 10,70,455 the
+-- spreading was adding.
+--
+-- VERIFIED against Meta rather than against a screenshot. Ads Manager
+-- readings moved between sittings (Rs 1,14,80,107, then Rs
+-- 1,16,28,012, for what was described as the same view), so the check
+-- is /act_<id>/insights at level=account for the identical window --
+-- the figure Ads Manager renders, straight from the API. For
+-- 2026-08-28..09-24 over the two live accounts:
+--
+--     Meta, level=account       Rs 1,11,21,647
+--     Meta, level=ad            Rs 1,11,21,647   (1,891 ads)
+--     this table                Rs 1,11,21,641   (-Rs 6, rounding)
+--     old pro-rated version     Rs 1,21,92,096   (+9.6%)
+--
+-- refresh_insights_daily_by_entity.py carries the same fix, and adset
+-- and campaign grain now land on the same Rs 1,11,21,641.
+--
+-- It is also why this step stopped finishing. Expanding 17,986 blocks
+-- across 15 days each, then deduplicating, ran past the 3600s
+-- statement timeout; the pooler dropped the socket and the client sat
+-- on it at 0% CPU. Reading only daily rows does no expansion at all.
 daily AS (
     SELECT ad_id, ds AS day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time
-    FROM extracted WHERE de = ds
-),
-summaries AS (
-    SELECT *, (de - ds + 1) AS range_days FROM extracted WHERE de > ds
-),
-summary_cov AS (
-    -- The LATERAL already aggregates to one row per summary, so this
-    -- is a plain projection -- no GROUP BY.
-    SELECT s.*,
-           COALESCE(c.cov_days, 0) AS cov_days,
-           COALESCE(c.s_spend, 0) AS cov_spend,
-           COALESCE(c.s_conv_value, 0) AS cov_conv_value,
-           COALESCE(c.s_ncp_count, 0) AS cov_ncp_count,
-           COALESCE(c.s_ftewv_count, 0) AS cov_ftewv_count,
-           COALESCE(c.s_impressions, 0) AS cov_impressions,
-           COALESCE(c.s_clicks, 0) AS cov_clicks,
-           COALESCE(c.s_all_clicks, 0) AS cov_all_clicks,
-           COALESCE(c.s_purchases, 0) AS cov_purchases,
-           COALESCE(c.s_add_to_cart, 0) AS cov_add_to_cart,
-           COALESCE(c.s_checkout_initiate, 0) AS cov_checkout_initiate,
-           COALESCE(c.s_thruplays, 0) AS cov_thruplays,
-           COALESCE(c.s_three_sec_plays, 0) AS cov_three_sec_plays,
-           COALESCE(c.s_outbound_clicks, 0) AS cov_outbound_clicks,
-           COALESCE(c.s_post_engagements, 0) AS cov_post_engagements
-    FROM summaries s
-    LEFT JOIN LATERAL (
-      SELECT COUNT(*) AS cov_days, SUM(d.spend) AS s_spend, SUM(d.conv_value) AS s_conv_value, SUM(d.ncp_count) AS s_ncp_count, SUM(d.ftewv_count) AS s_ftewv_count, SUM(d.impressions) AS s_impressions, SUM(d.clicks) AS s_clicks, SUM(d.all_clicks) AS s_all_clicks, SUM(d.purchases) AS s_purchases, SUM(d.add_to_cart) AS s_add_to_cart, SUM(d.checkout_initiate) AS s_checkout_initiate, SUM(d.thruplays) AS s_thruplays, SUM(d.three_sec_plays) AS s_three_sec_plays, SUM(d.outbound_clicks) AS s_outbound_clicks, SUM(d.post_engagements) AS s_post_engagements
-        FROM daily d
-       WHERE d.ad_id = s.ad_id AND d.day BETWEEN s.ds AND s.de
-    ) c ON TRUE
-),
-summary_fill AS (
-    SELECT
-      m.ad_id,
-      gs::date AS day,
-      m.range_days,
-      GREATEST(m.spend - m.cov_spend, 0) / NULLIF(m.range_days - m.cov_days, 0) AS spend,
-      GREATEST(m.conv_value - m.cov_conv_value, 0) / NULLIF(m.range_days - m.cov_days, 0) AS conv_value,
-      GREATEST(m.ncp_count - m.cov_ncp_count, 0) / NULLIF(m.range_days - m.cov_days, 0) AS ncp_count,
-      GREATEST(m.ftewv_count - m.cov_ftewv_count, 0) / NULLIF(m.range_days - m.cov_days, 0) AS ftewv_count,
-      GREATEST(m.impressions - m.cov_impressions, 0) / NULLIF(m.range_days - m.cov_days, 0) AS impressions,
-      GREATEST(m.clicks - m.cov_clicks, 0) / NULLIF(m.range_days - m.cov_days, 0) AS clicks,
-      GREATEST(m.all_clicks - m.cov_all_clicks, 0) / NULLIF(m.range_days - m.cov_days, 0) AS all_clicks,
-      GREATEST(m.purchases - m.cov_purchases, 0) / NULLIF(m.range_days - m.cov_days, 0) AS purchases,
-      GREATEST(m.add_to_cart - m.cov_add_to_cart, 0) / NULLIF(m.range_days - m.cov_days, 0) AS add_to_cart,
-      GREATEST(m.checkout_initiate - m.cov_checkout_initiate, 0) / NULLIF(m.range_days - m.cov_days, 0) AS checkout_initiate,
-      GREATEST(m.thruplays - m.cov_thruplays, 0) / NULLIF(m.range_days - m.cov_days, 0) AS thruplays,
-      GREATEST(m.three_sec_plays - m.cov_three_sec_plays, 0) / NULLIF(m.range_days - m.cov_days, 0) AS three_sec_plays,
-      GREATEST(m.outbound_clicks - m.cov_outbound_clicks, 0) / NULLIF(m.range_days - m.cov_days, 0) AS outbound_clicks,
-      GREATEST(m.post_engagements - m.cov_post_engagements, 0) / NULLIF(m.range_days - m.cov_days, 0) AS post_engagements,
-      m.reach / NULLIF(m.range_days, 0) AS reach,
-      m.video_play_time                 AS video_play_time
-    FROM summary_cov m,
-         generate_series(m.ds, m.de, '1 day'::interval) gs
-    WHERE m.range_days > m.cov_days
-      AND NOT EXISTS (
-        SELECT 1 FROM daily d WHERE d.ad_id = m.ad_id AND d.day = gs::date)
+    FROM extracted
+    WHERE de = ds
 ),
 best AS (
+    -- raw_dedup already keeps one row per (ad_id, date_start,
+    -- date_stop); with only same-day rows left that is one row per
+    -- (ad_id, day). This guards the invariant rather than doing work.
     SELECT DISTINCT ON (ad_id, day) ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time
-    FROM (
-      SELECT ad_id, day, 1 AS range_days, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time FROM daily
-      UNION ALL
-      SELECT ad_id, day, range_days, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time FROM summary_fill
-    ) u
-    ORDER BY ad_id, day, range_days ASC
+    FROM daily
+    ORDER BY ad_id, day
 )
 INSERT INTO public.insights_daily_by_ad (
     ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, reach, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time

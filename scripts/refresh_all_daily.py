@@ -165,8 +165,16 @@ PHASE_INGEST = [
                                "--levels", "ad"],                           2700),
     # DAILY rows for adset and campaign. Without this they were fetched
     # only at all_days, so their "daily" table was the 15-day total
-    # divided by 15 -- refresh_insights_daily_by_entity spreads any
-    # multi-day Bronze row evenly across its days.
+    # divided by 15 -- refresh_insights_daily_by_entity used to spread
+    # any multi-day Bronze row evenly across its days.
+    #
+    # It no longer does: that builder now keeps only rows where
+    # date_start = date_stop, because the pro-rating was inventing spend
+    # on days that already had a real daily row (campaign grain ran
+    # +4.37% and adset +7.65% over Meta's own account total). Which
+    # makes THIS step load-bearing rather than merely an improvement --
+    # drop the `--time-increment 1` below and the adset and campaign
+    # tables go empty, not coarse.
     #
     # The damage was real: 132 of 268 ad sets carried byte-identical
     # spend on 22 and 23 Sep because both days were one sixteenth of the
