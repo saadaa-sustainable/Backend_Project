@@ -534,6 +534,7 @@ function CpisView() {
               points={dailySeries.points}
               maxSpend={dailySeries.max_spend}
               maxOrders={dailySeries.max_orders}
+              truncatedTo={dailySeries.truncated_to}
             />
           </div>
         )}

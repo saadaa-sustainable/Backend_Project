@@ -7,14 +7,29 @@
  * hundreds. On one axis the order line flattens onto the floor and
  * carries no information. A twin axis would fit, but at this size two
  * sets of labels cost more room than the plot itself — so each line is
- * drawn against its own maximum and that maximum is printed in the
- * legend. The shapes are then honestly comparable and the heights
- * explicitly are not, which the caption says out loud.
+ * drawn against its own range and that range is printed in the legend.
+ * The shapes are then honestly comparable and the heights explicitly
+ * are not, which the caption says out loud.
  *
- * A null spend day breaks the line rather than dropping it to zero:
- * Meta reports a day in arrears, so the newest point in any window has
- * orders against no spend yet, and a line diving to the floor on the
- * most-looked-at day of the chart is a lie about delivery.
+ * WHY THE FLOOR IS NOT ZERO. Both series sit between roughly 70 and
+ * 100% of their peak, so anchored at zero they compress into the top
+ * third of the box and the variation this chart exists to show becomes
+ * a wobble. A zero baseline is what keeps a single-axis chart honest
+ * about magnitude — but magnitude is already off the table here, since
+ * the two lines are on different scales by construction. So each is
+ * scaled across its own low-to-high and the legend prints both ends,
+ * which is where the magnitude actually lives.
+ *
+ * WHY IT IS NOT FULL WIDTH. At the content column's ~1280px against a
+ * 96px box the aspect is 13:1, and both series flatten into a band a
+ * few pixels tall with two thirds of the plot empty underneath. The
+ * shape it exists to show stops being legible at exactly the size that
+ * looks most generous. It is capped instead, and left-aligned rather
+ * than stretched.
+ *
+ * The series arrives already stopped at the last COMPLETE day, so
+ * there is no partial final point to draw. `truncatedTo` says where it
+ * ends when that is short of the range asked for.
  */
 
 import { useId, useState } from "react";
@@ -23,11 +38,11 @@ import { theme } from "@/lib/theme";
 
 export interface SpendVsOrdersPoint {
   day: string;
-  ad_spend: number | null;
+  ad_spend: number;
   attributed_orders: number;
 }
 
-const H = 96;
+const H = 120;
 const PAD = { top: 10, right: 2, bottom: 16, left: 2 };
 
 function inr(n: number): string {
@@ -41,10 +56,12 @@ export function SpendVsOrdersChart({
   points,
   maxSpend,
   maxOrders,
+  truncatedTo,
 }: {
   points: SpendVsOrdersPoint[];
   maxSpend: number;
   maxOrders: number;
+  truncatedTo?: string | null;
 }) {
   const clipId = useId();
   const [hover, setHover] = useState<number | null>(null);
@@ -52,15 +69,20 @@ export function SpendVsOrdersChart({
 
   const plotH = H - PAD.top - PAD.bottom;
   const xs = (i: number) => (i / (points.length - 1)) * 100; // percent
-  const ySpend = (v: number) => PAD.top + plotH - (v / (maxSpend || 1)) * plotH;
-  const yOrders = (v: number) => PAD.top + plotH - (v / (maxOrders || 1)) * plotH;
 
-  // A null breaks the path rather than interpolating across it.
-  const spendPath = points.reduce((d, p, i) => {
-    if (p.ad_spend === null) return d;
-    const prevNull = i === 0 || points[i - 1].ad_spend === null;
-    return d + `${prevNull ? "M" : "L"}${xs(i)},${ySpend(p.ad_spend)}`;
-  }, "");
+  const spendVals = points.map((p) => p.ad_spend);
+  const orderVals = points.map((p) => p.attributed_orders);
+  const loSpend = Math.min(...spendVals);
+  const loOrders = Math.min(...orderVals);
+  // A flat series would divide by zero; give it a mid-height line.
+  const band = (v: number, lo: number, hi: number) =>
+    hi > lo ? PAD.top + plotH - ((v - lo) / (hi - lo)) * plotH : PAD.top + plotH / 2;
+  const ySpend = (v: number) => band(v, loSpend, maxSpend);
+  const yOrders = (v: number) => band(v, loOrders, maxOrders);
+
+  const spendPath = points
+    .map((p, i) => `${i ? "L" : "M"}${xs(i)},${ySpend(p.ad_spend)}`)
+    .join("");
   const ordersPath = points
     .map((p, i) => `${i ? "L" : "M"}${xs(i)},${yOrders(p.attributed_orders)}`)
     .join("");
@@ -68,19 +90,19 @@ export function SpendVsOrdersChart({
   const h = hover !== null ? points[hover] : null;
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex w-full max-w-[640px] flex-col gap-1">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-0.5 text-[10px]">
         <span className="inline-flex items-center gap-1.5 text-text-secondary">
           <span className="h-[2px] w-3" style={{ background: theme.accentYellow }} />
-          Ad spend · peak {inr(maxSpend)}
+          Ad spend · {inr(loSpend)}–{inr(maxSpend)}
         </span>
         <span className="inline-flex items-center gap-1.5 text-text-secondary">
           <span className="h-[2px] w-3" style={{ background: theme.warningMid }} />
-          Orders credited · peak {maxOrders.toLocaleString()}
+          Orders credited · {loOrders.toLocaleString()}–{maxOrders.toLocaleString()}
         </span>
         {h && (
           <span className="ml-auto font-medium text-text-primary">
-            {h.day} · {h.ad_spend === null ? "spend not in yet" : inr(h.ad_spend)} ·{" "}
+            {h.day} · {inr(h.ad_spend)} ·{" "}
             {h.attributed_orders.toLocaleString()} orders
           </span>
         )}
@@ -89,7 +111,7 @@ export function SpendVsOrdersChart({
       <svg
         viewBox={`0 0 100 ${H}`}
         preserveAspectRatio="none"
-        className="h-[96px] w-full"
+        className="h-[120px] w-full"
         role="img"
         aria-label={`Daily ad spend against orders credited to it, ${points.length} days`}
         onMouseLeave={() => setHover(null)}
@@ -101,8 +123,9 @@ export function SpendVsOrdersChart({
         </defs>
         {/* One baseline rule. No box, no grid — at this height a grid is
             more ink than the data. */}
+        {/* Marks each line's own low, not zero. */}
         <line x1="0" y1={PAD.top + plotH} x2="100" y2={PAD.top + plotH}
-              stroke={theme.borderPrimary} strokeWidth="1"
+              stroke={theme.borderSoft} strokeWidth="1"
               vectorEffect="non-scaling-stroke" />
         <g clipPath={`url(#${clipId})`}>
           <path d={ordersPath} fill="none" stroke={theme.warningMid}
@@ -133,9 +156,10 @@ export function SpendVsOrdersChart({
       </svg>
 
       <p className="text-[10px] text-text-tertiary">
-        Each line is drawn against its own peak, so compare the{" "}
-        <em>shape</em>, not the height. A break in the spend line is a day
-        Meta has not reported yet.
+        Each line runs between its own low and high, so compare the{" "}
+        <em>shape</em>, not the height. The floor is each line&rsquo;s own
+        minimum, not zero.
+        {truncatedTo ? ` Ends ${truncatedTo} — the newest days are still partial.` : ""}
       </p>
     </div>
   );

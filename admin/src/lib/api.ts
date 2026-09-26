@@ -1591,8 +1591,7 @@ export interface CpisUtmParams {
 
 export interface CpisDailyPoint {
   day: string;
-  /** Null for a day Meta has not reported yet -- draw a break, not a 0. */
-  ad_spend: number | null;
+  ad_spend: number;
   attributed_orders: number;
 }
 
@@ -1602,6 +1601,8 @@ export interface CpisDailySeriesResponse {
   points: CpisDailyPoint[];
   max_spend: number;
   max_orders: number;
+  /** Where the series really ends, when the newest days were partial. */
+  truncated_to: string | null;
 }
 
 export function fetchCpisDailySeries(params: {

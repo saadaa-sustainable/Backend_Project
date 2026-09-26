@@ -4840,12 +4840,7 @@ class CpisDailyPoint(BaseModel):
     #: slice that tied to an order. This is the honest "what did the day
     #: cost" figure.
     #:
-    #: NULL, not 0, for a day Meta has not reported yet. Its insights
-    #: land a day in arrears, so the newest day in any window has orders
-    #: against no spend; drawn as zero it reads as "we stopped
-    #: advertising" on exactly the day a reader is most likely to look
-    #: at. Null makes the line break instead.
-    ad_spend: float | None
+    ad_spend: float
     #: Orders that day which an ad drove, by last-click UTM. Matched to
     #: the SAME day, so an order placed today against yesterday's spend
     #: sits on today's point, not yesterday's.
@@ -4860,6 +4855,12 @@ class CpisDailySeriesResponse(BaseModel):
     #: without re-deriving them from the points.
     max_spend: float
     max_orders: int
+    #: Set when the series stops short of the requested end, with the
+    #: reason. Meta reports a day in arrears and today's orders are
+    #: still arriving, so the last day or two of any range are partial:
+    #: plotted, they read as a collapse in both spend and demand on
+    #: exactly the days a reader looks at first.
+    truncated_to: date | None = None
 
 
 @router.get("/cpis-utm/daily-series", response_model=CpisDailySeriesResponse)
@@ -4890,8 +4891,15 @@ async def get_cpis_utm_daily_series(
     comparison legible day by day; it is also why the lines can diverge
     without either being wrong.
 
-    Every day in the range is returned, including zero days, so a gap in
-    delivery reads as a gap rather than as a shorter line.
+    The series stops at the last COMPLETE day: Meta reports a day in
+    arrears and today's orders are still arriving, so the newest day or
+    two of any range are partial. Plotted, they read as a collapse in
+    both spend and demand on exactly the days a reader looks at first.
+    `truncated_to` says where it actually ends, so the client can print
+    that instead of implying the range it was asked for.
+
+    Days inside that bound are returned even when they are zero, so a
+    real gap in delivery reads as a gap rather than as a shorter line.
     """
     if from_date and to_date:
         wf, wt = from_date, to_date
@@ -4929,23 +4937,24 @@ async def get_cpis_utm_daily_series(
            GROUP BY day
         )
         SELECT d.day,
-               -- Zero only where Meta HAS reported and the figure really
-               -- is nothing; null past the reporting edge.
-               CASE WHEN d.day <= (SELECT MAX(day) FROM public.insights_daily_by_ad)
-                    THEN COALESCE(s.ad_spend, 0)::float END        AS ad_spend,
-               COALESCE(o.attributed_orders, 0)::int               AS attributed_orders
+               COALESCE(s.ad_spend, 0)::float        AS ad_spend,
+               COALESCE(o.attributed_orders, 0)::int AS attributed_orders
           FROM days d
           LEFT JOIN spend  s USING (day)
           LEFT JOIN orders o USING (day)
+         WHERE d.day <= (SELECT MAX(day) FROM public.insights_daily_by_ad)
+           AND d.day <  CURRENT_DATE
          ORDER BY d.day
     """), {"wf": wf, "wt": wt})).all()
 
     points = [CpisDailyPoint(day=r.day, ad_spend=r.ad_spend,
                              attributed_orders=r.attributed_orders) for r in rows]
+    last = points[-1].day if points else None
     return CpisDailySeriesResponse(
         window_from=wf, window_to=wt, points=points,
-        max_spend=max((p.ad_spend for p in points if p.ad_spend is not None), default=0.0),
+        max_spend=max((p.ad_spend for p in points), default=0.0),
         max_orders=max((p.attributed_orders for p in points), default=0),
+        truncated_to=last if (last and last < wt) else None,
     )
 
 

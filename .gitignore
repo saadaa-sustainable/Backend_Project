@@ -69,3 +69,4 @@ data/
 # are committed; the installed skill and its scratch are not.
 .agents/skills/
 .impeccable/mocks/
+exports/shots/
