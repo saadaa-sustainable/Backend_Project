@@ -38,7 +38,7 @@ const UTM_SORT_OPTIONS: { value: CpisUtmSort; label: string }[] = [
   { value: "attributed_units", label: "Units sold (most first)" },
   { value: "attributed_orders", label: "Orders (most first)" },
   { value: "attributed_revenue", label: "Revenue (highest first)" },
-  { value: "ad_spend", label: "Ad spend (highest first)" },
+  { value: "ad_spend", label: "Spend on this SKU\u2019s ads (highest first)" },
 ];
 
 export function Cpis() {
@@ -687,8 +687,17 @@ function CpisView() {
               onClick={() => setSpendMatchMode(mode)}
               title={
                 mode === "ad_name"
-                  ? "STRICT: only ads whose ad_name contains this SKU code as a whole word (regex \\y<sku>\\y). Typically 5-15% of the SKU's converting spend."
-                  : "FRACTIONAL: every ad whose id appeared in this SKU's UTM-attributed orders, with spend split per-order and then within-order by line-item revenue share. Sums back to Meta total across SKUs -- no double-count."
+                  ? "Spend on ads that NAME this SKU.\n\n"
+                    + "An ad counts in full if its name contains the SKU code as a whole word. "
+                    + "An ad that sold the SKU without naming it counts nothing, and an ad naming "
+                    + "two SKUs counts in full against both.\n\n"
+                    + "These figures DO NOT ADD UP: summing the column across SKUs exceeds what "
+                    + "Meta charged. Use it to judge one SKU's own ads, never to total spend."
+                  : "This SKU's SHARE of spend, from orders.\n\n"
+                    + "Every ad that drove an attributed order is split across the SKUs in that "
+                    + "order, by each line's share of the order's value.\n\n"
+                    + "These figures DO ADD UP: every rupee lands on exactly one SKU, so the "
+                    + "column totals to Meta's own spend. Use it to divide the budget."
               }
               className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                 spendMatchMode === mode
@@ -696,7 +705,7 @@ function CpisView() {
                   : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
               }`}
             >
-              {mode === "ad_name" ? "Match: ad_name" : "Match: fractional"}
+              {mode === "ad_name" ? "Ads naming the SKU" : "SKU\u2019s share of spend"}
             </button>
           ))}
         </div>
@@ -820,14 +829,16 @@ function CpisView() {
                   className="px-3 py-3 text-right"
                   title={
                     spendMatchMode === "ad_name"
-                      ? "SUM of windowed spend for name-matched ads (from insights_daily_by_ad, in the picked date range). Only ads whose ad_name contains this SKU."
-                      : "Fractional per-line-item allocation from cpis_by_sku_utm.ad_spend: for each ad, per_order_share = ad_spend / n_orders_ad_drove, then split within-order by line-item revenue share (line_rev / order_total_rev). Example: ad spent 1000 on 10 orders => 100 / order; order value 600 with SDCET 300 (50%) => SDCET share = 100 x 50% = 50. Sums back to Meta total across all SKUs -- no double-count."
+                      ? "Spend, in the picked window, of every ad whose NAME contains this SKU "
+                        + "code as a whole word. Does not add up across SKUs \u2014 an ad naming "
+                        + "two SKUs counts in full against both, and an ad that sold this SKU "
+                        + "without naming it counts nothing."
+                      : "This SKU\u2019s share of the spend behind its attributed orders: each "
+                        + "ad\u2019s spend is split across the order, by each line\u2019s share of "
+                        + "the order value. Adds up \u2014 the column totals to Meta\u2019s own spend."
                   }
                 >
-                  Spend
-                  <span className="ml-1 text-[10px] text-text-tertiary">
-                    ({spendMatchMode === "ad_name" ? "name" : "frac"})
-                  </span>
+                  {spendMatchMode === "ad_name" ? "Named-ad spend" : "Spend share"}
                 </th>
                 <th
                   className="px-3 py-3 text-right"
@@ -1661,7 +1672,7 @@ function CpisKpiStrip({
       <KwikTile
         icon={<span>₹</span>}
         iconColor="amber"
-        label={isFractional ? "Meta ad spend" : "Ad spend (name-matched)"}
+        label={isFractional ? "Spend share (adds up)" : "Named-ad spend (does not add up)"}
         value={fmtINRCompact(totalSpend)}
         subLine={
           isFractional && attrRate !== null && untetheredSpend !== null

@@ -3373,12 +3373,43 @@ async def get_cpis(
 ) -> CpisResponse:
     """CPIS per master SKU with windowed ad metrics.
 
+    WHAT `ad_spend` MEANS HERE, because CPIS has two things by that
+    name and mixing them up is the single easiest way to be wrong:
+
+      THIS endpoint          the windowed spend of every ad whose NAME
+                             contains the SKU code as a whole word.
+                             NOT ADDITIVE. An ad naming two SKUs is
+                             counted in full against both, so summing
+                             the column across SKUs exceeds what Meta
+                             charged. Today that is 1.01x overall (53
+                             ads name more than one SKU) but up to 2x
+                             for the SKUs involved. An ad that sold the
+                             SKU without naming it contributes zero.
+                             Answers: how are THIS SKU's own ads doing?
+
+      cpis_by_sku_utm        the SKU's SHARE of the spend behind its
+      (/cpis-utm)            attributed orders -- each ad's spend split
+                             per order, then within the order by line
+                             revenue. ADDITIVE: every rupee lands on
+                             exactly one SKU line and the column totals
+                             to Meta's own spend.
+                             Answers: how should the budget be divided?
+
+    Neither is "money spent selling this product"; the first is money
+    behind ads that mention it, the second is a modelled share.
+
     Ad-side metrics (ad_spend, ncp_count, cost_per_ncp) are computed
-    *at query time* from raw_dump_meta insights so they respect the
-    picked window; the underlying cpis_by_sku table stores those
-    columns as lifetime totals per SKU regardless of window_key, which
-    is why picking 7d used to show the same ad_spend as 30d. Fixed
-    2026-08-29.
+    *at query time* so they respect the picked window; the underlying
+    cpis_by_sku table stores those columns as lifetime totals per SKU
+    regardless of window_key, which is why picking 7d used to show the
+    same ad_spend as 30d. Fixed 2026-08-29.
+
+    The sort and the page are taken on the WINDOWED value as of
+    2026-09-26. They used to be taken on the stored lifetime one while
+    the windowed figure was displayed, so "sort by ad spend" returned a
+    column that read as unsorted -- on 30d the first row showed Rs 2,893
+    and the tenth Rs 17.1L -- and LIMIT/OFFSET ran on that same wrong
+    order, which could keep a heavy in-window spender off page one.
 
     Both windowed ad_spend and windowed ncp_count come from
     insights_daily_by_ad, which is keyed (ad_id, day) and therefore
@@ -3417,90 +3448,95 @@ async def get_cpis(
     # We do this in one big SQL rather than a Python loop so the whole
     # thing lands in a single request. The `matched_ads` CTE reuses the
     # same word-boundary regex we use in /cpis/{sku}/ads.
+    # Windowed sort keys, so the ORDER BY names the same number the
+    # column shows. `units_sold` is the one stored figure that is
+    # already per-window.
+    _ORDER = {
+        "ad_spend":           "ad_spend_windowed",
+        "cost_per_ncp":       "cost_per_ncp_windowed",
+        "cost_per_unit_sold": "cost_per_unit_sold_windowed",
+        "units_sold":         "units_sold",
+    }
+    order_expr = _ORDER[sort]
+
     sql = f"""
-      WITH page AS (
+      -- EVERY matching SKU, not a page of them. The windowed figures
+      -- have to exist before the sort can use them, and the set is 97
+      -- rows per window -- the old "expand only the page" shape was
+      -- guarding against a cost that does not exist.
+      WITH candidates AS (
         SELECT master_sku, window_key, window_from, window_to,
                units_sold, ending_inventory_units, avg_sell_through_rate,
                matched_ad_count,
-               ad_spend AS ad_spend_lifetime,
-               ncp_count AS ncp_count_lifetime,
-               cost_per_ncp AS cost_per_ncp_lifetime,
+               ad_spend           AS ad_spend_lifetime,
+               ncp_count          AS ncp_count_lifetime,
+               cost_per_ncp       AS cost_per_ncp_lifetime,
                cost_per_unit_sold AS cost_per_unit_sold_lifetime
         FROM cpis_by_sku c
         {where_sql}
-        ORDER BY c.{sort_column} DESC NULLS LAST
-        LIMIT :limit OFFSET :offset
       ),
-      -- For each SKU on the page, expand to matched ads via word-
-      -- boundary regex on ad_name (same as /cpis/{{sku}}/ads).
+      -- Expand each SKU to the ads whose NAME carries its code, by
+      -- word-boundary regex (same rule as /cpis/{{sku}}/ads). An ad
+      -- naming two SKUs joins to both, which is why this column is not
+      -- additive across rows -- see the docstring.
       matched AS (
-        SELECT p.master_sku, al.ad_id, al.spend AS ad_lifetime_spend,
-               al.ncp_count AS ad_lifetime_ncp
-        FROM page p
+        SELECT c.master_sku, al.ad_id
+        FROM candidates c
         JOIN ad_lifecycle al
-          ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+          ON al.ad_name ~* ('\\y' || c.master_sku || '\\y')
       ),
-      -- Windowed spend and NCP per ad from the materialised
-      -- insights_daily_by_ad table (scripts/refresh_insights_daily_by_ad.py),
-      -- which is what /creative-testing already reads.
-      --
-      -- This replaced a LEFT JOIN onto raw_dump_meta that matched on
-      -- raw_payload->>'ad_id' and cast raw_payload->>'date_start' to a
-      -- date per row. No index can serve either expression, so every
-      -- request scanned 2.2M JSONB rows across 5.9GB and the endpoint
-      -- took 50s. The typed table has ix_idba_ad_day on (ad_id, day).
-      --
-      -- The window bounds come from the join to `page` rather than the
-      -- two correlated subqueries that were here before, which re-ran
-      -- per matched ad.
       windowed_ad AS (
         SELECT m.master_sku, m.ad_id,
-               COALESCE(SUM(i.spend), 0) AS windowed_spend,
-               COALESCE(SUM(i.ncp_count), 0) AS windowed_ncp,
-               m.ad_lifetime_spend, m.ad_lifetime_ncp
+               COALESCE(SUM(i.spend), 0)     AS windowed_spend,
+               COALESCE(SUM(i.ncp_count), 0) AS windowed_ncp
         FROM matched m
-        JOIN page p ON p.master_sku = m.master_sku
+        JOIN candidates c ON c.master_sku = m.master_sku
         LEFT JOIN public.insights_daily_by_ad i
           ON i.ad_id = m.ad_id
-         AND i.day >= p.window_from
-         AND i.day <= p.window_to
-        GROUP BY m.master_sku, m.ad_id, m.ad_lifetime_spend, m.ad_lifetime_ncp
+         AND i.day >= c.window_from
+         AND i.day <= c.window_to
+        GROUP BY m.master_sku, m.ad_id
       ),
       windowed_sku AS (
-        -- NCP is now the real windowed count, summed per day from
-        -- insights_daily_by_ad. It used to be the proportional
-        -- approximation lifetime_ncp * (windowed_spend /
-        -- lifetime_spend), which this module documented as standing in
-        -- only until Silver carried per-day NCP. It does.
         SELECT master_sku,
                SUM(windowed_spend) AS ad_spend_windowed,
                SUM(windowed_ncp)   AS ncp_count_windowed
         FROM windowed_ad
         GROUP BY master_sku
+      ),
+      scored AS (
+        SELECT c.*,
+               COALESCE(w.ad_spend_windowed, 0)::numeric  AS ad_spend_windowed,
+               COALESCE(w.ncp_count_windowed, 0)::numeric AS ncp_count_windowed,
+               CASE WHEN COALESCE(w.ncp_count_windowed, 0) > 0
+                 THEN w.ad_spend_windowed / w.ncp_count_windowed END
+                 AS cost_per_ncp_windowed,
+               CASE WHEN COALESCE(c.units_sold, 0) > 0
+                 THEN COALESCE(w.ad_spend_windowed, 0) / c.units_sold END
+                 AS cost_per_unit_sold_windowed
+        FROM candidates c
+        LEFT JOIN windowed_sku w USING (master_sku)
       )
-      SELECT p.master_sku, p.window_key, p.window_from, p.window_to,
-             p.units_sold, p.ending_inventory_units, p.avg_sell_through_rate,
-             p.matched_ad_count,
-             COALESCE(w.ad_spend_windowed, 0)::numeric AS ad_spend,
-             COALESCE(w.ncp_count_windowed, 0)::numeric AS ncp_count,
-             CASE WHEN COALESCE(w.ncp_count_windowed,0) > 0
-               THEN COALESCE(w.ad_spend_windowed,0) / w.ncp_count_windowed
-               ELSE NULL END AS cost_per_ncp,
-             CASE WHEN COALESCE(p.units_sold,0) > 0
-               THEN COALESCE(w.ad_spend_windowed,0) / p.units_sold
-               ELSE NULL END AS cost_per_unit_sold,
-             p.ad_spend_lifetime,
-             p.ncp_count_lifetime
-      FROM page p
-      LEFT JOIN windowed_sku w USING (master_sku)
-      -- Row order preserved from `page` CTE (which sorted by
-      -- c.{sort_column}). Adding an explicit ORDER BY here would
-      -- re-shuffle after the LEFT JOIN and can't reference the
-      -- CTE order directly without ROW_NUMBER(). The page CTE
-      -- sorts by cpis_by_sku's stored value which is lifetime for
-      -- ad_spend/cost_per_ncp -- that's approximately correlated
-      -- with the windowed value users see, and the alternative
-      -- (sorting outer by windowed) would need a second query.
+      SELECT master_sku, window_key, window_from, window_to,
+             units_sold, ending_inventory_units, avg_sell_through_rate,
+             matched_ad_count,
+             ad_spend_windowed           AS ad_spend,
+             ncp_count_windowed          AS ncp_count,
+             cost_per_ncp_windowed       AS cost_per_ncp,
+             cost_per_unit_sold_windowed AS cost_per_unit_sold,
+             ad_spend_lifetime,
+             ncp_count_lifetime
+      FROM scored
+      -- Sorted on the value the column actually shows. Until
+      -- 2026-09-26 this sorted on cpis_by_sku's stored LIFETIME spend
+      -- and then displayed the windowed one, so "sort by ad spend"
+      -- returned a column that read as unsorted: on the 30d window the
+      -- first row showed Rs 2,893 and the tenth Rs 17.1L. Worse than
+      -- cosmetic -- LIMIT/OFFSET ran on the lifetime order too, so a
+      -- SKU spending heavily inside the window could sit off page one
+      -- entirely.
+      ORDER BY {order_expr} DESC NULLS LAST, master_sku
+      LIMIT :limit OFFSET :offset
     """
 
     rows_result = await session.execute(text(sql), {**params, "limit": limit, "offset": offset})
