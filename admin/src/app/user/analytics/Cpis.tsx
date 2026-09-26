@@ -688,17 +688,18 @@ function CpisView() {
               onClick={() => setSpendMatchMode(mode)}
               title={
                 mode === "ad_name"
-                  ? "Spend on ads that NAME this SKU.\n\n"
-                    + "An ad counts in full if its name contains the SKU code as a whole word. "
-                    + "An ad that sold the SKU without naming it counts nothing, and an ad naming "
-                    + "two SKUs counts in full against both.\n\n"
-                    + "These figures DO NOT ADD UP: summing the column across SKUs exceeds what "
-                    + "Meta charged. Use it to judge one SKU's own ads, never to total spend."
-                  : "This SKU's SHARE of spend, from orders.\n\n"
-                    + "Every ad that drove an attributed order is split across the SKUs in that "
-                    + "order, by each line's share of the order's value.\n\n"
-                    + "These figures DO ADD UP: every rupee lands on exactly one SKU, so the "
-                    + "column totals to Meta's own spend. Use it to divide the budget."
+                  ? "Money spent on ads that have this product's code in their name.\n\n"
+                    + "We look at the ad's name, not at what it sold. So an ad that sold this "
+                    + "product without naming it counts as nothing here, and an ad naming two "
+                    + "products is counted in full for both.\n\n"
+                    + "Because of that, DO NOT ADD THESE UP \u2014 the total would be more than "
+                    + "you actually spent. Use this to look at one product's own ads."
+                  : "This product's slice of the money behind the orders it sold in.\n\n"
+                    + "Say an ad cost \u20b91,000 and led to 10 orders. That is \u20b9100 per "
+                    + "order. If one of those orders came to \u20b9600 and this product was "
+                    + "\u20b9300 of it \u2014 half \u2014 then this product takes \u20b950.\n\n"
+                    + "Every rupee is counted once, so these DO ADD UP to your real Meta spend. "
+                    + "Use this to decide how to split the budget."
               }
               className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                 spendMatchMode === mode
@@ -706,7 +707,7 @@ function CpisView() {
                   : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
               }`}
             >
-              {mode === "ad_name" ? "Ads naming the SKU" : "SKU\u2019s share of spend"}
+              {mode === "ad_name" ? "Ads that name it" : "Its share of spend"}
             </button>
           ))}
         </div>
@@ -830,16 +831,14 @@ function CpisView() {
                   className="px-3 py-3 text-right"
                   title={
                     spendMatchMode === "ad_name"
-                      ? "Spend, in the picked window, of every ad whose NAME contains this SKU "
-                        + "code as a whole word. Does not add up across SKUs \u2014 an ad naming "
-                        + "two SKUs counts in full against both, and an ad that sold this SKU "
-                        + "without naming it counts nothing."
-                      : "This SKU\u2019s share of the spend behind its attributed orders: each "
-                        + "ad\u2019s spend is split across the order, by each line\u2019s share of "
-                        + "the order value. Adds up \u2014 the column totals to Meta\u2019s own spend."
+                      ? "Money spent on ads with this product's code in their name, over the "
+                        + "dates you picked. Do not add this column up \u2014 an ad naming two "
+                        + "products is counted for both."
+                      : "This product's slice of the money behind the orders it sold in, split "
+                        + "by how much of each order it was. Adds up to your real Meta spend."
                   }
                 >
-                  {spendMatchMode === "ad_name" ? "Named-ad spend" : "Spend share"}
+                  {spendMatchMode === "ad_name" ? "Spend (named ads)" : "Spend (this product\u2019s share)"}
                 </th>
                 <th
                   className="px-3 py-3 text-right"
@@ -1663,19 +1662,24 @@ function CpisKpiStrip({
     if (adUnknown === null || lag === null || noConversion === null) return undefined;
     const pct = (n: number) => (metaTotalSpend > 0 ? ` (${((n / metaTotalSpend) * 100).toFixed(0)}%)` : "");
     const lines = [
+      `This is every product's slice of your ad money added together. ` +
+        `Each ad's cost is shared out across the orders it led to, and then ` +
+        `across the products inside each order, so no rupee is counted twice.`,
+      `It does not reach your full Meta spend, because some spend never ` +
+        `ties to an order. Here is where the rest went:`,
       `Of ${fmtINRCompact(metaTotalSpend)} Meta spend in this window, ` +
         `${fmtINRCompact(attributedSpend ?? 0)} is claimed by an attributed order. ` +
         `The remaining ${fmtINRCompact(untetheredSpend)} breaks down as:`,
-      `• ${fmtINRCompact(adUnknown)}${pct(adUnknown)} — an order named this ad, but the ad is missing from our Meta history, so the order could not be tied to it.`,
+      `• ${fmtINRCompact(adUnknown)}${pct(adUnknown)} \u2014 an order pointed at this ad, but we have no record of the ad, so the two could not be joined up.`,
     ];
     if (lag > 0) {
       lines.push(
-        `• ${fmtINRCompact(lag)}${pct(lag)} — the ad did convert in this window, just not on the day it spent. A custom date range matches spend to orders day by day; the preset windows do not.`,
+        `• ${fmtINRCompact(lag)}${pct(lag)} \u2014 the ad did sell in this window, just not on the same day it spent. Picking your own dates matches day by day; the preset windows look across the whole period.`,
       );
     }
     lines.push(
-      `• ${fmtINRCompact(noConversion)}${pct(noConversion)} — the ad drove no attributed order at all. Prospecting and awareness spend lives here.`,
-      `Separately, roughly a third of orders carry no ad tag at all (organic, direct, other channels), so they can never attribute to Meta spend.`,
+      `• ${fmtINRCompact(noConversion)}${pct(noConversion)} \u2014 the ad led to no order we can see. Prospecting and awareness spend sits here.`,
+      `Separately, about a third of all orders arrive with no ad tag at all \u2014 organic, direct, and other channels \u2014 so they can never be matched to Meta spend.`,
     );
     return lines.join("\n");
   })();
