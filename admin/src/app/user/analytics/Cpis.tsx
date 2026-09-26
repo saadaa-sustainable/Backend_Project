@@ -943,8 +943,14 @@ function CpisView() {
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders (toggles with attribution mode)">
+                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders. One order may hold several units of this SKU, so this runs above Cost/Unit by the Qty/Order factor.">
                   LC Cost/Order
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
+                <th className="px-3 py-3 text-right" title="Ad spend / attributed units -- what one UNIT of this SKU cost to sell. The line-item view of Cost/Order; compare against ASP Net and the contribution margin.">
+                  LC Cost/Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
@@ -1189,6 +1195,13 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtINRFull(
                       attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw,
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {fmtINRFull(
+                      attributionMode === "equal"
+                        ? row.cost_per_unit_sold
+                        : row.cost_per_unit_sold_vw,
                     )}
                   </td>
                   <td className="px-3 py-2.5 text-right">
