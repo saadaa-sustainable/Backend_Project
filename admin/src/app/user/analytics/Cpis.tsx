@@ -1605,10 +1605,21 @@ function CpisKpiStrip({
     ? rows.reduce((s, r) => s + (r.utm_matched_ncp ?? 0), 0)
     : rows.reduce((s, r) => s + (r.name_matched_ncp ?? 0), 0);
 
-  // Ad-spend tile: full Meta window total in fractional mode; sum of
-  // name-matched slices for the paginated rows in ad_name mode.
+  // Ad-spend tile: the SPEND SHARE, which is the methodology the rest
+  // of this section runs on -- the same allocation the Spend column,
+  // Cost/Order and ROAS all read.
+  //
+  // It used to show Meta's full window total here instead, so the tile
+  // and the column beneath it were computed two different ways and the
+  // tile did not equal the sum of what it sat above. Meta's total has
+  // not been dropped: it moves to the sub-line as the denominator of
+  // the attribution rate, which is the question it was answering.
+  //
+  // In ad_name mode there is no window-total analog, so this remains a
+  // sum over the LOADED rows -- said plainly on the sub-line rather
+  // than left to look like a window figure.
   const totalSpend = isFractional
-    ? (metaTotalSpend ?? 0)
+    ? (attributedSpend ?? 0)
     : rows.reduce((s, r) => s + (r.name_matched_spend ?? 0), 0);
 
   const attrRate =
@@ -1672,12 +1683,14 @@ function CpisKpiStrip({
       <KwikTile
         icon={<span>₹</span>}
         iconColor="amber"
-        label={isFractional ? "Spend share (adds up)" : "Named-ad spend (does not add up)"}
+        label={isFractional ? "Spend share" : "Named-ad spend"}
         value={fmtINRCompact(totalSpend)}
         subLine={
-          isFractional && attrRate !== null && untetheredSpend !== null
-            ? `${attrRate.toFixed(0)}% attributed · ${fmtINRCompact(untetheredSpend)} untethered`
-            : windowLabel
+          isFractional
+            ? attrRate !== null && metaTotalSpend !== null
+              ? `${attrRate.toFixed(0)}% of ${fmtINRCompact(metaTotalSpend)} Meta spend`
+              : windowLabel
+            : `${rows.length} loaded rows \u2014 does not add up`
         }
         info={isFractional ? untetheredInfo : undefined}
       />
