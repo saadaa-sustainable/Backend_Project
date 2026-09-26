@@ -290,6 +290,33 @@ _ATTRIBUTION_DAILY = (
     "GROUP BY matched_ad_id"
 )
 
+# New vs repeat customers per ad, over the same window and the same
+# matched_ad_id mapping the Shopify pair above uses, so the four columns
+# and shopify_orders agree about which orders belong to the ad.
+#
+# "New" means the customer's FIRST EVER order, decided from the whole
+# order history by scripts/refresh_order_customer_type.py -- not first
+# in the window. new_customers equals new orders (a first order is
+# unique to a person) and adds up across ads; repeat_customers is
+# DISTINCT people and does not, because one person can buy from two ads
+# in one window.
+_CUSTOMER_MIX_DAILY = (
+    "SELECT a.matched_ad_id, "
+    "       COUNT(*) FILTER (WHERE oct.is_new_customer), "
+    "       COUNT(DISTINCT oct.customer_id) "
+    "         FILTER (WHERE NOT oct.is_new_customer), "
+    "       COALESCE(SUM(oct.total_price) "
+    "         FILTER (WHERE oct.is_new_customer), 0), "
+    "       COALESCE(SUM(oct.total_price) "
+    "         FILTER (WHERE NOT oct.is_new_customer), 0) "
+    "FROM public.shopify_order_attribution a "
+    "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
+    "WHERE a.matched_ad_id = ANY(:ad_ids) "
+    "  AND oct.order_day >= CAST(:from_str AS date) "
+    "  AND oct.order_day <= CAST(:to_str AS date) "
+    "GROUP BY a.matched_ad_id"
+)
+
 # Fallback daily grain for an install with no source configured: this
 # project's own bronze insights. Carries spend / impressions / reach and
 # nothing else, and UNION ALLs two bronze tables that overlap, so an
@@ -971,6 +998,13 @@ class AdsAnalyseRow(BaseModel):
     ctr_pct: float | None
     shopify_orders: float | None
     shopify_revenue: float | None
+    #: New vs repeat customers, and the sales from each. See
+    #: _CUSTOMER_MIX_DAILY -- repeat_customers is distinct people and
+    #: must not be summed across rows.
+    new_customers: int | None = None
+    repeat_customers: int | None = None
+    new_customer_sales: float | None = None
+    repeat_customer_sales: float | None = None
     shopify_aov: float | None
     shopify_roas: float | None
     cost_per_shopify_order: float | None
@@ -1453,6 +1487,37 @@ async def get_ads_analyse(
         {**params, "limit": limit, "offset": offset},
     )
     rows = [AdsAnalyseRow(**dict(r._mapping)) for r in rows_result]
+
+    # New vs repeat customers, for EVERY date_field -- not only
+    # 'delivery'. The windowed overlay below rewrites the Meta metrics
+    # for delivery mode alone, but these four come from our own order
+    # attribution and are just as meaningful beside a lifetime row. Left
+    # out of that branch they would read NULL on two of the three modes,
+    # which looks like missing data rather than a different question.
+    #
+    # Bounded by the picked dates when there are any, lifetime otherwise
+    # -- the same rule the row's other Shopify columns follow.
+    mix_map: dict[str, tuple[int, int, float, float]] = {}
+    if rows:
+        _mix_sql = _CUSTOMER_MIX_DAILY
+        _mix_params: dict[str, object] = {"ad_ids": [r.ad_id for r in rows]}
+        if from_date and to_date:
+            _mix_params |= {"from_str": from_date, "to_str": to_date}
+        else:
+            _mix_sql = _mix_sql.replace(
+                "  AND oct.order_day >= CAST(:from_str AS date) "
+                "  AND oct.order_day <= CAST(:to_str AS date) ", "")
+        mix_map = {
+            aid: (int(nc or 0), int(rc or 0), float(ns or 0), float(rs or 0))
+            for aid, nc, rc, ns, rs in
+            (await session.execute(text(_mix_sql), _mix_params)).all()
+        }
+    for _r in rows:
+        _nc, _rc, _ns, _rs = mix_map.get(_r.ad_id, (0, 0, 0.0, 0.0))
+        _r.new_customers = _nc
+        _r.repeat_customers = _rc
+        _r.new_customer_sales = _ns
+        _r.repeat_customer_sales = _rs
 
     # The legacy table keeps efficiency scores on lifetime inputs even
     # when delivery metrics are overlaid. Calculate before that overlay,
@@ -7190,6 +7255,60 @@ def _ncp_rollup_sql(level: str) -> str:
     )
 
 
+def _customer_mix_sql(level: str) -> str:
+    """New vs repeat customers, and the sales from each, per entity.
+
+    An order is a NEW-customer order when it is that customer's first
+    ever, judged from the whole order history by
+    scripts/refresh_order_customer_type.py -- not from the window. A
+    customer who first bought in March and bought again in September is
+    a repeat customer on the September order, even though a 30-day view
+    sees only one of them.
+
+    Mapping matches _rolling_lc_sql exactly -- utm_term for ad sets,
+    matched_campaign_id for campaigns -- so these columns and LC Revenue
+    can never disagree about which orders belong to the entity. That is
+    deliberately NOT the ad_lifecycle mapping _ncp_rollup_sql uses; NCP
+    is a Meta-reported figure at ad grain, these are Shopify orders.
+
+    ADDITIVITY, which differs per column:
+
+        new_customers    == new orders. A first order is unique to a
+                            customer, so the two are the same number
+                            and both add up across entities.
+        repeat_customers  counted DISTINCT here, and does NOT add up.
+                            One person buying twice in the window from
+                            two ad sets is one customer but two rows,
+                            so summing this column across entities
+                            overstates. Fine per row, wrong in a total.
+    """
+    if level == "campaign":
+        src = ("FROM public.shopify_order_attribution a "
+               "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
+               "WHERE a.matched_campaign_id IS NOT NULL")
+        key = "a.matched_campaign_id"
+    else:
+        src = ("FROM public.shopify_order_attribution a "
+               "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
+               "JOIN public.meta_adsets s ON s.adset_id = a.utm_term "
+               "WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> '' "
+               "  AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'")
+        key = "a.utm_term"
+    return (
+        f"SELECT {key} AS entity_id, "
+        "       COUNT(*) FILTER (WHERE oct.is_new_customer) AS new_customers, "
+        "       COUNT(DISTINCT oct.customer_id) "
+        "         FILTER (WHERE NOT oct.is_new_customer) AS repeat_customers, "
+        "       COALESCE(SUM(oct.total_price) "
+        "         FILTER (WHERE oct.is_new_customer), 0) AS new_customer_sales, "
+        "       COALESCE(SUM(oct.total_price) "
+        "         FILTER (WHERE NOT oct.is_new_customer), 0) AS repeat_customer_sales "
+        f"{src} "
+        "  AND oct.order_day BETWEEN :from_date AND :to_date "
+        f"GROUP BY {key}"
+    )
+
+
 def _rolling_lc_sql(level: str) -> str:
     """Last-click revenue per rolling window, same mapping the Shopify
     columns use -- utm_term for ad sets, matched_campaign_id for
@@ -7384,6 +7503,14 @@ class RollupRow(BaseModel):
     #: insights_daily_by_ad through ad_lifecycle's adset_id/campaign_id.
     ncp_count: float | None = None
     cost_per_ncp: float | None = None
+    #: New vs repeat customers in the window, from Shopify orders mapped
+    #: the same way LC Revenue is. new_customers equals new orders and
+    #: adds up across rows; repeat_customers is DISTINCT people and does
+    #: not, since one person can buy from two ad sets in one window.
+    new_customers: int | None = None
+    repeat_customers: int | None = None
+    new_customer_sales: float | None = None
+    repeat_customer_sales: float | None = None
     #: Ads inside this entity that meet all four creative-scaling gates
     #: from section 3 of the framework. Matters most on a PAUSE row: the
     #: document's principle is that killing a weak ad set must not kill
@@ -7722,6 +7849,10 @@ async def get_ads_analyse_rollup(
            f"          WHERE s4.adset_id = i.{id_col}) AS campaign_name, "
            if level == "adset" else "       NULL::text AS campaign_name, ")
         + f"       COALESCE(scal.scalable_creatives, 0)::int AS scalable_creatives, "
+        "       COALESCE(cmx.new_customers, 0) AS new_customers, "
+        "       COALESCE(cmx.repeat_customers, 0) AS repeat_customers, "
+        "       COALESCE(cmx.new_customer_sales, 0) AS new_customer_sales, "
+        "       COALESCE(cmx.repeat_customer_sales, 0) AS repeat_customer_sales, "
         f"       npc.ncp_count AS ncp_count, "
         f"       CASE WHEN COALESCE(npc.ncp_count, 0) > 0 "
         f"            THEN COALESCE(w.spend, 0) / npc.ncp_count END AS cost_per_ncp, "
@@ -7766,6 +7897,7 @@ async def get_ads_analyse_rollup(
         f"       ON rm.entity_id = i.{id_col} "
         f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
         f"LEFT JOIN ({_ncp_rollup_sql(level)}) npc ON npc.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_customer_mix_sql(level)}) cmx ON cmx.entity_id = i.{id_col} "
         f"LEFT JOIN ({_scalable_creative_sql(level)}) scal ON scal.entity_id = i.{id_col} "
         f"LEFT JOIN ({_BUDGET_TYPE_SQL if level == 'adset' else _BUDGET_TYPE_CAMPAIGN_SQL}) bt "
         f"       ON bt.{id_col} = i.{id_col} "

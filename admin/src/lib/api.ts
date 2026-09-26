@@ -643,6 +643,16 @@ export interface AdsAnalyseRow {
   ctr_pct: number | null;
   shopify_orders: number | null;
   shopify_revenue: number | null;
+  /** New vs repeat customers over the window, from our own order
+   *  attribution. A customer is NEW on their first ever order, judged
+   *  from full order history -- not first-in-window.
+   *  new_customers equals new orders and adds up across rows;
+   *  repeat_customers is DISTINCT people and does NOT, since one person
+   *  can buy from two entities in one window. */
+  new_customers: number | null;
+  repeat_customers: number | null;
+  new_customer_sales: number | null;
+  repeat_customer_sales: number | null;
   shopify_aov: number | null;
   shopify_roas: number | null;
   cost_per_shopify_order: number | null;
@@ -2302,6 +2312,16 @@ export interface RollupRow {
    *  correctly absent at that level. */
   shopify_orders: number | null;
   shopify_revenue: number | null;
+  /** New vs repeat customers over the window, from our own order
+   *  attribution. A customer is NEW on their first ever order, judged
+   *  from full order history -- not first-in-window.
+   *  new_customers equals new orders and adds up across rows;
+   *  repeat_customers is DISTINCT people and does NOT, since one person
+   *  can buy from two entities in one window. */
+  new_customers: number | null;
+  repeat_customers: number | null;
+  new_customer_sales: number | null;
+  repeat_customer_sales: number | null;
   shopify_roas: number | null;
   cost_per_shopify_order: number | null;
   /** (shopify_revenue - conv_value) / conv_value * 100. Negative means

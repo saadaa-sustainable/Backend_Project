@@ -325,6 +325,10 @@ PHASE_SILVER = [
     # ~50x the measured 12s.
     ("cpis_sku_context",      ["scripts/refresh_cpis_sku_context.py"],       600),
     ("silver_returns",        ["scripts/refresh_master_sku_returns.py"],     900),
+    # New vs repeat customer flag per order. Depends only on
+    # shopify_orders, so it sits before anything that reads it;
+    # the Ads Analyse new/repeat columns join it per ad.
+    ("order_customer_type",   ["scripts/refresh_order_customer_type.py"],   900),
     ("silver_cpis_daily",     ["scripts/refresh_cpis_by_sku_daily.py"],      900),
     # (day, master_sku, ad_id) for /cpis-utm. Must run after the
     # Shopify ingest: the endpoint reads this instead of exploding

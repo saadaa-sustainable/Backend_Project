@@ -304,7 +304,7 @@ interface ColDef {
   /** Whether the column is on by default (matches CTD's default-visible set). */
   defaultVisible?: boolean;
   /** Group for the column picker's grouping. */
-  group: "Identity" | "Timeline" | "Category" | "Delivery" | "Reach" | "Efficiency" | "Meta metrics" | "Shopify" | "Links";
+  group: "Identity" | "Timeline" | "Category" | "Delivery" | "Reach" | "Efficiency" | "Meta metrics" | "Shopify" | "Customers" | "Links";
 }
 
 function fmt(n: number | null | undefined, opts: Intl.NumberFormatOptions = {}) {
@@ -1226,6 +1226,19 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <>{!r.shopify_orders ? "—" : r.shopify_orders.toLocaleString("en-IN")}</> },
   { key: "shopify_revenue", header: "Shop. revenue", group: "Shopify", defaultVisible: true, align: "right",
     render: (r) => <>{!r.shopify_revenue ? "—" : rMoney(r.shopify_revenue)}</> },
+  { key: "new_customers", header: "New cust.", group: "Customers", defaultVisible: true, align: "right",
+    title: "Customers whose FIRST EVER order came through this ad, over the selected dates. Judged against the whole order history, not just this window.",
+    render: (r) => <>{!r.new_customers ? "—" : r.new_customers.toLocaleString("en-IN")}</> },
+  { key: "repeat_customers", header: "Repeat cust.", group: "Customers", defaultVisible: true, align: "right",
+    title: "Distinct people who had bought before and bought again through this ad. Counted DISTINCT, so this column does not add up across rows -- one person can buy from two ads in the same window.",
+    render: (r) => <>{!r.repeat_customers ? "—" : r.repeat_customers.toLocaleString("en-IN")}</> },
+  { key: "new_customer_sales", header: "New cust. sales", group: "Customers", defaultVisible: true, align: "right",
+    title: "Order value from first-time customers",
+    render: (r) => <>{!r.new_customer_sales ? "—" : rMoney(r.new_customer_sales)}</> },
+  { key: "repeat_customer_sales", header: "Repeat cust. sales", group: "Customers", defaultVisible: true, align: "right",
+    title: "Order value from returning customers",
+    render: (r) => <>{!r.repeat_customer_sales ? "—" : rMoney(r.repeat_customer_sales)}</> },
+
   { key: "shopify_roas", header: "Shop. ROAS", group: "Shopify", defaultVisible: true, align: "right",
     title: "Shopify revenue ÷ Meta spend",
     render: (r) => <>{rNum(r.shopify_roas)}</> },
@@ -1475,6 +1488,14 @@ const COLUMNS: ColDef[] = [
     render: (r) => <span className="num">₹{money(r.shopify_revenue)}</span> },
   { key: "shopify_roas", header: "Shop ROAS", kind: "num", group: "Shopify", defaultVisible: true,
     render: (r) => <span className="num">{num2(r.shopify_roas)}</span> },
+  { key: "new_customers", header: "New Cust", kind: "int", group: "Customers", defaultVisible: true,
+    render: (r) => <span className="num">{fmt(r.new_customers, { maximumFractionDigits: 0 })}</span> },
+  { key: "repeat_customers", header: "Repeat Cust", kind: "int", group: "Customers", defaultVisible: true,
+    render: (r) => <span className="num">{fmt(r.repeat_customers, { maximumFractionDigits: 0 })}</span> },
+  { key: "new_customer_sales", header: "New Cust Sales", kind: "money", group: "Customers", defaultVisible: true,
+    render: (r) => <span className="num">₹{money(r.new_customer_sales)}</span> },
+  { key: "repeat_customer_sales", header: "Repeat Cust Sales", kind: "money", group: "Customers", defaultVisible: true,
+    render: (r) => <span className="num">₹{money(r.repeat_customer_sales)}</span> },
   { key: "meta_shop_diff_pct", header: "% Meta vs Shop", kind: "pct", group: "Shopify", defaultVisible: true,
     render: (r) => (
       <span
