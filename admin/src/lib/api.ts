@@ -1499,6 +1499,13 @@ export interface CpisUtmRow {
   // carries no product code); tooltip explains.
   untested_video_ct: number | null;
   untested_graphic_ct: number | null;
+  /** Assets that HAVE run but spent nothing in the picked window --
+   *  proven creative sitting idle. SKU comes from the ad the asset ran
+   *  under, not the asset's own nomenclature, which is why influencer
+   *  has a real count here and none in the untested columns. */
+  tested_idle_video_ct: number | null;
+  tested_idle_graphic_ct: number | null;
+  tested_idle_influencer_ct: number | null;
   untested_influencer_ct: number | null;
   // Return metrics from BQ (MapleMonk consolidated returns, joined
   // per-window). null when the SKU has no rows in master_sku_returns

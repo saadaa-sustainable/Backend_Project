@@ -214,6 +214,15 @@ function RequiredCreativesCell({
   );
 }
 
+/** Idle-count cell. Reads as ordinary ink rather than a warning: idle
+ *  proven creative is an opportunity, not a backlog, and colouring it
+ *  like one would put two amber columns side by side meaning opposite
+ *  things. */
+function IdleCell({ n }: { n: number | null | undefined }) {
+  if (!n) return <span className="text-text-tertiary">—</span>;
+  return <span className="text-text-primary">{n}</span>;
+}
+
 /** Untested-count cell -- muted dash for 0/null, amber emphasis for
  *  backlog >= 5 so a merchant can spot SKUs with plenty of unused
  *  creative ready to test. */
@@ -845,8 +854,24 @@ function CpisView() {
                   Untested<br />Graphic
                 </th>
                 <th className="px-3 py-3 text-right"
-                    title="Influencer posts pending test. Always 0 per SKU today -- SIF-<n>-P<n> nomenclature carries no product code, so no SKU derivation exists yet. See the Untested Assets → Influencer tab for the flat list.">
+                    title="Influencer posts never run in an ad. Always 0 per SKU: SIF-<n>-P<n> nomenclature carries no product code, so an UNTESTED post cannot be tied to a SKU — there is no ad to read one from. The Untested Assets → Influencer tab has the flat list.">
                   Untested<br />Influencer
+                </th>
+                {/* The mirror of the three columns to the left: not
+                    "never tried" but "worked once, not running now".
+                    SKU is read off the ad the asset ran under, so
+                    influencer has a real count here. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right"
+                    title="Videos that HAVE run in a Meta ad but whose ads spent nothing in the picked window. Proven creative sitting idle — the first place to look before briefing something new.">
+                  Idle<br />Video
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Graphics that have run but spent nothing in the picked window.">
+                  Idle<br />Graphic
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Influencer posts that have run but spent nothing in the picked window. This column CAN be attributed to a SKU where the untested one cannot: a tested post has an ad, and the ad name carries the SKU.">
+                  Idle<br />Influencer
                 </th>
                 <th className="border-l border-border-soft px-3 py-3 text-right"
                     title="Creative-testing cadence rule: 1 new creative per week per 1L of weekly ad spend. So a SKU burning 5L / week needs 5 fresh tests. Derived from windowed name-matched spend normalised to a 7-day rate. Compare against the two Untested columns to the left to see if the backlog covers next week's requirement.">
@@ -1076,8 +1101,17 @@ function CpisView() {
                     <UntestedCell n={row.untested_graphic_ct} />
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-tertiary"
-                      title="No per-SKU mapping available for influencer posts today.">
+                      title="An untested influencer post has no ad, so there is no SKU to read.">
                     —
+                  </td>
+                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
+                    <IdleCell n={row.tested_idle_video_ct} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px]">
+                    <IdleCell n={row.tested_idle_graphic_ct} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px]">
+                    <IdleCell n={row.tested_idle_influencer_ct} />
                   </td>
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
                     <RequiredCreativesCell

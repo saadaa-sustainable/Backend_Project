@@ -3850,6 +3850,14 @@ class CpisUtmRow(BaseModel):
     halo_sale_pct: float | None
     # Untested backlog rolled to a single "ready to test" number
     pipeline_avail_to_test: int | None
+    #: Assets that HAVE run but spent nothing in the picked window --
+    #: proven creative sitting idle. The SKU is taken from the ad the
+    #: asset ran under rather than the asset's own nomenclature, which
+    #: is why influencer has a real count here and cannot in the
+    #: untested columns.
+    tested_idle_video_ct: int | None = None
+    tested_idle_graphic_ct: int | None = None
+    tested_idle_influencer_ct: int | None = None
     # Per-SKU untested-asset backlog counts (see untested_by_sku CTE).
     # untested_influencer_ct is always 0 today -- influencer nomenclature
     # doesn't carry a product code, so no SKU mapping exists. Column
@@ -4448,6 +4456,60 @@ async def get_cpis_utm(
         WHERE master_sku IS NOT NULL
         GROUP BY master_sku
       ),
+      -- Assets that HAVE run but spent nothing in the picked window:
+      -- proven creative sitting idle. The merchant question is the
+      -- mirror of the untested columns -- not "what have I never
+      -- tried?" but "what worked once and is not running now?"
+      --
+      -- The SKU comes from the ad the asset ran under, not from the
+      -- asset's own nomenclature. That is what makes an INFLUENCER
+      -- count possible here when the untested columns cannot have one:
+      -- SIF-<n> carries no product code, but the ad that ran the post
+      -- does, and a tested asset always has an ad by definition.
+      --
+      -- Zero spend, not absence: an asset whose ads exist but recorded
+      -- no spend in these dates is idle, which is the finding. The
+      -- LEFT JOIN keeps ads with no insights row at all, and those sum
+      -- to zero, which is the same state.
+      asset_media AS (
+        SELECT asset_id AS aid, 'video'::text AS media
+          FROM public.content_asset_register WHERE asset_id IS NOT NULL
+        UNION ALL
+        SELECT requisition_id, 'video'
+          FROM public.content_iterated_register WHERE requisition_id IS NOT NULL
+        UNION ALL
+        SELECT requisition_id, 'graphic'
+          FROM public.content_graphic_register WHERE requisition_id IS NOT NULL
+        UNION ALL
+        SELECT post_id, 'influencer'
+          FROM public.content_influencer_posts WHERE post_id IS NOT NULL
+      ),
+      asset_window_spend AS (
+        SELECT am.aid, am.media, COALESCE(SUM(i.spend), 0) AS spend
+          FROM asset_media am
+          JOIN public.ad_asset_map map ON map.asset_id = am.aid
+          CROSS JOIN bounds b
+          LEFT JOIN public.insights_daily_by_ad i
+                 ON i.ad_id = map.ad_id AND i.day BETWEEN b.lo AND b.hi
+         GROUP BY am.aid, am.media
+      ),
+      asset_sku AS (
+        SELECT DISTINCT am.aid, am.media, p.master_sku
+          FROM asset_media am
+          JOIN public.ad_asset_map map ON map.asset_id = am.aid
+          JOIN ad_lifecycle al ON al.ad_id = map.ad_id
+          JOIN page p ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+      ),
+      tested_idle_by_sku AS (
+        SELECT sk.master_sku,
+               COUNT(*) FILTER (WHERE sk.media = 'video')      AS tested_idle_video_ct,
+               COUNT(*) FILTER (WHERE sk.media = 'graphic')    AS tested_idle_graphic_ct,
+               COUNT(*) FILTER (WHERE sk.media = 'influencer') AS tested_idle_influencer_ct
+          FROM asset_sku sk
+          JOIN asset_window_spend w ON w.aid = sk.aid AND w.media = sk.media
+         WHERE w.spend = 0
+         GROUP BY sk.master_sku
+      ),
       -- Window length in days so the frontend doesn't have to know
       -- window_key -> length mapping. Same for every row.
       window_days AS (
@@ -4704,6 +4766,9 @@ async def get_cpis_utm(
              -- for derivation). Influencer is 0 for every SKU because
              -- its nomenclature carries no product code; frontend shows
              -- a footer note with the global count so it isn't hidden.
+             COALESCE(tib.tested_idle_video_ct,      0)::integer AS tested_idle_video_ct,
+             COALESCE(tib.tested_idle_graphic_ct,    0)::integer AS tested_idle_graphic_ct,
+             COALESCE(tib.tested_idle_influencer_ct, 0)::integer AS tested_idle_influencer_ct,
              COALESCE(ubs.untested_video_ct,      0)::integer AS untested_video_ct,
              COALESCE(ubs.untested_graphic_ct,    0)::integer AS untested_graphic_ct,
              COALESCE(ubs.untested_influencer_ct, 0)::integer AS untested_influencer_ct,
@@ -4734,6 +4799,7 @@ async def get_cpis_utm(
       LEFT JOIN name_ads na    USING (master_sku)
       LEFT JOIN utm_ads  ua    USING (master_sku)
       LEFT JOIN untested_by_sku ubs USING (master_sku)
+      LEFT JOIN tested_idle_by_sku tib USING (master_sku)
       -- Return metrics from BQ. Pre-filter to a single window inside
       -- the subquery so USING(master_sku) works without ambiguity
       -- against the other joins. Custom date ranges fall back to 30d
