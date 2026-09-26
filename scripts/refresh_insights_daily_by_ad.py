@@ -107,8 +107,9 @@ CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
 #               weekly slice it would double with. Pro-rated weekly
 #               slices only survive on days that had no daily row.
 #
-# Result: row count = distinct (ad_id, day) tuples, values ~= Meta actual.
-# Cross-checked against Ads Manager on 2026-09-03: 30d totals within 5%.
+# Result: row count = distinct (ad_id, day) tuples. A day with a true
+# daily row carries Meta's own figure for it; a day without carries its
+# share of whatever the covering summary did not already account for.
 REBUILD_SQL = """
 WITH ncp_ids AS (
     SELECT DISTINCT raw_payload ->> 'id' AS id
@@ -214,41 +215,95 @@ extracted AS (
       COALESCE((raw_payload->'video_avg_time_watched_actions'->0->>'value')::numeric, 0) AS video_play_time
     FROM raw_dedup
 ),
-expanded AS (
+-- A true daily row is authoritative for its day. Anything longer is a
+-- SUMMARY OVER ITS WHOLE RANGE, so it may only supply the days no
+-- daily row covers -- and only the spend those days actually account
+-- for.
+--
+-- This used to divide a summary by its full range and hand every
+-- uncovered day that flat average. When 10 of a 15-day summary's days
+-- already had daily rows, the remaining 5 each still received
+-- total/15, so the same spend was counted twice: once as itself, once
+-- inside the summary's average.
+--
+-- Measured 2026-08-28..09-24 against Ads Manager at ad level across
+-- both live accounts (Rs 1,16,28,012):
+--
+--     true daily rows only        Rs 1,11,21,641   -4.4%
+--     flat-average fill (old)     Rs 1,21,88,770   +4.8%
+--
+-- The fill is right in principle -- the uncovered days did carry real
+-- spend -- but it injected Rs 10,67,129 where the gap was Rs 5,06,371,
+-- roughly double. The residual is now the summary MINUS whatever its
+-- own daily rows already account for, spread across the uncovered days
+-- alone.
+daily AS (
+    SELECT ad_id, ds AS day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time
+    FROM extracted WHERE de = ds
+),
+summaries AS (
+    SELECT *, (de - ds + 1) AS range_days FROM extracted WHERE de > ds
+),
+summary_cov AS (
+    -- The LATERAL already aggregates to one row per summary, so this
+    -- is a plain projection -- no GROUP BY.
+    SELECT s.*,
+           COALESCE(c.cov_days, 0) AS cov_days,
+           COALESCE(c.s_spend, 0) AS cov_spend,
+           COALESCE(c.s_conv_value, 0) AS cov_conv_value,
+           COALESCE(c.s_ncp_count, 0) AS cov_ncp_count,
+           COALESCE(c.s_ftewv_count, 0) AS cov_ftewv_count,
+           COALESCE(c.s_impressions, 0) AS cov_impressions,
+           COALESCE(c.s_clicks, 0) AS cov_clicks,
+           COALESCE(c.s_all_clicks, 0) AS cov_all_clicks,
+           COALESCE(c.s_purchases, 0) AS cov_purchases,
+           COALESCE(c.s_add_to_cart, 0) AS cov_add_to_cart,
+           COALESCE(c.s_checkout_initiate, 0) AS cov_checkout_initiate,
+           COALESCE(c.s_thruplays, 0) AS cov_thruplays,
+           COALESCE(c.s_three_sec_plays, 0) AS cov_three_sec_plays,
+           COALESCE(c.s_outbound_clicks, 0) AS cov_outbound_clicks,
+           COALESCE(c.s_post_engagements, 0) AS cov_post_engagements
+    FROM summaries s
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS cov_days, SUM(d.spend) AS s_spend, SUM(d.conv_value) AS s_conv_value, SUM(d.ncp_count) AS s_ncp_count, SUM(d.ftewv_count) AS s_ftewv_count, SUM(d.impressions) AS s_impressions, SUM(d.clicks) AS s_clicks, SUM(d.all_clicks) AS s_all_clicks, SUM(d.purchases) AS s_purchases, SUM(d.add_to_cart) AS s_add_to_cart, SUM(d.checkout_initiate) AS s_checkout_initiate, SUM(d.thruplays) AS s_thruplays, SUM(d.three_sec_plays) AS s_three_sec_plays, SUM(d.outbound_clicks) AS s_outbound_clicks, SUM(d.post_engagements) AS s_post_engagements
+        FROM daily d
+       WHERE d.ad_id = s.ad_id AND d.day BETWEEN s.ds AND s.de
+    ) c ON TRUE
+),
+summary_fill AS (
     SELECT
-      e.ad_id,
+      m.ad_id,
       gs::date AS day,
-      (e.de - e.ds + 1) AS range_days,
-      e.spend       / NULLIF(e.de - e.ds + 1, 0) AS spend,
-      e.conv_value  / NULLIF(e.de - e.ds + 1, 0) AS conv_value,
-      e.ncp_count   / NULLIF(e.de - e.ds + 1, 0) AS ncp_count,
-      e.ftewv_count / NULLIF(e.de - e.ds + 1, 0) AS ftewv_count,
-      e.impressions / NULLIF(e.de - e.ds + 1, 0) AS impressions,
-      e.clicks      / NULLIF(e.de - e.ds + 1, 0) AS clicks,
-      e.all_clicks  / NULLIF(e.de - e.ds + 1, 0) AS all_clicks,
-      -- Reach is people, not events: spreading it across a range would
-      -- imply the same person was reached afresh each day. A true daily
-      -- row carries its own reach, so the divide only ever applies to a
-      -- weekly/monthly slice, where the average day is the honest read.
-      e.reach       / NULLIF(e.de - e.ds + 1, 0) AS reach,
-      e.purchases         / NULLIF(e.de - e.ds + 1, 0) AS purchases,
-      e.add_to_cart       / NULLIF(e.de - e.ds + 1, 0) AS add_to_cart,
-      e.checkout_initiate / NULLIF(e.de - e.ds + 1, 0) AS checkout_initiate,
-      e.thruplays         / NULLIF(e.de - e.ds + 1, 0) AS thruplays,
-      e.three_sec_plays   / NULLIF(e.de - e.ds + 1, 0) AS three_sec_plays,
-      e.outbound_clicks   / NULLIF(e.de - e.ds + 1, 0) AS outbound_clicks,
-      e.post_engagements  / NULLIF(e.de - e.ds + 1, 0) AS post_engagements,
-      -- video_play_time is an AVERAGE seconds-watched, not a count, so
-      -- it is NOT divided across the range -- pro-rating an average
-      -- would turn "watched 8s" into "watched 1s a day for 8 days".
-      e.video_play_time                                AS video_play_time
-    FROM extracted e,
-         generate_series(e.ds, e.de, '1 day'::interval) gs
+      m.range_days,
+      GREATEST(m.spend - m.cov_spend, 0) / NULLIF(m.range_days - m.cov_days, 0) AS spend,
+      GREATEST(m.conv_value - m.cov_conv_value, 0) / NULLIF(m.range_days - m.cov_days, 0) AS conv_value,
+      GREATEST(m.ncp_count - m.cov_ncp_count, 0) / NULLIF(m.range_days - m.cov_days, 0) AS ncp_count,
+      GREATEST(m.ftewv_count - m.cov_ftewv_count, 0) / NULLIF(m.range_days - m.cov_days, 0) AS ftewv_count,
+      GREATEST(m.impressions - m.cov_impressions, 0) / NULLIF(m.range_days - m.cov_days, 0) AS impressions,
+      GREATEST(m.clicks - m.cov_clicks, 0) / NULLIF(m.range_days - m.cov_days, 0) AS clicks,
+      GREATEST(m.all_clicks - m.cov_all_clicks, 0) / NULLIF(m.range_days - m.cov_days, 0) AS all_clicks,
+      GREATEST(m.purchases - m.cov_purchases, 0) / NULLIF(m.range_days - m.cov_days, 0) AS purchases,
+      GREATEST(m.add_to_cart - m.cov_add_to_cart, 0) / NULLIF(m.range_days - m.cov_days, 0) AS add_to_cart,
+      GREATEST(m.checkout_initiate - m.cov_checkout_initiate, 0) / NULLIF(m.range_days - m.cov_days, 0) AS checkout_initiate,
+      GREATEST(m.thruplays - m.cov_thruplays, 0) / NULLIF(m.range_days - m.cov_days, 0) AS thruplays,
+      GREATEST(m.three_sec_plays - m.cov_three_sec_plays, 0) / NULLIF(m.range_days - m.cov_days, 0) AS three_sec_plays,
+      GREATEST(m.outbound_clicks - m.cov_outbound_clicks, 0) / NULLIF(m.range_days - m.cov_days, 0) AS outbound_clicks,
+      GREATEST(m.post_engagements - m.cov_post_engagements, 0) / NULLIF(m.range_days - m.cov_days, 0) AS post_engagements,
+      m.reach / NULLIF(m.range_days, 0) AS reach,
+      m.video_play_time                 AS video_play_time
+    FROM summary_cov m,
+         generate_series(m.ds, m.de, '1 day'::interval) gs
+    WHERE m.range_days > m.cov_days
+      AND NOT EXISTS (
+        SELECT 1 FROM daily d WHERE d.ad_id = m.ad_id AND d.day = gs::date)
 ),
 best AS (
-    SELECT DISTINCT ON (ad_id, day)
-      ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, reach, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, video_play_time
-    FROM expanded
+    SELECT DISTINCT ON (ad_id, day) ad_id, day, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time
+    FROM (
+      SELECT ad_id, day, 1 AS range_days, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time FROM daily
+      UNION ALL
+      SELECT ad_id, day, range_days, spend, conv_value, ncp_count, ftewv_count, impressions, clicks, all_clicks, purchases, add_to_cart, checkout_initiate, thruplays, three_sec_plays, outbound_clicks, post_engagements, reach, video_play_time FROM summary_fill
+    ) u
     ORDER BY ad_id, day, range_days ASC
 )
 INSERT INTO public.insights_daily_by_ad (

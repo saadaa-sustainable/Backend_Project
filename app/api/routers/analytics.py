@@ -4378,19 +4378,36 @@ async def get_cpis_utm(
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
       ),
-      -- Per-SKU untested-asset counts across the three CTD content
-      -- registers. Merchant lens: "for SKU SDCP, how many briefed-but-
-      -- unused videos / graphics do I still have in the pipeline?"
-      --   * video    -- content_asset_register  ad_id IS NULL,
-      --                 SKU derived from split_part(planning_nomenclature)
-      --   * graphic  -- content_graphic_register  computed_is_tested = false,
-      --                 SKU from the pre-populated `product` column (falls
-      --                 back to split_part(nomenclature))
-      --   * inf.     -- content_influencer_posts  computed_is_tested = false,
-      --                 no SKU derivation available (SIF-<n>-P<n>
-      --                 nomenclature carries no product code) -- count
-      --                 is always 0 per SKU, but the UI shows the global
-      --                 total in a footer/tooltip so it isn't hidden.
+      -- Per-SKU untested-asset counts. Merchant lens: "for SKU SDCP,
+      -- how many briefed-but-unused videos / graphics do I still have
+      -- in the pipeline?"
+      --
+      -- UNTESTED MEANS NO AD EVER RESOLVED TO THE ASSET -- the same
+      -- rule /untested uses. It used to read each register's OWN
+      -- bookkeeping column (content_asset_register.ad_id IS NULL,
+      -- content_graphic_register.computed_is_tested = false), which
+      -- reports an asset untested whenever the content workflow simply
+      -- never wrote the link back, even though its id appears verbatim
+      -- in a live ad's name. Measured 2026-09-26:
+      --
+      --     video     788 -> 581   213 had demonstrably run (27%)
+      --     graphic   698 -> 517   196 had demonstrably run (28%)
+      --
+      -- The two sections disagreed by that much on the same question,
+      -- which is worse than either number alone: the backlog here read
+      -- a quarter larger than the backlog on the tab built to show it.
+      --
+      --   * video    -- content_asset_register, SKU from
+      --                 split_part(planning_nomenclature, '_', 1)
+      --   * graphic  -- content_graphic_register, SKU from the
+      --                 pre-populated `product` column, falling back to
+      --                 split_part(nomenclature, '_', 1)
+      --   * inf.     -- NOT COUNTED PER SKU and still 0 here. SIF-<n>
+      --                 nomenclature carries no product code, so there
+      --                 is nothing to join on; 13,429 posts are
+      --                 genuinely untested and none of them can be
+      --                 attributed to a SKU. The Untested Assets tab
+      --                 owns that number.
       untested_by_sku AS (
         SELECT master_sku,
                COUNT(*) FILTER (WHERE media = 'video')      AS untested_video_ct,
@@ -4401,7 +4418,8 @@ async def get_cpis_utm(
             'video'::text AS media,
             NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '') AS master_sku
           FROM public.content_asset_register car
-          WHERE car.ad_id IS NULL
+          WHERE NOT EXISTS (
+            SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = car.asset_id)
           UNION ALL
           SELECT
             'graphic'::text,
@@ -4410,7 +4428,8 @@ async def get_cpis_utm(
               NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
             )
           FROM public.content_graphic_register cgr
-          WHERE COALESCE(cgr.computed_is_tested, false) = false
+          WHERE NOT EXISTS (
+            SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = cgr.requisition_id)
           -- Influencer left out of the union: no per-SKU derivation.
           -- Frontend surfaces the global total separately.
         ) u
