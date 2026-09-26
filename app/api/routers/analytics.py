@@ -3979,8 +3979,31 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
     )
     return (
         "WITH breakdown AS (" + _CPIS_UNTETHERED_BREAKDOWN + ") "
+        # CAMPAIGN grain for the headline total, not ad grain.
+        #
+        # Meta's own figures do not agree across grains, and the
+        # coarser the grain the closer they land to what Ads Manager
+        # shows. Measured 2026-08-28..09-24 over the two live
+        # accounts (the third is deactivated and spent nothing):
+        #
+        #     by ad        Rs 1,21,92,096    +6.2% vs Ads Manager
+        #     by adset     Rs 1,19,72,599    +4.3%
+        #     by campaign  Rs 1,16,07,248    +1.1%
+        #     Ads Manager  Rs 1,14,80,107
+        #
+        # It is not duplication on our side: (ad_id, day) is unique
+        # across all 75,976 rows, no ad maps to two accounts, and
+        # every ad-day has a matching adset-day. The grains simply
+        # disagree -- 30.8% of adset-days differ from the sum of
+        # their own ads, and some adset rows read zero while their
+        # ads report real spend.
+        #
+        # A headline called "Total ad spend" has one job: match the
+        # number the reader can check in Ads Manager. The ad grain
+        # stays where it belongs -- per-ad and per-SKU work, where
+        # the question is relative, not absolute.
         "SELECT b.*, (SELECT COALESCE(SUM(spend), 0) "
-        "FROM public.insights_daily_by_ad WHERE day BETWEEN :wf AND :wt) AS meta_total_spend, "
+        "FROM public.insights_daily_by_campaign WHERE day BETWEEN :wf AND :wt) AS meta_total_spend, "
         f"({attributed}) AS attributed_spend FROM breakdown b"
     )
 
@@ -4878,9 +4901,12 @@ async def get_cpis_utm_daily_series(
 
     The two series come from different places on purpose.
 
-      ad_spend           insights_daily_by_ad, summed over every ad.
-                         Meta's own charge for the day, whether or not
-                         it tied to anything.
+      ad_spend           insights_daily_by_campaign, summed over every
+                         campaign. Meta's own charge for the day,
+                         whether or not it tied to anything. Campaign
+                         grain rather than ad grain because the two
+                         disagree and this one reconciles with Ads
+                         Manager -- see _cpis_reconciliation_sql.
       attributed_orders  cpis_by_sku_daily, summed over every SKU.
                          Orders that day credited to an ad.
 
@@ -4925,8 +4951,11 @@ async def get_cpis_utm_daily_series(
                                  INTERVAL '1 day')::date AS day
         ),
         spend AS (
+          -- Campaign grain, same as the headline tile. Ad grain runs
+          -- ~6% above what Ads Manager reports; see the note in
+          -- _cpis_reconciliation_sql.
           SELECT day, COALESCE(SUM(spend), 0) AS ad_spend
-            FROM public.insights_daily_by_ad
+            FROM public.insights_daily_by_campaign
            WHERE day BETWEEN :wf AND :wt
            GROUP BY day
         ),
@@ -4942,7 +4971,7 @@ async def get_cpis_utm_daily_series(
           FROM days d
           LEFT JOIN spend  s USING (day)
           LEFT JOIN orders o USING (day)
-         WHERE d.day <= (SELECT MAX(day) FROM public.insights_daily_by_ad)
+         WHERE d.day <= (SELECT MAX(day) FROM public.insights_daily_by_campaign)
            AND d.day <  CURRENT_DATE
          ORDER BY d.day
     """), {"wf": wf, "wt": wt})).all()
