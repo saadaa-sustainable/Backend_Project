@@ -1640,21 +1640,24 @@ function CpisKpiStrip({
     ? rows.reduce((s, r) => s + (r.utm_matched_ncp ?? 0), 0)
     : rows.reduce((s, r) => s + (r.name_matched_ncp ?? 0), 0);
 
-  // Ad-spend tile: the SPEND SHARE, which is the methodology the rest
-  // of this section runs on -- the same allocation the Spend column,
-  // Cost/Order and ROAS all read.
+  // Ad-spend tile: TOTAL on the headline, attributed underneath.
   //
-  // It used to show Meta's full window total here instead, so the tile
-  // and the column beneath it were computed two different ways and the
-  // tile did not equal the sum of what it sat above. Meta's total has
-  // not been dropped: it moves to the sub-line as the denominator of
-  // the attribution rate, which is the question it was answering.
+  // The headline is the number a first-time reader already has a model
+  // for -- what Meta charged, the figure that matches Ads Manager. The
+  // allocated slice is the one that needs explaining, so it sits below
+  // rather than leading. An earlier cut led with the slice, because it
+  // is what the Spend column beneath sums to; that made the tile and
+  // the column agree and left the headline needing a paragraph before
+  // it meant anything.
   //
-  // In ad_name mode there is no window-total analog, so this remains a
-  // sum over the LOADED rows -- said plainly on the sub-line rather
-  // than left to look like a window figure.
+  // The two are still both on the card and still labelled, so nothing
+  // was hidden to achieve it -- what changed is which one a reader
+  // meets first.
+  //
+  // In ad_name mode there is no window-total analog, so the headline
+  // remains a sum over the LOADED rows and says so.
   const totalSpend = isFractional
-    ? (attributedSpend ?? 0)
+    ? (metaTotalSpend ?? 0)
     : rows.reduce((s, r) => s + (r.name_matched_spend ?? 0), 0);
 
   const attrRate =
@@ -1677,7 +1680,11 @@ function CpisKpiStrip({
       ? null
       : d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
   })();
-  const blendedCostPerNcp = totalNcp > 0 && totalSpend > 0 ? totalSpend / totalNcp : null;
+  // Both sides from the attributed set. Dividing the Meta TOTAL by the
+  // attributed NCP count would mix two populations and understate the
+  // cost of an NCP by whatever share of spend never tied to an order.
+  const costBasis = isFractional ? (attributedSpend ?? 0) : totalSpend;
+  const blendedCostPerNcp = totalNcp > 0 && costBasis > 0 ? costBasis / totalNcp : null;
 
   // "60% attributed" reads as "40% of the budget did nothing" unless the
   // tile says otherwise, so spell out the three reasons the API measured.
@@ -1723,12 +1730,12 @@ function CpisKpiStrip({
       <KwikTile
         icon={<span>₹</span>}
         iconColor="amber"
-        label={isFractional ? "Spend share" : "Named-ad spend"}
+        label={isFractional ? "Total ad spend" : "Named-ad spend"}
         value={fmtINRCompact(totalSpend)}
         subLine={
           isFractional
-            ? attrRate !== null && metaTotalSpend !== null
-              ? `${attrRate.toFixed(0)}% of ${fmtINRCompact(metaTotalSpend)} Meta spend`
+            ? attributedSpend !== null && attrRate !== null
+              ? `${fmtINRCompact(attributedSpend)} tied to an order (${attrRate.toFixed(0)}%)`
                 + (dayMatched ? " \u00b7 same-day matching" : "")
               : windowLabel
             : `${rows.length} loaded rows \u2014 does not add up`
