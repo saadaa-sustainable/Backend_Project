@@ -4834,6 +4834,121 @@ class CpisDataFreshnessResponse(BaseModel):
     computed_at: datetime
 
 
+class CpisDailyPoint(BaseModel):
+    day: date
+    #: Every rupee Meta charged that day, across all ads -- not just the
+    #: slice that tied to an order. This is the honest "what did the day
+    #: cost" figure.
+    #:
+    #: NULL, not 0, for a day Meta has not reported yet. Its insights
+    #: land a day in arrears, so the newest day in any window has orders
+    #: against no spend; drawn as zero it reads as "we stopped
+    #: advertising" on exactly the day a reader is most likely to look
+    #: at. Null makes the line break instead.
+    ad_spend: float | None
+    #: Orders that day which an ad drove, by last-click UTM. Matched to
+    #: the SAME day, so an order placed today against yesterday's spend
+    #: sits on today's point, not yesterday's.
+    attributed_orders: int
+
+
+class CpisDailySeriesResponse(BaseModel):
+    window_from: date | None
+    window_to: date | None
+    points: list[CpisDailyPoint]
+    #: Series maxima, so the client can label each line's own scale
+    #: without re-deriving them from the points.
+    max_spend: float
+    max_orders: int
+
+
+@router.get("/cpis-utm/daily-series", response_model=CpisDailySeriesResponse)
+@cached_analytics(ttl=300.0)
+async def get_cpis_utm_daily_series(
+    session: SessionDep,
+    window: str = Query(default="30d"),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+) -> CpisDailySeriesResponse:
+    """Daily ad spend beside the orders it is credited with.
+
+    One row per day, so the shape of the two can be read against each
+    other: does a heavier spend day actually produce more orders?
+
+    The two series come from different places on purpose.
+
+      ad_spend           insights_daily_by_ad, summed over every ad.
+                         Meta's own charge for the day, whether or not
+                         it tied to anything.
+      attributed_orders  cpis_by_sku_daily, summed over every SKU.
+                         Orders that day credited to an ad.
+
+    They are therefore NOT two views of one number and the ratio between
+    them is not a conversion rate: the spend line includes prospecting
+    that will convert later or never, and the order line includes orders
+    against earlier days' spend. Same-day matching is what makes the
+    comparison legible day by day; it is also why the lines can diverge
+    without either being wrong.
+
+    Every day in the range is returned, including zero days, so a gap in
+    delivery reads as a gap rather than as a shorter line.
+    """
+    if from_date and to_date:
+        wf, wt = from_date, to_date
+    else:
+        row = (await session.execute(
+            text("SELECT window_from, window_to FROM cpis_by_sku_utm "
+                 "WHERE window_key = :window LIMIT 1"),
+            {"window": window},
+        )).first()
+        wf, wt = (row[0], row[1]) if row else (None, None)
+
+    if not (wf and wt):
+        return CpisDailySeriesResponse(window_from=None, window_to=None,
+                                       points=[], max_spend=0.0, max_orders=0)
+
+    rows = (await session.execute(text("""
+        WITH days AS (
+          -- CAST(), not :wf::date -- SQLAlchemy's bind-parameter
+          -- scanner does not see a name followed by '::' and left
+          -- both series bounds unbound, which the driver reported
+          -- only as a missing parameter for the whole statement.
+          SELECT generate_series(CAST(:wf AS date), CAST(:wt AS date),
+                                 INTERVAL '1 day')::date AS day
+        ),
+        spend AS (
+          SELECT day, COALESCE(SUM(spend), 0) AS ad_spend
+            FROM public.insights_daily_by_ad
+           WHERE day BETWEEN :wf AND :wt
+           GROUP BY day
+        ),
+        orders AS (
+          SELECT day, COALESCE(SUM(attributed_orders), 0) AS attributed_orders
+            FROM public.cpis_by_sku_daily
+           WHERE day BETWEEN :wf AND :wt
+           GROUP BY day
+        )
+        SELECT d.day,
+               -- Zero only where Meta HAS reported and the figure really
+               -- is nothing; null past the reporting edge.
+               CASE WHEN d.day <= (SELECT MAX(day) FROM public.insights_daily_by_ad)
+                    THEN COALESCE(s.ad_spend, 0)::float END        AS ad_spend,
+               COALESCE(o.attributed_orders, 0)::int               AS attributed_orders
+          FROM days d
+          LEFT JOIN spend  s USING (day)
+          LEFT JOIN orders o USING (day)
+         ORDER BY d.day
+    """), {"wf": wf, "wt": wt})).all()
+
+    points = [CpisDailyPoint(day=r.day, ad_spend=r.ad_spend,
+                             attributed_orders=r.attributed_orders) for r in rows]
+    return CpisDailySeriesResponse(
+        window_from=wf, window_to=wt, points=points,
+        max_spend=max((p.ad_spend for p in points if p.ad_spend is not None), default=0.0),
+        max_orders=max((p.attributed_orders for p in points), default=0),
+    )
+
+
 @router.get("/cpis-utm/data-freshness", response_model=CpisDataFreshnessResponse)
 @cached_analytics(ttl=60.0)
 async def get_cpis_utm_data_freshness(session: SessionDep) -> CpisDataFreshnessResponse:

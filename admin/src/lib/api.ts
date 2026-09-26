@@ -1589,6 +1589,35 @@ export interface CpisUtmParams {
   offset?: number;
 }
 
+export interface CpisDailyPoint {
+  day: string;
+  /** Null for a day Meta has not reported yet -- draw a break, not a 0. */
+  ad_spend: number | null;
+  attributed_orders: number;
+}
+
+export interface CpisDailySeriesResponse {
+  window_from: string | null;
+  window_to: string | null;
+  points: CpisDailyPoint[];
+  max_spend: number;
+  max_orders: number;
+}
+
+export function fetchCpisDailySeries(params: {
+  window?: string; from_date?: string; to_date?: string;
+} = {}): Promise<CpisDailySeriesResponse> {
+  const qs = new URLSearchParams();
+  if (params.from_date && params.to_date) {
+    qs.set("from_date", params.from_date);
+    qs.set("to_date", params.to_date);
+  } else if (params.window) {
+    qs.set("window", params.window);
+  }
+  return request<CpisDailySeriesResponse>(
+    `/admin/analytics/cpis-utm/daily-series?${qs}`);
+}
+
 export function fetchCpisUtm(params: CpisUtmParams = {}): Promise<CpisUtmResponse> {
   const qs = new URLSearchParams();
   if (params.from_date && params.to_date) {

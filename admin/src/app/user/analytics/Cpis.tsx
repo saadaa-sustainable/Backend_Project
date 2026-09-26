@@ -4,16 +4,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   CpisMatchedAdRow,
+  CpisDailySeriesResponse,
   CpisUtmRow,
   CpisUtmSort,
   CpisUtmWindow,
   fetchCpisDataFreshness,
   fetchCpisMatchedAds,
   fetchCpisSpendTrends,
+  fetchCpisDailySeries,
   fetchCpisUtm,
   type CpisDataFreshness,
   type CpisSpendTrendResponse,
 } from "@/lib/api";
+import { SpendVsOrdersChart } from "./charts/SpendVsOrdersChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
@@ -389,6 +392,7 @@ function CpisView() {
   const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
   const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
   const [untetheredSpend, setUntetheredSpend] = useState<number | null>(null);
+  const [dailySeries, setDailySeries] = useState<CpisDailySeriesResponse | null>(null);
   // Why the untethered slice is untethered -- printed in the Ad spend
   // tile's info tooltip so the percentage is a diagnosis, not a mystery.
   const [untetheredParts, setUntetheredParts] = useState<{
@@ -432,6 +436,16 @@ function CpisView() {
         setRequestError(null);
         setMetaTotalSpend(res.meta_total_spend);
         setAttributedSpend(res.attributed_spend);
+        // Its own request: the series is one row per day for the whole
+        // account, not per SKU, so it does not belong in the paginated
+        // response and must not make the table wait on it.
+        fetchCpisDailySeries({
+          window: filters.window,
+          from_date: filters.from_date,
+          to_date: filters.to_date,
+        })
+          .then((sr) => !cancelled && setDailySeries(sr))
+          .catch(() => !cancelled && setDailySeries(null));
         setUntetheredSpend(res.untethered_spend);
         setUntetheredParts({
           adUnknown: res.untethered_ad_unknown,
@@ -511,6 +525,18 @@ function CpisView() {
         open={openKpi}
         onToggle={() => setOpenKpi((v) => !v)}
       >
+        {hasCurrentRange && dailySeries && dailySeries.points.length > 1 && (
+          <div className="mb-3 border-b border-border-primary pb-3">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+              Spend and orders, day by day
+            </div>
+            <SpendVsOrdersChart
+              points={dailySeries.points}
+              maxSpend={dailySeries.max_spend}
+              maxOrders={dailySeries.max_orders}
+            />
+          </div>
+        )}
         {hasCurrentRange && rows.length > 0 && (
           <CpisKpiStrip
             rows={rows}
