@@ -1575,6 +1575,11 @@ export interface CpisUtmResponse {
   untethered_ad_unknown: number | null;
   untethered_lag: number | null;
   untethered_no_conversion: number | null;
+  /** Newest day meta_total_spend actually covers. Earlier than the
+   *  requested end whenever Meta has not landed the tail of the window
+   *  yet, so the KPI strip labels itself with this rather than with
+   *  the dates the user picked. */
+  spend_through: string | null;
 }
 
 export interface CpisUtmParams {

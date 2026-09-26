@@ -4016,6 +4016,13 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         # the rows beneath it come from one place.
         "SELECT b.*, (SELECT COALESCE(SUM(spend), 0) "
         "FROM public.insights_daily_by_ad WHERE day BETWEEN :wf AND :wt) AS meta_total_spend, "
+        # The newest day the sum above actually covers. Meta lands
+        # insights a day in arrears, so a window ending today is
+        # summed only to yesterday. Printing the requested end date
+        # beside a total that stops earlier is how a correct number
+        # gets read as a 4% shortfall against Ads Manager.
+        "(SELECT MAX(day) FROM public.insights_daily_by_ad "
+        "WHERE day BETWEEN :wf AND :wt) AS spend_through, "
         f"({attributed}) AS attributed_spend FROM breakdown b"
     )
 
@@ -4050,6 +4057,11 @@ class CpisUtmResponse(BaseModel):
     meta_total_spend: float | None
     attributed_spend: float | None
     untethered_spend: float | None
+    #: Newest day meta_total_spend actually covers, which is earlier
+    #: than the requested end whenever Meta has not landed the tail of
+    #: the window yet. The UI labels the tile with this, not with what
+    #: the user asked for.
+    spend_through: date | None = None
     #: Why the untethered slice is untethered. See
     #: _CPIS_UNTETHERED_BREAKDOWN. These three always sum to
     #: untethered_spend, so the tile can print the reasons rather than
@@ -4877,11 +4889,13 @@ async def get_cpis_utm(
     untethered_ad_unknown: float | None = None
     untethered_lag: float | None = None
     untethered_no_conversion: float | None = None
+    spend_through: date | None = None
     if wf and wt:
         # The reconciliation strip is independent of pagination/search.
         # Cache its complete, original population by allocation mode + dates.
         rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
         meta_total_spend = float(rec["meta_total_spend"] or 0)
+        spend_through = rec["spend_through"]
         attributed_spend = float(rec["attributed_spend"] or 0)
         untethered_spend = max(0.0, meta_total_spend - attributed_spend)
         untethered_ad_unknown = min(float(rec["ad_unknown"] or 0), untethered_spend)
@@ -4906,6 +4920,7 @@ async def get_cpis_utm(
         untethered_ad_unknown=untethered_ad_unknown,
         untethered_lag=untethered_lag,
         untethered_no_conversion=untethered_no_conversion,
+        spend_through=spend_through,
     )
 
 

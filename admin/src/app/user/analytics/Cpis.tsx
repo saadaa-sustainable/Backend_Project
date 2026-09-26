@@ -400,6 +400,7 @@ function CpisView() {
   // total (not just the paginated row sum).
   const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
   const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
+  const [spendThrough, setSpendThrough] = useState<string | null>(null);
   const [untetheredSpend, setUntetheredSpend] = useState<number | null>(null);
   const [dailySeries, setDailySeries] = useState<CpisDailySeriesResponse | null>(null);
   // Why the untethered slice is untethered -- printed in the Ad spend
@@ -456,6 +457,7 @@ function CpisView() {
           .then((sr) => !cancelled && setDailySeries(sr))
           .catch(() => !cancelled && setDailySeries(null));
         setUntetheredSpend(res.untethered_spend);
+        setSpendThrough(res.spend_through);
         setUntetheredParts({
           adUnknown: res.untethered_ad_unknown,
           lag: res.untethered_lag,
@@ -556,9 +558,14 @@ function CpisView() {
             untetheredSpend={untetheredSpend}
             untetheredParts={untetheredParts}
             dayMatched={Boolean(fromDate && toDate)}
+            /* The day the spend figure actually reaches, not the day
+               the user asked for. Meta lands insights in arrears, so a
+               window ending today is summed only to yesterday, and
+               printing the requested end beside it is what makes a
+               correct total read as a shortfall against Ads Manager. */
             windowLabel={
               fromDate && toDate
-                ? `${fromDate} → ${toDate}`
+                ? `${fromDate} → ${spendThrough ?? toDate}`
                 : `Last ${window_}`
             }
           />
