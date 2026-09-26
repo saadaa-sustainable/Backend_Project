@@ -4397,9 +4397,18 @@ async def get_cpis_utm(
       -- which is worse than either number alone: the backlog here read
       -- a quarter larger than the backlog on the tab built to show it.
       --
-      --   * video    -- content_asset_register, SKU from
+      -- It also counts the SAME POPULATION /untested does: assets the
+      -- register holds a link for. An asset with no file cannot be put
+      -- in an ad, so counting it as backlog asks someone to action work
+      -- that has nothing to action. /untested made that scope explicit
+      -- on 2026-09-25 and this is the other half of the same change --
+      -- without it the two tabs still answer differently, just by a
+      -- smaller margin than the rule alone accounted for.
+      --
+      --   * video    -- content_asset_register, link_to_asset, SKU from
       --                 split_part(planning_nomenclature, '_', 1)
-      --   * graphic  -- content_graphic_register, SKU from the
+      --   * graphic  -- content_graphic_register, first of
+      --                 link_1/2/3 or creative, SKU from the
       --                 pre-populated `product` column, falling back to
       --                 split_part(nomenclature, '_', 1)
       --   * inf.     -- NOT COUNTED PER SKU and still 0 here. SIF-<n>
@@ -4418,8 +4427,9 @@ async def get_cpis_utm(
             'video'::text AS media,
             NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '') AS master_sku
           FROM public.content_asset_register car
-          WHERE NOT EXISTS (
-            SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = car.asset_id)
+          WHERE btrim(COALESCE(car.link_to_asset, '')) <> ''
+            AND NOT EXISTS (
+              SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = car.asset_id)
           UNION ALL
           SELECT
             'graphic'::text,
@@ -4428,8 +4438,10 @@ async def get_cpis_utm(
               NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
             )
           FROM public.content_graphic_register cgr
-          WHERE NOT EXISTS (
-            SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = cgr.requisition_id)
+          WHERE btrim(COALESCE(cgr.link_1, cgr.link_2, cgr.link_3,
+                               cgr.creative, '')) <> ''
+            AND NOT EXISTS (
+              SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = cgr.requisition_id)
           -- Influencer left out of the union: no per-SKU derivation.
           -- Frontend surfaces the global total separately.
         ) u
