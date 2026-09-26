@@ -89,8 +89,22 @@ SQL_STEP1 = """
 WITH orders_in_window AS (
   SELECT so.order_id, so.utm_content AS ad_id, so.line_items
   FROM shopify_orders so
-  WHERE so.processed_at >= %(window_from)s::date
-    AND so.processed_at <  (%(window_to)s::date + integer '1')
+  -- IST, because Meta reports its days in the ad account's timezone
+  -- (Asia/Kolkata on all three accounts). Windowing orders in UTC while
+  -- the spend they are divided by is counted in IST misaligns the two
+  -- by 5.5 hours. Over a 30-day window the edges very nearly cancel
+  -- (+6 orders, Rs 2,395, +0.01 pct), but the daily grain does not, so
+  -- both are done the same way.
+  --
+  -- Expressed as timestamptz BOUNDS rather than by transforming every
+  -- row: an IST calendar day is a fixed instant range, so the index on
+  -- processed_at is still usable. Filtering on
+  -- (processed_at AT TIME ZONE ...)::date instead is not sargable and
+  -- took this query from seconds to over nine minutes.
+  WHERE so.processed_at >= (%(window_from)s::date::timestamp
+                              AT TIME ZONE 'Asia/Kolkata')
+    AND so.processed_at <  ((%(window_to)s::date + 1)::timestamp
+                              AT TIME ZONE 'Asia/Kolkata')
     AND so.utm_content ~ '^[0-9]{10,20}$'
     AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
     AND jsonb_typeof(so.line_items->'edges') = 'array'
@@ -160,8 +174,11 @@ SQL_STEP1_HALO = """
 WITH orders_in_window AS (
   SELECT so.order_id, so.line_items
   FROM shopify_orders so
-  WHERE so.processed_at >= %(window_from)s::date
-    AND so.processed_at <  (%(window_to)s::date + integer '1')
+  -- IST day bounds, as in SQL_STEP1.
+  WHERE so.processed_at >= (%(window_from)s::date::timestamp
+                              AT TIME ZONE 'Asia/Kolkata')
+    AND so.processed_at <  ((%(window_to)s::date + 1)::timestamp
+                              AT TIME ZONE 'Asia/Kolkata')
     AND LOWER(TRIM(so.utm_source)) IN (
       'meta','facebook','ig','instagram','fb','igshopping'
     )

@@ -87,9 +87,21 @@ ALTER TABLE cpis_by_sku_daily
 # same shape scoped over a fixed window).
 SQL_HALO_LINES = """
 WITH orders_in_range AS (
-  SELECT so.order_id, so.processed_at::date AS order_day, so.line_items
+  -- IST, because Meta reports its days in the ad account's timezone
+  -- (Asia/Kolkata on all three accounts) while processed_at::date would
+  -- cast at the session timezone, UTC. That put 3,233 of 19,316 orders
+  -- (16.7 pct) on the wrong day against the spend they are compared
+  -- with. Keep the percent sign out of this string entirely: psycopg2
+  -- reads one as a placeholder even inside a SQL comment, and the query
+  -- then dies with "dict is not a sequence".
+  -- The plain `>=` bound stays so the index on processed_at is still
+  -- usable; it is widened by a day to cover the offset.
+  SELECT so.order_id,
+         (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date AS order_day,
+         so.line_items
   FROM shopify_orders so
-  WHERE so.processed_at >= %(since)s::date
+  WHERE so.processed_at >= (%(since)s::date::timestamp
+                             AT TIME ZONE 'Asia/Kolkata')
     AND LOWER(TRIM(so.utm_source)) IN (
       'meta','facebook','ig','instagram','fb','igshopping'
     )
@@ -145,14 +157,16 @@ GROUP BY t.order_id, t.order_day, t.master_sku,
 
 
 # Same shape as refresh_cpis_utm.py but no window filter -- we fetch
-# every ad-driven order since --since and bucket by processed_at day.
+# every ad-driven order since --since and bucket by IST order day.
 SQL_LINES = """
 WITH orders_in_range AS (
+  -- IST day, not UTC -- see the note in SQL_HALO_LINES.
   SELECT so.order_id, so.utm_content AS ad_id,
-         so.processed_at::date AS order_day,
+         (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date AS order_day,
          so.line_items
   FROM shopify_orders so
-  WHERE so.processed_at >= %(since)s::date
+  WHERE so.processed_at >= (%(since)s::date::timestamp
+                             AT TIME ZONE 'Asia/Kolkata')
     AND so.utm_content ~ '^[0-9]{10,20}$'
     AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
     AND jsonb_typeof(so.line_items->'edges') = 'array'

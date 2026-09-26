@@ -401,6 +401,7 @@ function CpisView() {
   const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
   const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
   const [spendThrough, setSpendThrough] = useState<string | null>(null);
+  const [attributedOrders, setAttributedOrders] = useState<number | null>(null);
   const [untetheredSpend, setUntetheredSpend] = useState<number | null>(null);
   const [dailySeries, setDailySeries] = useState<CpisDailySeriesResponse | null>(null);
   // Why the untethered slice is untethered -- printed in the Ad spend
@@ -458,6 +459,7 @@ function CpisView() {
           .catch(() => !cancelled && setDailySeries(null));
         setUntetheredSpend(res.untethered_spend);
         setSpendThrough(res.spend_through);
+        setAttributedOrders(res.attributed_orders_distinct);
         setUntetheredParts({
           adUnknown: res.untethered_ad_unknown,
           lag: res.untethered_lag,
@@ -563,6 +565,7 @@ function CpisView() {
                window ending today is summed only to yesterday, and
                printing the requested end beside it is what makes a
                correct total read as a shortfall against Ads Manager. */
+            attributedOrders={attributedOrders}
             windowLabel={
               fromDate && toDate
                 ? `${fromDate} → ${spendThrough ?? toDate}`
@@ -1639,6 +1642,7 @@ function CategoryFlagPill({ category }: { category: string }) {
  *  attribution is deferred to the per-color-variant view. */
 function CpisKpiStrip({
   rows,
+  attributedOrders,
   windowLabel,
   spendMatchMode,
   metaTotalSpend,
@@ -1648,6 +1652,7 @@ function CpisKpiStrip({
   dayMatched,
 }: {
   rows: CpisUtmRow[];
+  attributedOrders: number | null;
   windowLabel: string;
   /** A custom date range matches spend to orders DAY BY DAY; the preset
    *  windows match across the whole window. Same 30 days picked the two
@@ -1674,8 +1679,13 @@ function CpisKpiStrip({
   //                     TRUE Meta total, not just the attributed slice.
   const isFractional = spendMatchMode === "utm_id";
 
+  // Server-side DISTINCT count when we have one. Summing the per-SKU
+  // column counts a two-SKU basket twice -- 22k against 19.3k real
+  // orders over 30 days, a 14.7% overstatement on a tile labelled
+  // "orders driven". The per-SKU column stays as it is; it means
+  // "orders containing this SKU" and is right at that grain.
   const totalCount = isFractional
-    ? rows.reduce((s, r) => s + (r.attributed_orders ?? 0), 0)
+    ? attributedOrders ?? rows.reduce((s, r) => s + (r.attributed_orders ?? 0), 0)
     : rows.reduce((s, r) => s + (r.name_matched_ads ?? 0), 0);
   const totalNcp = isFractional
     ? rows.reduce((s, r) => s + (r.utm_matched_ncp ?? 0), 0)

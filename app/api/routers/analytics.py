@@ -3951,11 +3951,18 @@ WITH spend AS (
      WHERE day BETWEEN :wf AND :wt AND spend > 0
 ),
 orders_in_window AS MATERIALIZED (
-    SELECT so.utm_content AS ad_id, so.processed_at::date AS d,
+    -- IST, because Meta counts its spend days in the ad account's
+    -- timezone (Asia/Kolkata) and this joins order days to spend days.
+    -- processed_at::date casts at the session timezone, UTC, which put
+    -- 16.7% of orders on the day either side of the one they belong to.
+    SELECT so.utm_content AS ad_id,
+           (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date AS d,
            jsonb_typeof(so.line_items->'edges') = 'array' AS has_items
       FROM shopify_orders so
-     WHERE so.processed_at >= CAST(:wf AS date)
-       AND so.processed_at < CAST(:wt AS date) + integer '1'
+     WHERE so.processed_at >= CAST(:wf AS date) - 1
+       AND so.processed_at < CAST(:wt AS date) + integer '2'
+       AND (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date
+             BETWEEN CAST(:wf AS date) AND CAST(:wt AS date)
        AND so.utm_content ~ '^[0-9]{10,20}$'
 ),
 cited AS (
@@ -4023,6 +4030,21 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         # gets read as a 4% shortfall against Ads Manager.
         "(SELECT MAX(day) FROM public.insights_daily_by_ad "
         "WHERE day BETWEEN :wf AND :wt) AS spend_through, "
+        # DISTINCT orders, not the sum of per-SKU order counts. A basket
+        # holding two master SKUs is one order but appears once under
+        # each, so summing the per-SKU column overstated the headline by
+        # 14.7% (22,162 against 19,317 real orders over 30 days). The
+        # per-SKU column itself is right -- "orders containing this SKU"
+        # -- it just does not add up across SKUs.
+        "(SELECT COUNT(DISTINCT so.order_id) FROM shopify_orders so "
+        " WHERE so.processed_at >= CAST(:wf AS date) - 1 "
+        "   AND so.processed_at < CAST(:wt AS date) + integer '2' "
+        "   AND (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date "
+        "         BETWEEN CAST(:wf AS date) AND CAST(:wt AS date) "
+        "   AND so.utm_content ~ '^[0-9]{10,20}$' "
+        "   AND jsonb_typeof(so.line_items->'edges') = 'array' "
+        "   AND EXISTS (SELECT 1 FROM ad_lifecycle al "
+        "               WHERE al.ad_id = so.utm_content)) AS attributed_orders_distinct, "
         f"({attributed}) AS attributed_spend FROM breakdown b"
     )
 
@@ -4062,6 +4084,10 @@ class CpisUtmResponse(BaseModel):
     #: the window yet. The UI labels the tile with this, not with what
     #: the user asked for.
     spend_through: date | None = None
+    #: DISTINCT attributed orders in the window. The per-SKU
+    #: attributed_orders column counts orders containing that SKU, so it
+    #: double-counts mixed baskets when summed; this does not.
+    attributed_orders_distinct: int | None = None
     #: Why the untethered slice is untethered. See
     #: _CPIS_UNTETHERED_BREAKDOWN. These three always sum to
     #: untethered_spend, so the tile can print the reasons rather than
@@ -4890,12 +4916,14 @@ async def get_cpis_utm(
     untethered_lag: float | None = None
     untethered_no_conversion: float | None = None
     spend_through: date | None = None
+    attributed_orders_distinct: int | None = None
     if wf and wt:
         # The reconciliation strip is independent of pagination/search.
         # Cache its complete, original population by allocation mode + dates.
         rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
         meta_total_spend = float(rec["meta_total_spend"] or 0)
         spend_through = rec["spend_through"]
+        attributed_orders_distinct = rec["attributed_orders_distinct"]
         attributed_spend = float(rec["attributed_spend"] or 0)
         untethered_spend = max(0.0, meta_total_spend - attributed_spend)
         untethered_ad_unknown = min(float(rec["ad_unknown"] or 0), untethered_spend)
@@ -4921,6 +4949,7 @@ async def get_cpis_utm(
         untethered_lag=untethered_lag,
         untethered_no_conversion=untethered_no_conversion,
         spend_through=spend_through,
+        attributed_orders_distinct=attributed_orders_distinct,
     )
 
 

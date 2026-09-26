@@ -1580,6 +1580,10 @@ export interface CpisUtmResponse {
    *  yet, so the KPI strip labels itself with this rather than with
    *  the dates the user picked. */
   spend_through: string | null;
+  /** DISTINCT attributed orders in the window. The per-SKU
+   *  attributed_orders column counts orders CONTAINING that SKU, so
+   *  summing it across SKUs double-counts mixed baskets; this does not. */
+  attributed_orders_distinct: number | null;
 }
 
 export interface CpisUtmParams {
