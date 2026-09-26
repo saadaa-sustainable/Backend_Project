@@ -20,12 +20,12 @@
  * scaled across its own low-to-high and the legend prints both ends,
  * which is where the magnitude actually lives.
  *
- * WHY IT IS NOT FULL WIDTH. At the content column's ~1280px against a
- * 96px box the aspect is 13:1, and both series flatten into a band a
- * few pixels tall with two thirds of the plot empty underneath. The
- * shape it exists to show stops being legible at exactly the size that
- * looks most generous. It is capped instead, and left-aligned rather
- * than stretched.
+ * It fills the content column. An earlier cut capped it at 640px
+ * because a 13:1 aspect flattened both series into a band a few pixels
+ * tall — but that was the zero-anchored scale doing the flattening,
+ * not the width. Scaled low-to-high the shape uses the whole box, and
+ * the extra width buys resolution: 30 days across 1280px gives each
+ * day room to show a real move rather than a kink.
  *
  * The series arrives already stopped at the last COMPLETE day, so
  * there is no partial final point to draw. `truncatedTo` says where it
@@ -42,7 +42,7 @@ export interface SpendVsOrdersPoint {
   attributed_orders: number;
 }
 
-const H = 120;
+const H = 140;
 const PAD = { top: 10, right: 2, bottom: 16, left: 2 };
 
 function inr(n: number): string {
@@ -90,7 +90,7 @@ export function SpendVsOrdersChart({
   const h = hover !== null ? points[hover] : null;
 
   return (
-    <div className="flex w-full max-w-[640px] flex-col gap-1">
+    <div className="flex w-full flex-col gap-1">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-0.5 text-[10px]">
         <span className="inline-flex items-center gap-1.5 text-text-secondary">
           <span className="h-[2px] w-3" style={{ background: theme.accentYellow }} />
@@ -111,7 +111,7 @@ export function SpendVsOrdersChart({
       <svg
         viewBox={`0 0 100 ${H}`}
         preserveAspectRatio="none"
-        className="h-[120px] w-full"
+        className="h-[140px] w-full"
         role="img"
         aria-label={`Daily ad spend against orders credited to it, ${points.length} days`}
         onMouseLeave={() => setHover(null)}
