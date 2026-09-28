@@ -3773,6 +3773,9 @@ class CpisUtmRow(BaseModel):
     #: attributed_revenue is this SKU's own lines; this is the whole
     #: order, so order_revenue >= attributed_revenue always.
     order_revenue: float | None = None
+    #: Total units in those same baskets -- the unit-count twin of
+    #: order_revenue. attributed_units counts only this SKU's units.
+    order_units: int | None = None
     lc_avg_order_value: float | None
     lc_avg_qty_per_order: float | None
     # Spend-trend sparkline: 30 daily spend values (most recent day
@@ -4288,6 +4291,7 @@ async def get_cpis_utm(
                    SUM(attributed_units)::int   AS attributed_units,
                    SUM(attributed_revenue)      AS attributed_revenue,
                    SUM(order_revenue)           AS order_revenue,
+                   SUM(order_units)::int        AS order_units,
                    MAX(matched_ad_count)::int   AS matched_ad_count,
                    SUM(ad_spend)                AS ad_spend,
                    SUM(ad_spend_vw)             AS ad_spend_vw,
@@ -4318,6 +4322,7 @@ async def get_cpis_utm(
                  COALESCE(agg.attributed_units, 0)   AS attributed_units,
                  COALESCE(agg.attributed_revenue, 0) AS attributed_revenue,
                  COALESCE(agg.order_revenue, 0)      AS order_revenue,
+                 COALESCE(agg.order_units, 0)        AS order_units,
                  COALESCE(agg.matched_ad_count, 0)   AS matched_ad_count,
                  COALESCE(agg.ad_spend, 0)           AS ad_spend,
                  COALESCE(agg.ad_spend_vw, 0)        AS ad_spend_vw,
@@ -4404,6 +4409,7 @@ async def get_cpis_utm(
                    COALESCE(c.attributed_units, 0)   AS attributed_units,
                    COALESCE(c.attributed_revenue, 0) AS attributed_revenue,
                    COALESCE(c.order_revenue, 0)      AS order_revenue,
+                   COALESCE(c.order_units, 0)        AS order_units,
                    COALESCE(c.matched_ad_count, 0)   AS matched_ad_count,
                    COALESCE(c.ad_spend, 0)           AS ad_spend,
                    c.cost_per_order, c.cost_per_unit_sold, c.roas,
@@ -4929,7 +4935,7 @@ async def get_cpis_utm(
                   ELSE 0 END                                 AS required_creatives_per_week,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
-             p.order_revenue,
+             p.order_revenue, p.order_units,
              p.matched_ad_count, p.ad_spend,
              p.cost_per_order, p.cost_per_unit_sold, p.roas,
              p.halo_orders, p.halo_units, p.halo_revenue, p.halo_spend,

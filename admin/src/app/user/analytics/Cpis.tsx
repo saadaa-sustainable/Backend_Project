@@ -929,17 +929,14 @@ function CpisView() {
                   Net ROAS
                 </th>
                 <th className="px-3 py-3 text-right" title="New-customer ROAS approximation: (windowed NCP × AOV of last-click orders) / windowed spend. Meta's actions[first_time_customer_purchase] would be more accurate but isn't exposed as a flat column.">NC ROAS</th>
-                {/* LAST-CLICK group -- pulled straight from
-                    cpis_by_sku_utm which does order.utm_content → ad_id
-                    → line_items.sku attribution. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Sales value of THIS SKU's units in orders whose last-click UTM content maps to an ad. Its own line value only -- the rest of the basket is in Halo Rev, not here.">LC Revenue</th>
-                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of the orders this SKU appeared in, counted once per order. LC Revenue beside it is only this SKU's own lines, so this is always the larger of the two, and the gap is what the rest of the basket was worth. This is what LC AOV divides.">Order Sales</th>
-                <th className="px-3 py-3 text-right" title="Units of THIS SKU sold in those same orders. An order holding 3 of this SKU counts as 3, so this runs above LC Orders. It is the denominator behind LC Cost/Unit and ASP Net.">LC Units</th>
-                <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Orders</th>
-                {/* 3 mode-dependent cells: LC Ad Spend, LC Cost/Order, LC ROAS.
-                    Header labels the current attribution mode so the merchant
-                    can see at a glance which set of numbers they're looking at. */}
-                <th className="px-3 py-3 text-right" title={
+                {/* LAST-CLICK group, in three tiers.
+                    ORDER LEVEL asks what a whole order cost and was
+                    worth. UNIT LEVEL asks the same of one unit of THIS
+                    SKU. HALO is the rest of the basket. The columns used
+                    to interleave the three, so Cost/Order sat beside
+                    Cost/Unit with nothing saying they divide different
+                    denominators. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right" title={
                   attributionMode === "equal"
                     ? "Equal-per-order allocation: ad spend split evenly across orders driven, then within-order by line-item revenue"
                     : "Value-weighted allocation: ad spend split proportional to each order's total revenue"
@@ -949,42 +946,47 @@ function CpisView() {
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders. One order may hold several units of this SKU, so this runs above Cost/Unit by the Qty/Order factor.">
+                <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to an ad and contain this SKU.">LC Orders</th>
+                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of those orders, counted once per order. Equals LC Revenue + Halo Rev exactly \u2014 this SKU's lines plus everything else in the same baskets.">Order Sales</th>
+                <th className="px-3 py-3 text-right" title="Total units in those orders, every SKU counted. The unit-count twin of Order Sales, and equal to LC Units + Halo Units.">Order Units</th>
+                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales \u00f7 LC Orders.">LC AOV</th>
+                <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Orders. What one ORDER cost to win. Runs above Cost/Unit by the Qty/Order factor.">
                   LC Cost/Order
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Ad spend / attributed units -- what one UNIT of this SKU cost to sell. The line-item view of Cost/Order; compare against ASP Net and the contribution margin.">
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Units of THIS SKU sold in those orders. An order holding 3 counts as 3.">LC Units</th>
+                <th className="px-3 py-3 text-right" title="Sales value of THIS SKU's units only. The rest of the basket is Halo Rev.">LC Revenue</th>
+                <th className="px-3 py-3 text-right" title="Average selling price net \u2014 LC Revenue \u00f7 LC Units.">ASP Net</th>
+                <th className="px-3 py-3 text-right" title="Average units of THIS SKU per order. What separates Cost/Order from Cost/Unit.">Qty/Order</th>
+                <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Units \u2014 what one UNIT cost to sell. Compare against ASP Net and Break-even CPIS.">
                   LC Cost/Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend ÷ this SKU's sales, as a percentage. The share of ad-driven revenue spent on ads, so lower is better. It is the inverse of LC ROAS. Profitable while it stays under the break-even ACoS (unit profit ÷ price).">
+                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend \u00f7 this SKU's sales, as a percentage. The inverse of LC ROAS. Profitable while under the break-even ACoS (unit profit \u00f7 price).">
                   LC ACoS
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising, so it is the most ad spend a unit can carry before it loses money. Selling price − COGS − logistics and returns. A property of the product, so it does not change with the attribution mode.">
-                  Break-even CPIS
-                </th>
-                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS − LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money, and the SKU needs a price, cost or targeting change rather than more budget.">
-                  Headroom
-                  <span className="ml-1 text-[10px] text-text-tertiary">
-                    ({attributionMode === "equal" ? "eq" : "vw"})
-                  </span>
-                </th>
-                <th className="px-3 py-3 text-right" title="Attributed revenue / allocated ad spend (toggles with attribution mode)">
+                <th className="px-3 py-3 text-right" title="LC Revenue \u00f7 allocated ad spend.">
                   LC ROAS
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales ÷ LC Orders. It used to divide LC Revenue, this SKU's own lines, so it read low on every mixed basket and was not an order value at all.">LC AOV</th>
-                <th className="px-3 py-3 text-right" title="Average units of THIS SKU per attributed order (some orders will have multiple units of the same SKU)">Qty/Order</th>
-                <th className="px-3 py-3 text-right" title="Average selling price NET (attributed_revenue / attributed_units)">ASP Net</th>
+                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising \u2014 the most ad spend a unit can carry before it loses money. A property of the product, so it does not change with the attribution mode.">
+                  Break-even CPIS
+                </th>
+                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS \u2212 LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money.">
+                  Headroom
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
                 {/* HALO group (2026-09-04) -- basket co-occurrence
                     over Meta-family traffic. For every SKU in a mixed
                     basket that came from utm_source in {meta, facebook,
@@ -1197,49 +1199,38 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={row.name_matched_nc_roas} />
                   </td>
-                  {/* LAST-CLICK group */}
-                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.attributed_revenue)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.order_revenue)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtNumFull(row.attributed_units)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtNumFull(row.attributed_orders)}
-                  </td>
-                  {/* 3 mode-dependent cells -- toggle with the pill above. */}
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(
-                      attributionMode === "equal" ? row.ad_spend : row.ad_spend_vw,
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(
-                      attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw,
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(
-                      attributionMode === "equal"
-                        ? row.cost_per_unit_sold
-                        : row.cost_per_unit_sold_vw,
-                    )}
-                  </td>
+                  {/* LAST-CLICK group -- order tier, then unit tier. */}
                   {(() => {
-                    const acos = attributionMode === "equal" ? row.acos : row.acos_vw;
-                    const head = attributionMode === "equal" ? row.headroom : row.headroom_vw;
-                    // Break-even ACoS is unit profit ÷ price. Past it, the
+                    const spend = attributionMode === "equal" ? row.ad_spend : row.ad_spend_vw;
+                    const cpo   = attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw;
+                    const cpu   = attributionMode === "equal" ? row.cost_per_unit_sold : row.cost_per_unit_sold_vw;
+                    const acos  = attributionMode === "equal" ? row.acos : row.acos_vw;
+                    const head  = attributionMode === "equal" ? row.headroom : row.headroom_vw;
+                    // Break-even ACoS is unit profit / price. Past it the
                     // SKU is losing money -- the same fact headroom states
                     // in rupees, so the two colour together.
                     const beAcos =
                       row.break_even_cpis !== null && row.avg_selling_price
                         ? (row.break_even_cpis / row.avg_selling_price) * 100
                         : null;
+                    const num = "px-3 py-2.5 text-right font-mono text-[12px] text-text-primary";
                     return (
                       <>
+                        {/* ── order level ── */}
+                        <td className={`border-l border-border-soft ${num}`}>{fmtINRFull(spend)}</td>
+                        <td className={num}>{fmtNumFull(row.attributed_orders)}</td>
+                        <td className={num}>{fmtINRFull(row.order_revenue)}</td>
+                        <td className={num}>{fmtNumFull(row.order_units)}</td>
+                        <td className={num}>{fmtINRFull(row.lc_avg_order_value)}</td>
+                        <td className={num}>{fmtINRFull(cpo)}</td>
+                        {/* ── unit level ── */}
+                        <td className={`border-l border-border-soft ${num}`}>{fmtNumFull(row.attributed_units)}</td>
+                        <td className={num}>{fmtINRFull(row.attributed_revenue)}</td>
+                        <td className={num}>{fmtINRFull(row.avg_selling_price)}</td>
+                        <td className={num}>
+                          {row.lc_avg_qty_per_order !== null ? row.lc_avg_qty_per_order.toFixed(2) : "—"}
+                        </td>
+                        <td className={num}>{fmtINRFull(cpu)}</td>
                         <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
                           acos === null
                             ? "text-text-tertiary"
@@ -1250,7 +1241,10 @@ function CpisView() {
                         title={beAcos !== null ? `Break-even ACoS ${beAcos.toFixed(1)}%` : undefined}>
                           {acos !== null ? `${acos.toFixed(1)}%` : "—"}
                         </td>
-                        <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                        <td className="px-3 py-2.5 text-right">
+                          <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
+                        </td>
+                        <td className={num}>
                           {row.break_even_cpis !== null ? fmtINRFull(row.break_even_cpis) : "—"}
                         </td>
                         <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
@@ -1265,18 +1259,6 @@ function CpisView() {
                       </>
                     );
                   })()}
-                  <td className="px-3 py-2.5 text-right">
-                    <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.lc_avg_order_value)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {row.lc_avg_qty_per_order !== null ? row.lc_avg_qty_per_order.toFixed(2) : "—"}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.avg_selling_price)}
-                  </td>
                   {/* HALO group */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
                     {fmtINRFull(row.halo_revenue)}
