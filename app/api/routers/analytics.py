@@ -3965,6 +3965,27 @@ class CpisUtmRow(BaseModel):
     ad_spend_vw: float | None
     cost_per_order_vw: float | None
     cost_per_unit_sold_vw: float | None
+    #: The three profit columns from the CPIS spec's Step 8.
+    #:
+    #:   acos             allocated spend / product sales. The share of
+    #:                    ad-driven revenue spent on ads; lower is better.
+    #:                    ROAS is its inverse, and is already here.
+    #:   break_even_cpis  unit profit before ads -- the most one unit can
+    #:                    carry in ad spend before it loses money. Taken
+    #:                    from contribution_margin, which is already
+    #:                    selling_price - cogs - logistics_return.
+    #:   headroom         break_even_cpis - CPIS. Profit left per unit
+    #:                    after ads; NEGATIVE means every unit sold loses
+    #:                    money, which is the whole point of the column.
+    #:
+    #: break_even_cpis has no _vw twin: it is a property of the product,
+    #: not of how spend was allocated. acos and headroom do, because CPIS
+    #: and allocated spend differ between the two views.
+    acos: float | None = None
+    acos_vw: float | None = None
+    break_even_cpis: float | None = None
+    headroom: float | None = None
+    headroom_vw: float | None = None
     roas_vw: float | None
     # Halo counterpart -- basket effect from the same ad-driven orders.
     # Not counted in CPIS / ROAS (those use primary only); exposed here
@@ -4949,6 +4970,29 @@ async def get_cpis_utm(
             except (ValueError, TypeError):
                 parsed = None
         row_dict["spend_trend_current"] = parsed
+
+        # Derived here rather than in SQL because the two source
+        # branches (cpis_by_sku_utm for presets, cpis_by_sku_daily
+        # summed for custom ranges) build their columns separately, and
+        # a formula duplicated across both is a formula that drifts.
+        _rev = row_dict.get("attributed_revenue") or 0.0
+        _be = row_dict.get("contribution_margin")
+        for _suffix in ("", "_vw"):
+            _spend = row_dict.get(f"ad_spend{_suffix}")
+            # ACoS is undefined without revenue, not zero: a SKU that
+            # spent and sold nothing has no meaningful ratio, and 0
+            # would read as "perfectly efficient".
+            row_dict[f"acos{_suffix}"] = (
+                float(_spend) / float(_rev) * 100.0
+                if _spend is not None and _rev else None
+            )
+            _cpis = row_dict.get(f"cost_per_unit_sold{_suffix}")
+            row_dict[f"headroom{_suffix}"] = (
+                float(_be) - float(_cpis)
+                if _be is not None and _cpis is not None else None
+            )
+        row_dict["break_even_cpis"] = _be
+
         rows.append(CpisUtmRow(**row_dict))
 
     # `count_sql` was built above alongside `page_cte` to match whichever

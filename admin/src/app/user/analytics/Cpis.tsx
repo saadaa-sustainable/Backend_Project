@@ -955,6 +955,21 @@ function CpisView() {
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
+                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend ÷ this SKU's sales, as a percentage. The share of ad-driven revenue spent on ads, so lower is better. It is the inverse of LC ROAS. Profitable while it stays under the break-even ACoS (unit profit ÷ price).">
+                  LC ACoS
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
+                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising, so it is the most ad spend a unit can carry before it loses money. Selling price − COGS − logistics and returns. A property of the product, so it does not change with the attribution mode.">
+                  Break-even CPIS
+                </th>
+                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS − LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money, and the SKU needs a price, cost or targeting change rather than more budget.">
+                  Headroom
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
                 <th className="px-3 py-3 text-right" title="Attributed revenue / allocated ad spend (toggles with attribution mode)">
                   LC ROAS
                   <span className="ml-1 text-[10px] text-text-tertiary">
@@ -1204,6 +1219,43 @@ function CpisView() {
                         : row.cost_per_unit_sold_vw,
                     )}
                   </td>
+                  {(() => {
+                    const acos = attributionMode === "equal" ? row.acos : row.acos_vw;
+                    const head = attributionMode === "equal" ? row.headroom : row.headroom_vw;
+                    // Break-even ACoS is unit profit ÷ price. Past it, the
+                    // SKU is losing money -- the same fact headroom states
+                    // in rupees, so the two colour together.
+                    const beAcos =
+                      row.break_even_cpis !== null && row.avg_selling_price
+                        ? (row.break_even_cpis / row.avg_selling_price) * 100
+                        : null;
+                    return (
+                      <>
+                        <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                          acos === null
+                            ? "text-text-tertiary"
+                            : beAcos !== null && acos > beAcos
+                              ? "text-error-text"
+                              : "text-text-primary"
+                        }`}
+                        title={beAcos !== null ? `Break-even ACoS ${beAcos.toFixed(1)}%` : undefined}>
+                          {acos !== null ? `${acos.toFixed(1)}%` : "—"}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                          {row.break_even_cpis !== null ? fmtINRFull(row.break_even_cpis) : "—"}
+                        </td>
+                        <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                          head === null
+                            ? "text-text-tertiary"
+                            : head < 0
+                              ? "text-error-text"
+                              : "text-text-primary"
+                        }`}>
+                          {head !== null ? fmtINRFull(head) : "—"}
+                        </td>
+                      </>
+                    );
+                  })()}
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
                   </td>
