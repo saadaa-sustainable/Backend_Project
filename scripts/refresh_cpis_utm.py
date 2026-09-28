@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS cpis_by_sku_utm (
 
 DDL_MIGRATE = """
 ALTER TABLE cpis_by_sku_utm
+    ADD COLUMN IF NOT EXISTS order_revenue  numeric,
     ADD COLUMN IF NOT EXISTS halo_orders    integer,
     ADD COLUMN IF NOT EXISTS halo_units     numeric,
     ADD COLUMN IF NOT EXISTS halo_revenue   numeric,
@@ -87,7 +88,8 @@ ALTER TABLE cpis_by_sku_utm
 # each line as line_revenue / order_total_revenue.
 SQL_STEP1 = """
 WITH orders_in_window AS (
-  SELECT so.order_id, so.utm_content AS ad_id, so.line_items
+  SELECT so.order_id, so.utm_content AS raw_ad, so.utm_term AS raw_adset,
+         so.line_items
   FROM shopify_orders so
   -- IST, because Meta reports its days in the ad account's timezone
   -- (Asia/Kolkata on all three accounts). Windowing orders in UTC while
@@ -105,9 +107,64 @@ WITH orders_in_window AS (
                               AT TIME ZONE 'Asia/Kolkata')
     AND so.processed_at <  ((%(window_to)s::date + 1)::timestamp
                               AT TIME ZONE 'Asia/Kolkata')
-    AND so.utm_content ~ '^[0-9]{10,20}$'
-    AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
+    -- Cancelled orders are out of units and sales, per the CPIS spec.
+    -- financial_status is the only signal we have: shopify_fulfillments
+    -- carries is_canceled_order but it is never set. VOIDED is safe to
+    -- read as cancelled -- all 1,730 of them in a 30-day window are
+    -- UNFULFILLED, so none ever shipped. PENDING is NOT cancelled: it is
+    -- COD awaiting payment and is overwhelmingly fulfilled (16,245 of
+    -- 16,409). REFUNDED stays too -- the spec keeps gross units, because
+    -- return status arrives long after the sale.
+    AND COALESCE(so.financial_status, '') <> 'VOIDED'
     AND jsonb_typeof(so.line_items->'edges') = 'array'
+),
+-- WHICH ENTITY PAYS FOR THIS ORDER.
+--
+-- Step 3 of the spec: utm_content maps to the ad, utm_term to the ad
+-- set. When an order carries an ad set we can see but no ad we can
+-- resolve, the spec falls back a level: "that ad set is allocated as one
+-- unit: its total spend is shared across all its orders".
+--
+-- So the fallback is decided PER AD SET, not per order. If any of an ad
+-- set's orders cannot name an ad, the whole ad set switches to ad-set
+-- allocation -- every one of its orders, including the ones that did
+-- name an ad. Allocating some of its orders per ad and the rest from the
+-- ad set total would count the overlap twice and break the spec's own
+-- reconciliation check (allocated + unattributed = total spend).
+matched AS (
+  SELECT o.order_id, o.line_items,
+         CASE WHEN o.raw_ad ~ '^[0-9]{10,20}$' AND al.ad_id IS NOT NULL
+              THEN o.raw_ad END                                   AS ad_id,
+         -- The ad set comes from the ad when we resolved one; otherwise
+         -- from utm_term, but ONLY if it is a real ad set. Without that
+         -- existence check any numeric utm_term becomes an entity with
+         -- no spend, which would add orders to a SKU at zero cost and
+         -- quietly improve its CPIS.
+         COALESCE(al.adset_id, s.adset_id)                        AS adset_id
+  FROM orders_in_window o
+  LEFT JOIN ad_lifecycle al
+         ON al.ad_id = o.raw_ad AND o.raw_ad ~ '^[0-9]{10,20}$'
+  LEFT JOIN meta_adsets s
+         ON s.adset_id = o.raw_adset AND o.raw_adset ~ '^[0-9]{6,20}$'
+),
+fallback_adsets AS (
+  SELECT adset_id FROM matched
+   WHERE adset_id IS NOT NULL
+   GROUP BY adset_id
+  HAVING bool_or(ad_id IS NULL)
+),
+resolved AS (
+  SELECT m.order_id, m.line_items,
+         CASE WHEN f.adset_id IS NOT NULL THEN 'adset:' || m.adset_id
+              WHEN m.ad_id   IS NOT NULL  THEN 'ad:'    || m.ad_id
+         END AS ad_id
+  FROM matched m
+  LEFT JOIN fallback_adsets f ON f.adset_id = m.adset_id
+),
+entity_orders AS (
+  -- Orders that name neither a resolvable ad nor an ad set stay UNMAPPED
+  -- and are left out of CPIS, exactly as the spec says.
+  SELECT order_id, ad_id, line_items FROM resolved WHERE ad_id IS NOT NULL
 ),
 line_items AS (
   SELECT
@@ -118,7 +175,7 @@ line_items AS (
       (edge->'node'->'originalUnitPriceSet'->'shopMoney'->>'amount')::numeric,
       0
     )                                                               AS unit_price
-  FROM orders_in_window ow,
+  FROM entity_orders ow,
        LATERAL jsonb_array_elements(ow.line_items->'edges') edge
   WHERE edge->'node'->>'sku' IS NOT NULL
 ),
@@ -159,94 +216,28 @@ GROUP BY t.ad_id, t.order_id, t.master_sku,
 """
 
 
-# Step 1b (2026-09-04): Meta-family lines for halo_* only.
-# Halo is *independent of ad_spend* -- it captures basket co-occurrence
-# whenever an order came from Meta/Meta-family traffic (paid ad OR
-# organic IG/FB), regardless of whether we can attribute the click to
-# a specific ad_id. This is broader than SQL_STEP1 (which requires
-# utm_content -> ad_id in lifecycle).
-#
-# Included utm_source values (case-insensitive, trimmed):
-#     meta, facebook, ig, instagram, fb, igshopping
-# In current 30d these cover ~19.5k of 27k orders vs SQL_STEP1's ~20k
-# ad-attributed subset.
-SQL_STEP1_HALO = """
-WITH orders_in_window AS (
-  SELECT so.order_id, so.line_items
-  FROM shopify_orders so
-  -- IST day bounds, as in SQL_STEP1.
-  WHERE so.processed_at >= (%(window_from)s::date::timestamp
-                              AT TIME ZONE 'Asia/Kolkata')
-    AND so.processed_at <  ((%(window_to)s::date + 1)::timestamp
-                              AT TIME ZONE 'Asia/Kolkata')
-    AND LOWER(TRIM(so.utm_source)) IN (
-      'meta','facebook','ig','instagram','fb','igshopping'
-    )
-    AND jsonb_typeof(so.line_items->'edges') = 'array'
-),
-line_items AS (
-  SELECT
-    ow.order_id,
-    (edge->'node'->>'sku')                                          AS variant_sku,
-    COALESCE((edge->'node'->>'quantity')::int, 0)                   AS qty,
-    COALESCE(
-      (edge->'node'->'originalUnitPriceSet'->'shopMoney'->>'amount')::numeric,
-      0
-    )                                                               AS unit_price
-  FROM orders_in_window ow,
-       LATERAL jsonb_array_elements(ow.line_items->'edges') edge
-  WHERE edge->'node'->>'sku' IS NOT NULL
-),
-parsed AS (
-  SELECT
-    order_id, variant_sku, qty, unit_price,
-    (qty * unit_price)                                                AS line_revenue,
-    SUBSTRING(
-      regexp_replace(variant_sku, '_[A-Za-z0-9]+$', '')
-      FROM 1
-      FOR GREATEST(1,
-        length(regexp_replace(variant_sku, '_[A-Za-z0-9]+$', '')) - 2
-      )
-    ) AS master_sku
-  FROM line_items
-),
-tagged AS (
-  SELECT * FROM parsed
-  WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$'
-),
-order_totals AS (
-  SELECT order_id,
-         SUM(line_revenue) AS order_total_revenue,
-         SUM(qty)          AS order_total_qty
-  FROM tagged
-  GROUP BY order_id
-)
-SELECT
-  t.order_id, t.master_sku,
-  SUM(t.qty)::int          AS qty,
-  SUM(t.line_revenue)      AS line_revenue,
-  ot.order_total_revenue,
-  ot.order_total_qty
-FROM tagged t
-JOIN order_totals ot USING (order_id)
-GROUP BY t.order_id, t.master_sku,
-         ot.order_total_revenue, ot.order_total_qty
-"""
-
-
-# Step 2: total spend per ad_id in the window.
-#
-# 2026-09-03 rewrite: reads from public.insights_daily_by_ad (the
-# canonical (ad_id, day) silver) instead of re-implementing the
-# dedup + range-expansion logic against raw_dump_meta. Single source
-# of truth -- whatever fix lands in refresh_insights_daily_by_ad.py
-# automatically flows through here on the next refresh cadence.
 SQL_STEP2 = """
-SELECT ad_id, SUM(spend) AS spend
+-- Keyed to match SQL_STEP1's `resolved` CTE: 'ad:<id>' for an order that
+-- named a resolvable ad, 'adset:<id>' for one that fell back a level.
+-- Both kinds are returned in one map so the allocator does not care
+-- which level an order landed on.
+--
+-- The two never overlap. An ad set only appears here as 'adset:' if the
+-- allocator asked for it, and when it does, none of its ads are asked
+-- for -- see the fallback note in SQL_STEP1. Spend is therefore counted
+-- once, and the spec's reconciliation (allocated + unattributed =
+-- total) still holds.
+SELECT 'ad:' || ad_id AS ad_id, SUM(spend) AS spend
 FROM public.insights_daily_by_ad
 WHERE day BETWEEN %(window_from)s AND %(window_to)s
   AND ad_id IS NOT NULL
-GROUP BY ad_id
+GROUP BY 1
+UNION ALL
+SELECT 'adset:' || adset_id, SUM(spend)
+FROM public.insights_daily_by_adset
+WHERE day BETWEEN %(window_from)s AND %(window_to)s
+  AND adset_id IS NOT NULL
+GROUP BY 1
 """
 
 
@@ -297,6 +288,12 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         # fractionally distributed across the basket by ad_spend /
         # ad_spend_vw, so charging halo_spend on top would double-count.
         "halo_orders": set(), "halo_units": 0, "halo_revenue": 0.0,
+        # Basket value of the orders this SKU appeared in, counted ONCE
+        # per order. `revenue` above is the SKU's own lines only; this is
+        # the whole order, so it is what an average ORDER value must
+        # divide. Keyed by order_id because a SKU can appear on several
+        # lines of one order and the basket must not be added twice.
+        "order_revenue_by_order": {},
     })
     for ad_id, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
         qty      = int(qty or 0)
@@ -305,16 +302,32 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         order_total_qty = int(order_total_qty or 0)
         agg = sku_agg[master_sku]
         agg["orders"].add(order_id)
+        agg["order_revenue_by_order"][order_id] = order_total_rev
         agg["units"]   += qty
         agg["revenue"] += line_rev
         agg["ad_ids"].add(ad_id)
 
-        # --- Halo was previously computed HERE using ad-attributed
-        # orders only. Moved out to a second pass over SQL_STEP1_HALO
-        # below so halo counts basket co-occurrence across ALL
-        # Meta-family traffic, not just orders we can attribute to
-        # a specific ad_id. Keeps halo independent of ad_spend, per
-        # the 2026-09-04 spec revision.
+        # HALO: the rest of the basket, from these same mapped orders.
+        #
+        # This briefly ran over all Meta-family traffic instead -- paid
+        # and organic IG/FB alike -- on the reasoning that basket
+        # co-occurrence is worth knowing wherever it happens. It broke
+        # the one identity that makes the row readable:
+        #
+        #     LC Revenue + Halo Rev = Order Sales
+        #
+        # because halo was counting orders that carry no ad spend and
+        # are not in LC Orders. For SMCP over 30 days it reported
+        # Rs 7,91,450 where the real rest-of-basket was Rs 7,10,123.
+        #
+        # Scoped back to the mapped orders, the two columns now split
+        # each order exactly: this SKU's lines, and everything else.
+        halo_rev_here   = order_total_rev - line_rev
+        halo_units_here = order_total_qty - qty
+        if halo_rev_here > 0 or halo_units_here > 0:
+            agg["halo_orders"].add(order_id)
+            agg["halo_units"]   += halo_units_here
+            agg["halo_revenue"] += halo_rev_here
 
         ad_total_spend  = spend_map.get(ad_id, 0.0)
 
@@ -339,37 +352,12 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             # signal to weight by.
             agg["ad_spend_vw"] += per_order_share * within_order_share
 
-    # ─── Halo pass over Meta-family orders (broader than ad-attributed) ───
-    print(f"[{window_key}] step1b: Meta-family basket lines for halo ...",
-          flush=True)
-    cur.execute(SQL_STEP1_HALO, {"window_from": window_from, "window_to": window_to})
-    halo_lines = cur.fetchall()
-    print(f"[{window_key}]   -> {len(halo_lines)} (order, sku) rows from "
-          f"Meta-family traffic", flush=True)
-
-    for order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in halo_lines:
-        qty      = int(qty or 0)
-        line_rev = float(line_rev or 0)
-        order_total_rev = float(order_total_rev or 0)
-        order_total_qty = int(order_total_qty or 0)
-        # halo = the *other* SKUs in the same basket. Zero for single-SKU
-        # baskets (order_total == line).
-        halo_rev_here   = order_total_rev - line_rev
-        halo_units_here = order_total_qty - qty
-        if halo_rev_here > 0 or halo_units_here > 0:
-            # sku_agg defaultdict auto-creates the entry so SKUs that
-            # got no ad-attributed activity still appear with halo-only
-            # metrics -- useful for rider SKUs the ads never named.
-            agg = sku_agg[master_sku]
-            agg["halo_orders"].add(order_id)
-            agg["halo_units"]   += halo_units_here
-            agg["halo_revenue"] += halo_rev_here
-
     rows: list[tuple] = []
     for master_sku, agg in sku_agg.items():
         orders      = len(agg["orders"])
         units       = agg["units"]
         revenue     = agg["revenue"]
+        order_revenue = float(sum(agg["order_revenue_by_order"].values()))
         ad_spend    = agg["ad_spend"]
         ad_spend_vw = agg["ad_spend_vw"]
         cost_per_order        = (ad_spend    / orders) if orders else None
@@ -383,7 +371,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         halo_revenue = float(agg["halo_revenue"])
         rows.append((
             master_sku, window_key, window_from, window_to,
-            orders, units, revenue,
+            orders, units, revenue, order_revenue,
             len(agg["ad_ids"]), ad_spend,
             cost_per_order, cost_per_unit_sold, roas,
             # halo_spend intentionally 0 -- ad_spend is already fully
@@ -401,6 +389,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             INSERT INTO cpis_by_sku_utm (
               master_sku, window_key, window_from, window_to,
               attributed_orders, attributed_units, attributed_revenue,
+              order_revenue,
               matched_ad_count, ad_spend,
               cost_per_order, cost_per_unit_sold, roas,
               halo_orders, halo_units, halo_revenue, halo_spend,
@@ -410,7 +399,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             ) VALUES %s
             """,
             rows,
-            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
         )
     print(f"[{window_key}]   -> inserted {len(rows)} rows", flush=True)
     return len(rows)

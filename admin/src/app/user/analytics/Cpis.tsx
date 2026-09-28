@@ -889,19 +889,23 @@ function CpisView() {
                 </th>
                 <th className="px-3 py-3 text-right" title="Active-ad spend in the picked window, divided by window length in days. Average daily burn on ads still running.">Spend/Day</th>
                 <th className="px-3 py-3 text-right" title="Daily spend sparkline for the picked window + % change vs. the previous same-length period. Green ≥ +5%, amber ±5%, red ≤ -5%.">Spend Trend</th>
-                <th
-                  className="px-3 py-3 text-right"
-                  title={
-                    spendMatchMode === "ad_name"
-                      ? "Money spent on ads with this product's code in their name, over the "
-                        + "dates you picked. Do not add this column up \u2014 an ad naming two "
-                        + "products is counted for both."
-                      : "This product's slice of the money behind the orders it sold in, split "
-                        + "by how much of each order it was. Adds up to your real Meta spend."
-                  }
-                >
-                  {spendMatchMode === "ad_name" ? "Spend (named ads)" : "Spend (this product\u2019s share)"}
-                </th>
+                {/* Named-ad spend only. In utm_id mode this cell used to
+                    render `ad_spend` -- the very same number as LC Ad
+                    Spend further right, under a second name. Two columns
+                    showing one figure and calling it two things is worse
+                    than one column, so the duplicate is gone. Named-ad
+                    spend is a genuinely different figure and appears
+                    nowhere else on the row, so it stays. */}
+                {spendMatchMode === "ad_name" && (
+                  <th
+                    className="px-3 py-3 text-right"
+                    title={"Money spent on ads with this product's code in their name, over the "
+                      + "dates you picked. Do not add this column up \u2014 an ad naming two "
+                      + "products is counted for both."}
+                  >
+                    Spend (named ads)
+                  </th>
+                )}
                 <th
                   className="px-3 py-3 text-right"
                   title={
@@ -928,7 +932,9 @@ function CpisView() {
                 {/* LAST-CLICK group -- pulled straight from
                     cpis_by_sku_utm which does order.utm_content → ad_id
                     → line_items.sku attribution. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Revenue from orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Revenue</th>
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Sales value of THIS SKU's units in orders whose last-click UTM content maps to an ad. Its own line value only -- the rest of the basket is in Halo Rev, not here.">LC Revenue</th>
+                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of the orders this SKU appeared in, counted once per order. LC Revenue beside it is only this SKU's own lines, so this is always the larger of the two, and the gap is what the rest of the basket was worth. This is what LC AOV divides.">Order Sales</th>
+                <th className="px-3 py-3 text-right" title="Units of THIS SKU sold in those same orders. An order holding 3 of this SKU counts as 3, so this runs above LC Orders. It is the denominator behind LC Cost/Unit and ASP Net.">LC Units</th>
                 <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Orders</th>
                 {/* 3 mode-dependent cells: LC Ad Spend, LC Cost/Order, LC ROAS.
                     Header labels the current attribution mode so the merchant
@@ -955,13 +961,28 @@ function CpisView() {
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
+                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend ÷ this SKU's sales, as a percentage. The share of ad-driven revenue spent on ads, so lower is better. It is the inverse of LC ROAS. Profitable while it stays under the break-even ACoS (unit profit ÷ price).">
+                  LC ACoS
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
+                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising, so it is the most ad spend a unit can carry before it loses money. Selling price − COGS − logistics and returns. A property of the product, so it does not change with the attribution mode.">
+                  Break-even CPIS
+                </th>
+                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS − LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money, and the SKU needs a price, cost or targeting change rather than more budget.">
+                  Headroom
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
                 <th className="px-3 py-3 text-right" title="Attributed revenue / allocated ad spend (toggles with attribution mode)">
                   LC ROAS
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Average order value of last-click orders containing this SKU">LC AOV</th>
+                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales ÷ LC Orders. It used to divide LC Revenue, this SKU's own lines, so it read low on every mixed basket and was not an order value at all.">LC AOV</th>
                 <th className="px-3 py-3 text-right" title="Average units of THIS SKU per attributed order (some orders will have multiple units of the same SKU)">Qty/Order</th>
                 <th className="px-3 py-3 text-right" title="Average selling price NET (attributed_revenue / attributed_units)">ASP Net</th>
                 {/* HALO group (2026-09-04) -- basket co-occurrence
@@ -1142,14 +1163,11 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right">
                     <SpendTrendCell trend={currentTrends?.[row.master_sku]} loading={currentTrends === null} />
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {/* utm mode renders `ad_spend` (fractional / equal-per-order
-                        + within-order value-weighted allocation from
-                        cpis_by_sku_utm) rather than `utm_matched_spend`
-                        (naive over-counted affinity). The fractional version
-                        sums back to Meta total across SKUs -- no double-count. */}
-                    {fmtINRFull(spendMatchMode === "ad_name" ? row.name_matched_spend : row.ad_spend)}
-                  </td>
+                  {spendMatchMode === "ad_name" && (
+                    <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                      {fmtINRFull(row.name_matched_spend)}
+                    </td>
+                  )}
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(spendMatchMode === "ad_name" ? row.name_matched_ncp : row.utm_matched_ncp)}
                   </td>
@@ -1184,6 +1202,12 @@ function CpisView() {
                     {fmtINRFull(row.attributed_revenue)}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {fmtINRFull(row.order_revenue)}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {fmtNumFull(row.attributed_units)}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(row.attributed_orders)}
                   </td>
                   {/* 3 mode-dependent cells -- toggle with the pill above. */}
@@ -1204,6 +1228,43 @@ function CpisView() {
                         : row.cost_per_unit_sold_vw,
                     )}
                   </td>
+                  {(() => {
+                    const acos = attributionMode === "equal" ? row.acos : row.acos_vw;
+                    const head = attributionMode === "equal" ? row.headroom : row.headroom_vw;
+                    // Break-even ACoS is unit profit ÷ price. Past it, the
+                    // SKU is losing money -- the same fact headroom states
+                    // in rupees, so the two colour together.
+                    const beAcos =
+                      row.break_even_cpis !== null && row.avg_selling_price
+                        ? (row.break_even_cpis / row.avg_selling_price) * 100
+                        : null;
+                    return (
+                      <>
+                        <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                          acos === null
+                            ? "text-text-tertiary"
+                            : beAcos !== null && acos > beAcos
+                              ? "text-error-text"
+                              : "text-text-primary"
+                        }`}
+                        title={beAcos !== null ? `Break-even ACoS ${beAcos.toFixed(1)}%` : undefined}>
+                          {acos !== null ? `${acos.toFixed(1)}%` : "—"}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                          {row.break_even_cpis !== null ? fmtINRFull(row.break_even_cpis) : "—"}
+                        </td>
+                        <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
+                          head === null
+                            ? "text-text-tertiary"
+                            : head < 0
+                              ? "text-error-text"
+                              : "text-text-primary"
+                        }`}>
+                          {head !== null ? fmtINRFull(head) : "—"}
+                        </td>
+                      </>
+                    );
+                  })()}
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
                   </td>

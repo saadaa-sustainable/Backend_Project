@@ -1549,6 +1549,21 @@ export interface CpisUtmRow {
   ad_spend_vw: number | null;           // value-weighted
   cost_per_order_vw: number | null;
   cost_per_unit_sold_vw: number | null;
+  /** CPIS spec Step 8. acos = allocated spend / product sales, as a
+   *  percentage. break_even_cpis = unit profit before ads, the most one
+   *  unit can carry in ad spend before it loses money. headroom =
+   *  break_even_cpis - CPIS; NEGATIVE means every unit sold loses money.
+   *  break_even_cpis has no _vw twin -- it is a property of the product,
+   *  not of how spend was allocated. */
+  /** Basket value of the attributed orders, counted once per order.
+   *  attributed_revenue is this SKU's own lines only, so order_revenue
+   *  is always >= it. This is what LC AOV divides. */
+  order_revenue: number | null;
+  acos: number | null;
+  acos_vw: number | null;
+  break_even_cpis: number | null;
+  headroom: number | null;
+  headroom_vw: number | null;
   roas_vw: number | null;
   // Halo counterpart -- basket effect from the same ad-driven orders.
   // Not counted in CPIS / ROAS (those use primary only).

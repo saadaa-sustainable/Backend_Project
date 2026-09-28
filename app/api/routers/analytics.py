@@ -3769,6 +3769,10 @@ class CpisUtmRow(BaseModel):
     # Last-click UTM aggregates (surfaced explicitly for the Last Click
     # column group -- these are already in cpis_by_sku_utm; renaming
     # them here for the UI's Last-Click semantics).
+    #: Basket value of the attributed orders, counted once per order.
+    #: attributed_revenue is this SKU's own lines; this is the whole
+    #: order, so order_revenue >= attributed_revenue always.
+    order_revenue: float | None = None
     lc_avg_order_value: float | None
     lc_avg_qty_per_order: float | None
     # Spend-trend sparkline: 30 daily spend values (most recent day
@@ -3965,6 +3969,27 @@ class CpisUtmRow(BaseModel):
     ad_spend_vw: float | None
     cost_per_order_vw: float | None
     cost_per_unit_sold_vw: float | None
+    #: The three profit columns from the CPIS spec's Step 8.
+    #:
+    #:   acos             allocated spend / product sales. The share of
+    #:                    ad-driven revenue spent on ads; lower is better.
+    #:                    ROAS is its inverse, and is already here.
+    #:   break_even_cpis  unit profit before ads -- the most one unit can
+    #:                    carry in ad spend before it loses money. Taken
+    #:                    from contribution_margin, which is already
+    #:                    selling_price - cogs - logistics_return.
+    #:   headroom         break_even_cpis - CPIS. Profit left per unit
+    #:                    after ads; NEGATIVE means every unit sold loses
+    #:                    money, which is the whole point of the column.
+    #:
+    #: break_even_cpis has no _vw twin: it is a property of the product,
+    #: not of how spend was allocated. acos and headroom do, because CPIS
+    #: and allocated spend differ between the two views.
+    acos: float | None = None
+    acos_vw: float | None = None
+    break_even_cpis: float | None = None
+    headroom: float | None = None
+    headroom_vw: float | None = None
     roas_vw: float | None
     # Halo counterpart -- basket effect from the same ad-driven orders.
     # Not counted in CPIS / ROAS (those use primary only); exposed here
@@ -4262,6 +4287,7 @@ async def get_cpis_utm(
                    SUM(attributed_orders)::int  AS attributed_orders,
                    SUM(attributed_units)::int   AS attributed_units,
                    SUM(attributed_revenue)      AS attributed_revenue,
+                   SUM(order_revenue)           AS order_revenue,
                    MAX(matched_ad_count)::int   AS matched_ad_count,
                    SUM(ad_spend)                AS ad_spend,
                    SUM(ad_spend_vw)             AS ad_spend_vw,
@@ -4291,6 +4317,7 @@ async def get_cpis_utm(
                  COALESCE(agg.attributed_orders, 0)  AS attributed_orders,
                  COALESCE(agg.attributed_units, 0)   AS attributed_units,
                  COALESCE(agg.attributed_revenue, 0) AS attributed_revenue,
+                 COALESCE(agg.order_revenue, 0)      AS order_revenue,
                  COALESCE(agg.matched_ad_count, 0)   AS matched_ad_count,
                  COALESCE(agg.ad_spend, 0)           AS ad_spend,
                  COALESCE(agg.ad_spend_vw, 0)        AS ad_spend_vw,
@@ -4376,6 +4403,7 @@ async def get_cpis_utm(
                    COALESCE(c.attributed_orders, 0)  AS attributed_orders,
                    COALESCE(c.attributed_units, 0)   AS attributed_units,
                    COALESCE(c.attributed_revenue, 0) AS attributed_revenue,
+                   COALESCE(c.order_revenue, 0)      AS order_revenue,
                    COALESCE(c.matched_ad_count, 0)   AS matched_ad_count,
                    COALESCE(c.ad_spend, 0)           AS ad_spend,
                    c.cost_per_order, c.cost_per_unit_sold, c.roas,
@@ -4734,9 +4762,16 @@ async def get_cpis_utm(
              CASE WHEN wd.n_days > 0
                   THEN na.active_windowed_spend / wd.n_days
                   ELSE NULL END           AS active_spend_per_day,
-             -- Last-click AOV: revenue per attributed order
+             -- Last-click AOV: BASKET value per attributed order.
+             --
+             -- This divided attributed_revenue, which is only this
+             -- SKU's own lines -- so a column labelled "average order
+             -- value" was reporting average SKU value per order and
+             -- came out below the real basket on every mixed order.
+             -- order_revenue counts each order's full value once.
              CASE WHEN COALESCE(p.attributed_orders, 0) > 0
-                  THEN p.attributed_revenue / p.attributed_orders
+                  THEN COALESCE(p.order_revenue, p.attributed_revenue)
+                       / p.attributed_orders
                   ELSE NULL END           AS lc_avg_order_value,
              -- Avg qty of THIS SKU per attributed order
              CASE WHEN COALESCE(p.attributed_orders, 0) > 0
@@ -4894,6 +4929,7 @@ async def get_cpis_utm(
                   ELSE 0 END                                 AS required_creatives_per_week,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
+             p.order_revenue,
              p.matched_ad_count, p.ad_spend,
              p.cost_per_order, p.cost_per_unit_sold, p.roas,
              p.halo_orders, p.halo_units, p.halo_revenue, p.halo_spend,
@@ -4949,6 +4985,29 @@ async def get_cpis_utm(
             except (ValueError, TypeError):
                 parsed = None
         row_dict["spend_trend_current"] = parsed
+
+        # Derived here rather than in SQL because the two source
+        # branches (cpis_by_sku_utm for presets, cpis_by_sku_daily
+        # summed for custom ranges) build their columns separately, and
+        # a formula duplicated across both is a formula that drifts.
+        _rev = row_dict.get("attributed_revenue") or 0.0
+        _be = row_dict.get("contribution_margin")
+        for _suffix in ("", "_vw"):
+            _spend = row_dict.get(f"ad_spend{_suffix}")
+            # ACoS is undefined without revenue, not zero: a SKU that
+            # spent and sold nothing has no meaningful ratio, and 0
+            # would read as "perfectly efficient".
+            row_dict[f"acos{_suffix}"] = (
+                float(_spend) / float(_rev) * 100.0
+                if _spend is not None and _rev else None
+            )
+            _cpis = row_dict.get(f"cost_per_unit_sold{_suffix}")
+            row_dict[f"headroom{_suffix}"] = (
+                float(_be) - float(_cpis)
+                if _be is not None and _cpis is not None else None
+            )
+        row_dict["break_even_cpis"] = _be
+
         rows.append(CpisUtmRow(**row_dict))
 
     # `count_sql` was built above alongside `page_cte` to match whichever
