@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS cpis_by_sku_utm (
 DDL_MIGRATE = """
 ALTER TABLE cpis_by_sku_utm
     ADD COLUMN IF NOT EXISTS order_revenue  numeric,
+    ADD COLUMN IF NOT EXISTS order_units    integer,
     ADD COLUMN IF NOT EXISTS halo_orders    integer,
     ADD COLUMN IF NOT EXISTS halo_units     numeric,
     ADD COLUMN IF NOT EXISTS halo_revenue   numeric,
@@ -294,6 +295,9 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         # divide. Keyed by order_id because a SKU can appear on several
         # lines of one order and the basket must not be added twice.
         "order_revenue_by_order": {},
+        # Total units in those baskets, once per order -- the unit-count
+        # twin of order_revenue. attributed_units counts only this SKU.
+        "order_units_by_order": {},
     })
     for ad_id, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
         qty      = int(qty or 0)
@@ -303,6 +307,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         agg = sku_agg[master_sku]
         agg["orders"].add(order_id)
         agg["order_revenue_by_order"][order_id] = order_total_rev
+        agg["order_units_by_order"][order_id] = order_total_qty
         agg["units"]   += qty
         agg["revenue"] += line_rev
         agg["ad_ids"].add(ad_id)
@@ -358,6 +363,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         units       = agg["units"]
         revenue     = agg["revenue"]
         order_revenue = float(sum(agg["order_revenue_by_order"].values()))
+        order_units   = int(sum(agg["order_units_by_order"].values()))
         ad_spend    = agg["ad_spend"]
         ad_spend_vw = agg["ad_spend_vw"]
         cost_per_order        = (ad_spend    / orders) if orders else None
@@ -371,7 +377,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         halo_revenue = float(agg["halo_revenue"])
         rows.append((
             master_sku, window_key, window_from, window_to,
-            orders, units, revenue, order_revenue,
+            orders, units, revenue, order_revenue, order_units,
             len(agg["ad_ids"]), ad_spend,
             cost_per_order, cost_per_unit_sold, roas,
             # halo_spend intentionally 0 -- ad_spend is already fully
@@ -389,7 +395,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             INSERT INTO cpis_by_sku_utm (
               master_sku, window_key, window_from, window_to,
               attributed_orders, attributed_units, attributed_revenue,
-              order_revenue,
+              order_revenue, order_units,
               matched_ad_count, ad_spend,
               cost_per_order, cost_per_unit_sold, roas,
               halo_orders, halo_units, halo_revenue, halo_spend,
@@ -399,7 +405,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             ) VALUES %s
             """,
             rows,
-            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
         )
     print(f"[{window_key}]   -> inserted {len(rows)} rows", flush=True)
     return len(rows)

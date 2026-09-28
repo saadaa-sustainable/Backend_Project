@@ -1559,6 +1559,10 @@ export interface CpisUtmRow {
    *  attributed_revenue is this SKU's own lines only, so order_revenue
    *  is always >= it. This is what LC AOV divides. */
   order_revenue: number | null;
+  /** Total units in those same baskets, every SKU counted. The
+   *  unit-count twin of order_revenue; equals attributed_units +
+   *  halo_units. */
+  order_units: number | null;
   acos: number | null;
   acos_vw: number | null;
   break_even_cpis: number | null;

@@ -19,6 +19,7 @@ import {
 import { SpendVsOrdersChart } from "./charts/SpendVsOrdersChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
+import { DateRangePicker } from "@/components/DateRangePicker";
 import { ExportButton } from "@/components/ExportButton";
 
 // Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
@@ -301,7 +302,12 @@ function RoasChip({ roas }: { roas: number | null | undefined }) {
 }
 
 function CpisView() {
-  const window_: CpisUtmWindow = "30d";
+  // State, not a constant. The three presets that have a pre-computed
+  // rollup (cpis_by_sku_utm) set this and CLEAR the dates, so they read
+  // the whole-period table the CPIS spec asks for. Every other preset
+  // sets explicit dates and goes through cpis_by_sku_daily, which
+  // matches spend to orders day by day.
+  const [window_, setWindow_] = useState<CpisUtmWindow>("30d");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   useEffect(() => {
@@ -334,13 +340,13 @@ function CpisView() {
   // visible. When both dates are filled, the /cpis-utm endpoint hits
   // the daily-sum path (cpis_by_sku_daily); when empty, falls back to
   // the pre-computed cpis_by_sku_utm rollup for `window_`.
-  const [datePreset, setDatePreset] = useState<string>("30d");
-  const [fromDate, setFromDate] = useState<string>(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 29);
-    return d.toISOString().slice(0, 10);
-  });
-  const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  // Preset keys are the shared DateRangePicker's, the same ones Ads
+  // Analyse uses, so the two sections speak one vocabulary.
+  const [datePreset, setDatePreset] = useState<string>("last30");
+  // Empty by default: "Last 30 Days" resolves to the 30d rollup rather
+  // than to an explicit range.
+  const [fromDate, setFromDate] = useState<string>("");
+  const [toDate, setToDate] = useState<string>("");
   // Data-freshness probe -- fetched once on mount from
   // /cpis-utm/data-freshness. Used to (a) cap the picker's `to_date`
   // default to whichever underlying table is stalest (Meta insights
@@ -356,19 +362,16 @@ function CpisView() {
       .then((f) => {
         if (cancelled) return;
         setFreshness(f);
-        // Use max_daily_day (the freshest day for which BOTH Meta spend
-        // AND Shopify orders exist -- it's min(max_meta, max_orders)).
-        // Fall back to max_meta_day if daily table hasn't been
-        // populated. Only auto-fill when the user hasn't touched the
-        // picker while the freshness request was in flight.
-        const cap = f.max_daily_day || f.max_meta_day;
-        if (!cap || datesTouchedRef.current) return;
-        setToDate(cap);
-        // Slide fromDate back 29 days from cap for a stable "last 30d"
-        // default anchored on data reality, not wall-clock today.
-        const capDate = new Date(cap);
-        capDate.setDate(capDate.getDate() - 29);
-        setFromDate(capDate.toISOString().slice(0, 10));
+        // No longer auto-fills the dates. The default preset is now
+        // "Last 30 Days", which resolves to the 30d ROLLUP and wants
+        // fromDate/toDate empty; writing a range here would silently
+        // push the default onto the day-matched path instead.
+        //
+        // max_daily_day is still the anchor every preset resolves
+        // against -- the freshest day for which BOTH Meta spend and
+        // Shopify orders exist. Presets must not run off the clock:
+        // data lags a few days, so a "Last 7 Days" anchored on today
+        // covers one populated day and looks broken.
       })
       .catch(() => {
         /* silent: leave the naive today-based defaults if probe fails */
@@ -531,123 +534,43 @@ function CpisView() {
         per-color-variant drill-down (coming soon) and is intentionally not shown here.
       </p>
 
-      {/* Collapsible KPI strip. */}
-      <CollapsibleSection
-        title="Aggregate KPIs"
-        subtitle="Sum of name-matched metrics across every SKU in view"
-        open={openKpi}
-        onToggle={() => setOpenKpi((v) => !v)}
-      >
-        {hasCurrentRange && dailySeries && dailySeries.points.length > 1 && (
-          <div className="mb-3 border-b border-border-primary pb-3">
-            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-              Spend and orders, day by day
-            </div>
-            <SpendVsOrdersChart
-              points={dailySeries.points}
-              maxSpend={dailySeries.max_spend}
-              maxOrders={dailySeries.max_orders}
-              truncatedTo={dailySeries.truncated_to}
-            />
-          </div>
-        )}
-        {hasCurrentRange && rows.length > 0 && (
-          <CpisKpiStrip
-            rows={rows}
-            spendMatchMode={spendMatchMode}
-            metaTotalSpend={metaTotalSpend}
-            attributedSpend={attributedSpend}
-            untetheredSpend={untetheredSpend}
-            untetheredParts={untetheredParts}
-            dayMatched={Boolean(fromDate && toDate)}
-            /* The day the spend figure actually reaches, not the day
-               the user asked for. Meta lands insights in arrears, so a
-               window ending today is summed only to yesterday, and
-               printing the requested end beside it is what makes a
-               correct total read as a shortfall against Ads Manager. */
-            attributedOrders={attributedOrders}
-            windowLabel={
-              fromDate && toDate
-                ? `${fromDate} → ${spendThrough ?? toDate}`
-                : `Last ${window_}`
-            }
-          />
-        )}
-      </CollapsibleSection>
-
-      {/* Collapsible "Analytics table" block. Wraps the filter bar +
-          main SKU-level table so the merchant can fold the whole
-          scrolling grid away when they only care about the top
-          summary cards above. Toggled independently from KPI /
-          the table. */}
-      <CollapsibleSection
-        title="Analytics table"
-        subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
-        open={openTable}
-        onToggle={() => setOpenTable((v) => !v)}
-      >
-      {/* Filter bar. Kwikengage puts the window pills flush left, then a
-          search box, then dropdowns/toggles trailing to the right. The
-          whole strip lives inside one card so it reads as a single
-          control zone, not a scatter of chips. */}
+      {/* Filter bar, ABOVE the KPI strip. It used to sit inside the
+          Analytics table section, which put the controls BELOW the
+          numbers they govern -- collapse that section and the date
+          range driving every KPI went with it. It governs the whole
+          page, so it leads the page. */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-3">
-        {/* Date range picker -- ported directly from Ads Analyse
-            (AdsAnalyse.tsx :720). A preset <select> auto-fills the two
-            date inputs; typing directly into either input flips the
-            preset to "custom" so the two controls always stay in sync. */}
-        <select
-          value={datePreset}
-          onChange={(e) => {
+        {/* The shared DateRangePicker, the same control Ads Analyse
+            uses, so one vocabulary of presets covers both sections.
+            Replaces a preset <select> plus two bare date inputs.
+
+            The three presets that have a pre-computed rollup set
+            `window_` and CLEAR the dates: those read cpis_by_sku_utm,
+            which sums spend over the WHOLE period, as the CPIS spec
+            asks. Every other preset hands over explicit dates and goes
+            through cpis_by_sku_daily, which matches spend to orders day
+            by day -- the one deviation from the spec still on the page,
+            and now confined to the presets that have no alternative. */}
+        <DateRangePicker
+          value={{ from: fromDate, to: toDate }}
+          preset={datePreset}
+          anchor={freshness?.max_daily_day ?? freshness?.max_meta_day ?? null}
+          align="left"
+          onApply={(r, pk) => {
             datesTouchedRef.current = true;
-            const v = e.target.value;
-            setDatePreset(v);
-            // Anchor presets to the FRESHEST DAY that has data, not the
-            // wall-clock "today". Data lags 1-6 days behind today in
-            // normal ops (Meta insights, Shopify orders), so using today
-            // as the anchor makes "Last 7 days" actually cover only 1
-            // day of populated data -- looks broken to the merchant.
-            // Fall back to today when freshness hasn't loaded yet.
-            const anchor = freshness?.max_daily_day
-              ? new Date(freshness.max_daily_day)
-              : new Date();
-            const anchorIso = anchor.toISOString().slice(0, 10);
-            const daysAgo = (n: number) => {
-              const d = new Date(anchor);
-              d.setDate(d.getDate() - n);
-              return d.toISOString().slice(0, 10);
+            setDatePreset(pk);
+            const rollup: Record<string, CpisUtmWindow> = {
+              last7: "7d", last30: "30d", last90: "90d",
             };
-            if (v === "all")       { setFromDate(""); setToDate(""); }
-            else if (v === "today") { setFromDate(anchorIso); setToDate(anchorIso); }
-            else if (v === "7d")   { setFromDate(daysAgo(6));  setToDate(anchorIso); }
-            else if (v === "14d")  { setFromDate(daysAgo(13)); setToDate(anchorIso); }
-            else if (v === "30d")  { setFromDate(daysAgo(29)); setToDate(anchorIso); }
-            else if (v === "90d")  { setFromDate(daysAgo(89)); setToDate(anchorIso); }
+            if (rollup[pk]) {
+              setWindow_(rollup[pk]);
+              setFromDate("");
+              setToDate("");
+            } else {
+              setFromDate(r.from);
+              setToDate(r.to);
+            }
           }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Date-range window applied to CPIS metrics. Anchored to the freshest available day, not today (data lags a few days behind)."
-        >
-          <option value="all">All time (uses pre-computed rollup)</option>
-          <option value="today">Latest day</option>
-          <option value="7d">Last 7 days (anchored on latest data)</option>
-          <option value="14d">Last 14 days</option>
-          <option value="30d">Last 30 days</option>
-          <option value="90d">Last 90 days</option>
-          <option value="custom">Custom…</option>
-        </select>
-        <input
-          type="date"
-          value={fromDate}
-          onChange={(e) => { datesTouchedRef.current = true; setFromDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Window start (YYYY-MM-DD)"
-        />
-        <span className="text-[12px] text-text-secondary">→</span>
-        <input
-          type="date"
-          value={toDate}
-          onChange={(e) => { datesTouchedRef.current = true; setToDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Window end (YYYY-MM-DD)"
         />
         {fromDate && toDate && (
           <span
@@ -765,6 +688,62 @@ function CpisView() {
           disabled={loading || showingPreviousResults || search !== debouncedSearch || !hasCurrentRange || !rows.length}
         />
       </div>
+
+      {/* Collapsible KPI strip. */}
+      <CollapsibleSection
+        title="Aggregate KPIs"
+        subtitle="Sum of name-matched metrics across every SKU in view"
+        open={openKpi}
+        onToggle={() => setOpenKpi((v) => !v)}
+      >
+        {hasCurrentRange && dailySeries && dailySeries.points.length > 1 && (
+          <div className="mb-3 border-b border-border-primary pb-3">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+              Spend and orders, day by day
+            </div>
+            <SpendVsOrdersChart
+              points={dailySeries.points}
+              maxSpend={dailySeries.max_spend}
+              maxOrders={dailySeries.max_orders}
+              truncatedTo={dailySeries.truncated_to}
+            />
+          </div>
+        )}
+        {hasCurrentRange && rows.length > 0 && (
+          <CpisKpiStrip
+            rows={rows}
+            spendMatchMode={spendMatchMode}
+            metaTotalSpend={metaTotalSpend}
+            attributedSpend={attributedSpend}
+            untetheredSpend={untetheredSpend}
+            untetheredParts={untetheredParts}
+            dayMatched={Boolean(fromDate && toDate)}
+            /* The day the spend figure actually reaches, not the day
+               the user asked for. Meta lands insights in arrears, so a
+               window ending today is summed only to yesterday, and
+               printing the requested end beside it is what makes a
+               correct total read as a shortfall against Ads Manager. */
+            attributedOrders={attributedOrders}
+            windowLabel={
+              fromDate && toDate
+                ? `${fromDate} → ${spendThrough ?? toDate}`
+                : `Last ${window_}`
+            }
+          />
+        )}
+      </CollapsibleSection>
+
+      {/* Collapsible "Analytics table" block. Wraps the filter bar +
+          main SKU-level table so the merchant can fold the whole
+          scrolling grid away when they only care about the top
+          summary cards above. Toggled independently from KPI /
+          the table. */}
+      <CollapsibleSection
+        title="Analytics table"
+        subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
+        open={openTable}
+        onToggle={() => setOpenTable((v) => !v)}
+      >
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
       {hasCurrentRange && (loading || search !== debouncedSearch || showingPreviousResults) && (
@@ -929,17 +908,14 @@ function CpisView() {
                   Net ROAS
                 </th>
                 <th className="px-3 py-3 text-right" title="New-customer ROAS approximation: (windowed NCP × AOV of last-click orders) / windowed spend. Meta's actions[first_time_customer_purchase] would be more accurate but isn't exposed as a flat column.">NC ROAS</th>
-                {/* LAST-CLICK group -- pulled straight from
-                    cpis_by_sku_utm which does order.utm_content → ad_id
-                    → line_items.sku attribution. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Sales value of THIS SKU's units in orders whose last-click UTM content maps to an ad. Its own line value only -- the rest of the basket is in Halo Rev, not here.">LC Revenue</th>
-                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of the orders this SKU appeared in, counted once per order. LC Revenue beside it is only this SKU's own lines, so this is always the larger of the two, and the gap is what the rest of the basket was worth. This is what LC AOV divides.">Order Sales</th>
-                <th className="px-3 py-3 text-right" title="Units of THIS SKU sold in those same orders. An order holding 3 of this SKU counts as 3, so this runs above LC Orders. It is the denominator behind LC Cost/Unit and ASP Net.">LC Units</th>
-                <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Orders</th>
-                {/* 3 mode-dependent cells: LC Ad Spend, LC Cost/Order, LC ROAS.
-                    Header labels the current attribution mode so the merchant
-                    can see at a glance which set of numbers they're looking at. */}
-                <th className="px-3 py-3 text-right" title={
+                {/* LAST-CLICK group, in three tiers.
+                    ORDER LEVEL asks what a whole order cost and was
+                    worth. UNIT LEVEL asks the same of one unit of THIS
+                    SKU. HALO is the rest of the basket. The columns used
+                    to interleave the three, so Cost/Order sat beside
+                    Cost/Unit with nothing saying they divide different
+                    denominators. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right" title={
                   attributionMode === "equal"
                     ? "Equal-per-order allocation: ad spend split evenly across orders driven, then within-order by line-item revenue"
                     : "Value-weighted allocation: ad spend split proportional to each order's total revenue"
@@ -949,42 +925,47 @@ function CpisView() {
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders. One order may hold several units of this SKU, so this runs above Cost/Unit by the Qty/Order factor.">
+                <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to an ad and contain this SKU.">LC Orders</th>
+                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of those orders, counted once per order. Equals LC Revenue + Halo Rev exactly \u2014 this SKU's lines plus everything else in the same baskets.">Order Sales</th>
+                <th className="px-3 py-3 text-right" title="Total units in those orders, every SKU counted. The unit-count twin of Order Sales, and equal to LC Units + Halo Units.">Order Units</th>
+                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales \u00f7 LC Orders.">LC AOV</th>
+                <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Orders. What one ORDER cost to win. Runs above Cost/Unit by the Qty/Order factor.">
                   LC Cost/Order
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Ad spend / attributed units -- what one UNIT of this SKU cost to sell. The line-item view of Cost/Order; compare against ASP Net and the contribution margin.">
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Units of THIS SKU sold in those orders. An order holding 3 counts as 3.">LC Units</th>
+                <th className="px-3 py-3 text-right" title="Sales value of THIS SKU's units only. The rest of the basket is Halo Rev.">LC Revenue</th>
+                <th className="px-3 py-3 text-right" title="Average selling price net \u2014 LC Revenue \u00f7 LC Units.">ASP Net</th>
+                <th className="px-3 py-3 text-right" title="Average units of THIS SKU per order. What separates Cost/Order from Cost/Unit.">Qty/Order</th>
+                <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Units \u2014 what one UNIT cost to sell. Compare against ASP Net and Break-even CPIS.">
                   LC Cost/Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend ÷ this SKU's sales, as a percentage. The share of ad-driven revenue spent on ads, so lower is better. It is the inverse of LC ROAS. Profitable while it stays under the break-even ACoS (unit profit ÷ price).">
+                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend \u00f7 this SKU's sales, as a percentage. The inverse of LC ROAS. Profitable while under the break-even ACoS (unit profit \u00f7 price).">
                   LC ACoS
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising, so it is the most ad spend a unit can carry before it loses money. Selling price − COGS − logistics and returns. A property of the product, so it does not change with the attribution mode.">
-                  Break-even CPIS
-                </th>
-                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS − LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money, and the SKU needs a price, cost or targeting change rather than more budget.">
-                  Headroom
-                  <span className="ml-1 text-[10px] text-text-tertiary">
-                    ({attributionMode === "equal" ? "eq" : "vw"})
-                  </span>
-                </th>
-                <th className="px-3 py-3 text-right" title="Attributed revenue / allocated ad spend (toggles with attribution mode)">
+                <th className="px-3 py-3 text-right" title="LC Revenue \u00f7 allocated ad spend.">
                   LC ROAS
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales ÷ LC Orders. It used to divide LC Revenue, this SKU's own lines, so it read low on every mixed basket and was not an order value at all.">LC AOV</th>
-                <th className="px-3 py-3 text-right" title="Average units of THIS SKU per attributed order (some orders will have multiple units of the same SKU)">Qty/Order</th>
-                <th className="px-3 py-3 text-right" title="Average selling price NET (attributed_revenue / attributed_units)">ASP Net</th>
+                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising \u2014 the most ad spend a unit can carry before it loses money. A property of the product, so it does not change with the attribution mode.">
+                  Break-even CPIS
+                </th>
+                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS \u2212 LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money.">
+                  Headroom
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
                 {/* HALO group (2026-09-04) -- basket co-occurrence
                     over Meta-family traffic. For every SKU in a mixed
                     basket that came from utm_source in {meta, facebook,
@@ -1197,49 +1178,38 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right">
                     <RoasChip roas={row.name_matched_nc_roas} />
                   </td>
-                  {/* LAST-CLICK group */}
-                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.attributed_revenue)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.order_revenue)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtNumFull(row.attributed_units)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtNumFull(row.attributed_orders)}
-                  </td>
-                  {/* 3 mode-dependent cells -- toggle with the pill above. */}
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(
-                      attributionMode === "equal" ? row.ad_spend : row.ad_spend_vw,
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(
-                      attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw,
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(
-                      attributionMode === "equal"
-                        ? row.cost_per_unit_sold
-                        : row.cost_per_unit_sold_vw,
-                    )}
-                  </td>
+                  {/* LAST-CLICK group -- order tier, then unit tier. */}
                   {(() => {
-                    const acos = attributionMode === "equal" ? row.acos : row.acos_vw;
-                    const head = attributionMode === "equal" ? row.headroom : row.headroom_vw;
-                    // Break-even ACoS is unit profit ÷ price. Past it, the
+                    const spend = attributionMode === "equal" ? row.ad_spend : row.ad_spend_vw;
+                    const cpo   = attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw;
+                    const cpu   = attributionMode === "equal" ? row.cost_per_unit_sold : row.cost_per_unit_sold_vw;
+                    const acos  = attributionMode === "equal" ? row.acos : row.acos_vw;
+                    const head  = attributionMode === "equal" ? row.headroom : row.headroom_vw;
+                    // Break-even ACoS is unit profit / price. Past it the
                     // SKU is losing money -- the same fact headroom states
                     // in rupees, so the two colour together.
                     const beAcos =
                       row.break_even_cpis !== null && row.avg_selling_price
                         ? (row.break_even_cpis / row.avg_selling_price) * 100
                         : null;
+                    const num = "px-3 py-2.5 text-right font-mono text-[12px] text-text-primary";
                     return (
                       <>
+                        {/* ── order level ── */}
+                        <td className={`border-l border-border-soft ${num}`}>{fmtINRFull(spend)}</td>
+                        <td className={num}>{fmtNumFull(row.attributed_orders)}</td>
+                        <td className={num}>{fmtINRFull(row.order_revenue)}</td>
+                        <td className={num}>{fmtNumFull(row.order_units)}</td>
+                        <td className={num}>{fmtINRFull(row.lc_avg_order_value)}</td>
+                        <td className={num}>{fmtINRFull(cpo)}</td>
+                        {/* ── unit level ── */}
+                        <td className={`border-l border-border-soft ${num}`}>{fmtNumFull(row.attributed_units)}</td>
+                        <td className={num}>{fmtINRFull(row.attributed_revenue)}</td>
+                        <td className={num}>{fmtINRFull(row.avg_selling_price)}</td>
+                        <td className={num}>
+                          {row.lc_avg_qty_per_order !== null ? row.lc_avg_qty_per_order.toFixed(2) : "—"}
+                        </td>
+                        <td className={num}>{fmtINRFull(cpu)}</td>
                         <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
                           acos === null
                             ? "text-text-tertiary"
@@ -1250,7 +1220,10 @@ function CpisView() {
                         title={beAcos !== null ? `Break-even ACoS ${beAcos.toFixed(1)}%` : undefined}>
                           {acos !== null ? `${acos.toFixed(1)}%` : "—"}
                         </td>
-                        <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                        <td className="px-3 py-2.5 text-right">
+                          <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
+                        </td>
+                        <td className={num}>
                           {row.break_even_cpis !== null ? fmtINRFull(row.break_even_cpis) : "—"}
                         </td>
                         <td className={`px-3 py-2.5 text-right font-mono text-[12px] font-medium ${
@@ -1265,18 +1238,6 @@ function CpisView() {
                       </>
                     );
                   })()}
-                  <td className="px-3 py-2.5 text-right">
-                    <RoasChip roas={attributionMode === "equal" ? row.roas : row.roas_vw} />
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.lc_avg_order_value)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {row.lc_avg_qty_per_order !== null ? row.lc_avg_qty_per_order.toFixed(2) : "—"}
-                  </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {fmtINRFull(row.avg_selling_price)}
-                  </td>
                   {/* HALO group */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
                     {fmtINRFull(row.halo_revenue)}
