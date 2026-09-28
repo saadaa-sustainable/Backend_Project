@@ -2368,6 +2368,18 @@ export function AdsAnalyse() {
             >
               ▤ Columns ({rollupCols.length}/{ROLLUP_COLUMNS.length})
             </button>
+            {/* Ad Sets and Campaigns had no export at all: the only
+                button lived inside the ad-level branch, so switching
+                level silently took it off screen. Exports the FILTERED
+                rows, which is what the table below is showing, and
+                names the file for the level so an ad-set export and a
+                campaign export cannot be mistaken for each other. */}
+            <ExportButton
+              rows={rollupFiltered as unknown as Record<string, unknown>[]}
+              filename={`ads_analyse_${levelToggle}`}
+              window={datePreset}
+              disabled={rollupLoading || !rollupFiltered.length}
+            />
             {rollupHidden.size !== ROLLUP_DEFAULT_HIDDEN.size && (
               <button
                 onClick={() => setRollupHidden(new Set(ROLLUP_DEFAULT_HIDDEN))}
@@ -2695,6 +2707,9 @@ export function AdsAnalyse() {
             )}
           </button>
         </div>
+        {/* Ad level only -- this whole toolbar sits inside the
+            levelToggle === "ad" branch. Ad Sets and Campaigns have
+            their own button beside their own Columns control. */}
         <ExportButton
           rows={rows as unknown as Record<string, unknown>[]}
           filename="ads_analyse"
