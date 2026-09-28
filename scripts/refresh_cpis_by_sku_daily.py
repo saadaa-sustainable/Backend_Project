@@ -105,6 +105,7 @@ WITH orders_in_range AS (
     AND LOWER(TRIM(so.utm_source)) IN (
       'meta','facebook','ig','instagram','fb','igshopping'
     )
+    AND COALESCE(so.financial_status, '') <> 'VOIDED'
     AND jsonb_typeof(so.line_items->'edges') = 'array'
 ),
 line_items AS (
@@ -169,6 +170,11 @@ WITH orders_in_range AS (
                              AT TIME ZONE 'Asia/Kolkata')
     AND so.utm_content ~ '^[0-9]{10,20}$'
     AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
+    -- Cancelled orders are out of units and sales, per the CPIS spec.
+    -- VOIDED is the only signal we have and it is a safe one: every
+    -- VOIDED order in a 30-day window is UNFULFILLED, so none shipped.
+    -- PENDING is COD awaiting payment, not a cancellation, and stays.
+    AND COALESCE(so.financial_status, '') <> 'VOIDED'
     AND jsonb_typeof(so.line_items->'edges') = 'array'
 ),
 line_items AS (

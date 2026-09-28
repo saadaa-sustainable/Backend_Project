@@ -87,7 +87,8 @@ ALTER TABLE cpis_by_sku_utm
 # each line as line_revenue / order_total_revenue.
 SQL_STEP1 = """
 WITH orders_in_window AS (
-  SELECT so.order_id, so.utm_content AS ad_id, so.line_items
+  SELECT so.order_id, so.utm_content AS raw_ad, so.utm_term AS raw_adset,
+         so.line_items
   FROM shopify_orders so
   -- IST, because Meta reports its days in the ad account's timezone
   -- (Asia/Kolkata on all three accounts). Windowing orders in UTC while
@@ -105,9 +106,64 @@ WITH orders_in_window AS (
                               AT TIME ZONE 'Asia/Kolkata')
     AND so.processed_at <  ((%(window_to)s::date + 1)::timestamp
                               AT TIME ZONE 'Asia/Kolkata')
-    AND so.utm_content ~ '^[0-9]{10,20}$'
-    AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
+    -- Cancelled orders are out of units and sales, per the CPIS spec.
+    -- financial_status is the only signal we have: shopify_fulfillments
+    -- carries is_canceled_order but it is never set. VOIDED is safe to
+    -- read as cancelled -- all 1,730 of them in a 30-day window are
+    -- UNFULFILLED, so none ever shipped. PENDING is NOT cancelled: it is
+    -- COD awaiting payment and is overwhelmingly fulfilled (16,245 of
+    -- 16,409). REFUNDED stays too -- the spec keeps gross units, because
+    -- return status arrives long after the sale.
+    AND COALESCE(so.financial_status, '') <> 'VOIDED'
     AND jsonb_typeof(so.line_items->'edges') = 'array'
+),
+-- WHICH ENTITY PAYS FOR THIS ORDER.
+--
+-- Step 3 of the spec: utm_content maps to the ad, utm_term to the ad
+-- set. When an order carries an ad set we can see but no ad we can
+-- resolve, the spec falls back a level: "that ad set is allocated as one
+-- unit: its total spend is shared across all its orders".
+--
+-- So the fallback is decided PER AD SET, not per order. If any of an ad
+-- set's orders cannot name an ad, the whole ad set switches to ad-set
+-- allocation -- every one of its orders, including the ones that did
+-- name an ad. Allocating some of its orders per ad and the rest from the
+-- ad set total would count the overlap twice and break the spec's own
+-- reconciliation check (allocated + unattributed = total spend).
+matched AS (
+  SELECT o.order_id, o.line_items,
+         CASE WHEN o.raw_ad ~ '^[0-9]{10,20}$' AND al.ad_id IS NOT NULL
+              THEN o.raw_ad END                                   AS ad_id,
+         -- The ad set comes from the ad when we resolved one; otherwise
+         -- from utm_term, but ONLY if it is a real ad set. Without that
+         -- existence check any numeric utm_term becomes an entity with
+         -- no spend, which would add orders to a SKU at zero cost and
+         -- quietly improve its CPIS.
+         COALESCE(al.adset_id, s.adset_id)                        AS adset_id
+  FROM orders_in_window o
+  LEFT JOIN ad_lifecycle al
+         ON al.ad_id = o.raw_ad AND o.raw_ad ~ '^[0-9]{10,20}$'
+  LEFT JOIN meta_adsets s
+         ON s.adset_id = o.raw_adset AND o.raw_adset ~ '^[0-9]{6,20}$'
+),
+fallback_adsets AS (
+  SELECT adset_id FROM matched
+   WHERE adset_id IS NOT NULL
+   GROUP BY adset_id
+  HAVING bool_or(ad_id IS NULL)
+),
+resolved AS (
+  SELECT m.order_id, m.line_items,
+         CASE WHEN f.adset_id IS NOT NULL THEN 'adset:' || m.adset_id
+              WHEN m.ad_id   IS NOT NULL  THEN 'ad:'    || m.ad_id
+         END AS ad_id
+  FROM matched m
+  LEFT JOIN fallback_adsets f ON f.adset_id = m.adset_id
+),
+entity_orders AS (
+  -- Orders that name neither a resolvable ad nor an ad set stay UNMAPPED
+  -- and are left out of CPIS, exactly as the spec says.
+  SELECT order_id, ad_id, line_items FROM resolved WHERE ad_id IS NOT NULL
 ),
 line_items AS (
   SELECT
@@ -118,7 +174,7 @@ line_items AS (
       (edge->'node'->'originalUnitPriceSet'->'shopMoney'->>'amount')::numeric,
       0
     )                                                               AS unit_price
-  FROM orders_in_window ow,
+  FROM entity_orders ow,
        LATERAL jsonb_array_elements(ow.line_items->'edges') edge
   WHERE edge->'node'->>'sku' IS NOT NULL
 ),
@@ -242,11 +298,27 @@ GROUP BY t.order_id, t.master_sku,
 # of truth -- whatever fix lands in refresh_insights_daily_by_ad.py
 # automatically flows through here on the next refresh cadence.
 SQL_STEP2 = """
-SELECT ad_id, SUM(spend) AS spend
+-- Keyed to match SQL_STEP1's `resolved` CTE: 'ad:<id>' for an order that
+-- named a resolvable ad, 'adset:<id>' for one that fell back a level.
+-- Both kinds are returned in one map so the allocator does not care
+-- which level an order landed on.
+--
+-- The two never overlap. An ad set only appears here as 'adset:' if the
+-- allocator asked for it, and when it does, none of its ads are asked
+-- for -- see the fallback note in SQL_STEP1. Spend is therefore counted
+-- once, and the spec's reconciliation (allocated + unattributed =
+-- total) still holds.
+SELECT 'ad:' || ad_id AS ad_id, SUM(spend) AS spend
 FROM public.insights_daily_by_ad
 WHERE day BETWEEN %(window_from)s AND %(window_to)s
   AND ad_id IS NOT NULL
-GROUP BY ad_id
+GROUP BY 1
+UNION ALL
+SELECT 'adset:' || adset_id, SUM(spend)
+FROM public.insights_daily_by_adset
+WHERE day BETWEEN %(window_from)s AND %(window_to)s
+  AND adset_id IS NOT NULL
+GROUP BY 1
 """
 
 
