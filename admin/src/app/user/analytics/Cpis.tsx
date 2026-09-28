@@ -531,65 +531,11 @@ function CpisView() {
         per-color-variant drill-down (coming soon) and is intentionally not shown here.
       </p>
 
-      {/* Collapsible KPI strip. */}
-      <CollapsibleSection
-        title="Aggregate KPIs"
-        subtitle="Sum of name-matched metrics across every SKU in view"
-        open={openKpi}
-        onToggle={() => setOpenKpi((v) => !v)}
-      >
-        {hasCurrentRange && dailySeries && dailySeries.points.length > 1 && (
-          <div className="mb-3 border-b border-border-primary pb-3">
-            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-              Spend and orders, day by day
-            </div>
-            <SpendVsOrdersChart
-              points={dailySeries.points}
-              maxSpend={dailySeries.max_spend}
-              maxOrders={dailySeries.max_orders}
-              truncatedTo={dailySeries.truncated_to}
-            />
-          </div>
-        )}
-        {hasCurrentRange && rows.length > 0 && (
-          <CpisKpiStrip
-            rows={rows}
-            spendMatchMode={spendMatchMode}
-            metaTotalSpend={metaTotalSpend}
-            attributedSpend={attributedSpend}
-            untetheredSpend={untetheredSpend}
-            untetheredParts={untetheredParts}
-            dayMatched={Boolean(fromDate && toDate)}
-            /* The day the spend figure actually reaches, not the day
-               the user asked for. Meta lands insights in arrears, so a
-               window ending today is summed only to yesterday, and
-               printing the requested end beside it is what makes a
-               correct total read as a shortfall against Ads Manager. */
-            attributedOrders={attributedOrders}
-            windowLabel={
-              fromDate && toDate
-                ? `${fromDate} → ${spendThrough ?? toDate}`
-                : `Last ${window_}`
-            }
-          />
-        )}
-      </CollapsibleSection>
-
-      {/* Collapsible "Analytics table" block. Wraps the filter bar +
-          main SKU-level table so the merchant can fold the whole
-          scrolling grid away when they only care about the top
-          summary cards above. Toggled independently from KPI /
-          the table. */}
-      <CollapsibleSection
-        title="Analytics table"
-        subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
-        open={openTable}
-        onToggle={() => setOpenTable((v) => !v)}
-      >
-      {/* Filter bar. Kwikengage puts the window pills flush left, then a
-          search box, then dropdowns/toggles trailing to the right. The
-          whole strip lives inside one card so it reads as a single
-          control zone, not a scatter of chips. */}
+      {/* Filter bar, ABOVE the KPI strip. It used to sit inside the
+          Analytics table section, which put the controls BELOW the
+          numbers they govern -- collapse that section and the date
+          range driving every KPI went with it. It governs the whole
+          page, so it leads the page. */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-3">
         {/* Date range picker -- ported directly from Ads Analyse
             (AdsAnalyse.tsx :720). A preset <select> auto-fills the two
@@ -765,6 +711,62 @@ function CpisView() {
           disabled={loading || showingPreviousResults || search !== debouncedSearch || !hasCurrentRange || !rows.length}
         />
       </div>
+
+      {/* Collapsible KPI strip. */}
+      <CollapsibleSection
+        title="Aggregate KPIs"
+        subtitle="Sum of name-matched metrics across every SKU in view"
+        open={openKpi}
+        onToggle={() => setOpenKpi((v) => !v)}
+      >
+        {hasCurrentRange && dailySeries && dailySeries.points.length > 1 && (
+          <div className="mb-3 border-b border-border-primary pb-3">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+              Spend and orders, day by day
+            </div>
+            <SpendVsOrdersChart
+              points={dailySeries.points}
+              maxSpend={dailySeries.max_spend}
+              maxOrders={dailySeries.max_orders}
+              truncatedTo={dailySeries.truncated_to}
+            />
+          </div>
+        )}
+        {hasCurrentRange && rows.length > 0 && (
+          <CpisKpiStrip
+            rows={rows}
+            spendMatchMode={spendMatchMode}
+            metaTotalSpend={metaTotalSpend}
+            attributedSpend={attributedSpend}
+            untetheredSpend={untetheredSpend}
+            untetheredParts={untetheredParts}
+            dayMatched={Boolean(fromDate && toDate)}
+            /* The day the spend figure actually reaches, not the day
+               the user asked for. Meta lands insights in arrears, so a
+               window ending today is summed only to yesterday, and
+               printing the requested end beside it is what makes a
+               correct total read as a shortfall against Ads Manager. */
+            attributedOrders={attributedOrders}
+            windowLabel={
+              fromDate && toDate
+                ? `${fromDate} → ${spendThrough ?? toDate}`
+                : `Last ${window_}`
+            }
+          />
+        )}
+      </CollapsibleSection>
+
+      {/* Collapsible "Analytics table" block. Wraps the filter bar +
+          main SKU-level table so the merchant can fold the whole
+          scrolling grid away when they only care about the top
+          summary cards above. Toggled independently from KPI /
+          the table. */}
+      <CollapsibleSection
+        title="Analytics table"
+        subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
+        open={openTable}
+        onToggle={() => setOpenTable((v) => !v)}
+      >
 
       {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
       {hasCurrentRange && (loading || search !== debouncedSearch || showingPreviousResults) && (
