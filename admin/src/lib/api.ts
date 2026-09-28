@@ -1555,6 +1555,10 @@ export interface CpisUtmRow {
    *  break_even_cpis - CPIS; NEGATIVE means every unit sold loses money.
    *  break_even_cpis has no _vw twin -- it is a property of the product,
    *  not of how spend was allocated. */
+  /** Basket value of the attributed orders, counted once per order.
+   *  attributed_revenue is this SKU's own lines only, so order_revenue
+   *  is always >= it. This is what LC AOV divides. */
+  order_revenue: number | null;
   acos: number | null;
   acos_vw: number | null;
   break_even_cpis: number | null;

@@ -3769,6 +3769,10 @@ class CpisUtmRow(BaseModel):
     # Last-click UTM aggregates (surfaced explicitly for the Last Click
     # column group -- these are already in cpis_by_sku_utm; renaming
     # them here for the UI's Last-Click semantics).
+    #: Basket value of the attributed orders, counted once per order.
+    #: attributed_revenue is this SKU's own lines; this is the whole
+    #: order, so order_revenue >= attributed_revenue always.
+    order_revenue: float | None = None
     lc_avg_order_value: float | None
     lc_avg_qty_per_order: float | None
     # Spend-trend sparkline: 30 daily spend values (most recent day
@@ -4283,6 +4287,7 @@ async def get_cpis_utm(
                    SUM(attributed_orders)::int  AS attributed_orders,
                    SUM(attributed_units)::int   AS attributed_units,
                    SUM(attributed_revenue)      AS attributed_revenue,
+                   SUM(order_revenue)           AS order_revenue,
                    MAX(matched_ad_count)::int   AS matched_ad_count,
                    SUM(ad_spend)                AS ad_spend,
                    SUM(ad_spend_vw)             AS ad_spend_vw,
@@ -4312,6 +4317,7 @@ async def get_cpis_utm(
                  COALESCE(agg.attributed_orders, 0)  AS attributed_orders,
                  COALESCE(agg.attributed_units, 0)   AS attributed_units,
                  COALESCE(agg.attributed_revenue, 0) AS attributed_revenue,
+                 COALESCE(agg.order_revenue, 0)      AS order_revenue,
                  COALESCE(agg.matched_ad_count, 0)   AS matched_ad_count,
                  COALESCE(agg.ad_spend, 0)           AS ad_spend,
                  COALESCE(agg.ad_spend_vw, 0)        AS ad_spend_vw,
@@ -4397,6 +4403,7 @@ async def get_cpis_utm(
                    COALESCE(c.attributed_orders, 0)  AS attributed_orders,
                    COALESCE(c.attributed_units, 0)   AS attributed_units,
                    COALESCE(c.attributed_revenue, 0) AS attributed_revenue,
+                   COALESCE(c.order_revenue, 0)      AS order_revenue,
                    COALESCE(c.matched_ad_count, 0)   AS matched_ad_count,
                    COALESCE(c.ad_spend, 0)           AS ad_spend,
                    c.cost_per_order, c.cost_per_unit_sold, c.roas,
@@ -4755,9 +4762,16 @@ async def get_cpis_utm(
              CASE WHEN wd.n_days > 0
                   THEN na.active_windowed_spend / wd.n_days
                   ELSE NULL END           AS active_spend_per_day,
-             -- Last-click AOV: revenue per attributed order
+             -- Last-click AOV: BASKET value per attributed order.
+             --
+             -- This divided attributed_revenue, which is only this
+             -- SKU's own lines -- so a column labelled "average order
+             -- value" was reporting average SKU value per order and
+             -- came out below the real basket on every mixed order.
+             -- order_revenue counts each order's full value once.
              CASE WHEN COALESCE(p.attributed_orders, 0) > 0
-                  THEN p.attributed_revenue / p.attributed_orders
+                  THEN COALESCE(p.order_revenue, p.attributed_revenue)
+                       / p.attributed_orders
                   ELSE NULL END           AS lc_avg_order_value,
              -- Avg qty of THIS SKU per attributed order
              CASE WHEN COALESCE(p.attributed_orders, 0) > 0
@@ -4915,6 +4929,7 @@ async def get_cpis_utm(
                   ELSE 0 END                                 AS required_creatives_per_week,
              -- UTM-attributed (secondary comparison)
              p.attributed_orders, p.attributed_units, p.attributed_revenue,
+             p.order_revenue,
              p.matched_ad_count, p.ad_spend,
              p.cost_per_order, p.cost_per_unit_sold, p.roas,
              p.halo_orders, p.halo_units, p.halo_revenue, p.halo_spend,

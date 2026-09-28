@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS cpis_by_sku_daily (
     attributed_orders   integer,
     attributed_units    integer,
     attributed_revenue  numeric,
+    order_revenue       numeric,
     matched_ad_count    integer,
     ad_spend            numeric,
     ad_spend_vw         numeric,
@@ -77,7 +78,8 @@ DDL_MIGRATE = """
 ALTER TABLE cpis_by_sku_daily
     ADD COLUMN IF NOT EXISTS halo_orders  integer DEFAULT 0,
     ADD COLUMN IF NOT EXISTS halo_units   integer DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS halo_revenue numeric DEFAULT 0
+    ADD COLUMN IF NOT EXISTS halo_revenue numeric DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS order_revenue numeric
 """
 
 
@@ -285,6 +287,11 @@ def main() -> None:
                 agg: dict[tuple[str, date], dict] = defaultdict(lambda: {
                     "orders": set(), "units": 0, "revenue": 0.0,
                     "ad_spend": 0.0, "ad_spend_vw": 0.0, "ad_ids": set(),
+                    # Basket value of the orders this SKU appeared in,
+                    # once per order. `revenue` is the SKU's own lines;
+                    # this is the whole order, which is what an average
+                    # ORDER value has to divide.
+                    "order_revenue_by_order": {},
                 })
                 for ad_id, order_day, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
                     qty = int(qty or 0)
@@ -294,6 +301,7 @@ def main() -> None:
                     key = (master_sku, order_day)
                     a = agg[key]
                     a["orders"].add(order_id)
+                    a["order_revenue_by_order"][order_id] = order_total_rev
                     a["units"]   += qty
                     a["revenue"] += line_rev
                     a["ad_ids"].add(ad_id)
@@ -362,11 +370,13 @@ def main() -> None:
                     a = agg.get(key, {
                         "orders": set(), "units": 0, "revenue": 0.0,
                         "ad_spend": 0.0, "ad_spend_vw": 0.0, "ad_ids": set(),
+                        "order_revenue_by_order": {},
                     })
                     h = halo_agg.get(key, {"orders": set(), "units": 0, "revenue": 0.0})
                     rows.append((
                         master_sku, day,
                         len(a["orders"]), a["units"], a["revenue"],
+                        float(sum(a["order_revenue_by_order"].values())),
                         len(a["ad_ids"]), a["ad_spend"], a["ad_spend_vw"],
                         len(h["orders"]), h["units"], h["revenue"],
                     ))
@@ -379,12 +389,13 @@ def main() -> None:
                     INSERT INTO cpis_by_sku_daily (
                       master_sku, day,
                       attributed_orders, attributed_units, attributed_revenue,
+                      order_revenue,
                       matched_ad_count, ad_spend, ad_spend_vw,
                       halo_orders, halo_units, halo_revenue
                     ) VALUES %s
                     """,
                     rows,
-                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 )
 
                 cur.execute("SELECT MIN(day), MAX(day), COUNT(DISTINCT master_sku), SUM(ad_spend), SUM(ad_spend_vw) FROM cpis_by_sku_daily")
