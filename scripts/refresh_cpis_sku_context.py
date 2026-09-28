@@ -131,19 +131,28 @@ WITH product_sku_map AS (
     -- The rest stay hard filters: combo / set / "buy any 3" listings are
     -- BUNDLES of different products, so their inventory count is a
     -- bundle count, not this SKU's units.
+    --
+    -- The bundle test reads the TITLE as well as productType. It used
+    -- to read productType alone, and 36 of the 1,408 products carry a
+    -- blank one -- among them "Cotton Pant Combo", two kurta combos
+    -- and five bedsheets, 14 bundles in total, which sailed through
+    -- every filter because '' contains none of these words.
+    --
+    -- Both of the defects this fixes trace to that one hole. SDCP's
+    -- combo ran to Rs 1,598 against the real pant at Rs 799, and
+    -- price_max took it; the same listing's blank productType then won
+    -- the shortest-string contest below and left the SKU unnamed.
     SELECT
       r.raw_payload->>'productType' AS product_type,
+      r.raw_payload->>'title'        AS product_title,
       lower(coalesce(r.raw_payload->>'productType','')) LIKE '%price test%' AS is_price_test,
       upper(coalesce(r.raw_payload->>'status','')) = 'ACTIVE'              AS is_active,
       r.raw_payload AS p
     FROM raw_dump_shopify r
     WHERE r.object_type = 'products'
-      AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%combo%'
-      AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%bedsheet%'
-      AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%co-ord%'
-      AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%comforter%'
-      AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '%buy any 3%'
-      AND lower(coalesce(r.raw_payload->>'productType','')) NOT LIKE '% set%'
+      AND lower(coalesce(r.raw_payload->>'productType','') || ' '
+                || coalesce(r.raw_payload->>'title',''))
+          !~ '(combo|bedsheet|co-ord|comforter|buy any 3| set)'
 ),
 product_variants AS (
     -- Master SKU parsed from the variant SKU: strip the trailing
@@ -157,6 +166,7 @@ product_variants AS (
         FOR GREATEST(1, length(regexp_replace(edge->'node'->>'sku','_[A-Za-z0-9]+$','')) - 2)
       )                                                      AS master_sku,
       psm.product_type,
+      psm.product_title,
       psm.is_price_test,
       psm.is_active,
       edge->'node'->>'sku'                                   AS variant_sku,
@@ -186,12 +196,29 @@ variant_stock AS (
 products_ctx AS (
     SELECT
       master_sku,
-      (ARRAY_AGG(product_type ORDER BY length(product_type)))[1] AS product_name,
+      -- The most-listed NON-BLANK productType, falling back to the
+      -- product title. Was the SHORTEST product_type, which meant any
+      -- listing with a blank one won outright and the SKU showed no
+      -- name at all -- 6 of 102 SKUs. Shortest was never the point
+      -- either; the main listing is the one most variants sit under.
+      COALESCE(
+        (SELECT pt FROM (
+           SELECT product_type AS pt, COUNT(*) n
+             FROM product_variants pv
+            WHERE pv.master_sku = product_variants.master_sku
+              AND btrim(COALESCE(pv.product_type, '')) <> ''
+            GROUP BY product_type ORDER BY n DESC, length(product_type) LIMIT 1) x),
+        MIN(product_title)
+      )                                                         AS product_name,
       COUNT(DISTINCT product_type)                              AS product_type_count,
       COUNT(DISTINCT variant_sku)                               AS variant_count,
       COUNT(DISTINCT variant_sku) FILTER (WHERE inv > 0)        AS available_variant_count,
-      MIN(price)                                                AS price_min,
-      MAX(price)                                                AS price_max
+      -- Non-positive prices are not price points. The gift listing
+      -- "🎁 Black Cotton Tote Bag" carries variant SDCTBBL at Rs 0
+      -- beside the same SKU's real Rs 499, and it dragged that SKU's
+      -- floor to zero.
+      MIN(price) FILTER (WHERE price > 0)                       AS price_min,
+      MAX(price) FILTER (WHERE price > 0)                       AS price_max
     FROM product_variants
     WHERE NOT is_price_test
     GROUP BY master_sku

@@ -290,6 +290,33 @@ _ATTRIBUTION_DAILY = (
     "GROUP BY matched_ad_id"
 )
 
+# New vs repeat customers per ad, over the same window and the same
+# matched_ad_id mapping the Shopify pair above uses, so the four columns
+# and shopify_orders agree about which orders belong to the ad.
+#
+# "New" means the customer's FIRST EVER order, decided from the whole
+# order history by scripts/refresh_order_customer_type.py -- not first
+# in the window. new_customers equals new orders (a first order is
+# unique to a person) and adds up across ads; repeat_customers is
+# DISTINCT people and does not, because one person can buy from two ads
+# in one window.
+_CUSTOMER_MIX_DAILY = (
+    "SELECT a.matched_ad_id, "
+    "       COUNT(*) FILTER (WHERE oct.is_new_customer), "
+    "       COUNT(DISTINCT oct.customer_id) "
+    "         FILTER (WHERE NOT oct.is_new_customer), "
+    "       COALESCE(SUM(oct.total_price) "
+    "         FILTER (WHERE oct.is_new_customer), 0), "
+    "       COALESCE(SUM(oct.total_price) "
+    "         FILTER (WHERE NOT oct.is_new_customer), 0) "
+    "FROM public.shopify_order_attribution a "
+    "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
+    "WHERE a.matched_ad_id = ANY(:ad_ids) "
+    "  AND oct.order_day >= CAST(:from_str AS date) "
+    "  AND oct.order_day <= CAST(:to_str AS date) "
+    "GROUP BY a.matched_ad_id"
+)
+
 # Fallback daily grain for an install with no source configured: this
 # project's own bronze insights. Carries spend / impressions / reach and
 # nothing else, and UNION ALLs two bronze tables that overlap, so an
@@ -971,6 +998,13 @@ class AdsAnalyseRow(BaseModel):
     ctr_pct: float | None
     shopify_orders: float | None
     shopify_revenue: float | None
+    #: New vs repeat customers, and the sales from each. See
+    #: _CUSTOMER_MIX_DAILY -- repeat_customers is distinct people and
+    #: must not be summed across rows.
+    new_customers: int | None = None
+    repeat_customers: int | None = None
+    new_customer_sales: float | None = None
+    repeat_customer_sales: float | None = None
     shopify_aov: float | None
     shopify_roas: float | None
     cost_per_shopify_order: float | None
@@ -1453,6 +1487,37 @@ async def get_ads_analyse(
         {**params, "limit": limit, "offset": offset},
     )
     rows = [AdsAnalyseRow(**dict(r._mapping)) for r in rows_result]
+
+    # New vs repeat customers, for EVERY date_field -- not only
+    # 'delivery'. The windowed overlay below rewrites the Meta metrics
+    # for delivery mode alone, but these four come from our own order
+    # attribution and are just as meaningful beside a lifetime row. Left
+    # out of that branch they would read NULL on two of the three modes,
+    # which looks like missing data rather than a different question.
+    #
+    # Bounded by the picked dates when there are any, lifetime otherwise
+    # -- the same rule the row's other Shopify columns follow.
+    mix_map: dict[str, tuple[int, int, float, float]] = {}
+    if rows:
+        _mix_sql = _CUSTOMER_MIX_DAILY
+        _mix_params: dict[str, object] = {"ad_ids": [r.ad_id for r in rows]}
+        if from_date and to_date:
+            _mix_params |= {"from_str": from_date, "to_str": to_date}
+        else:
+            _mix_sql = _mix_sql.replace(
+                "  AND oct.order_day >= CAST(:from_str AS date) "
+                "  AND oct.order_day <= CAST(:to_str AS date) ", "")
+        mix_map = {
+            aid: (int(nc or 0), int(rc or 0), float(ns or 0), float(rs or 0))
+            for aid, nc, rc, ns, rs in
+            (await session.execute(text(_mix_sql), _mix_params)).all()
+        }
+    for _r in rows:
+        _nc, _rc, _ns, _rs = mix_map.get(_r.ad_id, (0, 0, 0.0, 0.0))
+        _r.new_customers = _nc
+        _r.repeat_customers = _rc
+        _r.new_customer_sales = _ns
+        _r.repeat_customer_sales = _rs
 
     # The legacy table keeps efficiency scores on lifetime inputs even
     # when delivery metrics are overlaid. Calculate before that overlay,
@@ -3373,12 +3438,43 @@ async def get_cpis(
 ) -> CpisResponse:
     """CPIS per master SKU with windowed ad metrics.
 
+    WHAT `ad_spend` MEANS HERE, because CPIS has two things by that
+    name and mixing them up is the single easiest way to be wrong:
+
+      THIS endpoint          the windowed spend of every ad whose NAME
+                             contains the SKU code as a whole word.
+                             NOT ADDITIVE. An ad naming two SKUs is
+                             counted in full against both, so summing
+                             the column across SKUs exceeds what Meta
+                             charged. Today that is 1.01x overall (53
+                             ads name more than one SKU) but up to 2x
+                             for the SKUs involved. An ad that sold the
+                             SKU without naming it contributes zero.
+                             Answers: how are THIS SKU's own ads doing?
+
+      cpis_by_sku_utm        the SKU's SHARE of the spend behind its
+      (/cpis-utm)            attributed orders -- each ad's spend split
+                             per order, then within the order by line
+                             revenue. ADDITIVE: every rupee lands on
+                             exactly one SKU line and the column totals
+                             to Meta's own spend.
+                             Answers: how should the budget be divided?
+
+    Neither is "money spent selling this product"; the first is money
+    behind ads that mention it, the second is a modelled share.
+
     Ad-side metrics (ad_spend, ncp_count, cost_per_ncp) are computed
-    *at query time* from raw_dump_meta insights so they respect the
-    picked window; the underlying cpis_by_sku table stores those
-    columns as lifetime totals per SKU regardless of window_key, which
-    is why picking 7d used to show the same ad_spend as 30d. Fixed
-    2026-08-29.
+    *at query time* so they respect the picked window; the underlying
+    cpis_by_sku table stores those columns as lifetime totals per SKU
+    regardless of window_key, which is why picking 7d used to show the
+    same ad_spend as 30d. Fixed 2026-08-29.
+
+    The sort and the page are taken on the WINDOWED value as of
+    2026-09-26. They used to be taken on the stored lifetime one while
+    the windowed figure was displayed, so "sort by ad spend" returned a
+    column that read as unsorted -- on 30d the first row showed Rs 2,893
+    and the tenth Rs 17.1L -- and LIMIT/OFFSET ran on that same wrong
+    order, which could keep a heavy in-window spender off page one.
 
     Both windowed ad_spend and windowed ncp_count come from
     insights_daily_by_ad, which is keyed (ad_id, day) and therefore
@@ -3417,90 +3513,95 @@ async def get_cpis(
     # We do this in one big SQL rather than a Python loop so the whole
     # thing lands in a single request. The `matched_ads` CTE reuses the
     # same word-boundary regex we use in /cpis/{sku}/ads.
+    # Windowed sort keys, so the ORDER BY names the same number the
+    # column shows. `units_sold` is the one stored figure that is
+    # already per-window.
+    _ORDER = {
+        "ad_spend":           "ad_spend_windowed",
+        "cost_per_ncp":       "cost_per_ncp_windowed",
+        "cost_per_unit_sold": "cost_per_unit_sold_windowed",
+        "units_sold":         "units_sold",
+    }
+    order_expr = _ORDER[sort]
+
     sql = f"""
-      WITH page AS (
+      -- EVERY matching SKU, not a page of them. The windowed figures
+      -- have to exist before the sort can use them, and the set is 97
+      -- rows per window -- the old "expand only the page" shape was
+      -- guarding against a cost that does not exist.
+      WITH candidates AS (
         SELECT master_sku, window_key, window_from, window_to,
                units_sold, ending_inventory_units, avg_sell_through_rate,
                matched_ad_count,
-               ad_spend AS ad_spend_lifetime,
-               ncp_count AS ncp_count_lifetime,
-               cost_per_ncp AS cost_per_ncp_lifetime,
+               ad_spend           AS ad_spend_lifetime,
+               ncp_count          AS ncp_count_lifetime,
+               cost_per_ncp       AS cost_per_ncp_lifetime,
                cost_per_unit_sold AS cost_per_unit_sold_lifetime
         FROM cpis_by_sku c
         {where_sql}
-        ORDER BY c.{sort_column} DESC NULLS LAST
-        LIMIT :limit OFFSET :offset
       ),
-      -- For each SKU on the page, expand to matched ads via word-
-      -- boundary regex on ad_name (same as /cpis/{{sku}}/ads).
+      -- Expand each SKU to the ads whose NAME carries its code, by
+      -- word-boundary regex (same rule as /cpis/{{sku}}/ads). An ad
+      -- naming two SKUs joins to both, which is why this column is not
+      -- additive across rows -- see the docstring.
       matched AS (
-        SELECT p.master_sku, al.ad_id, al.spend AS ad_lifetime_spend,
-               al.ncp_count AS ad_lifetime_ncp
-        FROM page p
+        SELECT c.master_sku, al.ad_id
+        FROM candidates c
         JOIN ad_lifecycle al
-          ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+          ON al.ad_name ~* ('\\y' || c.master_sku || '\\y')
       ),
-      -- Windowed spend and NCP per ad from the materialised
-      -- insights_daily_by_ad table (scripts/refresh_insights_daily_by_ad.py),
-      -- which is what /creative-testing already reads.
-      --
-      -- This replaced a LEFT JOIN onto raw_dump_meta that matched on
-      -- raw_payload->>'ad_id' and cast raw_payload->>'date_start' to a
-      -- date per row. No index can serve either expression, so every
-      -- request scanned 2.2M JSONB rows across 5.9GB and the endpoint
-      -- took 50s. The typed table has ix_idba_ad_day on (ad_id, day).
-      --
-      -- The window bounds come from the join to `page` rather than the
-      -- two correlated subqueries that were here before, which re-ran
-      -- per matched ad.
       windowed_ad AS (
         SELECT m.master_sku, m.ad_id,
-               COALESCE(SUM(i.spend), 0) AS windowed_spend,
-               COALESCE(SUM(i.ncp_count), 0) AS windowed_ncp,
-               m.ad_lifetime_spend, m.ad_lifetime_ncp
+               COALESCE(SUM(i.spend), 0)     AS windowed_spend,
+               COALESCE(SUM(i.ncp_count), 0) AS windowed_ncp
         FROM matched m
-        JOIN page p ON p.master_sku = m.master_sku
+        JOIN candidates c ON c.master_sku = m.master_sku
         LEFT JOIN public.insights_daily_by_ad i
           ON i.ad_id = m.ad_id
-         AND i.day >= p.window_from
-         AND i.day <= p.window_to
-        GROUP BY m.master_sku, m.ad_id, m.ad_lifetime_spend, m.ad_lifetime_ncp
+         AND i.day >= c.window_from
+         AND i.day <= c.window_to
+        GROUP BY m.master_sku, m.ad_id
       ),
       windowed_sku AS (
-        -- NCP is now the real windowed count, summed per day from
-        -- insights_daily_by_ad. It used to be the proportional
-        -- approximation lifetime_ncp * (windowed_spend /
-        -- lifetime_spend), which this module documented as standing in
-        -- only until Silver carried per-day NCP. It does.
         SELECT master_sku,
                SUM(windowed_spend) AS ad_spend_windowed,
                SUM(windowed_ncp)   AS ncp_count_windowed
         FROM windowed_ad
         GROUP BY master_sku
+      ),
+      scored AS (
+        SELECT c.*,
+               COALESCE(w.ad_spend_windowed, 0)::numeric  AS ad_spend_windowed,
+               COALESCE(w.ncp_count_windowed, 0)::numeric AS ncp_count_windowed,
+               CASE WHEN COALESCE(w.ncp_count_windowed, 0) > 0
+                 THEN w.ad_spend_windowed / w.ncp_count_windowed END
+                 AS cost_per_ncp_windowed,
+               CASE WHEN COALESCE(c.units_sold, 0) > 0
+                 THEN COALESCE(w.ad_spend_windowed, 0) / c.units_sold END
+                 AS cost_per_unit_sold_windowed
+        FROM candidates c
+        LEFT JOIN windowed_sku w USING (master_sku)
       )
-      SELECT p.master_sku, p.window_key, p.window_from, p.window_to,
-             p.units_sold, p.ending_inventory_units, p.avg_sell_through_rate,
-             p.matched_ad_count,
-             COALESCE(w.ad_spend_windowed, 0)::numeric AS ad_spend,
-             COALESCE(w.ncp_count_windowed, 0)::numeric AS ncp_count,
-             CASE WHEN COALESCE(w.ncp_count_windowed,0) > 0
-               THEN COALESCE(w.ad_spend_windowed,0) / w.ncp_count_windowed
-               ELSE NULL END AS cost_per_ncp,
-             CASE WHEN COALESCE(p.units_sold,0) > 0
-               THEN COALESCE(w.ad_spend_windowed,0) / p.units_sold
-               ELSE NULL END AS cost_per_unit_sold,
-             p.ad_spend_lifetime,
-             p.ncp_count_lifetime
-      FROM page p
-      LEFT JOIN windowed_sku w USING (master_sku)
-      -- Row order preserved from `page` CTE (which sorted by
-      -- c.{sort_column}). Adding an explicit ORDER BY here would
-      -- re-shuffle after the LEFT JOIN and can't reference the
-      -- CTE order directly without ROW_NUMBER(). The page CTE
-      -- sorts by cpis_by_sku's stored value which is lifetime for
-      -- ad_spend/cost_per_ncp -- that's approximately correlated
-      -- with the windowed value users see, and the alternative
-      -- (sorting outer by windowed) would need a second query.
+      SELECT master_sku, window_key, window_from, window_to,
+             units_sold, ending_inventory_units, avg_sell_through_rate,
+             matched_ad_count,
+             ad_spend_windowed           AS ad_spend,
+             ncp_count_windowed          AS ncp_count,
+             cost_per_ncp_windowed       AS cost_per_ncp,
+             cost_per_unit_sold_windowed AS cost_per_unit_sold,
+             ad_spend_lifetime,
+             ncp_count_lifetime
+      FROM scored
+      -- Sorted on the value the column actually shows. Until
+      -- 2026-09-26 this sorted on cpis_by_sku's stored LIFETIME spend
+      -- and then displayed the windowed one, so "sort by ad spend"
+      -- returned a column that read as unsorted: on the 30d window the
+      -- first row showed Rs 2,893 and the tenth Rs 17.1L. Worse than
+      -- cosmetic -- LIMIT/OFFSET ran on the lifetime order too, so a
+      -- SKU spending heavily inside the window could sit off page one
+      -- entirely.
+      ORDER BY {order_expr} DESC NULLS LAST, master_sku
+      LIMIT :limit OFFSET :offset
     """
 
     rows_result = await session.execute(text(sql), {**params, "limit": limit, "offset": offset})
@@ -3814,6 +3915,14 @@ class CpisUtmRow(BaseModel):
     halo_sale_pct: float | None
     # Untested backlog rolled to a single "ready to test" number
     pipeline_avail_to_test: int | None
+    #: Assets that HAVE run but spent nothing in the picked window --
+    #: proven creative sitting idle. The SKU is taken from the ad the
+    #: asset ran under rather than the asset's own nomenclature, which
+    #: is why influencer has a real count here and cannot in the
+    #: untested columns.
+    tested_idle_video_ct: int | None = None
+    tested_idle_graphic_ct: int | None = None
+    tested_idle_influencer_ct: int | None = None
     # Per-SKU untested-asset backlog counts (see untested_by_sku CTE).
     # untested_influencer_ct is always 0 today -- influencer nomenclature
     # doesn't carry a product code, so no SKU mapping exists. Column
@@ -3907,11 +4016,18 @@ WITH spend AS (
      WHERE day BETWEEN :wf AND :wt AND spend > 0
 ),
 orders_in_window AS MATERIALIZED (
-    SELECT so.utm_content AS ad_id, so.processed_at::date AS d,
+    -- IST, because Meta counts its spend days in the ad account's
+    -- timezone (Asia/Kolkata) and this joins order days to spend days.
+    -- processed_at::date casts at the session timezone, UTC, which put
+    -- 16.7% of orders on the day either side of the one they belong to.
+    SELECT so.utm_content AS ad_id,
+           (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date AS d,
            jsonb_typeof(so.line_items->'edges') = 'array' AS has_items
       FROM shopify_orders so
-     WHERE so.processed_at >= CAST(:wf AS date)
-       AND so.processed_at < CAST(:wt AS date) + integer '1'
+     WHERE so.processed_at >= (CAST(:wf AS date)::timestamp
+                                 AT TIME ZONE 'Asia/Kolkata')
+       AND so.processed_at <  ((CAST(:wt AS date) + 1)::timestamp
+                                 AT TIME ZONE 'Asia/Kolkata')
        AND so.utm_content ~ '^[0-9]{10,20}$'
 ),
 cited AS (
@@ -3943,8 +4059,57 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
     )
     return (
         "WITH breakdown AS (" + _CPIS_UNTETHERED_BREAKDOWN + ") "
+        # AD grain for the headline total.
+        #
+        # This read campaign grain for a while, because the grains
+        # disagreed and campaign happened to land closest to Ads
+        # Manager. That was treating a symptom. All three grains were
+        # inflated by the same bug in the two silver builders: they
+        # spread each Meta row's spend evenly across its date range,
+        # and Meta returns rolling trailing summaries (7-21, 8-22,
+        # 9-23 Sep) next to the true daily rows, so pro-rating
+        # invented spend on days that already had a real row.
+        #
+        # With both builders restricted to date_start = date_stop, all
+        # three grains agree with Meta's own account-level total.
+        # Measured 2026-08-28..09-24 over the two live accounts (the
+        # third is deactivated and spent nothing), against
+        # /act_<id>/insights at level=account -- the same figure Ads
+        # Manager renders:
+        #
+        #     by ad         Rs 1,11,21,641
+        #     by adset      Rs 1,11,21,641
+        #     by campaign   Rs 1,11,21,641
+        #     Meta account  Rs 1,11,21,647    (level=ad agrees exactly)
+        #
+        # Rs 6 in Rs 1.11 crore, which is rounding over 1,891 ads.
+        # Ad grain is now both the correct total and the grain the
+        # per-ad and per-SKU work already uses, so the headline and
+        # the rows beneath it come from one place.
         "SELECT b.*, (SELECT COALESCE(SUM(spend), 0) "
         "FROM public.insights_daily_by_ad WHERE day BETWEEN :wf AND :wt) AS meta_total_spend, "
+        # The newest day the sum above actually covers. Meta lands
+        # insights a day in arrears, so a window ending today is
+        # summed only to yesterday. Printing the requested end date
+        # beside a total that stops earlier is how a correct number
+        # gets read as a 4% shortfall against Ads Manager.
+        "(SELECT MAX(day) FROM public.insights_daily_by_ad "
+        "WHERE day BETWEEN :wf AND :wt) AS spend_through, "
+        # DISTINCT orders, not the sum of per-SKU order counts. A basket
+        # holding two master SKUs is one order but appears once under
+        # each, so summing the per-SKU column overstated the headline by
+        # 14.7% (22,162 against 19,317 real orders over 30 days). The
+        # per-SKU column itself is right -- "orders containing this SKU"
+        # -- it just does not add up across SKUs.
+        "(SELECT COUNT(DISTINCT so.order_id) FROM shopify_orders so "
+        " WHERE so.processed_at >= (CAST(:wf AS date)::timestamp "
+        "                            AT TIME ZONE 'Asia/Kolkata') "
+        "   AND so.processed_at <  ((CAST(:wt AS date) + 1)::timestamp "
+        "                            AT TIME ZONE 'Asia/Kolkata') "
+        "   AND so.utm_content ~ '^[0-9]{10,20}$' "
+        "   AND jsonb_typeof(so.line_items->'edges') = 'array' "
+        "   AND EXISTS (SELECT 1 FROM ad_lifecycle al "
+        "               WHERE al.ad_id = so.utm_content)) AS attributed_orders_distinct, "
         f"({attributed}) AS attributed_spend FROM breakdown b"
     )
 
@@ -3979,6 +4144,15 @@ class CpisUtmResponse(BaseModel):
     meta_total_spend: float | None
     attributed_spend: float | None
     untethered_spend: float | None
+    #: Newest day meta_total_spend actually covers, which is earlier
+    #: than the requested end whenever Meta has not landed the tail of
+    #: the window yet. The UI labels the tile with this, not with what
+    #: the user asked for.
+    spend_through: date | None = None
+    #: DISTINCT attributed orders in the window. The per-SKU
+    #: attributed_orders column counts orders containing that SKU, so it
+    #: double-counts mixed baskets when summed; this does not.
+    attributed_orders_distinct: int | None = None
     #: Why the untethered slice is untethered. See
     #: _CPIS_UNTETHERED_BREAKDOWN. These three always sum to
     #: untethered_spend, so the tile can print the reasons rather than
@@ -4319,19 +4493,45 @@ async def get_cpis_utm(
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
       ),
-      -- Per-SKU untested-asset counts across the three CTD content
-      -- registers. Merchant lens: "for SKU SDCP, how many briefed-but-
-      -- unused videos / graphics do I still have in the pipeline?"
-      --   * video    -- content_asset_register  ad_id IS NULL,
-      --                 SKU derived from split_part(planning_nomenclature)
-      --   * graphic  -- content_graphic_register  computed_is_tested = false,
-      --                 SKU from the pre-populated `product` column (falls
-      --                 back to split_part(nomenclature))
-      --   * inf.     -- content_influencer_posts  computed_is_tested = false,
-      --                 no SKU derivation available (SIF-<n>-P<n>
-      --                 nomenclature carries no product code) -- count
-      --                 is always 0 per SKU, but the UI shows the global
-      --                 total in a footer/tooltip so it isn't hidden.
+      -- Per-SKU untested-asset counts. Merchant lens: "for SKU SDCP,
+      -- how many briefed-but-unused videos / graphics do I still have
+      -- in the pipeline?"
+      --
+      -- UNTESTED MEANS NO AD EVER RESOLVED TO THE ASSET -- the same
+      -- rule /untested uses. It used to read each register's OWN
+      -- bookkeeping column (content_asset_register.ad_id IS NULL,
+      -- content_graphic_register.computed_is_tested = false), which
+      -- reports an asset untested whenever the content workflow simply
+      -- never wrote the link back, even though its id appears verbatim
+      -- in a live ad's name. Measured 2026-09-26:
+      --
+      --     video     788 -> 581   213 had demonstrably run (27%)
+      --     graphic   698 -> 517   196 had demonstrably run (28%)
+      --
+      -- The two sections disagreed by that much on the same question,
+      -- which is worse than either number alone: the backlog here read
+      -- a quarter larger than the backlog on the tab built to show it.
+      --
+      -- It also counts the SAME POPULATION /untested does: assets the
+      -- register holds a link for. An asset with no file cannot be put
+      -- in an ad, so counting it as backlog asks someone to action work
+      -- that has nothing to action. /untested made that scope explicit
+      -- on 2026-09-25 and this is the other half of the same change --
+      -- without it the two tabs still answer differently, just by a
+      -- smaller margin than the rule alone accounted for.
+      --
+      --   * video    -- content_asset_register, link_to_asset, SKU from
+      --                 split_part(planning_nomenclature, '_', 1)
+      --   * graphic  -- content_graphic_register, first of
+      --                 link_1/2/3 or creative, SKU from the
+      --                 pre-populated `product` column, falling back to
+      --                 split_part(nomenclature, '_', 1)
+      --   * inf.     -- NOT COUNTED PER SKU and still 0 here. SIF-<n>
+      --                 nomenclature carries no product code, so there
+      --                 is nothing to join on; 13,429 posts are
+      --                 genuinely untested and none of them can be
+      --                 attributed to a SKU. The Untested Assets tab
+      --                 owns that number.
       untested_by_sku AS (
         SELECT master_sku,
                COUNT(*) FILTER (WHERE media = 'video')      AS untested_video_ct,
@@ -4342,7 +4542,9 @@ async def get_cpis_utm(
             'video'::text AS media,
             NULLIF(split_part(COALESCE(car.planning_nomenclature, ''), '_', 1), '') AS master_sku
           FROM public.content_asset_register car
-          WHERE car.ad_id IS NULL
+          WHERE btrim(COALESCE(car.link_to_asset, '')) <> ''
+            AND NOT EXISTS (
+              SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = car.asset_id)
           UNION ALL
           SELECT
             'graphic'::text,
@@ -4351,12 +4553,69 @@ async def get_cpis_utm(
               NULLIF(split_part(COALESCE(cgr.nomenclature, ''), '_', 1), '')
             )
           FROM public.content_graphic_register cgr
-          WHERE COALESCE(cgr.computed_is_tested, false) = false
+          WHERE btrim(COALESCE(cgr.link_1, cgr.link_2, cgr.link_3,
+                               cgr.creative, '')) <> ''
+            AND NOT EXISTS (
+              SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = cgr.requisition_id)
           -- Influencer left out of the union: no per-SKU derivation.
           -- Frontend surfaces the global total separately.
         ) u
         WHERE master_sku IS NOT NULL
         GROUP BY master_sku
+      ),
+      -- Assets that HAVE run but spent nothing in the picked window:
+      -- proven creative sitting idle. The merchant question is the
+      -- mirror of the untested columns -- not "what have I never
+      -- tried?" but "what worked once and is not running now?"
+      --
+      -- The SKU comes from the ad the asset ran under, not from the
+      -- asset's own nomenclature. That is what makes an INFLUENCER
+      -- count possible here when the untested columns cannot have one:
+      -- SIF-<n> carries no product code, but the ad that ran the post
+      -- does, and a tested asset always has an ad by definition.
+      --
+      -- Zero spend, not absence: an asset whose ads exist but recorded
+      -- no spend in these dates is idle, which is the finding. The
+      -- LEFT JOIN keeps ads with no insights row at all, and those sum
+      -- to zero, which is the same state.
+      asset_media AS (
+        SELECT asset_id AS aid, 'video'::text AS media
+          FROM public.content_asset_register WHERE asset_id IS NOT NULL
+        UNION ALL
+        SELECT requisition_id, 'video'
+          FROM public.content_iterated_register WHERE requisition_id IS NOT NULL
+        UNION ALL
+        SELECT requisition_id, 'graphic'
+          FROM public.content_graphic_register WHERE requisition_id IS NOT NULL
+        UNION ALL
+        SELECT post_id, 'influencer'
+          FROM public.content_influencer_posts WHERE post_id IS NOT NULL
+      ),
+      asset_window_spend AS (
+        SELECT am.aid, am.media, COALESCE(SUM(i.spend), 0) AS spend
+          FROM asset_media am
+          JOIN public.ad_asset_map map ON map.asset_id = am.aid
+          CROSS JOIN bounds b
+          LEFT JOIN public.insights_daily_by_ad i
+                 ON i.ad_id = map.ad_id AND i.day BETWEEN b.lo AND b.hi
+         GROUP BY am.aid, am.media
+      ),
+      asset_sku AS (
+        SELECT DISTINCT am.aid, am.media, p.master_sku
+          FROM asset_media am
+          JOIN public.ad_asset_map map ON map.asset_id = am.aid
+          JOIN ad_lifecycle al ON al.ad_id = map.ad_id
+          JOIN page p ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+      ),
+      tested_idle_by_sku AS (
+        SELECT sk.master_sku,
+               COUNT(*) FILTER (WHERE sk.media = 'video')      AS tested_idle_video_ct,
+               COUNT(*) FILTER (WHERE sk.media = 'graphic')    AS tested_idle_graphic_ct,
+               COUNT(*) FILTER (WHERE sk.media = 'influencer') AS tested_idle_influencer_ct
+          FROM asset_sku sk
+          JOIN asset_window_spend w ON w.aid = sk.aid AND w.media = sk.media
+         WHERE w.spend = 0
+         GROUP BY sk.master_sku
       ),
       -- Window length in days so the frontend doesn't have to know
       -- window_key -> length mapping. Same for every row.
@@ -4614,6 +4873,9 @@ async def get_cpis_utm(
              -- for derivation). Influencer is 0 for every SKU because
              -- its nomenclature carries no product code; frontend shows
              -- a footer note with the global count so it isn't hidden.
+             COALESCE(tib.tested_idle_video_ct,      0)::integer AS tested_idle_video_ct,
+             COALESCE(tib.tested_idle_graphic_ct,    0)::integer AS tested_idle_graphic_ct,
+             COALESCE(tib.tested_idle_influencer_ct, 0)::integer AS tested_idle_influencer_ct,
              COALESCE(ubs.untested_video_ct,      0)::integer AS untested_video_ct,
              COALESCE(ubs.untested_graphic_ct,    0)::integer AS untested_graphic_ct,
              COALESCE(ubs.untested_influencer_ct, 0)::integer AS untested_influencer_ct,
@@ -4644,6 +4906,7 @@ async def get_cpis_utm(
       LEFT JOIN name_ads na    USING (master_sku)
       LEFT JOIN utm_ads  ua    USING (master_sku)
       LEFT JOIN untested_by_sku ubs USING (master_sku)
+      LEFT JOIN tested_idle_by_sku tib USING (master_sku)
       -- Return metrics from BQ. Pre-filter to a single window inside
       -- the subquery so USING(master_sku) works without ambiguity
       -- against the other joins. Custom date ranges fall back to 30d
@@ -4717,11 +4980,15 @@ async def get_cpis_utm(
     untethered_ad_unknown: float | None = None
     untethered_lag: float | None = None
     untethered_no_conversion: float | None = None
+    spend_through: date | None = None
+    attributed_orders_distinct: int | None = None
     if wf and wt:
         # The reconciliation strip is independent of pagination/search.
         # Cache its complete, original population by allocation mode + dates.
         rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
         meta_total_spend = float(rec["meta_total_spend"] or 0)
+        spend_through = rec["spend_through"]
+        attributed_orders_distinct = rec["attributed_orders_distinct"]
         attributed_spend = float(rec["attributed_spend"] or 0)
         untethered_spend = max(0.0, meta_total_spend - attributed_spend)
         untethered_ad_unknown = min(float(rec["ad_unknown"] or 0), untethered_spend)
@@ -4746,6 +5013,8 @@ async def get_cpis_utm(
         untethered_ad_unknown=untethered_ad_unknown,
         untethered_lag=untethered_lag,
         untethered_no_conversion=untethered_no_conversion,
+        spend_through=spend_through,
+        attributed_orders_distinct=attributed_orders_distinct,
     )
 
 
@@ -4796,6 +5065,135 @@ class CpisDataFreshnessResponse(BaseModel):
     max_daily_day: date | None     # freshest day in cpis_by_sku_daily
     distinct_skus: int
     computed_at: datetime
+
+
+class CpisDailyPoint(BaseModel):
+    day: date
+    #: Every rupee Meta charged that day, across all ads -- not just the
+    #: slice that tied to an order. This is the honest "what did the day
+    #: cost" figure.
+    #:
+    ad_spend: float
+    #: Orders that day which an ad drove, by last-click UTM. Matched to
+    #: the SAME day, so an order placed today against yesterday's spend
+    #: sits on today's point, not yesterday's.
+    attributed_orders: int
+
+
+class CpisDailySeriesResponse(BaseModel):
+    window_from: date | None
+    window_to: date | None
+    points: list[CpisDailyPoint]
+    #: Series maxima, so the client can label each line's own scale
+    #: without re-deriving them from the points.
+    max_spend: float
+    max_orders: int
+    #: Set when the series stops short of the requested end, with the
+    #: reason. Meta reports a day in arrears and today's orders are
+    #: still arriving, so the last day or two of any range are partial:
+    #: plotted, they read as a collapse in both spend and demand on
+    #: exactly the days a reader looks at first.
+    truncated_to: date | None = None
+
+
+@router.get("/cpis-utm/daily-series", response_model=CpisDailySeriesResponse)
+@cached_analytics(ttl=300.0)
+async def get_cpis_utm_daily_series(
+    session: SessionDep,
+    window: str = Query(default="30d"),
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+) -> CpisDailySeriesResponse:
+    """Daily ad spend beside the orders it is credited with.
+
+    One row per day, so the shape of the two can be read against each
+    other: does a heavier spend day actually produce more orders?
+
+    The two series come from different places on purpose.
+
+      ad_spend           insights_daily_by_ad, summed over every ad.
+                         Meta's own charge for the day, whether or not
+                         it tied to anything. Ad grain, the same as the
+                         headline tile -- all three grains now agree
+                         with Meta's account-level total; see the note
+                         in _cpis_reconciliation_sql.
+      attributed_orders  cpis_by_sku_daily, summed over every SKU.
+                         Orders that day credited to an ad.
+
+    They are therefore NOT two views of one number and the ratio between
+    them is not a conversion rate: the spend line includes prospecting
+    that will convert later or never, and the order line includes orders
+    against earlier days' spend. Same-day matching is what makes the
+    comparison legible day by day; it is also why the lines can diverge
+    without either being wrong.
+
+    The series stops at the last COMPLETE day: Meta reports a day in
+    arrears and today's orders are still arriving, so the newest day or
+    two of any range are partial. Plotted, they read as a collapse in
+    both spend and demand on exactly the days a reader looks at first.
+    `truncated_to` says where it actually ends, so the client can print
+    that instead of implying the range it was asked for.
+
+    Days inside that bound are returned even when they are zero, so a
+    real gap in delivery reads as a gap rather than as a shorter line.
+    """
+    if from_date and to_date:
+        wf, wt = from_date, to_date
+    else:
+        row = (await session.execute(
+            text("SELECT window_from, window_to FROM cpis_by_sku_utm "
+                 "WHERE window_key = :window LIMIT 1"),
+            {"window": window},
+        )).first()
+        wf, wt = (row[0], row[1]) if row else (None, None)
+
+    if not (wf and wt):
+        return CpisDailySeriesResponse(window_from=None, window_to=None,
+                                       points=[], max_spend=0.0, max_orders=0)
+
+    rows = (await session.execute(text("""
+        WITH days AS (
+          -- CAST(), not :wf::date -- SQLAlchemy's bind-parameter
+          -- scanner does not see a name followed by '::' and left
+          -- both series bounds unbound, which the driver reported
+          -- only as a missing parameter for the whole statement.
+          SELECT generate_series(CAST(:wf AS date), CAST(:wt AS date),
+                                 INTERVAL '1 day')::date AS day
+        ),
+        spend AS (
+          -- Ad grain, same as the headline tile, so this plot and
+          -- that number can never drift apart.
+          SELECT day, COALESCE(SUM(spend), 0) AS ad_spend
+            FROM public.insights_daily_by_ad
+           WHERE day BETWEEN :wf AND :wt
+           GROUP BY day
+        ),
+        orders AS (
+          SELECT day, COALESCE(SUM(attributed_orders), 0) AS attributed_orders
+            FROM public.cpis_by_sku_daily
+           WHERE day BETWEEN :wf AND :wt
+           GROUP BY day
+        )
+        SELECT d.day,
+               COALESCE(s.ad_spend, 0)::float        AS ad_spend,
+               COALESCE(o.attributed_orders, 0)::int AS attributed_orders
+          FROM days d
+          LEFT JOIN spend  s USING (day)
+          LEFT JOIN orders o USING (day)
+         WHERE d.day <= (SELECT MAX(day) FROM public.insights_daily_by_ad)
+           AND d.day <  CURRENT_DATE
+         ORDER BY d.day
+    """), {"wf": wf, "wt": wt})).all()
+
+    points = [CpisDailyPoint(day=r.day, ad_spend=r.ad_spend,
+                             attributed_orders=r.attributed_orders) for r in rows]
+    last = points[-1].day if points else None
+    return CpisDailySeriesResponse(
+        window_from=wf, window_to=wt, points=points,
+        max_spend=max((p.ad_spend for p in points), default=0.0),
+        max_orders=max((p.attributed_orders for p in points), default=0),
+        truncated_to=last if (last and last < wt) else None,
+    )
 
 
 @router.get("/cpis-utm/data-freshness", response_model=CpisDataFreshnessResponse)
@@ -6857,6 +7255,60 @@ def _ncp_rollup_sql(level: str) -> str:
     )
 
 
+def _customer_mix_sql(level: str) -> str:
+    """New vs repeat customers, and the sales from each, per entity.
+
+    An order is a NEW-customer order when it is that customer's first
+    ever, judged from the whole order history by
+    scripts/refresh_order_customer_type.py -- not from the window. A
+    customer who first bought in March and bought again in September is
+    a repeat customer on the September order, even though a 30-day view
+    sees only one of them.
+
+    Mapping matches _rolling_lc_sql exactly -- utm_term for ad sets,
+    matched_campaign_id for campaigns -- so these columns and LC Revenue
+    can never disagree about which orders belong to the entity. That is
+    deliberately NOT the ad_lifecycle mapping _ncp_rollup_sql uses; NCP
+    is a Meta-reported figure at ad grain, these are Shopify orders.
+
+    ADDITIVITY, which differs per column:
+
+        new_customers    == new orders. A first order is unique to a
+                            customer, so the two are the same number
+                            and both add up across entities.
+        repeat_customers  counted DISTINCT here, and does NOT add up.
+                            One person buying twice in the window from
+                            two ad sets is one customer but two rows,
+                            so summing this column across entities
+                            overstates. Fine per row, wrong in a total.
+    """
+    if level == "campaign":
+        src = ("FROM public.shopify_order_attribution a "
+               "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
+               "WHERE a.matched_campaign_id IS NOT NULL")
+        key = "a.matched_campaign_id"
+    else:
+        src = ("FROM public.shopify_order_attribution a "
+               "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
+               "JOIN public.meta_adsets s ON s.adset_id = a.utm_term "
+               "WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> '' "
+               "  AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'")
+        key = "a.utm_term"
+    return (
+        f"SELECT {key} AS entity_id, "
+        "       COUNT(*) FILTER (WHERE oct.is_new_customer) AS new_customers, "
+        "       COUNT(DISTINCT oct.customer_id) "
+        "         FILTER (WHERE NOT oct.is_new_customer) AS repeat_customers, "
+        "       COALESCE(SUM(oct.total_price) "
+        "         FILTER (WHERE oct.is_new_customer), 0) AS new_customer_sales, "
+        "       COALESCE(SUM(oct.total_price) "
+        "         FILTER (WHERE NOT oct.is_new_customer), 0) AS repeat_customer_sales "
+        f"{src} "
+        "  AND oct.order_day BETWEEN :from_date AND :to_date "
+        f"GROUP BY {key}"
+    )
+
+
 def _rolling_lc_sql(level: str) -> str:
     """Last-click revenue per rolling window, same mapping the Shopify
     columns use -- utm_term for ad sets, matched_campaign_id for
@@ -7051,6 +7503,14 @@ class RollupRow(BaseModel):
     #: insights_daily_by_ad through ad_lifecycle's adset_id/campaign_id.
     ncp_count: float | None = None
     cost_per_ncp: float | None = None
+    #: New vs repeat customers in the window, from Shopify orders mapped
+    #: the same way LC Revenue is. new_customers equals new orders and
+    #: adds up across rows; repeat_customers is DISTINCT people and does
+    #: not, since one person can buy from two ad sets in one window.
+    new_customers: int | None = None
+    repeat_customers: int | None = None
+    new_customer_sales: float | None = None
+    repeat_customer_sales: float | None = None
     #: Ads inside this entity that meet all four creative-scaling gates
     #: from section 3 of the framework. Matters most on a PAUSE row: the
     #: document's principle is that killing a weak ad set must not kill
@@ -7389,6 +7849,10 @@ async def get_ads_analyse_rollup(
            f"          WHERE s4.adset_id = i.{id_col}) AS campaign_name, "
            if level == "adset" else "       NULL::text AS campaign_name, ")
         + f"       COALESCE(scal.scalable_creatives, 0)::int AS scalable_creatives, "
+        "       COALESCE(cmx.new_customers, 0) AS new_customers, "
+        "       COALESCE(cmx.repeat_customers, 0) AS repeat_customers, "
+        "       COALESCE(cmx.new_customer_sales, 0) AS new_customer_sales, "
+        "       COALESCE(cmx.repeat_customer_sales, 0) AS repeat_customer_sales, "
         f"       npc.ncp_count AS ncp_count, "
         f"       CASE WHEN COALESCE(npc.ncp_count, 0) > 0 "
         f"            THEN COALESCE(w.spend, 0) / npc.ncp_count END AS cost_per_ncp, "
@@ -7433,6 +7897,7 @@ async def get_ads_analyse_rollup(
         f"       ON rm.entity_id = i.{id_col} "
         f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
         f"LEFT JOIN ({_ncp_rollup_sql(level)}) npc ON npc.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_customer_mix_sql(level)}) cmx ON cmx.entity_id = i.{id_col} "
         f"LEFT JOIN ({_scalable_creative_sql(level)}) scal ON scal.entity_id = i.{id_col} "
         f"LEFT JOIN ({_BUDGET_TYPE_SQL if level == 'adset' else _BUDGET_TYPE_CAMPAIGN_SQL}) bt "
         f"       ON bt.{id_col} = i.{id_col} "

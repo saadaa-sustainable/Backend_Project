@@ -16,6 +16,16 @@ and any sheet pulling at that moment blocks until it finishes. The
 concurrent form needs the unique index each view carries (see
 sql/snapshot_views.sql) and leaves readers untouched.
 
+REBINDING, and why this script checks before it refreshes: Postgres
+stores a view's dependencies by table OID, not by name. The silver
+builders rebuild into `<table>_new` and rename-swap, which means the old
+table keeps the OID these views were compiled against. A REFRESH then
+re-executes the stored definition perfectly faithfully -- against
+`insights_daily_by_ad_old`. Nothing errors. The sheets just quietly show
+whatever the table held before the last swap, and did for weeks. So
+`_verify_bindings` resolves each view's real dependencies and re-applies
+sql/snapshot_views.sql when any of them has drifted off the live table.
+
 Usage:
     ./.venv/bin/python scripts/refresh_snapshot_views.py
     ./.venv/bin/python scripts/refresh_snapshot_views.py --no-concurrent
@@ -43,6 +53,39 @@ VIEWS = (
 )
 
 
+#: Every view below must depend on this table, not on a swapped-out
+#: predecessor of it.
+LIVE_SOURCE = "insights_daily_by_ad"
+
+DDL_PATH = Path(__file__).resolve().parents[1] / "sql" / "snapshot_views.sql"
+
+
+def _verify_bindings(cur) -> list[str]:
+    """Names of meta_direct_* views bound to something other than LIVE_SOURCE.
+
+    Reads pg_depend, so it reports where the view will ACTUALLY read on
+    its next refresh rather than what its printed definition says -- the
+    two diverge after a rename-swap, which is the whole point.
+    """
+    cur.execute("""
+        SELECT DISTINCT v.relname, src.relname
+          FROM pg_class v
+          JOIN pg_namespace n   ON n.oid = v.relnamespace
+          JOIN pg_rewrite r     ON r.ev_class = v.oid
+          JOIN pg_depend d      ON d.objid = r.oid AND d.classid = 'pg_rewrite'::regclass
+          JOIN pg_class src     ON src.oid = d.refobjid
+         WHERE n.nspname = 'public'
+           AND v.relname LIKE %s
+           AND src.relkind IN ('r', 'p')
+           AND src.relname LIKE %s
+           AND src.relname <> %s
+    """, ("meta_direct%", LIVE_SOURCE + "%", LIVE_SOURCE))
+    drifted = cur.fetchall()
+    for view, src in drifted:
+        print(f"[drift] {view} reads public.{src}, not public.{LIVE_SOURCE}", flush=True)
+    return sorted({v for v, _ in drifted})
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--no-concurrent", action="store_true",
@@ -58,6 +101,14 @@ def main() -> int:
     try:
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = '3600s'")
+            # A refresh of a view bound to a stale table succeeds and
+            # publishes stale numbers, so rebind first.
+            if _verify_bindings(cur):
+                print(f"[fix]  re-applying {DDL_PATH.name} to rebind", flush=True)
+                cur.execute(DDL_PATH.read_text())
+                still = _verify_bindings(cur)
+                print("[fix]  rebound" if not still
+                      else f"[FAIL] still drifted: {', '.join(still)}", flush=True)
             for v in VIEWS:
                 t = time.time()
                 try:

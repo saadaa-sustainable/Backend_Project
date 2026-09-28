@@ -643,6 +643,16 @@ export interface AdsAnalyseRow {
   ctr_pct: number | null;
   shopify_orders: number | null;
   shopify_revenue: number | null;
+  /** New vs repeat customers over the window, from our own order
+   *  attribution. A customer is NEW on their first ever order, judged
+   *  from full order history -- not first-in-window.
+   *  new_customers equals new orders and adds up across rows;
+   *  repeat_customers is DISTINCT people and does NOT, since one person
+   *  can buy from two entities in one window. */
+  new_customers: number | null;
+  repeat_customers: number | null;
+  new_customer_sales: number | null;
+  repeat_customer_sales: number | null;
   shopify_aov: number | null;
   shopify_roas: number | null;
   cost_per_shopify_order: number | null;
@@ -1499,6 +1509,13 @@ export interface CpisUtmRow {
   // carries no product code); tooltip explains.
   untested_video_ct: number | null;
   untested_graphic_ct: number | null;
+  /** Assets that HAVE run but spent nothing in the picked window --
+   *  proven creative sitting idle. SKU comes from the ad the asset ran
+   *  under, not the asset's own nomenclature, which is why influencer
+   *  has a real count here and none in the untested columns. */
+  tested_idle_video_ct: number | null;
+  tested_idle_graphic_ct: number | null;
+  tested_idle_influencer_ct: number | null;
   untested_influencer_ct: number | null;
   // Return metrics from BQ (MapleMonk consolidated returns, joined
   // per-window). null when the SKU has no rows in master_sku_returns
@@ -1568,6 +1585,15 @@ export interface CpisUtmResponse {
   untethered_ad_unknown: number | null;
   untethered_lag: number | null;
   untethered_no_conversion: number | null;
+  /** Newest day meta_total_spend actually covers. Earlier than the
+   *  requested end whenever Meta has not landed the tail of the window
+   *  yet, so the KPI strip labels itself with this rather than with
+   *  the dates the user picked. */
+  spend_through: string | null;
+  /** DISTINCT attributed orders in the window. The per-SKU
+   *  attributed_orders column counts orders CONTAINING that SKU, so
+   *  summing it across SKUs double-counts mixed baskets; this does not. */
+  attributed_orders_distinct: number | null;
 }
 
 export interface CpisUtmParams {
@@ -1587,6 +1613,36 @@ export interface CpisUtmParams {
   sort?: CpisUtmSort;
   limit?: number;
   offset?: number;
+}
+
+export interface CpisDailyPoint {
+  day: string;
+  ad_spend: number;
+  attributed_orders: number;
+}
+
+export interface CpisDailySeriesResponse {
+  window_from: string | null;
+  window_to: string | null;
+  points: CpisDailyPoint[];
+  max_spend: number;
+  max_orders: number;
+  /** Where the series really ends, when the newest days were partial. */
+  truncated_to: string | null;
+}
+
+export function fetchCpisDailySeries(params: {
+  window?: string; from_date?: string; to_date?: string;
+} = {}): Promise<CpisDailySeriesResponse> {
+  const qs = new URLSearchParams();
+  if (params.from_date && params.to_date) {
+    qs.set("from_date", params.from_date);
+    qs.set("to_date", params.to_date);
+  } else if (params.window) {
+    qs.set("window", params.window);
+  }
+  return request<CpisDailySeriesResponse>(
+    `/admin/analytics/cpis-utm/daily-series?${qs}`);
 }
 
 export function fetchCpisUtm(params: CpisUtmParams = {}): Promise<CpisUtmResponse> {
@@ -2256,6 +2312,16 @@ export interface RollupRow {
    *  correctly absent at that level. */
   shopify_orders: number | null;
   shopify_revenue: number | null;
+  /** New vs repeat customers over the window, from our own order
+   *  attribution. A customer is NEW on their first ever order, judged
+   *  from full order history -- not first-in-window.
+   *  new_customers equals new orders and adds up across rows;
+   *  repeat_customers is DISTINCT people and does NOT, since one person
+   *  can buy from two entities in one window. */
+  new_customers: number | null;
+  repeat_customers: number | null;
+  new_customer_sales: number | null;
+  repeat_customer_sales: number | null;
   shopify_roas: number | null;
   cost_per_shopify_order: number | null;
   /** (shopify_revenue - conv_value) / conv_value * 100. Negative means

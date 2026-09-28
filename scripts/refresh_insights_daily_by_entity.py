@@ -138,23 +138,38 @@ extracted AS (
         0) AS ftewv_count
     FROM raw_dedup
 ),
-expanded AS (
-    SELECT e.entity_id, gs::date AS day, (e.de - e.ds + 1) AS range_days,
-           e.spend       / NULLIF(e.de - e.ds + 1, 0) AS spend,
-           e.impressions / NULLIF(e.de - e.ds + 1, 0) AS impressions,
-           e.reach       / NULLIF(e.de - e.ds + 1, 0) AS reach,
-           e.clicks      / NULLIF(e.de - e.ds + 1, 0) AS clicks,
-           e.all_clicks  / NULLIF(e.de - e.ds + 1, 0) AS all_clicks,
-           e.conv_value  / NULLIF(e.de - e.ds + 1, 0) AS conv_value,
-           e.purchases   / NULLIF(e.de - e.ds + 1, 0) AS purchases,
-           e.ftewv_count / NULLIF(e.de - e.ds + 1, 0) AS ftewv_count
-      FROM extracted e, generate_series(e.ds, e.de, '1 day'::interval) gs
+-- Keep only Meta's true daily rows (date_start = date_stop) and take
+-- them at face value.
+--
+-- This used to spread every row's spend evenly across its date range
+-- and let `best` prefer the narrowest range. Two things made that
+-- wrong. Meta returns rolling trailing summaries (7-21, 8-22, 9-23 Sep)
+-- alongside the daily rows, so a single day is covered by a daily row
+-- AND a dozen summaries. And the summaries carry no spend the daily
+-- rows lack -- measured at Rs 26 across 33,888 of them. So every
+-- pro-rated day that filled a gap was inventing spend, not recovering
+-- it: campaign grain ran +4.37% and adset grain +7.65% over Meta's own
+-- account total, while the daily rows alone match it to Rs 6 in
+-- Rs 1.11 crore at all three grains.
+--
+-- Safe because the fetch is already daily: refresh_all_daily.py calls
+-- ingest_last_15_days.py with `--time-increment 1 --chunk-days 1` for
+-- adset and campaign, so a real row exists for every entity-day that
+-- actually delivered. A day with no daily row spent nothing.
+daily AS (
+    SELECT e.entity_id, e.ds AS day,
+           e.spend, e.impressions, e.reach, e.clicks, e.all_clicks,
+           e.conv_value, e.purchases, e.ftewv_count
+      FROM extracted e
+     WHERE e.de = e.ds
 ),
 best AS (
+    -- raw_dedup already keys on (entity, date_start, date_stop), so with
+    -- de = ds there is at most one row per (entity, day). Belt and braces.
     SELECT DISTINCT ON (entity_id, day)
            entity_id, day, spend, impressions, reach, clicks, all_clicks,
            conv_value, purchases, ftewv_count
-      FROM expanded ORDER BY entity_id, day, range_days ASC
+      FROM daily ORDER BY entity_id, day
 )
 INSERT INTO public.{table}_new
     ({id_col}, day, spend, impressions, reach, clicks, all_clicks, conv_value, purchases, ftewv_count)

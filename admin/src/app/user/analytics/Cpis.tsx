@@ -4,20 +4,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   CpisMatchedAdRow,
+  CpisDailySeriesResponse,
   CpisUtmRow,
   CpisUtmSort,
   CpisUtmWindow,
-  SaturationCurveResponse,
-  SaturationYMetric,
   fetchCpisDataFreshness,
   fetchCpisMatchedAds,
   fetchCpisSpendTrends,
+  fetchCpisDailySeries,
   fetchCpisUtm,
-  fetchSaturationCurve,
   type CpisDataFreshness,
   type CpisSpendTrendResponse,
 } from "@/lib/api";
-import { SaturationCurveChart } from "./charts/SaturationCurveChart";
+import { SpendVsOrdersChart } from "./charts/SpendVsOrdersChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
@@ -30,203 +29,7 @@ import { ExportButton } from "@/components/ExportButton";
 const PAGE_SIZE = 250;
 const DISPLAY_PAGE_SIZE = 50;
 
-const SATURATION_Y_METRICS: { value: SaturationYMetric; label: string }[] = [
-  { value: "ncp_count", label: "NCP" },
-  { value: "purchases", label: "Purchases" },
-  { value: "ftewv_count", label: "First-time EWV" },
-];
 
-/** Details of a single clicked ad on the saturation curve. Kept in
- *  parent state so the drilldown panel stays anchored to the selection
- *  when the chart re-fits after control changes. */
-interface SelectedAd {
-  ad_id: string;
-  ad_name: string | null;
-  spend: number;
-  y: number;
-  y_label: string;
-}
-
-function SaturationCurveSection({ masterSkuFilter }: { masterSkuFilter: string | null }) {
-  const [yMetric, setYMetric] = useState<SaturationYMetric>("ncp_count");
-  const [scopeToSku, setScopeToSku] = useState(false);
-  const [data, setData] = useState<SaturationCurveResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedAd, setSelectedAd] = useState<SelectedAd | null>(null);
-
-  const masterSku = scopeToSku ? masterSkuFilter ?? undefined : undefined;
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setSelectedAd(null); // clear drilldown on refit
-    fetchSaturationCurve({ y_metric: yMetric, master_sku: masterSku })
-      .then((res) => !cancelled && setData(res))
-      .catch((err: unknown) => !cancelled && setError(err instanceof ApiError ? err.message : "Could not compute the saturation curve."))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [yMetric, masterSku]);
-
-  // Chart AXIS labels only -- these stay abbreviated on purpose, since a
-  // y-axis tick reading "₹1,27,11,045" does not fit. Every table cell and
-  // tile now shows the full figure.
-  const fmtINR = (n: number) => {
-    const abs = Math.abs(n);
-    if (abs >= 1e7) return `₹${(n / 1e7).toFixed(2)}Cr`;
-    if (abs >= 1e5) return `₹${(n / 1e5).toFixed(2)}L`;
-    if (abs >= 1e3) return `₹${(n / 1e3).toFixed(1)}K`;
-    return `₹${Math.round(n)}`;
-  };
-
-  return (
-    <div className="flex flex-col gap-3 rounded-lg border border-border-primary bg-white shadow-sm p-4">
-      <div>
-        <h3 className="text-sm font-medium text-text-primary">Saturation curve</h3>
-        <p className="mt-1 text-xs text-text-secondary">
-          Real-time fit (log-log regression, computed in Python on every selection) of ad spend vs. conversions
-          across {scopeToSku && masterSkuFilter ? `ads matching ${masterSkuFilter}` : "every ad"} — where the curve
-          bends down is where more spend stops paying off proportionally. <strong>Click any dot to drill in.</strong>
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex overflow-hidden rounded-md border border-border-primary">
-          {SATURATION_Y_METRICS.map((m) => (
-            <button
-              key={m.value}
-              onClick={() => setYMetric(m.value)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                yMetric === m.value ? "bg-accent-yellow text-text-primary" : "bg-white text-text-secondary hover:bg-bg-surface"
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        {masterSkuFilter && (
-          <label className="flex items-center gap-1.5 text-xs text-text-secondary">
-            <input type="checkbox" checked={scopeToSku} onChange={(e) => setScopeToSku(e.target.checked)} />
-            Scope to <span className="font-mono">{masterSkuFilter}</span> only
-          </label>
-        )}
-        {data && (
-          <span className="ml-auto text-xs text-text-tertiary">
-            {data.points.length} ads · {data.excluded_zero_or_missing} excluded (zero spend/{data.y_label.toLowerCase()})
-          </span>
-        )}
-      </div>
-
-      {error && <div className="rounded-md border border-error-mid bg-error-bg p-2 text-xs text-error-text">{error}</div>}
-      {loading ? (
-        <p className="text-xs text-text-secondary">Fitting curve…</p>
-      ) : data ? (
-        <>
-          {data.fit ? (
-            <p className="text-xs text-text-secondary">
-              Fit: y = {data.fit.a.toFixed(4)} · spend<sup>{data.fit.b.toFixed(3)}</sup> (R² = {data.fit.r_squared.toFixed(3)}) —{" "}
-              {data.fit.is_saturating ? (
-                <span className="font-medium text-warning-text">exponent &lt; 1: real diminishing returns signal</span>
-              ) : (
-                <span className="text-text-tertiary">exponent ≥ 1: no saturation signal in this data</span>
-              )}
-            </p>
-          ) : (
-            <p className="text-xs text-text-tertiary">Not enough ads with both spend and {data.y_label} to fit a curve (need 5+).</p>
-          )}
-          <SaturationCurveChart
-            points={data.points
-              .filter((p) => p.spend > 0 && p.y > 0)
-              .map((p) => ({
-                label: p.ad_name ?? p.ad_id,
-                x: p.spend,
-                y: p.y,
-                meta: { ad_id: p.ad_id, ad_name: p.ad_name },
-              }))}
-            curve={data.fit?.curve_points ?? null}
-            xLabel="Ad spend"
-            yLabel={data.y_label}
-            selectedLabel={selectedAd ? (selectedAd.ad_name ?? selectedAd.ad_id) : null}
-            onPointClick={(p) => {
-              const meta = p.meta as { ad_id: string; ad_name: string | null } | undefined;
-              if (!meta) return;
-              setSelectedAd({
-                ad_id: meta.ad_id,
-                ad_name: meta.ad_name,
-                spend: p.x,
-                y: p.y,
-                y_label: data.y_label,
-              });
-            }}
-          />
-          {selectedAd && (
-            <div className="mt-2 rounded-lg border border-accent-yellow bg-accent-yellow-bg/30 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-[11px] uppercase tracking-wider text-text-tertiary">Selected ad</div>
-                  <div className="mt-1 truncate text-[13px] font-medium text-text-primary" title={selectedAd.ad_name ?? undefined}>
-                    {selectedAd.ad_name ?? <span className="text-text-tertiary">(unnamed)</span>}
-                  </div>
-                  <div className="mt-0.5 font-mono text-[10px] text-text-tertiary">ad_id: {selectedAd.ad_id}</div>
-                </div>
-                <button
-                  onClick={() => setSelectedAd(null)}
-                  className="rounded p-1 text-text-tertiary hover:bg-white hover:text-text-primary"
-                  aria-label="Clear selection"
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Spend</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold text-text-primary">{fmtINR(selectedAd.spend)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">{selectedAd.y_label}</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold text-text-primary">
-                    {selectedAd.y.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Cost / {selectedAd.y_label}</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold text-text-primary">
-                    {selectedAd.y > 0 ? fmtINR(selectedAd.spend / selectedAd.y) : "—"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wider text-text-tertiary">Position vs. fit</div>
-                  <div className="mt-0.5 font-mono text-[15px] font-semibold">
-                    {data.fit ? (() => {
-                      const predicted = data.fit.a * Math.pow(selectedAd.spend, data.fit.b);
-                      const ratio = selectedAd.y / predicted;
-                      return (
-                        <span className={ratio >= 1.2 ? "text-success-text" : ratio <= 0.8 ? "text-error-text" : "text-warning-text"}>
-                          {(ratio * 100).toFixed(0)}%
-                          <span className="ml-1 text-[10px] text-text-tertiary">
-                            {ratio >= 1.2 ? "above" : ratio <= 0.8 ? "below" : "near"}
-                          </span>
-                        </span>
-                      );
-                    })() : (
-                      <span className="text-text-tertiary">—</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <p className="mt-2 text-[11px] text-text-tertiary">
-                &quot;Position vs. fit&quot; is this ad&apos;s actual {selectedAd.y_label} divided by what the fitted saturation curve predicts at this spend level.
-                &gt;120% = the ad outperforms peers; &lt;80% = underperforms — a triage signal for whether more spend is worth it.
-              </p>
-            </div>
-          )}
-        </>
-      ) : null}
-    </div>
-  );
-}
 
 const UTM_WINDOWS: CpisUtmWindow[] = ["7d", "30d", "90d"];
 // Sort options exposed in the UI. These still map to columns on the base
@@ -238,7 +41,7 @@ const UTM_SORT_OPTIONS: { value: CpisUtmSort; label: string }[] = [
   { value: "attributed_units", label: "Units sold (most first)" },
   { value: "attributed_orders", label: "Orders (most first)" },
   { value: "attributed_revenue", label: "Revenue (highest first)" },
-  { value: "ad_spend", label: "Ad spend (highest first)" },
+  { value: "ad_spend", label: "Spend on this SKU\u2019s ads (highest first)" },
 ];
 
 export function Cpis() {
@@ -411,6 +214,15 @@ function RequiredCreativesCell({
   );
 }
 
+/** Idle-count cell. Reads as ordinary ink rather than a warning: idle
+ *  proven creative is an opportunity, not a backlog, and colouring it
+ *  like one would put two amber columns side by side meaning opposite
+ *  things. */
+function IdleCell({ n }: { n: number | null | undefined }) {
+  if (!n) return <span className="text-text-tertiary">—</span>;
+  return <span className="text-text-primary">{n}</span>;
+}
+
 /** Untested-count cell -- muted dash for 0/null, amber emphasis for
  *  backlog >= 5 so a merchant can spot SKUs with plenty of unused
  *  creative ready to test. */
@@ -567,10 +379,9 @@ function CpisView() {
     };
   }, []);
   // Collapse toggles for each of the three analytics blocks (KPI strip,
-  // saturation curve, main table). Default: everything open. Merchant
+  // main table). Default: everything open. Merchant
   // can fold anything they don't need so the section stops eating scroll.
   const [openKpi, setOpenKpi] = useState(true);
-  const [openSaturation, setOpenSaturation] = useState(true);
   const [openTable, setOpenTable] = useState(true);
   // Row-click drilldown -- opens the ads modal for the clicked master
   // SKU showing every name-matched ad's status / category / spend /
@@ -589,7 +400,10 @@ function CpisView() {
   // total (not just the paginated row sum).
   const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
   const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
+  const [spendThrough, setSpendThrough] = useState<string | null>(null);
+  const [attributedOrders, setAttributedOrders] = useState<number | null>(null);
   const [untetheredSpend, setUntetheredSpend] = useState<number | null>(null);
+  const [dailySeries, setDailySeries] = useState<CpisDailySeriesResponse | null>(null);
   // Why the untethered slice is untethered -- printed in the Ad spend
   // tile's info tooltip so the percentage is a diagnosis, not a mystery.
   const [untetheredParts, setUntetheredParts] = useState<{
@@ -633,7 +447,19 @@ function CpisView() {
         setRequestError(null);
         setMetaTotalSpend(res.meta_total_spend);
         setAttributedSpend(res.attributed_spend);
+        // Its own request: the series is one row per day for the whole
+        // account, not per SKU, so it does not belong in the paginated
+        // response and must not make the table wait on it.
+        fetchCpisDailySeries({
+          window: filters.window,
+          from_date: filters.from_date,
+          to_date: filters.to_date,
+        })
+          .then((sr) => !cancelled && setDailySeries(sr))
+          .catch(() => !cancelled && setDailySeries(null));
         setUntetheredSpend(res.untethered_spend);
+        setSpendThrough(res.spend_through);
+        setAttributedOrders(res.attributed_orders_distinct);
         setUntetheredParts({
           adUnknown: res.untethered_ad_unknown,
           lag: res.untethered_lag,
@@ -712,6 +538,19 @@ function CpisView() {
         open={openKpi}
         onToggle={() => setOpenKpi((v) => !v)}
       >
+        {hasCurrentRange && dailySeries && dailySeries.points.length > 1 && (
+          <div className="mb-3 border-b border-border-primary pb-3">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
+              Spend and orders, day by day
+            </div>
+            <SpendVsOrdersChart
+              points={dailySeries.points}
+              maxSpend={dailySeries.max_spend}
+              maxOrders={dailySeries.max_orders}
+              truncatedTo={dailySeries.truncated_to}
+            />
+          </div>
+        )}
         {hasCurrentRange && rows.length > 0 && (
           <CpisKpiStrip
             rows={rows}
@@ -720,30 +559,27 @@ function CpisView() {
             attributedSpend={attributedSpend}
             untetheredSpend={untetheredSpend}
             untetheredParts={untetheredParts}
+            dayMatched={Boolean(fromDate && toDate)}
+            /* The day the spend figure actually reaches, not the day
+               the user asked for. Meta lands insights in arrears, so a
+               window ending today is summed only to yesterday, and
+               printing the requested end beside it is what makes a
+               correct total read as a shortfall against Ads Manager. */
+            attributedOrders={attributedOrders}
             windowLabel={
               fromDate && toDate
-                ? `${fromDate} → ${toDate}`
+                ? `${fromDate} → ${spendThrough ?? toDate}`
                 : `Last ${window_}`
             }
           />
         )}
       </CollapsibleSection>
 
-      {/* Collapsible saturation curve. */}
-      <CollapsibleSection
-        title="Saturation curve"
-        subtitle="Spend vs conversions -- shape of diminishing returns across all ads"
-        open={openSaturation}
-        onToggle={() => setOpenSaturation((v) => !v)}
-      >
-        <SaturationCurveSection masterSkuFilter={null} />
-      </CollapsibleSection>
-
       {/* Collapsible "Analytics table" block. Wraps the filter bar +
           main SKU-level table so the merchant can fold the whole
           scrolling grid away when they only care about the top
           summary cards above. Toggled independently from KPI /
-          Saturation. */}
+          the table. */}
       <CollapsibleSection
         title="Analytics table"
         subtitle={`${total.toLocaleString()} SKUs, filterable + sortable`}
@@ -898,8 +734,18 @@ function CpisView() {
               onClick={() => setSpendMatchMode(mode)}
               title={
                 mode === "ad_name"
-                  ? "STRICT: only ads whose ad_name contains this SKU code as a whole word (regex \\y<sku>\\y). Typically 5-15% of the SKU's converting spend."
-                  : "FRACTIONAL: every ad whose id appeared in this SKU's UTM-attributed orders, with spend split per-order and then within-order by line-item revenue share. Sums back to Meta total across SKUs -- no double-count."
+                  ? "Money spent on ads that have this product's code in their name.\n\n"
+                    + "We look at the ad's name, not at what it sold. So an ad that sold this "
+                    + "product without naming it counts as nothing here, and an ad naming two "
+                    + "products is counted in full for both.\n\n"
+                    + "Because of that, DO NOT ADD THESE UP \u2014 the total would be more than "
+                    + "you actually spent. Use this to look at one product's own ads."
+                  : "This product's slice of the money behind the orders it sold in.\n\n"
+                    + "Say an ad cost \u20b91,000 and led to 10 orders. That is \u20b9100 per "
+                    + "order. If one of those orders came to \u20b9600 and this product was "
+                    + "\u20b9300 of it \u2014 half \u2014 then this product takes \u20b950.\n\n"
+                    + "Every rupee is counted once, so these DO ADD UP to your real Meta spend. "
+                    + "Use this to decide how to split the budget."
               }
               className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
                 spendMatchMode === mode
@@ -907,7 +753,7 @@ function CpisView() {
                   : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
               }`}
             >
-              {mode === "ad_name" ? "Match: ad_name" : "Match: fractional"}
+              {mode === "ad_name" ? "Ads that name it" : "Its share of spend"}
             </button>
           ))}
         </div>
@@ -1018,8 +864,24 @@ function CpisView() {
                   Untested<br />Graphic
                 </th>
                 <th className="px-3 py-3 text-right"
-                    title="Influencer posts pending test. Always 0 per SKU today -- SIF-<n>-P<n> nomenclature carries no product code, so no SKU derivation exists yet. See the Untested Assets → Influencer tab for the flat list.">
+                    title="Influencer posts never run in an ad. Always 0 per SKU: SIF-<n>-P<n> nomenclature carries no product code, so an UNTESTED post cannot be tied to a SKU — there is no ad to read one from. The Untested Assets → Influencer tab has the flat list.">
                   Untested<br />Influencer
+                </th>
+                {/* The mirror of the three columns to the left: not
+                    "never tried" but "worked once, not running now".
+                    SKU is read off the ad the asset ran under, so
+                    influencer has a real count here. */}
+                <th className="border-l border-border-soft px-3 py-3 text-right"
+                    title="Videos that HAVE run in a Meta ad but whose ads spent nothing in the picked window. Proven creative sitting idle — the first place to look before briefing something new.">
+                  Idle<br />Video
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Graphics that have run but spent nothing in the picked window.">
+                  Idle<br />Graphic
+                </th>
+                <th className="px-3 py-3 text-right"
+                    title="Influencer posts that have run but spent nothing in the picked window. This column CAN be attributed to a SKU where the untested one cannot: a tested post has an ad, and the ad name carries the SKU.">
+                  Idle<br />Influencer
                 </th>
                 <th className="border-l border-border-soft px-3 py-3 text-right"
                     title="Creative-testing cadence rule: 1 new creative per week per 1L of weekly ad spend. So a SKU burning 5L / week needs 5 fresh tests. Derived from windowed name-matched spend normalised to a 7-day rate. Compare against the two Untested columns to the left to see if the backlog covers next week's requirement.">
@@ -1031,14 +893,14 @@ function CpisView() {
                   className="px-3 py-3 text-right"
                   title={
                     spendMatchMode === "ad_name"
-                      ? "SUM of windowed spend for name-matched ads (from insights_daily_by_ad, in the picked date range). Only ads whose ad_name contains this SKU."
-                      : "Fractional per-line-item allocation from cpis_by_sku_utm.ad_spend: for each ad, per_order_share = ad_spend / n_orders_ad_drove, then split within-order by line-item revenue share (line_rev / order_total_rev). Example: ad spent 1000 on 10 orders => 100 / order; order value 600 with SDCET 300 (50%) => SDCET share = 100 x 50% = 50. Sums back to Meta total across all SKUs -- no double-count."
+                      ? "Money spent on ads with this product's code in their name, over the "
+                        + "dates you picked. Do not add this column up \u2014 an ad naming two "
+                        + "products is counted for both."
+                      : "This product's slice of the money behind the orders it sold in, split "
+                        + "by how much of each order it was. Adds up to your real Meta spend."
                   }
                 >
-                  Spend
-                  <span className="ml-1 text-[10px] text-text-tertiary">
-                    ({spendMatchMode === "ad_name" ? "name" : "frac"})
-                  </span>
+                  {spendMatchMode === "ad_name" ? "Spend (named ads)" : "Spend (this product\u2019s share)"}
                 </th>
                 <th
                   className="px-3 py-3 text-right"
@@ -1081,8 +943,14 @@ function CpisView() {
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders (toggles with attribution mode)">
+                <th className="px-3 py-3 text-right" title="Ad spend / attributed orders. One order may hold several units of this SKU, so this runs above Cost/Unit by the Qty/Order factor.">
                   LC Cost/Order
+                  <span className="ml-1 text-[10px] text-text-tertiary">
+                    ({attributionMode === "equal" ? "eq" : "vw"})
+                  </span>
+                </th>
+                <th className="px-3 py-3 text-right" title="Ad spend / attributed units -- what one UNIT of this SKU cost to sell. The line-item view of Cost/Order; compare against ASP Net and the contribution margin.">
+                  LC Cost/Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
@@ -1249,8 +1117,17 @@ function CpisView() {
                     <UntestedCell n={row.untested_graphic_ct} />
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-tertiary"
-                      title="No per-SKU mapping available for influencer posts today.">
+                      title="An untested influencer post has no ad, so there is no SKU to read.">
                     —
+                  </td>
+                  <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
+                    <IdleCell n={row.tested_idle_video_ct} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px]">
+                    <IdleCell n={row.tested_idle_graphic_ct} />
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px]">
+                    <IdleCell n={row.tested_idle_influencer_ct} />
                   </td>
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px]">
                     <RequiredCreativesCell
@@ -1318,6 +1195,13 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtINRFull(
                       attributionMode === "equal" ? row.cost_per_order : row.cost_per_order_vw,
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {fmtINRFull(
+                      attributionMode === "equal"
+                        ? row.cost_per_unit_sold
+                        : row.cost_per_unit_sold_vw,
                     )}
                   </td>
                   <td className="px-3 py-2.5 text-right">
@@ -1500,7 +1384,7 @@ function CpisView() {
 }
 
 /** Accordion-style section header with a chevron toggle. Used to fold
- *  the KPI strip / saturation curve / main table so the CPIS page stops
+ *  the KPI strip / main table so the CPIS page stops
  *  eating scroll when the merchant isn't looking at one of them. */
 function CollapsibleSection({
   title,
@@ -1771,15 +1655,25 @@ function CategoryFlagPill({ category }: { category: string }) {
  *  attribution is deferred to the per-color-variant view. */
 function CpisKpiStrip({
   rows,
+  attributedOrders,
   windowLabel,
   spendMatchMode,
   metaTotalSpend,
   attributedSpend,
   untetheredSpend,
   untetheredParts,
+  dayMatched,
 }: {
   rows: CpisUtmRow[];
+  attributedOrders: number | null;
   windowLabel: string;
+  /** A custom date range matches spend to orders DAY BY DAY; the preset
+   *  windows match across the whole window. Same 30 days picked the two
+   *  ways can differ by a fifth -- measured 2026-09-26: 93% attributed
+   *  on the 30d preset against 72% on the same dates from the calendar,
+   *  the gap being spend that converted on a later day than it spent.
+   *  Neither is wrong, so the tile says which one it is doing. */
+  dayMatched: boolean;
   spendMatchMode: "ad_name" | "utm_id";
   metaTotalSpend: number | null;
   attributedSpend: number | null;
@@ -1798,15 +1692,34 @@ function CpisKpiStrip({
   //                     TRUE Meta total, not just the attributed slice.
   const isFractional = spendMatchMode === "utm_id";
 
+  // Server-side DISTINCT count when we have one. Summing the per-SKU
+  // column counts a two-SKU basket twice -- 22k against 19.3k real
+  // orders over 30 days, a 14.7% overstatement on a tile labelled
+  // "orders driven". The per-SKU column stays as it is; it means
+  // "orders containing this SKU" and is right at that grain.
   const totalCount = isFractional
-    ? rows.reduce((s, r) => s + (r.attributed_orders ?? 0), 0)
+    ? attributedOrders ?? rows.reduce((s, r) => s + (r.attributed_orders ?? 0), 0)
     : rows.reduce((s, r) => s + (r.name_matched_ads ?? 0), 0);
   const totalNcp = isFractional
     ? rows.reduce((s, r) => s + (r.utm_matched_ncp ?? 0), 0)
     : rows.reduce((s, r) => s + (r.name_matched_ncp ?? 0), 0);
 
-  // Ad-spend tile: full Meta window total in fractional mode; sum of
-  // name-matched slices for the paginated rows in ad_name mode.
+  // Ad-spend tile: TOTAL on the headline, attributed underneath.
+  //
+  // The headline is the number a first-time reader already has a model
+  // for -- what Meta charged, the figure that matches Ads Manager. The
+  // allocated slice is the one that needs explaining, so it sits below
+  // rather than leading. An earlier cut led with the slice, because it
+  // is what the Spend column beneath sums to; that made the tile and
+  // the column agree and left the headline needing a paragraph before
+  // it meant anything.
+  //
+  // The two are still both on the card and still labelled, so nothing
+  // was hidden to achieve it -- what changed is which one a reader
+  // meets first.
+  //
+  // In ad_name mode there is no window-total analog, so the headline
+  // remains a sum over the LOADED rows and says so.
   const totalSpend = isFractional
     ? (metaTotalSpend ?? 0)
     : rows.reduce((s, r) => s + (r.name_matched_spend ?? 0), 0);
@@ -1831,7 +1744,11 @@ function CpisKpiStrip({
       ? null
       : d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
   })();
-  const blendedCostPerNcp = totalNcp > 0 && totalSpend > 0 ? totalSpend / totalNcp : null;
+  // Both sides from the attributed set. Dividing the Meta TOTAL by the
+  // attributed NCP count would mix two populations and understate the
+  // cost of an NCP by whatever share of spend never tied to an order.
+  const costBasis = isFractional ? (attributedSpend ?? 0) : totalSpend;
+  const blendedCostPerNcp = totalNcp > 0 && costBasis > 0 ? costBasis / totalNcp : null;
 
   // "60% attributed" reads as "40% of the budget did nothing" unless the
   // tile says otherwise, so spell out the three reasons the API measured.
@@ -1843,19 +1760,24 @@ function CpisKpiStrip({
     if (adUnknown === null || lag === null || noConversion === null) return undefined;
     const pct = (n: number) => (metaTotalSpend > 0 ? ` (${((n / metaTotalSpend) * 100).toFixed(0)}%)` : "");
     const lines = [
+      `This is every product's slice of your ad money added together. ` +
+        `Each ad's cost is shared out across the orders it led to, and then ` +
+        `across the products inside each order, so no rupee is counted twice.`,
+      `It does not reach your full Meta spend, because some spend never ` +
+        `ties to an order. Here is where the rest went:`,
       `Of ${fmtINRCompact(metaTotalSpend)} Meta spend in this window, ` +
         `${fmtINRCompact(attributedSpend ?? 0)} is claimed by an attributed order. ` +
         `The remaining ${fmtINRCompact(untetheredSpend)} breaks down as:`,
-      `• ${fmtINRCompact(adUnknown)}${pct(adUnknown)} — an order named this ad, but the ad is missing from our Meta history, so the order could not be tied to it.`,
+      `• ${fmtINRCompact(adUnknown)}${pct(adUnknown)} \u2014 an order pointed at this ad, but we have no record of the ad, so the two could not be joined up.`,
     ];
     if (lag > 0) {
       lines.push(
-        `• ${fmtINRCompact(lag)}${pct(lag)} — the ad did convert in this window, just not on the day it spent. A custom date range matches spend to orders day by day; the preset windows do not.`,
+        `• ${fmtINRCompact(lag)}${pct(lag)} \u2014 the ad did sell in this window, just not on the same day it spent. Picking your own dates matches day by day; the preset windows look across the whole period.`,
       );
     }
     lines.push(
-      `• ${fmtINRCompact(noConversion)}${pct(noConversion)} — the ad drove no attributed order at all. Prospecting and awareness spend lives here.`,
-      `Separately, roughly a third of orders carry no ad tag at all (organic, direct, other channels), so they can never attribute to Meta spend.`,
+      `• ${fmtINRCompact(noConversion)}${pct(noConversion)} \u2014 the ad led to no order we can see. Prospecting and awareness spend sits here.`,
+      `Separately, about a third of all orders arrive with no ad tag at all \u2014 organic, direct, and other channels \u2014 so they can never be matched to Meta spend.`,
     );
     return lines.join("\n");
   })();
@@ -1872,12 +1794,15 @@ function CpisKpiStrip({
       <KwikTile
         icon={<span>₹</span>}
         iconColor="amber"
-        label={isFractional ? "Meta ad spend" : "Ad spend (name-matched)"}
+        label={isFractional ? "Total ad spend" : "Named-ad spend"}
         value={fmtINRCompact(totalSpend)}
         subLine={
-          isFractional && attrRate !== null && untetheredSpend !== null
-            ? `${attrRate.toFixed(0)}% attributed · ${fmtINRCompact(untetheredSpend)} untethered`
-            : windowLabel
+          isFractional
+            ? attributedSpend !== null && attrRate !== null
+              ? `${fmtINRCompact(attributedSpend)} tied to an order (${attrRate.toFixed(0)}%)`
+                + (dayMatched ? " \u00b7 same-day matching" : "")
+              : windowLabel
+            : `${rows.length} loaded rows \u2014 does not add up`
         }
         info={isFractional ? untetheredInfo : undefined}
       />
