@@ -932,7 +932,8 @@ function CpisView() {
                 {/* LAST-CLICK group -- pulled straight from
                     cpis_by_sku_utm which does order.utm_content → ad_id
                     → line_items.sku attribution. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Revenue from orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Revenue</th>
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Sales value of THIS SKU's units in orders whose last-click UTM content maps to an ad. Its own line value only -- the rest of the basket is in Halo Rev, not here.">LC Revenue</th>
+                <th className="px-3 py-3 text-right" title="Units of THIS SKU sold in those same orders. An order holding 3 of this SKU counts as 3, so this runs above LC Orders. It is the denominator behind LC Cost/Unit and ASP Net.">LC Units</th>
                 <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to a name-matched ad, containing this SKU">LC Orders</th>
                 {/* 3 mode-dependent cells: LC Ad Spend, LC Cost/Order, LC ROAS.
                     Header labels the current attribution mode so the merchant
@@ -1198,6 +1199,9 @@ function CpisView() {
                   {/* LAST-CLICK group */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtINRFull(row.attributed_revenue)}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                    {fmtNumFull(row.attributed_units)}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(row.attributed_orders)}
