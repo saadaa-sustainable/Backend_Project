@@ -4024,10 +4024,10 @@ orders_in_window AS MATERIALIZED (
            (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date AS d,
            jsonb_typeof(so.line_items->'edges') = 'array' AS has_items
       FROM shopify_orders so
-     WHERE so.processed_at >= CAST(:wf AS date) - 1
-       AND so.processed_at < CAST(:wt AS date) + integer '2'
-       AND (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date
-             BETWEEN CAST(:wf AS date) AND CAST(:wt AS date)
+     WHERE so.processed_at >= (CAST(:wf AS date)::timestamp
+                                 AT TIME ZONE 'Asia/Kolkata')
+       AND so.processed_at <  ((CAST(:wt AS date) + 1)::timestamp
+                                 AT TIME ZONE 'Asia/Kolkata')
        AND so.utm_content ~ '^[0-9]{10,20}$'
 ),
 cited AS (
@@ -4102,10 +4102,10 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         # per-SKU column itself is right -- "orders containing this SKU"
         # -- it just does not add up across SKUs.
         "(SELECT COUNT(DISTINCT so.order_id) FROM shopify_orders so "
-        " WHERE so.processed_at >= CAST(:wf AS date) - 1 "
-        "   AND so.processed_at < CAST(:wt AS date) + integer '2' "
-        "   AND (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date "
-        "         BETWEEN CAST(:wf AS date) AND CAST(:wt AS date) "
+        " WHERE so.processed_at >= (CAST(:wf AS date)::timestamp "
+        "                            AT TIME ZONE 'Asia/Kolkata') "
+        "   AND so.processed_at <  ((CAST(:wt AS date) + 1)::timestamp "
+        "                            AT TIME ZONE 'Asia/Kolkata') "
         "   AND so.utm_content ~ '^[0-9]{10,20}$' "
         "   AND jsonb_typeof(so.line_items->'edges') = 'array' "
         "   AND EXISTS (SELECT 1 FROM ad_lifecycle al "

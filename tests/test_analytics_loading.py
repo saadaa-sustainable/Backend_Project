@@ -299,12 +299,33 @@ async def test_cpis_reconciliation_executes_exact_combined_sql_with_indexable_da
     statement, _ = _parsed_statement(query)
     assert statement.withClause.ctes[0].ctename == "breakdown"
     sql = " ".join(str(query).split())
-    assert sql.count("FROM shopify_orders so") == 1
+    # Two scans of shopify_orders: the untethered breakdown, and the
+    # DISTINCT attributed-order count. The second exists because summing
+    # the per-SKU attributed_orders column double-counts mixed baskets.
+    assert sql.count("FROM shopify_orders so") == 2
     assert "orders_in_window AS MATERIALIZED" in sql
-    assert "WHERE so.processed_at >= CAST(:wf AS date)" in sql
-    assert "AND so.processed_at < CAST(:wt AS date) + integer '1'" in sql
+    # IST bounds, because Meta counts its spend days in the ad account's
+    # timezone (Asia/Kolkata) and this joins order days to spend days.
+    #
+    # Expressed as BOUNDS on processed_at, not as a per-row cast: an IST
+    # calendar day is a fixed instant range, so the index on
+    # processed_at still applies. Filtering on
+    # (processed_at AT TIME ZONE ...)::date instead is not sargable and
+    # took the equivalent query in refresh_cpis_utm.py from seconds to
+    # over nine minutes. That is what this test is guarding.
+    assert sql.count(
+        "so.processed_at >= (CAST(:wf AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')"
+    ) == 2
+    assert sql.count(
+        "so.processed_at < ((CAST(:wt AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')"
+    ) == 2
     assert "WHERE so.processed_at::date" not in sql
+    assert "WHERE (so.processed_at AT TIME ZONE" not in sql
+    assert "AND (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN" not in sql
     assert "WHERE day BETWEEN :wf AND :wt" in sql
+    # Headline total comes from AD grain, the grain the per-SKU rows use.
+    assert "FROM public.insights_daily_by_ad WHERE day BETWEEN :wf AND :wt" in sql
+    assert "insights_daily_by_campaign" not in sql
     if custom:
         assert "FROM cpis_by_sku_daily WHERE day BETWEEN :wf AND :wt" in sql
         assert "FROM cpis_by_sku_utm" not in sql
