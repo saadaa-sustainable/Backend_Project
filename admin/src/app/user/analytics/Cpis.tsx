@@ -19,6 +19,7 @@ import {
 import { SpendVsOrdersChart } from "./charts/SpendVsOrdersChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
+import { DateRangePicker } from "@/components/DateRangePicker";
 import { ExportButton } from "@/components/ExportButton";
 
 // Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
@@ -301,7 +302,12 @@ function RoasChip({ roas }: { roas: number | null | undefined }) {
 }
 
 function CpisView() {
-  const window_: CpisUtmWindow = "30d";
+  // State, not a constant. The three presets that have a pre-computed
+  // rollup (cpis_by_sku_utm) set this and CLEAR the dates, so they read
+  // the whole-period table the CPIS spec asks for. Every other preset
+  // sets explicit dates and goes through cpis_by_sku_daily, which
+  // matches spend to orders day by day.
+  const [window_, setWindow_] = useState<CpisUtmWindow>("30d");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   useEffect(() => {
@@ -334,13 +340,13 @@ function CpisView() {
   // visible. When both dates are filled, the /cpis-utm endpoint hits
   // the daily-sum path (cpis_by_sku_daily); when empty, falls back to
   // the pre-computed cpis_by_sku_utm rollup for `window_`.
-  const [datePreset, setDatePreset] = useState<string>("30d");
-  const [fromDate, setFromDate] = useState<string>(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 29);
-    return d.toISOString().slice(0, 10);
-  });
-  const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  // Preset keys are the shared DateRangePicker's, the same ones Ads
+  // Analyse uses, so the two sections speak one vocabulary.
+  const [datePreset, setDatePreset] = useState<string>("last30");
+  // Empty by default: "Last 30 Days" resolves to the 30d rollup rather
+  // than to an explicit range.
+  const [fromDate, setFromDate] = useState<string>("");
+  const [toDate, setToDate] = useState<string>("");
   // Data-freshness probe -- fetched once on mount from
   // /cpis-utm/data-freshness. Used to (a) cap the picker's `to_date`
   // default to whichever underlying table is stalest (Meta insights
@@ -356,19 +362,16 @@ function CpisView() {
       .then((f) => {
         if (cancelled) return;
         setFreshness(f);
-        // Use max_daily_day (the freshest day for which BOTH Meta spend
-        // AND Shopify orders exist -- it's min(max_meta, max_orders)).
-        // Fall back to max_meta_day if daily table hasn't been
-        // populated. Only auto-fill when the user hasn't touched the
-        // picker while the freshness request was in flight.
-        const cap = f.max_daily_day || f.max_meta_day;
-        if (!cap || datesTouchedRef.current) return;
-        setToDate(cap);
-        // Slide fromDate back 29 days from cap for a stable "last 30d"
-        // default anchored on data reality, not wall-clock today.
-        const capDate = new Date(cap);
-        capDate.setDate(capDate.getDate() - 29);
-        setFromDate(capDate.toISOString().slice(0, 10));
+        // No longer auto-fills the dates. The default preset is now
+        // "Last 30 Days", which resolves to the 30d ROLLUP and wants
+        // fromDate/toDate empty; writing a range here would silently
+        // push the default onto the day-matched path instead.
+        //
+        // max_daily_day is still the anchor every preset resolves
+        // against -- the freshest day for which BOTH Meta spend and
+        // Shopify orders exist. Presets must not run off the clock:
+        // data lags a few days, so a "Last 7 Days" anchored on today
+        // covers one populated day and looks broken.
       })
       .catch(() => {
         /* silent: leave the naive today-based defaults if probe fails */
@@ -537,63 +540,37 @@ function CpisView() {
           range driving every KPI went with it. It governs the whole
           page, so it leads the page. */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-3">
-        {/* Date range picker -- ported directly from Ads Analyse
-            (AdsAnalyse.tsx :720). A preset <select> auto-fills the two
-            date inputs; typing directly into either input flips the
-            preset to "custom" so the two controls always stay in sync. */}
-        <select
-          value={datePreset}
-          onChange={(e) => {
+        {/* The shared DateRangePicker, the same control Ads Analyse
+            uses, so one vocabulary of presets covers both sections.
+            Replaces a preset <select> plus two bare date inputs.
+
+            The three presets that have a pre-computed rollup set
+            `window_` and CLEAR the dates: those read cpis_by_sku_utm,
+            which sums spend over the WHOLE period, as the CPIS spec
+            asks. Every other preset hands over explicit dates and goes
+            through cpis_by_sku_daily, which matches spend to orders day
+            by day -- the one deviation from the spec still on the page,
+            and now confined to the presets that have no alternative. */}
+        <DateRangePicker
+          value={{ from: fromDate, to: toDate }}
+          preset={datePreset}
+          anchor={freshness?.max_daily_day ?? freshness?.max_meta_day ?? null}
+          align="left"
+          onApply={(r, pk) => {
             datesTouchedRef.current = true;
-            const v = e.target.value;
-            setDatePreset(v);
-            // Anchor presets to the FRESHEST DAY that has data, not the
-            // wall-clock "today". Data lags 1-6 days behind today in
-            // normal ops (Meta insights, Shopify orders), so using today
-            // as the anchor makes "Last 7 days" actually cover only 1
-            // day of populated data -- looks broken to the merchant.
-            // Fall back to today when freshness hasn't loaded yet.
-            const anchor = freshness?.max_daily_day
-              ? new Date(freshness.max_daily_day)
-              : new Date();
-            const anchorIso = anchor.toISOString().slice(0, 10);
-            const daysAgo = (n: number) => {
-              const d = new Date(anchor);
-              d.setDate(d.getDate() - n);
-              return d.toISOString().slice(0, 10);
+            setDatePreset(pk);
+            const rollup: Record<string, CpisUtmWindow> = {
+              last7: "7d", last30: "30d", last90: "90d",
             };
-            if (v === "all")       { setFromDate(""); setToDate(""); }
-            else if (v === "today") { setFromDate(anchorIso); setToDate(anchorIso); }
-            else if (v === "7d")   { setFromDate(daysAgo(6));  setToDate(anchorIso); }
-            else if (v === "14d")  { setFromDate(daysAgo(13)); setToDate(anchorIso); }
-            else if (v === "30d")  { setFromDate(daysAgo(29)); setToDate(anchorIso); }
-            else if (v === "90d")  { setFromDate(daysAgo(89)); setToDate(anchorIso); }
+            if (rollup[pk]) {
+              setWindow_(rollup[pk]);
+              setFromDate("");
+              setToDate("");
+            } else {
+              setFromDate(r.from);
+              setToDate(r.to);
+            }
           }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Date-range window applied to CPIS metrics. Anchored to the freshest available day, not today (data lags a few days behind)."
-        >
-          <option value="all">All time (uses pre-computed rollup)</option>
-          <option value="today">Latest day</option>
-          <option value="7d">Last 7 days (anchored on latest data)</option>
-          <option value="14d">Last 14 days</option>
-          <option value="30d">Last 30 days</option>
-          <option value="90d">Last 90 days</option>
-          <option value="custom">Custom…</option>
-        </select>
-        <input
-          type="date"
-          value={fromDate}
-          onChange={(e) => { datesTouchedRef.current = true; setFromDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Window start (YYYY-MM-DD)"
-        />
-        <span className="text-[12px] text-text-secondary">→</span>
-        <input
-          type="date"
-          value={toDate}
-          onChange={(e) => { datesTouchedRef.current = true; setToDate(e.target.value); setDatePreset("custom"); }}
-          className="rounded-md border border-border-primary bg-white px-2 py-1 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-          title="Window end (YYYY-MM-DD)"
         />
         {fromDate && toDate && (
           <span
