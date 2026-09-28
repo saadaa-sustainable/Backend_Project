@@ -889,19 +889,23 @@ function CpisView() {
                 </th>
                 <th className="px-3 py-3 text-right" title="Active-ad spend in the picked window, divided by window length in days. Average daily burn on ads still running.">Spend/Day</th>
                 <th className="px-3 py-3 text-right" title="Daily spend sparkline for the picked window + % change vs. the previous same-length period. Green ≥ +5%, amber ±5%, red ≤ -5%.">Spend Trend</th>
-                <th
-                  className="px-3 py-3 text-right"
-                  title={
-                    spendMatchMode === "ad_name"
-                      ? "Money spent on ads with this product's code in their name, over the "
-                        + "dates you picked. Do not add this column up \u2014 an ad naming two "
-                        + "products is counted for both."
-                      : "This product's slice of the money behind the orders it sold in, split "
-                        + "by how much of each order it was. Adds up to your real Meta spend."
-                  }
-                >
-                  {spendMatchMode === "ad_name" ? "Spend (named ads)" : "Spend (this product\u2019s share)"}
-                </th>
+                {/* Named-ad spend only. In utm_id mode this cell used to
+                    render `ad_spend` -- the very same number as LC Ad
+                    Spend further right, under a second name. Two columns
+                    showing one figure and calling it two things is worse
+                    than one column, so the duplicate is gone. Named-ad
+                    spend is a genuinely different figure and appears
+                    nowhere else on the row, so it stays. */}
+                {spendMatchMode === "ad_name" && (
+                  <th
+                    className="px-3 py-3 text-right"
+                    title={"Money spent on ads with this product's code in their name, over the "
+                      + "dates you picked. Do not add this column up \u2014 an ad naming two "
+                      + "products is counted for both."}
+                  >
+                    Spend (named ads)
+                  </th>
+                )}
                 <th
                   className="px-3 py-3 text-right"
                   title={
@@ -1157,14 +1161,11 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right">
                     <SpendTrendCell trend={currentTrends?.[row.master_sku]} loading={currentTrends === null} />
                   </td>
-                  <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
-                    {/* utm mode renders `ad_spend` (fractional / equal-per-order
-                        + within-order value-weighted allocation from
-                        cpis_by_sku_utm) rather than `utm_matched_spend`
-                        (naive over-counted affinity). The fractional version
-                        sums back to Meta total across SKUs -- no double-count. */}
-                    {fmtINRFull(spendMatchMode === "ad_name" ? row.name_matched_spend : row.ad_spend)}
-                  </td>
+                  {spendMatchMode === "ad_name" && (
+                    <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
+                      {fmtINRFull(row.name_matched_spend)}
+                    </td>
+                  )}
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {fmtNumFull(spendMatchMode === "ad_name" ? row.name_matched_ncp : row.utm_matched_ncp)}
                   </td>
