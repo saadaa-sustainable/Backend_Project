@@ -32,6 +32,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
+  clearAnalyticsCache,
   ChannelSummary,
   LastClickUtmParams,
   SourceBreakdown,
@@ -894,7 +895,10 @@ export function LastClickUtm() {
               title="Lead with the order count, or its share of the scope"
             />
             <button
-              onClick={() => setReloadKey((k) => k + 1)}
+              onClick={() => {
+                clearAnalyticsCache();
+                setReloadKey((k) => k + 1);
+              }}
               disabled={loading}
               title="Re-read the cascade from shopify_order_attribution"
               className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted disabled:opacity-40"

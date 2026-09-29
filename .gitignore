@@ -70,3 +70,14 @@ data/
 .agents/skills/
 .impeccable/mocks/
 exports/shots/
+
+# ── Google service-account keys ──────────────────────────────────────
+# This repository is PUBLIC. The rule above is `/*.json`, which only
+# covers the repo ROOT -- a key saved one directory down would have been
+# committed. These match anywhere in the tree.
+secrets/
+*service-account*.json
+*service_account*.json
+*-key.json
+gcp-*.json
+application_default_credentials.json

@@ -25,6 +25,8 @@ import {
 } from "@/lib/api";
 import { AdPreviewLinks, DestinationLink } from "./AdLinks";
 import { getAdPopupTheme, type AdPopupAppearance } from "@/lib/adPopupTheme";
+import { useAnalyticsSectionVisible } from "@/lib/analyticsSectionVisibility";
+import { lockBodyScroll } from "@/lib/bodyScrollLock";
 
 const CAT_COLOR: Record<string, string> = {
   "Incremental Winner": "#2F6B3A",
@@ -93,7 +95,12 @@ type AssetAdsModalProps = {
 };
 
 export function AssetAdsModal(props: AssetAdsModalProps) {
-  return <AssetAdsDialog key={props.assetId} {...props} />;
+  const visible = useAnalyticsSectionVisible();
+  const { onClose } = props;
+  useEffect(() => {
+    if (!visible) onClose();
+  }, [visible, onClose]);
+  return visible ? <AssetAdsDialog key={props.assetId} {...props} /> : null;
 }
 
 function AssetAdsDialog({
@@ -136,12 +143,11 @@ function AssetAdsDialog({
   useEffect(() => {
     const dialog = dialogRef.current;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const previousOverflow = document.body.style.overflow;
     dialog?.showModal();
-    document.body.style.overflow = "hidden";
+    const unlock = lockBodyScroll();
     return () => {
       dialog?.close();
-      document.body.style.overflow = previousOverflow;
+      unlock();
       if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, []);
