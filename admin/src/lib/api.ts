@@ -12,6 +12,25 @@ import { RequestCache } from "./apiCache";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8002";
 
+/** Our thumbnail proxy for an Instagram post.
+ *
+ *  Not the stored thumbnail_url and not instagram.com directly: both
+ *  403 in the browser, the first because the URL has expired and the
+ *  second because the CDN URL it redirects to is signed against the
+ *  requester. The server can fetch it; we cannot. */
+/** Our proxy for a profile picture. Same reason as the post
+ *  thumbnail, one step worse: the URLs flattened into insta_data are
+ *  long dead, 403 even to a server fetch, so there is nothing to proxy
+ *  there. The endpoint reads the freshest capture in
+ *  raw_dump_instagram instead. */
+export function instagramAvatarUrl(username: string): string {
+  return `${API_BASE_URL}/admin/analytics/instagram/avatar/${encodeURIComponent(username)}`;
+}
+
+export function instagramThumbUrl(shortcode: string): string {
+  return `${API_BASE_URL}/admin/analytics/instagram/thumb/${encodeURIComponent(shortcode)}`;
+}
+
 export type ColumnKind = "identity" | "numeric" | "jsonb" | "other";
 
 export interface TableColumn {
@@ -2025,18 +2044,34 @@ export interface DashboardKpis {
   total_impressions: number;
   total_shopify_revenue: number;
   total_shopify_orders: number;
+  /** Set only when a window reaches back past the daily spend table's floor
+   *  (2025-12-29). Spend/impressions before that day are missing, so the
+   *  figure is partial -- surface it rather than let it read as a decline. */
+  spend_data_from?: string | null;
 }
 
-export const fetchDashboardKpis = () =>
-  request<DashboardKpis>(`/admin/analytics/dashboard/kpis`);
-export const fetchDashboardCategoryBreakdown = () =>
-  request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown`);
-export const fetchDashboardChannelBreakdown = () =>
-  request<BreakdownItem[]>(`/admin/analytics/dashboard/channel-breakdown`);
-export const fetchDashboardTopLandingPages = () =>
-  request<TopLandingPage[]>(`/admin/analytics/dashboard/top-landing-pages`);
-export const fetchDashboardTopCpisSkus = () =>
-  request<TopCpisSku[]>(`/admin/analytics/dashboard/top-cpis-skus`);
+/** `?date_from=&date_to=` when both are given, else no query string —
+ *  an empty range must hit the same URL the unfiltered tile caches under. */
+function dashboardRange(from?: string | null, to?: string | null): string {
+  return from && to
+    ? `?date_from=${encodeURIComponent(from)}&date_to=${encodeURIComponent(to)}`
+    : "";
+}
+
+// Unwindowed, kpis + category read ad_performance_summary (lifetime, all
+// history). Given a range they switch to insights_daily_by_ad, which only
+// reaches back to 2025-12-29 — hence spend_data_from on the response.
+export const fetchDashboardKpis = (from?: string | null, to?: string | null) =>
+  request<DashboardKpis>(`/admin/analytics/dashboard/kpis${dashboardRange(from, to)}`);
+export const fetchDashboardCategoryBreakdown = (from?: string | null, to?: string | null) =>
+  request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown${dashboardRange(from, to)}`);
+
+export const fetchDashboardChannelBreakdown = (from?: string | null, to?: string | null) =>
+  request<BreakdownItem[]>(`/admin/analytics/dashboard/channel-breakdown${dashboardRange(from, to)}`);
+export const fetchDashboardTopLandingPages = (from?: string | null, to?: string | null) =>
+  request<TopLandingPage[]>(`/admin/analytics/dashboard/top-landing-pages${dashboardRange(from, to)}`);
+export const fetchDashboardTopCpisSkus = (from?: string | null, to?: string | null) =>
+  request<TopCpisSku[]>(`/admin/analytics/dashboard/top-cpis-skus${dashboardRange(from, to)}`);
 
 export function retryFailedJobs(maxJobs = 100): Promise<RetryFailedJobsResponse> {
   return request<RetryFailedJobsResponse>(`/failed-jobs/retry?max_jobs=${maxJobs}`, {

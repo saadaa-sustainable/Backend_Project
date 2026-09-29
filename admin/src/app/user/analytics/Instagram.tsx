@@ -28,6 +28,7 @@ import {
   fetchInstagram,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { instagramAvatarUrl, instagramThumbUrl } from "@/lib/api";
 
 const PAGE_SIZE = 60;
 
@@ -47,12 +48,14 @@ const MEDIA_TYPE_COLORS: Record<string, string> = {
   CAROUSEL_ALBUM: "bg-success-bg text-success-text",
 };
 
+// Whole numbers, grouped Indian-style like every other figure in this
+// dashboard. The compact form rounded to one decimal, so 552,572
+// followers read as "552.6K" and 1,361 posts as "1.4K" -- close enough
+// to look precise and wrong enough to be useless for reconciling
+// against Instagram itself.
 function fmtInt(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
+  return Math.round(n).toLocaleString("en-IN");
 }
 function fmtPct(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
@@ -184,18 +187,7 @@ export function Instagram() {
               }
               title={username === p.username ? "Click to clear filter" : `Filter to @${p.username}`}
             >
-              {p.profile_picture_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={p.profile_picture_url}
-                  alt={p.username ?? ""}
-                  className="h-11 w-11 rounded-full object-cover"
-                />
-              ) : (
-                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-bg-muted text-xs text-text-secondary">
-                  IG
-                </div>
-              )}
+              <ProfileAvatar username={p.username} />
               <div>
                 <div className="text-sm font-semibold">@{p.username ?? "?"}</div>
                 <div className="text-[10px] text-text-secondary">
@@ -207,13 +199,32 @@ export function Instagram() {
         </div>
       )}
 
-      {/* KPI tiles */}
+      {/* KPI tiles.
+          "Posts (filtered)" used to lead this row and is gone. It sat
+          directly under a profile strip quoting Instagram's own post
+          counts and disagreed with them -- 1,361 against 1,414 -- because
+          it counted what WE have ingested across every tracked account
+          while the strip counts one account, live. Both were right and
+          the pairing read as an error. The same number still appears
+          beside the filters, as "N posts match", where it answers the
+          question a reader is actually asking at that moment. */}
       {summary && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          <Tile label="Posts (filtered)" value={fmtInt(summary.total_posts)} />
-          <Tile label="Total reach" value={fmtInt(summary.total_reach)} />
-          <Tile label="Total likes" value={fmtInt(summary.total_likes)} />
-          <Tile label="Total comments" value={fmtInt(summary.total_comments)} />
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Tile
+            label="Total reach"
+            value={fmtInt(summary.total_reach)}
+            info="Reach summed across the posts above. Instagram reports reach per post, and the same person reached by two posts counts in both, so this is larger than the number of people reached."
+          />
+          <Tile
+            label="Total likes"
+            value={fmtInt(summary.total_likes)}
+            info="Likes summed across the posts above, as they stood at the last ingest. Counts keep moving on Instagram; these do not until the next run."
+          />
+          <Tile
+            label="Total comments"
+            value={fmtInt(summary.total_comments)}
+            info="Comments summed across the posts above, as they stood at the last ingest."
+          />
           <Tile
             label="Engagement rate"
             value={fmtPct(summary.avg_engagement_rate_pct)}
@@ -344,31 +355,186 @@ export function Instagram() {
 
 // ─────────────────────────────────────────────────────────────────
 
-function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Tile({
+  label,
+  value,
+  hint,
+  info,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  /** What the number counts. These tiles sit beside a profile strip
+   *  quoting Instagram's own totals, and the two do not agree -- the
+   *  header says 1,414 posts while the tile says 1,361. Both are right
+   *  about different things, and nothing on screen said which. */
+  info?: string;
+}) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-      <div className="text-[10px] uppercase tracking-wide text-text-secondary">{label}</div>
+    <div className="relative rounded-lg border border-border-primary bg-white p-2 shadow-sm">
+      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-secondary">
+        {label}
+        {info && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-label={`What ${label} counts`}
+            aria-expanded={open}
+            className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-border-primary text-[8px] leading-none text-text-tertiary hover:bg-bg-muted"
+          >
+            i
+          </button>
+        )}
+      </div>
       <div className="font-mono text-lg font-semibold text-text-primary">{value}</div>
       {hint && <div className="text-[9px] text-text-tertiary">{hint}</div>}
+      {info && open && (
+        <div
+          role="tooltip"
+          className="absolute left-0 top-full z-20 mt-1 w-72 rounded-md border border-border-primary bg-white p-2 text-[11px] leading-snug text-text-secondary shadow-lg"
+        >
+          {info}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="mt-1.5 block text-[10px] text-text-tertiary underline"
+          >
+            close
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
+/** Instagram's own embed for a post, from the permalink we store.
+ *
+ *  Why not the stored image: media_url and thumbnail_url are CDN URLs
+ *  that EXPIRE. They 403 within days, which is what the broken tiles in
+ *  this grid are. The permalink does not expire, and we have one for
+ *  1,519 of 1,522 posts against 967 thumbnails -- better coverage and
+ *  stable.
+ *
+ *  /embed is the public endpoint, so it needs no token and no app
+ *  review, and it renders whatever the post actually is now: video plays
+ *  as video, a carousel keeps its arrows.
+ */
+/** A thumbnail that does not expire, served by our own proxy.
+ *
+ *  Instagram's /p/<code>/media/ endpoint never goes stale, unlike the
+ *  stored thumbnail_url -- 55 of the 63 tiles on the first screen were
+ *  already 403ing. But it 302s to a CDN URL signed against the
+ *  requester, and that signed URL 403s when the browser follows it from
+ *  our origin: 58 of 59 follows failed in the page, while the same URL
+ *  returns a JPEG to a server-side fetch. So the server fetches it.
+ *
+ *  The shortcode is taken from the column when we have one and parsed
+ *  from the permalink otherwise, because the proxy needs the /p/ form:
+ *  /reel/<code>/media/ answers 404 for the same post /p/<code>/media/
+ *  serves.
+ */
+function proxiedThumb(
+  permalink: string | null | undefined,
+  shortcode: string | null | undefined,
+): string | null {
+  const code =
+    shortcode?.trim() ||
+    permalink?.match(/instagram\.com\/(?:p|reel|reels|tv)\/([^/?#]+)/)?.[1];
+  return code ? instagramThumbUrl(code) : null;
+}
+
+function embedUrl(permalink: string | null | undefined): string | null {
+  if (!permalink) return null;
+  // Accept both /p/<code> and /reel/<code>, with or without the trailing
+  // slash Instagram sometimes omits.
+  if (!/^https:\/\/(www\.)?instagram\.com\//.test(permalink)) return null;
+  return `${permalink.replace(/\/?$/, "/")}embed`;
+}
+
+/** Profile picture, or the account's initial.
+ *
+ *  Never the stored profile_picture_url: those are expired CDN links
+ *  that 403 to the server as well as the browser, which is why this
+ *  row showed three broken-image icons. The proxy serves the freshest
+ *  capture in raw_dump_instagram, and 404s when even that has aged out
+ *  -- true today for two of the three accounts, where only a fresh
+ *  ingest can help. A letter is a better answer than a broken frame.
+ */
+function ProfileAvatar({ username }: { username: string | null }) {
+  const [failed, setFailed] = useState(false);
+  if (!username || failed) {
+    return (
+      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-bg-muted text-sm font-semibold uppercase text-text-secondary">
+        {username?.[0] ?? "IG"}
+      </div>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={instagramAvatarUrl(username)}
+      alt={username}
+      className="h-11 w-11 shrink-0 rounded-full object-cover"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) {
-  const thumb = r.thumbnail_url ?? r.media_url;
+  // Stored image first -- it is already in the browser cache on a
+  // revisit. When it 403s, fall back to the permalink thumbnail, which
+  // cannot expire. Only if BOTH fail is there nothing to show.
+  const sources = [
+    r.thumbnail_url ?? r.media_url,
+    proxiedThumb(r.permalink, r.shortcode),
+  ].filter((u): u is string => !!u);
+  const [srcIdx, setSrcIdx] = useState(0);
+  const thumb = sources[srcIdx] ?? null;
   const mediaTypeCls = MEDIA_TYPE_COLORS[r.media_type ?? ""] ?? "bg-bg-muted text-text-secondary";
   return (
     <button
       onClick={onClick}
       className="group flex flex-col overflow-hidden rounded-lg border border-border-primary bg-white text-left shadow-sm transition-shadow hover:shadow-md"
     >
-      <div className="relative aspect-square w-full bg-bg-muted">
+      {/* overflow-hidden, and the media inside is ABSOLUTE. aspect-square
+          alone did nothing here: an in-flow `h-full` image still sizes
+          its parent, so a 320x568 reel stretched its tile to 404px
+          while a 320x320 feed post sat at 228px and the grid came out
+          ragged. Positioning the image out of flow leaves the tile
+          height to the aspect ratio alone, so every preview is the
+          same square and object-cover crops the overflow. */}
+      <div className="relative aspect-square w-full overflow-hidden bg-bg-muted">
+        {/* The grid stays on stored images on purpose: fifty Instagram
+            iframes on one screen is fifty third-party documents, and the
+            page would crawl. The embed is in the detail view, one at a
+            time.
+
+            But these URLs expire, so a dead one must not render as a
+            broken-image icon with no way forward. onError swaps in a
+            note that the post is still openable -- clicking the card
+            opens the detail view, where the permalink embed shows the
+            post whatever the CDN has done. */}
         {thumb ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumb} alt="" className="h-full w-full object-cover" loading="lazy" />
+          <img
+            key={thumb}
+            src={thumb}
+            alt=""
+            className="absolute inset-0 h-full w-full object-cover"
+            loading="lazy"
+            // No Referer. Instagram's CDN refuses hotlinked images by
+            // referrer, so the same URL that returns a JPEG to curl
+            // returns 403 to a page on localhost. Sending none is what
+            // makes the permalink thumbnail usable at all.
+            referrerPolicy="no-referrer"
+            onError={() => setSrcIdx((i) => i + 1)}
+          />
         ) : (
-          <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
-            no thumbnail
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-2 text-center text-xs text-text-tertiary">
+            <span aria-hidden="true">▢</span>
+            <span>no preview</span>
+            <span className="text-[10px]">open to view the post</span>
           </div>
         )}
         <span className={`absolute left-2 top-2 rounded-full px-2 py-0.5 text-[9px] font-semibold ${mediaTypeCls}`}>
@@ -442,14 +608,30 @@ function PostDrawer({ r, onClose }: { r: InstagramPostRow; onClose: () => void }
             ✕
           </button>
         </div>
-        {(r.thumbnail_url ?? r.media_url) && (
+        {/* The post itself, not a stored still. Falls back to the
+            thumbnail only when there is no usable permalink -- three
+            posts out of 1,522. */}
+        {embedUrl(r.permalink) ? (
+          <iframe
+            src={embedUrl(r.permalink) ?? ""}
+            title="Instagram post"
+            loading="lazy"
+            // Instagram's embed is ~400px of chrome plus the media, and
+            // it scrolls internally rather than resizing to fit.
+            className="mb-3 h-[560px] w-full rounded-lg border border-border-primary bg-white"
+            // allow-scripts + allow-same-origin is what the embed needs
+            // to render; popups so "View on Instagram" still works.
+            sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+            referrerPolicy="no-referrer-when-downgrade"
+          />
+        ) : (r.thumbnail_url ?? r.media_url) ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={r.thumbnail_url ?? r.media_url ?? ""}
             alt=""
             className="mb-3 w-full rounded-lg object-cover"
           />
-        )}
+        ) : null}
         {r.caption && (
           <p className="mb-3 whitespace-pre-wrap rounded-md bg-bg-surface p-2 text-xs text-text-primary">
             {r.caption}

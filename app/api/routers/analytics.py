@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5903,6 +5904,133 @@ _IG_ROW_COLUMNS = (
 )
 
 
+#: Shortcodes are Instagram's own base64-ish ids. Anchored and bounded
+#: because this value is interpolated into an outbound URL: without it
+#: the endpoint is an open proxy for anything on instagram.com.
+_IG_SHORTCODE_RE = _re.compile(r"^[A-Za-z0-9_-]{5,32}$")
+
+
+#: Instagram usernames: letters, digits, dot, underscore. Anchored
+#: because it reaches a SQL parameter and, through it, an outbound
+#: fetch.
+_IG_USERNAME_RE = _re.compile(r"^[A-Za-z0-9._]{1,30}$")
+
+
+@router.get("/instagram/avatar/{username}")
+async def get_instagram_avatar(session: SessionDep, username: str) -> Response:
+    """Serve a profile picture, fetched server-side.
+
+    Profile picture URLs expire like every other Instagram CDN link, and
+    the ones flattened into insta_data are long dead -- all three 403 to
+    a server fetch, not just to the browser, so there is nothing to
+    proxy there.
+
+    raw_dump_instagram keeps every payload it has ever ingested, so the
+    NEWEST one per username is the freshest URL that exists anywhere in
+    this database. For an account the nightly ingest still reaches, that
+    is hours old and works; measured today, saadaadesigns returned a
+    48 KB JPEG while an August capture for saadaa_women returned 403.
+
+    A stale one 404s here and the caller draws initials instead. The
+    only real fix for those is the ingest running again, which is not
+    something a read endpoint can do.
+    """
+    if not _IG_USERNAME_RE.match(username):
+        raise HTTPException(status_code=400, detail="Bad username.")
+    # Walked in Python, not with jsonb_path_query: the two ingest paths
+    # nest the profile at different depths and under different keys, and
+    # a path expression that matched one returned NULL for the other.
+    rows = (await session.execute(text(
+        # BOTH predicates. Filtering on the username alone returned the
+        # 40 newest MEDIA payloads, which mention the account constantly
+        # and carry no profile block at all -- so the walk found nothing
+        # and every account 404'd.
+        "SELECT raw_payload FROM public.raw_dump_instagram "
+        " WHERE raw_payload::text ILIKE :like "
+        "   AND raw_payload::text ILIKE '%profile_picture_url%' "
+        " ORDER BY ingested_at DESC LIMIT 40"
+    ), {"like": f'%"{username}"%'})).scalars().all()
+
+    def _find_avatar(node: object) -> str | None:
+        """First profile_picture_url sitting beside this username."""
+        if isinstance(node, dict):
+            if node.get("username") == username and node.get("profile_picture_url"):
+                return str(node["profile_picture_url"])
+            for value in node.values():
+                if (hit := _find_avatar(value)):
+                    return hit
+        elif isinstance(node, list):
+            for value in node:
+                if (hit := _find_avatar(value)):
+                    return hit
+        return None
+
+    url = None
+    for payload in rows:
+        raw = payload if isinstance(payload, (dict, list)) else _json.loads(payload)
+        if (url := _find_avatar(raw)):
+            break
+    if not url:
+        raise HTTPException(status_code=404, detail="No avatar on file.")
+    try:
+        import httpx
+        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
+            r = await client.get(url)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Instagram unreachable.")
+    ctype = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ctype.startswith("image/"):
+        # Expired capture. The caller falls back to initials.
+        raise HTTPException(status_code=404, detail="Avatar expired.")
+    return Response(
+        content=r.content,
+        media_type=ctype,
+        # Shorter than the post thumbnail's day: a profile picture can
+        # change, and the URL behind this one expires on its own clock.
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/instagram/thumb/{shortcode}")
+async def get_instagram_thumb(shortcode: str) -> Response:
+    """Serve a post's thumbnail, fetched server-side.
+
+    The stored thumbnail_url and media_url are CDN URLs that EXPIRE --
+    55 of the 63 tiles on the first screen of the grid were 403ing.
+    Instagram's public /p/<code>/media/ endpoint does not expire, but it
+    302s to a CDN URL signed against the requester, and that signed URL
+    403s when a browser follows it from our origin. Measured: 58 of 59
+    such follows failed in the page, while the same URL returns a JPEG
+    to a server-side fetch.
+
+    So the fetch happens here. The browser asks us, we ask Instagram.
+
+    ALWAYS the /p/ form, never /reel/: /reel/<code>/media/ answers 404
+    or 500 for the very same post that /p/<code>/media/ serves.
+    """
+    if not _IG_SHORTCODE_RE.match(shortcode):
+        raise HTTPException(status_code=400, detail="Bad shortcode.")
+    url = f"https://www.instagram.com/p/{shortcode}/media/?size=m"
+    try:
+        import httpx
+        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
+            r = await client.get(url)
+    except Exception:
+        # A dead upstream must not surface as a 500 on the page: the
+        # caller renders its own placeholder for any non-200.
+        raise HTTPException(status_code=502, detail="Instagram unreachable.")
+    ctype = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ctype.startswith("image/"):
+        raise HTTPException(status_code=404, detail="No thumbnail.")
+    return Response(
+        content=r.content,
+        media_type=ctype,
+        # A post's thumbnail does not change. Cache hard, so the grid
+        # costs one upstream fetch per post rather than one per view.
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
 class InstagramPostRow(BaseModel):
     id: str
     source_id: str | None
@@ -6241,6 +6369,11 @@ class KpisResponse(BaseModel):
     total_impressions: float
     total_shopify_revenue: float
     total_shopify_orders: int
+    #: Earliest day insights_daily_by_ad actually covers. Only set on a
+    #: windowed request, and only when the window reaches back past it --
+    #: spend/impressions before this day are NOT in the daily table, so the
+    #: UI must say the figure is partial rather than let it read as a drop.
+    spend_data_from: str | None = None
 
 
 # ------------------------------------------------------------------
@@ -6256,23 +6389,84 @@ class KpisResponse(BaseModel):
 # ------------------------------------------------------------------
 @router.get("/dashboard/kpis", response_model=KpisResponse)
 @cached_analytics(ttl=60.0)
-async def get_dashboard_kpis(session: SessionDep) -> KpisResponse:
-    totals = (await session.execute(text(
-        "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0), "
-        "COALESCE(SUM(shopify_revenue),0), COALESCE(SUM(shopify_orders),0) "
-        "FROM ad_performance_summary"
-    ))).one()
+async def get_dashboard_kpis(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> KpisResponse:
+    """Lifetime from the gold table; windowed from the daily sources.
+
+    The two paths read DIFFERENT tables on purpose, because neither can do
+    both jobs:
+
+      ad_performance_summary  one row per ad, lifetime, no date column. It is
+                              the only source that spans all history, so the
+                              unwindowed view must keep using it -- its spend
+                              is 40.4cr against the daily table's 11.4cr.
+      insights_daily_by_ad    day grain, but only back to SPEND_DATA_FLOOR
+                              (2025-12-29). Correct inside that span, 72%
+                              short of lifetime outside it.
+      shopify_order_attribution  created_at spans 2020-11 onward, so revenue
+                              and orders window exactly with no floor.
+
+    Swapping the lifetime view to the daily table would have silently cut the
+    headline spend by ~72%, so it is left alone; a windowed request reports
+    spend_data_from when it reaches past the floor.
+    """
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+
+    if not (df and dt):
+        totals = (await session.execute(text(
+            "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0), "
+            "COALESCE(SUM(shopify_revenue),0), COALESCE(SUM(shopify_orders),0) "
+            "FROM ad_performance_summary"
+        ))).one()
+        return KpisResponse(
+            total_spend=float(totals[0]),
+            total_impressions=float(totals[1]),
+            total_shopify_revenue=float(totals[2]),
+            total_shopify_orders=int(totals[3]),
+        )
+
+    ads = (await session.execute(text(
+        "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0) "
+        "FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt"
+    ), {"df": df, "dt": dt})).one()
+    shop = (await session.execute(text(
+        "SELECT COALESCE(SUM(total_price),0), COUNT(*) "
+        "FROM shopify_order_attribution WHERE created_at::date BETWEEN :df AND :dt"
+    ), {"df": df, "dt": dt})).one()
+    floor = (await session.execute(text(
+        "SELECT MIN(day) FROM insights_daily_by_ad"
+    ))).scalar()
     return KpisResponse(
-        total_spend=float(totals[0]),
-        total_impressions=float(totals[1]),
-        total_shopify_revenue=float(totals[2]),
-        total_shopify_orders=int(totals[3]),
+        total_spend=float(ads[0]),
+        total_impressions=float(ads[1]),
+        total_shopify_revenue=float(shop[0]),
+        total_shopify_orders=int(shop[1]),
+        spend_data_from=floor.isoformat() if floor and df < floor else None,
     )
 
 
 @router.get("/dashboard/category-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_category_breakdown(session: SessionDep) -> list[BreakdownItem]:
+async def get_dashboard_category_breakdown(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[BreakdownItem]:
+    # Windowed: daily spend joined to the gold table purely for `category`,
+    # which only exists at ad grain. Same floor caveat as /dashboard/kpis.
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    if df and dt:
+        rows = (await session.execute(text(
+            "SELECT COALESCE(s.category,'Uncategorized'), SUM(d.spend) "
+            "FROM insights_daily_by_ad d "
+            "LEFT JOIN ad_performance_summary s ON s.ad_id = d.ad_id "
+            "WHERE d.day BETWEEN :df AND :dt "
+            "GROUP BY 1 ORDER BY 2 DESC"
+        ), {"df": df, "dt": dt})).all()
+        return [BreakdownItem(label=r[0], value=float(r[1] or 0)) for r in rows]
     rows = (await session.execute(text(
         "SELECT COALESCE(category,'Uncategorized'), SUM(spend) "
         "FROM ad_performance_summary GROUP BY 1 ORDER BY 2 DESC"
@@ -6280,20 +6474,82 @@ async def get_dashboard_category_breakdown(session: SessionDep) -> list[Breakdow
     return [BreakdownItem(label=r[0], value=float(r[1] or 0)) for r in rows]
 
 
+# Date filtering across these tiles is deliberately PARTIAL, because the five
+# sources do not share a grain:
+#
+#   ad_performance_summary        one row per ad, LIFETIME aggregate. Its only
+#                                 timestamp is gold_refreshed_at (when the row
+#                                 was computed), so kpis + category cannot be
+#                                 windowed without re-deriving them from daily
+#                                 ad data. They stay lifetime.
+#   shopify_order_attribution     has created_at -> genuinely filterable.
+#   shopify_landing_page_analysis has day -> filterable. The no-range path
+#                                 still reads landing_page_analysis_30d, a
+#                                 FIXED 30-day rollup that ignores any range.
+#   cpis_by_sku                   pre-aggregated per window_key ('1d'/'7d'/
+#                                 '30d'), so a range SNAPS to the nearest
+#                                 bucket rather than being honoured exactly.
+#
+# The UI labels each tile with the window that was actually applied, so a
+# single picker never implies one global range it cannot deliver. The cache
+# key already includes these params (see cached_analytics), so switching
+# range cannot serve another range's rows.
+
+def _parse_day(value: str | None, field: str) -> date | None:
+    """ISO string -> date, or a 400. Never hand asyncpg the raw string.
+
+    asyncpg types each bind param from its SQL context and then encodes the
+    Python value itself -- given a date column it calls .toordinal() on the
+    argument, so a str raises
+        DataError: invalid input ... ('str' object has no attribute 'toordinal')
+    and the endpoint 500s. psycopg2 coerces strings silently, so the same SQL
+    verified by hand against psycopg2 still fails here. Parse, then bind.
+    """
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field} must be YYYY-MM-DD, got {value!r}")
+
+
+def _cpis_window_for(date_from: str | None, date_to: str | None) -> str:
+    """Snap a requested range to the nearest precomputed cpis window_key."""
+    if not (date_from and date_to):
+        return "7d"
+    try:
+        span = (date.fromisoformat(date_to) - date.fromisoformat(date_from)).days + 1
+    except ValueError:
+        return "7d"
+    return min((("1d", 1), ("7d", 7), ("30d", 30)), key=lambda w: abs(w[1] - span))[0]
+
+
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_channel_breakdown(session: SessionDep) -> list[BreakdownItem]:
+async def get_dashboard_channel_breakdown(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[BreakdownItem]:
     # Aggregate in SQL first (340k rows -> ~200 distinct sources),
     # THEN apply _classify_channel in Python. The branching logic
     # stays in Python (per project convention) but the row shuffle
     # doesn't. This alone drops 27s -> <1s.
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    where, params = "", {}
+    if df and dt:
+        # created_at is a timestamp; ::date keeps `to` inclusive of that day.
+        # Binds are real date objects -- see _parse_day for why a str 500s.
+        where = "WHERE created_at::date BETWEEN :df AND :dt "
+        params = {"df": df, "dt": dt}
     rows = (await session.execute(text(
         "SELECT utm_source, "
         "       (lower(COALESCE(utm_content, '')) IN "
         "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
         "       SUM(total_price) FROM shopify_order_attribution "
+        + where +
         "GROUP BY utm_source, 2"
-    ))).all()
+    ), params)).all()
     channel_totals: dict[str, float] = {}
     for utm_source, organic_ig, total_price in rows:
         ch = _classify_channel(utm_source, "link_in_bio" if organic_ig else None)
@@ -6303,7 +6559,25 @@ async def get_dashboard_channel_breakdown(session: SessionDep) -> list[Breakdown
 
 @router.get("/dashboard/top-landing-pages", response_model=list[TopLandingPage])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_top_landing_pages(session: SessionDep) -> list[TopLandingPage]:
+async def get_dashboard_top_landing_pages(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[TopLandingPage]:
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    if df and dt:
+        # Day-grain table, so the requested range is honoured exactly.
+        # ad_spend is not carried at day grain here; the tile shows sessions,
+        # and 0.0 keeps the response model stable.
+        rows = (await session.execute(text(
+            "SELECT landing_page_path, SUM(sessions) AS sessions "
+            "FROM shopify_landing_page_analysis "
+            "WHERE day BETWEEN :df AND :dt "
+            "  AND landing_page_path IS NOT NULL "
+            "GROUP BY landing_page_path ORDER BY sessions DESC LIMIT 5"
+        ), {"df": df, "dt": dt})).all()
+        return [TopLandingPage(landing_page_path=r[0], sessions=int(r[1] or 0), ad_spend=0.0)
+                for r in rows]
     rows = (await session.execute(text(
         "SELECT landing_page_path, sessions, ad_spend "
         "FROM landing_page_analysis_30d ORDER BY sessions DESC LIMIT 5"
@@ -6313,12 +6587,19 @@ async def get_dashboard_top_landing_pages(session: SessionDep) -> list[TopLandin
 
 @router.get("/dashboard/top-cpis-skus", response_model=list[TopCpisSku])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_top_cpis_skus(session: SessionDep) -> list[TopCpisSku]:
+async def get_dashboard_top_cpis_skus(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[TopCpisSku]:
+    # Snaps to a precomputed bucket -- see the note above. A 14-day request
+    # resolves to '7d', NOT to a 14-day aggregate.
+    window = _cpis_window_for(date_from, date_to)
     rows = (await session.execute(text(
         "SELECT master_sku, ad_spend, cost_per_ncp FROM cpis_by_sku "
-        "WHERE window_key = '7d' AND matched_ad_count > 0 "
+        "WHERE window_key = :w AND matched_ad_count > 0 "
         "ORDER BY ad_spend DESC LIMIT 5"
-    ))).all()
+    ), {"w": window})).all()
     return [
         TopCpisSku(master_sku=r[0], ad_spend=float(r[1] or 0), cost_per_ncp=float(r[2]) if r[2] is not None else None)
         for r in rows

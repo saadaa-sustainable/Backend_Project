@@ -15,12 +15,62 @@ import {
 import { useCachedFetch } from "@/lib/useCachedFetch";
 import { DraggableGrid, GridItem } from "./DraggableGrid";
 import { BarChart } from "./charts/BarChart";
+import { DateRangePicker } from "@/components/DateRangePicker";
 
 const STORAGE_KEY = "analytics-dashboard-widget-order";
+const RANGE_KEY = "analytics-dashboard-date-range";
 const DEFAULT_ORDER = ["kpis", "category", "channel", "landing-pages", "cpis-skus"];
 
 function formatCurrency(n: number): string {
   return `₹${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+// ── Per-tile time frame ──────────────────────────────────────────────
+// The five tiles do NOT share a window, and never did. Before this filter
+// existed the dashboard already mixed lifetime, a fixed 30-day rollup and a
+// fixed 7-day bucket with nothing on screen saying so. A single picker would
+// have made that worse by implying one global range, so every tile states
+// the window it actually used:
+//
+//   kpis, category   ad_performance_summary is a lifetime aggregate with no
+//                    date column -> always "Lifetime", filter does not apply.
+//   channel          shopify_order_attribution.created_at -> exact range.
+//   landing-pages    shopify_landing_page_analysis.day -> exact range, and
+//                    falls back to the fixed 30d rollup when no range is set.
+//   cpis-skus        cpis_by_sku is precomputed per window_key, so the range
+//                    SNAPS to 1d / 7d / 30d. A 14-day pick reads 7d.
+function cpisWindowFor(from: string, to: string): string {
+  const span =
+    Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1;
+  return [
+    ["1d", 1],
+    ["7d", 7],
+    ["30d", 30],
+  ].reduce((best, w) =>
+    Math.abs((w[1] as number) - span) < Math.abs((best[1] as number) - span) ? w : best,
+  )[0] as string;
+}
+
+function fmtDay(d: string): string {
+  const t = Date.parse(d);
+  return Number.isNaN(t)
+    ? d
+    : new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+/** Small caption under a widget title naming the window it really covers. */
+function WindowBadge({ text, muted = false }: { text: string; muted?: boolean }) {
+  return (
+    <span
+      className={`ml-2 rounded px-1.5 py-0.5 align-middle text-[10px] font-normal ${
+        muted
+          ? "bg-bg-surface text-text-secondary"
+          : "bg-accent-bg text-accent-text"
+      }`}
+    >
+      {text}
+    </span>
+  );
 }
 
 function loadOrder(): string[] {
@@ -53,15 +103,60 @@ function WidgetSkeleton({ heightPx = 96 }: { heightPx?: number }) {
 export function Dashboard() {
   const [order, setOrder] = useState<string[]>(DEFAULT_ORDER);
 
+  // Default to lifetime so the first paint matches what this tab has always
+  // shown -- switching the default would silently change every number for
+  // anyone who had bookmarked a figure.
+  const [preset, setPreset] = useState<string>("lifetime");
+  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
+
+  useEffect(() => {
+    setOrder(loadOrder());
+    try {
+      const raw = window.localStorage.getItem(RANGE_KEY);
+      if (raw) {
+        const p = JSON.parse(raw) as { preset: string; from: string; to: string };
+        if (p?.preset) {
+          setPreset(p.preset);
+          setRange(p.preset === "lifetime" ? null : { from: p.from, to: p.to });
+        }
+      }
+    } catch {
+      // localStorage unavailable -- the picker still works for this session.
+    }
+  }, []);
+
+  const from = range?.from ?? null;
+  const to = range?.to ?? null;
+
   // Each widget owns its own cached fetch, so switching tabs and coming
   // back is an instant cache-hit render (sessionStorage, 5min TTL) and
   // no widget blocks another. If any one fails, only that tile goes
   // dark -- the rest still render.
-  const kpis     = useCachedFetch<DashboardKpis>("dashboard/kpis",              fetchDashboardKpis);
-  const category = useCachedFetch<BreakdownItem[]>("dashboard/category-breakdown", fetchDashboardCategoryBreakdown);
-  const channel  = useCachedFetch<BreakdownItem[]>("dashboard/channel-breakdown",  fetchDashboardChannelBreakdown);
-  const landing  = useCachedFetch<TopLandingPage[]>("dashboard/top-landing-pages", fetchDashboardTopLandingPages);
-  const cpisSkus = useCachedFetch<TopCpisSku[]>("dashboard/top-cpis-skus",         fetchDashboardTopCpisSkus);
+  //
+  // The range is part of the cache key for the three tiles that honour it,
+  // or last-30d and lifetime would share one cached payload.
+  const rangeKey = from && to ? `${from}|${to}` : "lifetime";
+  const kpis     = useCachedFetch<DashboardKpis>(`dashboard/kpis|${rangeKey}`,
+                                                   () => fetchDashboardKpis(from, to));
+  const category = useCachedFetch<BreakdownItem[]>(`dashboard/category-breakdown|${rangeKey}`,
+                                                   () => fetchDashboardCategoryBreakdown(from, to));
+  const channel  = useCachedFetch<BreakdownItem[]>(`dashboard/channel-breakdown|${rangeKey}`,
+                                                   () => fetchDashboardChannelBreakdown(from, to));
+  const landing  = useCachedFetch<TopLandingPage[]>(`dashboard/top-landing-pages|${rangeKey}`,
+                                                   () => fetchDashboardTopLandingPages(from, to));
+  const cpisSkus = useCachedFetch<TopCpisSku[]>(`dashboard/top-cpis-skus|${rangeKey}`,
+                                                   () => fetchDashboardTopCpisSkus(from, to));
+
+  const rangeLabel = from && to ? `${fmtDay(from)} – ${fmtDay(to)}` : "Lifetime";
+  // Set by the backend only when the chosen window starts before the daily
+  // spend table begins, i.e. spend/impressions are genuinely partial. Without
+  // saying so, a range reaching into 2025 shows a far smaller spend and reads
+  // as a collapse rather than as missing history.
+  const spendFloorNote = kpis.data?.spend_data_from
+    ? `Spend and impressions only exist from ${fmtDay(kpis.data.spend_data_from)} onwards — earlier days in this range are not included.`
+    : null;
+  const cpisLabel  = from && to ? `Last ${cpisWindowFor(from, to).replace("d", " days")}` : "Last 7 days";
+  const landingLabel = from && to ? rangeLabel : "Last 30 days";
 
   const error =
     kpis.error?.message ||
@@ -71,9 +166,15 @@ export function Dashboard() {
     cpisSkus.error?.message ||
     null;
 
-  useEffect(() => {
-    setOrder(loadOrder());
-  }, []);
+  function handleApplyRange(r: { from: string; to: string }, pk: string) {
+    setPreset(pk);
+    setRange(pk === "lifetime" ? null : { from: r.from, to: r.to });
+    try {
+      window.localStorage.setItem(RANGE_KEY, JSON.stringify({ preset: pk, from: r.from, to: r.to }));
+    } catch {
+      // non-fatal: the range still applies, it just won't persist.
+    }
+  }
 
   function handleReorder(next: string[]) {
     setOrder(next);
@@ -92,7 +193,9 @@ export function Dashboard() {
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div>
             <p className="tabular-nums text-2xl font-semibold text-text-primary">{formatCurrency(kpis.data.total_spend)}</p>
-            <p className="mt-0.5 text-xs text-text-secondary">Total ad spend</p>
+            <p className="mt-0.5 text-xs text-text-secondary">
+              Total ad spend<WindowBadge text={rangeLabel} />
+            </p>
           </div>
           <div>
             <p className="tabular-nums text-2xl font-semibold text-text-primary">{formatCurrency(kpis.data.total_shopify_revenue)}</p>
@@ -118,7 +221,9 @@ export function Dashboard() {
       span: 2,
       content: (
         <div>
-          <h3 className="text-sm font-medium text-text-primary">Spend by category</h3>
+          <h3 className="text-sm font-medium text-text-primary">
+            Spend by category<WindowBadge text={rangeLabel} />
+          </h3>
           <div className="mt-3">
             {category.data ? (
               <BarChart
@@ -139,7 +244,9 @@ export function Dashboard() {
       span: 1,
       content: (
         <div>
-          <h3 className="text-sm font-medium text-text-primary">Shopify revenue by channel</h3>
+          <h3 className="text-sm font-medium text-text-primary">
+            Shopify revenue by channel<WindowBadge text={rangeLabel} />
+          </h3>
           <div className="mt-3 flex flex-col gap-2">
             {channel.data ? (
               channel.data
@@ -163,7 +270,9 @@ export function Dashboard() {
       span: 1,
       content: (
         <div>
-          <h3 className="text-sm font-medium text-text-primary">Top landing pages</h3>
+          <h3 className="text-sm font-medium text-text-primary">
+            Top landing pages<WindowBadge text={landingLabel} />
+          </h3>
           <div className="mt-3 flex flex-col gap-2">
             {landing.data ? (
               landing.data.map((p) => (
@@ -186,7 +295,9 @@ export function Dashboard() {
       span: 2,
       content: (
         <div>
-          <h3 className="text-sm font-medium text-text-primary">Top SKUs by ad spend (cost / NCP)</h3>
+          <h3 className="text-sm font-medium text-text-primary">
+            Top SKUs by ad spend (cost / NCP)<WindowBadge text={cpisLabel} />
+          </h3>
           <div className="mt-3 flex flex-col gap-2">
             {cpisSkus.data ? (
               cpisSkus.data.map((s) => (
@@ -211,8 +322,24 @@ export function Dashboard() {
       {error && (
         <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>
       )}
-      <p className="text-sm text-text-secondary">
-        Drag any tile to rearrange — your layout is remembered on this device.
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-text-secondary">
+          Drag any tile to rearrange — your layout is remembered on this device.
+        </p>
+        <DateRangePicker
+          value={{ from: from ?? "", to: to ?? "" }}
+          preset={preset}
+          align="right"
+          onApply={handleApplyRange}
+        />
+      </div>
+      {/* Every tile carries its own window badge, because they still do not
+          all resolve the same way -- Top SKUs snaps to a precomputed bucket,
+          and spend has a data floor. Saying so here beats leaving it to be
+          discovered by comparing tiles. */}
+      <p className="text-xs text-text-secondary">
+        Each tile shows the period it actually covers.
+        {spendFloorNote && <> {spendFloorNote}</>}
       </p>
       <DraggableGrid items={items} order={order} onReorder={handleReorder} />
     </div>
