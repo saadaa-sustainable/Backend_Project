@@ -5,6 +5,8 @@ import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { getAdPopupTheme, type AdPopupAppearance } from "@/lib/adPopupTheme";
 import { getAssetPreview, type AssetPreview, type AssetPreviewSource } from "@/lib/assetPreview";
+import { useAnalyticsSectionVisible } from "@/lib/analyticsSectionVisibility";
+import { lockBodyScroll } from "@/lib/bodyScrollLock";
 
 type Asset = AssetPreviewSource & { asset_id: string; media: string | null };
 
@@ -28,6 +30,7 @@ export function PreviewDialog({ item, preview, onClose, appearance = "creative" 
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [failed, setFailed] = useState(false);
+  const visible = useAnalyticsSectionVisible();
   const theme = getAdPopupTheme(appearance);
   const colors = {
     "--preview-bg": theme.bg,
@@ -42,15 +45,21 @@ export function PreviewDialog({ item, preview, onClose, appearance = "creative" 
   } as CSSProperties;
 
   useEffect(() => {
+    if (!visible) onClose();
+  }, [visible, onClose]);
+
+  useEffect(() => {
+    if (!visible) return;
     const dialog = dialogRef.current;
     dialog?.showModal();
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    const unlock = lockBodyScroll();
     return () => {
       dialog?.close();
-      document.body.style.overflow = previousOverflow;
+      unlock();
     };
-  }, []);
+  }, [visible]);
+
+  if (!visible) return null;
 
   return createPortal(
     <dialog

@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useSyncExternalStore } from "react";
+import { memo, useMemo, useState, useSyncExternalStore } from "react";
 import dynamic from "next/dynamic";
 import { DataFloorNotice } from "@/components/DataFloorNotice";
+import { AnalyticsSectionVisibility } from "@/lib/analyticsSectionVisibility";
 
 function TabLoading() {
   return <div role="status" className="min-h-40 py-8 text-sm text-text-secondary">Loading analytics…</div>;
@@ -57,6 +58,12 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },
   "meta-explorer": { label: "Meta Explorer", render: () => <MetaExplorer /> },
 };
+
+// Switching sections must not rerender the retained tables and charts. Their
+// own filter/data updates still render normally. Mount only after first use.
+const SectionContent = memo(function SectionContent({ tab }: { tab: Tab }) {
+  return TAB_META[tab].render();
+});
 
 const DEFAULT_TAB_ORDER: Tab[] = [
   "dashboard",
@@ -121,7 +128,12 @@ export function AnalyticsTabs() {
   const tab = useSyncExternalStore(subscribeToHash, getCurrentTab, getServerTab);
   const ready = tab !== null;
   const tabOrder = useMemo(() => ready ? loadTabOrder() : DEFAULT_TAB_ORDER, [ready]);
-
+  const [visited, setVisited] = useState<Tab[]>([]);
+  // Track newly selected tabs before committing their children, avoiding an
+  // extra blank frame. This list is bounded by the known analytics sections.
+  if (tab !== null && !visited.includes(tab)) {
+    setVisited([...visited, tab]);
+  }
 
   return (
     <div className="flex flex-col gap-5">
@@ -164,7 +176,20 @@ export function AnalyticsTabs() {
           wording drift between them. Dismissible per browser. */}
       <DataFloorNotice />
 
-      {tab === null ? <TabLoading /> : TAB_META[tab].render()}
+      {tab === null && <TabLoading />}
+      {visited.map((section) => (
+        <section
+          key={section}
+          data-analytics-section={section}
+          aria-label={`${TAB_META[section].label} section`}
+          hidden={section !== tab}
+          inert={section !== tab}
+        >
+          <AnalyticsSectionVisibility.Provider value={section === tab}>
+            <SectionContent tab={section} />
+          </AnalyticsSectionVisibility.Provider>
+        </section>
+      ))}
     </div>
   );
 }

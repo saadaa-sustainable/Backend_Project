@@ -45,6 +45,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
+  clearAnalyticsCache,
   ShopifyAnalyticsResponse,
   ShopifyTotals,
   fetchShopifyAnalytics,
@@ -176,7 +177,10 @@ export function ShopifyAnalytics() {
             />
           </div>
           <button
-            onClick={() => setReloadKey((k) => k + 1)}
+            onClick={() => {
+              clearAnalyticsCache();
+              setReloadKey((k) => k + 1);
+            }}
             disabled={loading}
             className="rounded-md border border-border-primary bg-white px-2.5 py-2 text-xs hover:bg-bg-muted disabled:opacity-40"
           >

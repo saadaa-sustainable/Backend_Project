@@ -130,6 +130,14 @@ class ApiError extends Error {
 }
 
 const analyticsCache = new RequestCache();
+export const ANALYTICS_CACHE_TTL_MS = 5 * 60 * 1000;
+// These POST endpoints are read-only queries. Treating them as writes used
+// to clear every analytics response whenever a user generated an Explorer.
+const ANALYTICS_READ_POSTS = new Set([
+  "/admin/analytics/cpis-utm/spend-trends",
+  "/admin/analytics/shopify-explorer/query",
+  "/admin/analytics/meta-explorer/query",
+]);
 // Analytics sections should show their Retry control rather than spin
 // forever against a stalled backend -- but the bound has to clear the
 // slowest query that legitimately succeeds, or it converts a slow page
@@ -155,7 +163,7 @@ export function clearAnalyticsCache(): void {
 async function request<T>(path: string, init?: RequestInit, timeoutMs?: number): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const analyticsRead = path.startsWith("/admin/analytics/") && (
-    method === "GET" || (method === "POST" && path === "/admin/analytics/cpis-utm/spend-trends")
+    method === "GET" || (method === "POST" && ANALYTICS_READ_POSTS.has(path))
   );
   const effectiveTimeoutMs = analyticsRead
     ? timeoutMs ?? ANALYTICS_REQUEST_TIMEOUT_MS
@@ -165,7 +173,7 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
   if (analyticsRead && typeof window !== "undefined" && !init?.signal && init?.cache !== "reload") {
     const key = JSON.stringify([API_BASE_URL, method, path, init?.body ?? null,
       [...new Headers(init?.headers).entries()].sort(), effectiveTimeoutMs ?? null]);
-    return analyticsCache.get(key, () => fetchResponse<T>(path, init, effectiveTimeoutMs));
+    return analyticsCache.get(key, () => fetchResponse<T>(path, init, effectiveTimeoutMs), ANALYTICS_CACHE_TTL_MS);
   }
   const result = await fetchResponse<T>(path, init, effectiveTimeoutMs);
   if (method !== "GET" && !analyticsRead) clearAnalyticsCache();
@@ -2214,6 +2222,10 @@ export interface CreativeTestingResponse {
   totals: CreativeTestingTotals;
   category_counts: Record<string, number>;
   kind_counts: Record<string, number>;
+  /** Assets carrying a link that no ad has ever used, keyed by media.
+   *  Same rule as the Untested Assets tab. NOT windowed: an asset with
+   *  no ad has no date to fall inside. */
+  unmatched_counts: Record<string, number>;
 }
 
 export interface CreativeTestingParams {

@@ -6809,6 +6809,9 @@ class CreativeTestingResponse(BaseModel):
     #: the same filters as `rows` minus `kind` itself, so every tab shows
     #: its true size whichever one is open.
     kind_counts: dict[str, int]
+    #: Assets with a link that no ad has ever carried, by media. NOT
+    #: windowed -- see _CT_UNMATCHED_SQL.
+    unmatched_counts: dict[str, int] = {}
 
 
 #: Fields the Creative Testing multi-filter can match on. Asset grain,
@@ -7040,6 +7043,10 @@ async def get_creative_testing(
     import json
     values = {k: json.loads(v) if isinstance(v, str) else v for k, v in result.items()}
     totals = CreativeTestingTotals(**values["totals"])
+    # Its own statement: it takes no window parameters and joins none of
+    # the tables above, so folding it into that query would only make a
+    # heavy plan heavier for three scalar counts.
+    unmatched = dict((await session.execute(text(_CT_UNMATCHED_SQL))).mappings().one())
     return CreativeTestingResponse(
         rows=values["rows"], total=totals.assets, totals=totals,
         category_counts=values["category_counts"],
@@ -7049,7 +7056,38 @@ async def get_creative_testing(
             "new": 0, "historical_discarded": 0, "refresh_discarded": 0,
             **values["kind_counts"],
         },
+        unmatched_counts=unmatched,
     )
+
+
+# Assets that exist, carry a link, and have never been matched to an ad.
+#
+# SAME definition /untested and CPIS's untested_* columns use: a link is
+# present, so somebody could test it tomorrow, and ad_asset_map holds no
+# row for its id, so no ad has ever carried it. Repeating the rule here
+# rather than inventing a second one -- a "not matched" tile that
+# disagreed with the Untested Assets tab would be worse than no tile.
+#
+# Deliberately NOT windowed. Creative Testing's other counts are "in the
+# picked dates"; this one cannot be, because the population is assets
+# with no ad at all, and an asset with no ad has no date to fall inside.
+_CT_UNMATCHED_SQL = """
+SELECT
+  (SELECT COUNT(*) FROM public.content_asset_register car
+    WHERE btrim(COALESCE(car.link_to_asset, '')) <> ''
+      AND NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                       WHERE m.asset_id = car.asset_id))::int          AS video,
+  (SELECT COUNT(*) FROM public.content_graphic_register cgr
+    WHERE btrim(COALESCE(cgr.link_1, cgr.link_2, cgr.link_3,
+                         cgr.creative, '')) <> ''
+      AND NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                       WHERE m.asset_id = cgr.requisition_id))::int    AS graphic,
+  (SELECT COUNT(*) FROM public.content_influencer_posts cip
+    WHERE btrim(COALESCE(cip.post_link, '')) <> ''
+      AND cip.post_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
+                       WHERE m.asset_id = cip.post_id))::int           AS influencer
+"""
 
 
 class CreativeTestingAdRow(BaseModel):
