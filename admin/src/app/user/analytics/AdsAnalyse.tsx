@@ -40,6 +40,7 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { InfoBasis, InfoDot } from "./InfoDot";
 import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
+import { AdsLaunchDialog } from "./AdsLaunchDialog";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
@@ -1619,6 +1620,7 @@ export function AdsAnalyse() {
   const [rollupSort, setRollupSort] = useState("spend");
   const [rollupHidden, setRollupHidden] = useState<Set<string>>(new Set(ROLLUP_DEFAULT_HIDDEN));
   const [showRollupCols, setShowRollupCols] = useState(false);
+  const [chartOpen, setChartOpen] = useState(false);
   const [showRollupRules, setShowRollupRules] = useState(false);
   const rollupCols = ROLLUP_COLUMNS.filter((c) => !rollupHidden.has(c.key));
   // Ad Sets / Campaigns read adset_insights / campaign_insights via the
@@ -2119,6 +2121,27 @@ export function AdsAnalyse() {
         </span>
       </div>
 
+
+      {/* Analytics, behind a button. The Ads-launched chart used to sit
+          inline between the filters and the table, where it pushed the
+          table most of a screen down on every visit for a reading most
+          visits do not need. It opens on demand instead, and reads the
+          same filters it always did -- so what it shows still follows
+          the controls directly beneath this button. */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setChartOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border-primary bg-white px-3 py-1.5 text-xs font-medium text-text-primary shadow-sm hover:bg-bg-muted"
+          title="Ads launched per day, across every ad matching the filters below"
+        >
+          <span aria-hidden="true">📊</span>
+          Analytics
+        </button>
+        <span className="text-[11px] text-text-tertiary">
+          Ads launched per day, for the filters below
+        </span>
+      </div>
 
       {/* ═══════════════════════════════════════════════════════════
           Filter cards — ACCOUNT / GROUP BY / CATEGORY / AD STATUS /
@@ -2764,18 +2787,27 @@ export function AdsAnalyse() {
         })}
       </div>
 
-      {/* Ads launched per day. Replaces the three client-side charts
-          that were computed from derived.filtered -- i.e. one page of
-          rows -- while presenting themselves as a view of the whole
-          filter set. This one aggregates server-side. */}
-      <AdsLaunchChart
-        fromDate={winFrom}
-        toDate={winTo}
-        accountName={account || undefined}
-        category={categoryFilter || undefined}
-        adStatus={adStatus || undefined}
-        search={debouncedSearch || undefined}
-      />
+      {/* Ads launched per day, in the dialog the Analytics button opens.
+          Replaces the three client-side charts that were computed from
+          derived.filtered -- i.e. one page of rows -- while presenting
+          themselves as a view of the whole filter set. This one
+          aggregates server-side.
+
+          Mounted only while open, so a closed dialog costs no fetch.
+          Native <dialog>, matching AssetAdsModal: Escape and the
+          backdrop close it, and focus is trapped without a library. */}
+      {chartOpen && (
+        <AdsLaunchDialog onClose={() => setChartOpen(false)}>
+          <AdsLaunchChart
+            fromDate={winFrom}
+            toDate={winTo}
+            accountName={account || undefined}
+            category={categoryFilter || undefined}
+            adStatus={adStatus || undefined}
+            search={debouncedSearch || undefined}
+          />
+        </AdsLaunchDialog>
+      )}
 
       {/* Total ads bar */}
       <div className="rounded-lg border border-border-primary bg-white px-3 py-1.5 text-xs text-text-secondary shadow-sm">
