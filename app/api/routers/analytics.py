@@ -7034,7 +7034,8 @@ async def get_creative_testing(
         f"SELECT {_CT_CATEGORY} AS c, COUNT(*) AS n "
         f"{_CT_BASE}{base_where}{kind_where} GROUP BY 1"
         ") categories), '{}'::jsonb) AS category_counts, "
-        f"(SELECT to_jsonb(t) FROM ({totals_sql}) t) AS totals"
+        f"(SELECT to_jsonb(t) FROM ({totals_sql}) t) AS totals, "
+        f"(SELECT to_jsonb(u) FROM ({_CT_UNMATCHED_SQL}) u) AS unmatched_counts"
     )
     result = (await session.execute(
         text(sql), {**params, "limit": limit, "offset": offset},
@@ -7043,10 +7044,6 @@ async def get_creative_testing(
     import json
     values = {k: json.loads(v) if isinstance(v, str) else v for k, v in result.items()}
     totals = CreativeTestingTotals(**values["totals"])
-    # Its own statement: it takes no window parameters and joins none of
-    # the tables above, so folding it into that query would only make a
-    # heavy plan heavier for three scalar counts.
-    unmatched = dict((await session.execute(text(_CT_UNMATCHED_SQL))).mappings().one())
     return CreativeTestingResponse(
         rows=values["rows"], total=totals.assets, totals=totals,
         category_counts=values["category_counts"],
@@ -7056,7 +7053,10 @@ async def get_creative_testing(
             "new": 0, "historical_discarded": 0, "refresh_discarded": 0,
             **values["kind_counts"],
         },
-        unmatched_counts=unmatched,
+        # .get, not [...]: the endpoint is exercised with a mocked row in
+        # tests, and a missing key here should not turn three optional
+        # counts into a 500.
+        unmatched_counts=values.get("unmatched_counts") or {},
     )
 
 
@@ -7071,6 +7071,11 @@ async def get_creative_testing(
 # Deliberately NOT windowed. Creative Testing's other counts are "in the
 # picked dates"; this one cannot be, because the population is assets
 # with no ad at all, and an asset with no ad has no date to fall inside.
+#
+# Folded into the endpoint's single statement rather than run on its own.
+# That endpoint is deliberately ONE round trip -- there is a test named
+# for it -- and three scalar counts over small registers do not justify
+# breaking that.
 _CT_UNMATCHED_SQL = """
 SELECT
   (SELECT COUNT(*) FROM public.content_asset_register car

@@ -111,7 +111,18 @@ async def test_creative_testing_uses_one_materialized_rollup_with_distinct_panel
 
     aggregate = next(cte for cte in statement.withClause.ctes if cte.ctename == "agg")
     assert aggregate.ctematerialized == CTEMaterialize.CTEMaterializeAlways
-    assert str(query).count("FROM public.ad_asset_map m") == 1
+    # Four references, and the count is the point of the assertion.
+    #
+    # ONE inside the materialised aggregate -- that is the expensive
+    # scan this test was written to pin, and it must not become two.
+    #
+    # THREE anti-joins in the unmatched-assets block, one per register,
+    # reusing the Untested Assets rule (a link exists, ad_asset_map has
+    # no row for the id). They probe an 8.4k-row table on its indexed
+    # asset_id: ~226 ms against a ~4.7 s cold call for the endpoint.
+    #
+    # A FIFTH means the aggregate is being scanned twice again.
+    assert str(query).count("FROM public.ad_asset_map m") == 4
     panels = _panel_queries(statement)
     base = {"media", "account_name", "search"} if extra_filters else set()
     kind_parameters = {"from_date", "to_date"} if kind else set()
