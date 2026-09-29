@@ -415,7 +415,14 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
       onClick={onClick}
       className="group flex flex-col overflow-hidden rounded-lg border border-border-primary bg-white text-left shadow-sm transition-shadow hover:shadow-md"
     >
-      <div className="relative aspect-square w-full bg-bg-muted">
+      {/* overflow-hidden, and the media inside is ABSOLUTE. aspect-square
+          alone did nothing here: an in-flow `h-full` image still sizes
+          its parent, so a 320x568 reel stretched its tile to 404px
+          while a 320x320 feed post sat at 228px and the grid came out
+          ragged. Positioning the image out of flow leaves the tile
+          height to the aspect ratio alone, so every preview is the
+          same square and object-cover crops the overflow. */}
+      <div className="relative aspect-square w-full overflow-hidden bg-bg-muted">
         {/* The grid stays on stored images on purpose: fifty Instagram
             iframes on one screen is fifty third-party documents, and the
             page would crawl. The embed is in the detail view, one at a
@@ -432,7 +439,7 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
             key={thumb}
             src={thumb}
             alt=""
-            className="h-full w-full object-cover"
+            className="absolute inset-0 h-full w-full object-cover"
             loading="lazy"
             // No Referer. Instagram's CDN refuses hotlinked images by
             // referrer, so the same URL that returns a JPEG to curl
@@ -442,7 +449,7 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
             onError={() => setSrcIdx((i) => i + 1)}
           />
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-1 px-2 text-center text-xs text-text-tertiary">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 px-2 text-center text-xs text-text-tertiary">
             <span aria-hidden="true">▢</span>
             <span>no preview</span>
             <span className="text-[10px]">open to view the post</span>
