@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5901,6 +5902,52 @@ _IG_ROW_COLUMNS = (
     "insights_profile_activity, insights_navigation, insights_replies, "
     "insights_total_interactions, ingested_at"
 )
+
+
+#: Shortcodes are Instagram's own base64-ish ids. Anchored and bounded
+#: because this value is interpolated into an outbound URL: without it
+#: the endpoint is an open proxy for anything on instagram.com.
+_IG_SHORTCODE_RE = _re.compile(r"^[A-Za-z0-9_-]{5,32}$")
+
+
+@router.get("/instagram/thumb/{shortcode}")
+async def get_instagram_thumb(shortcode: str) -> Response:
+    """Serve a post's thumbnail, fetched server-side.
+
+    The stored thumbnail_url and media_url are CDN URLs that EXPIRE --
+    55 of the 63 tiles on the first screen of the grid were 403ing.
+    Instagram's public /p/<code>/media/ endpoint does not expire, but it
+    302s to a CDN URL signed against the requester, and that signed URL
+    403s when a browser follows it from our origin. Measured: 58 of 59
+    such follows failed in the page, while the same URL returns a JPEG
+    to a server-side fetch.
+
+    So the fetch happens here. The browser asks us, we ask Instagram.
+
+    ALWAYS the /p/ form, never /reel/: /reel/<code>/media/ answers 404
+    or 500 for the very same post that /p/<code>/media/ serves.
+    """
+    if not _IG_SHORTCODE_RE.match(shortcode):
+        raise HTTPException(status_code=400, detail="Bad shortcode.")
+    url = f"https://www.instagram.com/p/{shortcode}/media/?size=m"
+    try:
+        import httpx
+        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
+            r = await client.get(url)
+    except Exception:
+        # A dead upstream must not surface as a 500 on the page: the
+        # caller renders its own placeholder for any non-200.
+        raise HTTPException(status_code=502, detail="Instagram unreachable.")
+    ctype = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ctype.startswith("image/"):
+        raise HTTPException(status_code=404, detail="No thumbnail.")
+    return Response(
+        content=r.content,
+        media_type=ctype,
+        # A post's thumbnail does not change. Cache hard, so the grid
+        # costs one upstream fetch per post rather than one per view.
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 class InstagramPostRow(BaseModel):

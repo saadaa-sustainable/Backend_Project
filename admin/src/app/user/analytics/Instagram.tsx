@@ -28,6 +28,7 @@ import {
   fetchInstagram,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { instagramThumbUrl } from "@/lib/api";
 
 const PAGE_SIZE = 60;
 
@@ -354,8 +355,60 @@ function Tile({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
+/** Instagram's own embed for a post, from the permalink we store.
+ *
+ *  Why not the stored image: media_url and thumbnail_url are CDN URLs
+ *  that EXPIRE. They 403 within days, which is what the broken tiles in
+ *  this grid are. The permalink does not expire, and we have one for
+ *  1,519 of 1,522 posts against 967 thumbnails -- better coverage and
+ *  stable.
+ *
+ *  /embed is the public endpoint, so it needs no token and no app
+ *  review, and it renders whatever the post actually is now: video plays
+ *  as video, a carousel keeps its arrows.
+ */
+/** A thumbnail that does not expire, served by our own proxy.
+ *
+ *  Instagram's /p/<code>/media/ endpoint never goes stale, unlike the
+ *  stored thumbnail_url -- 55 of the 63 tiles on the first screen were
+ *  already 403ing. But it 302s to a CDN URL signed against the
+ *  requester, and that signed URL 403s when the browser follows it from
+ *  our origin: 58 of 59 follows failed in the page, while the same URL
+ *  returns a JPEG to a server-side fetch. So the server fetches it.
+ *
+ *  The shortcode is taken from the column when we have one and parsed
+ *  from the permalink otherwise, because the proxy needs the /p/ form:
+ *  /reel/<code>/media/ answers 404 for the same post /p/<code>/media/
+ *  serves.
+ */
+function proxiedThumb(
+  permalink: string | null | undefined,
+  shortcode: string | null | undefined,
+): string | null {
+  const code =
+    shortcode?.trim() ||
+    permalink?.match(/instagram\.com\/(?:p|reel|reels|tv)\/([^/?#]+)/)?.[1];
+  return code ? instagramThumbUrl(code) : null;
+}
+
+function embedUrl(permalink: string | null | undefined): string | null {
+  if (!permalink) return null;
+  // Accept both /p/<code> and /reel/<code>, with or without the trailing
+  // slash Instagram sometimes omits.
+  if (!/^https:\/\/(www\.)?instagram\.com\//.test(permalink)) return null;
+  return `${permalink.replace(/\/?$/, "/")}embed`;
+}
+
 function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) {
-  const thumb = r.thumbnail_url ?? r.media_url;
+  // Stored image first -- it is already in the browser cache on a
+  // revisit. When it 403s, fall back to the permalink thumbnail, which
+  // cannot expire. Only if BOTH fail is there nothing to show.
+  const sources = [
+    r.thumbnail_url ?? r.media_url,
+    proxiedThumb(r.permalink, r.shortcode),
+  ].filter((u): u is string => !!u);
+  const [srcIdx, setSrcIdx] = useState(0);
+  const thumb = sources[srcIdx] ?? null;
   const mediaTypeCls = MEDIA_TYPE_COLORS[r.media_type ?? ""] ?? "bg-bg-muted text-text-secondary";
   return (
     <button
@@ -363,12 +416,36 @@ function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) 
       className="group flex flex-col overflow-hidden rounded-lg border border-border-primary bg-white text-left shadow-sm transition-shadow hover:shadow-md"
     >
       <div className="relative aspect-square w-full bg-bg-muted">
+        {/* The grid stays on stored images on purpose: fifty Instagram
+            iframes on one screen is fifty third-party documents, and the
+            page would crawl. The embed is in the detail view, one at a
+            time.
+
+            But these URLs expire, so a dead one must not render as a
+            broken-image icon with no way forward. onError swaps in a
+            note that the post is still openable -- clicking the card
+            opens the detail view, where the permalink embed shows the
+            post whatever the CDN has done. */}
         {thumb ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumb} alt="" className="h-full w-full object-cover" loading="lazy" />
+          <img
+            key={thumb}
+            src={thumb}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+            // No Referer. Instagram's CDN refuses hotlinked images by
+            // referrer, so the same URL that returns a JPEG to curl
+            // returns 403 to a page on localhost. Sending none is what
+            // makes the permalink thumbnail usable at all.
+            referrerPolicy="no-referrer"
+            onError={() => setSrcIdx((i) => i + 1)}
+          />
         ) : (
-          <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
-            no thumbnail
+          <div className="flex h-full flex-col items-center justify-center gap-1 px-2 text-center text-xs text-text-tertiary">
+            <span aria-hidden="true">▢</span>
+            <span>no preview</span>
+            <span className="text-[10px]">open to view the post</span>
           </div>
         )}
         <span className={`absolute left-2 top-2 rounded-full px-2 py-0.5 text-[9px] font-semibold ${mediaTypeCls}`}>
@@ -442,14 +519,30 @@ function PostDrawer({ r, onClose }: { r: InstagramPostRow; onClose: () => void }
             ✕
           </button>
         </div>
-        {(r.thumbnail_url ?? r.media_url) && (
+        {/* The post itself, not a stored still. Falls back to the
+            thumbnail only when there is no usable permalink -- three
+            posts out of 1,522. */}
+        {embedUrl(r.permalink) ? (
+          <iframe
+            src={embedUrl(r.permalink) ?? ""}
+            title="Instagram post"
+            loading="lazy"
+            // Instagram's embed is ~400px of chrome plus the media, and
+            // it scrolls internally rather than resizing to fit.
+            className="mb-3 h-[560px] w-full rounded-lg border border-border-primary bg-white"
+            // allow-scripts + allow-same-origin is what the embed needs
+            // to render; popups so "View on Instagram" still works.
+            sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+            referrerPolicy="no-referrer-when-downgrade"
+          />
+        ) : (r.thumbnail_url ?? r.media_url) ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={r.thumbnail_url ?? r.media_url ?? ""}
             alt=""
             className="mb-3 w-full rounded-lg object-cover"
           />
-        )}
+        ) : null}
         {r.caption && (
           <p className="mb-3 whitespace-pre-wrap rounded-md bg-bg-surface p-2 text-xs text-text-primary">
             {r.caption}

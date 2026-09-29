@@ -12,6 +12,16 @@ import { RequestCache } from "./apiCache";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8002";
 
+/** Our thumbnail proxy for an Instagram post.
+ *
+ *  Not the stored thumbnail_url and not instagram.com directly: both
+ *  403 in the browser, the first because the URL has expired and the
+ *  second because the CDN URL it redirects to is signed against the
+ *  requester. The server can fetch it; we cannot. */
+export function instagramThumbUrl(shortcode: string): string {
+  return `${API_BASE_URL}/admin/analytics/instagram/thumb/${encodeURIComponent(shortcode)}`;
+}
+
 export type ColumnKind = "identity" | "numeric" | "jsonb" | "other";
 
 export interface TableColumn {
