@@ -199,14 +199,17 @@ export function Instagram() {
         </div>
       )}
 
-      {/* KPI tiles */}
+      {/* KPI tiles.
+          "Posts (filtered)" used to lead this row and is gone. It sat
+          directly under a profile strip quoting Instagram's own post
+          counts and disagreed with them -- 1,361 against 1,414 -- because
+          it counted what WE have ingested across every tracked account
+          while the strip counts one account, live. Both were right and
+          the pairing read as an error. The same number still appears
+          beside the filters, as "N posts match", where it answers the
+          question a reader is actually asking at that moment. */}
       {summary && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          <Tile
-            label="Posts (filtered)"
-            value={fmtInt(summary.total_posts)}
-            info="Posts WE have ingested, across every account tracked here, after the filters above. Not the same as the post counts in the profile strip: those are Instagram's own totals for one account each, live. The gap is posts never ingested, or deleted since. Collaboration invites and collaborative media are excluded; this counts published posts only."
-          />
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Tile
             label="Total reach"
             value={fmtInt(summary.total_reach)}
