@@ -202,10 +202,26 @@ export function Instagram() {
       {/* KPI tiles */}
       {summary && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          <Tile label="Posts (filtered)" value={fmtInt(summary.total_posts)} />
-          <Tile label="Total reach" value={fmtInt(summary.total_reach)} />
-          <Tile label="Total likes" value={fmtInt(summary.total_likes)} />
-          <Tile label="Total comments" value={fmtInt(summary.total_comments)} />
+          <Tile
+            label="Posts (filtered)"
+            value={fmtInt(summary.total_posts)}
+            info="Posts WE have ingested, across every account tracked here, after the filters above. Not the same as the post counts in the profile strip: those are Instagram's own totals for one account each, live. The gap is posts never ingested, or deleted since. Collaboration invites and collaborative media are excluded; this counts published posts only."
+          />
+          <Tile
+            label="Total reach"
+            value={fmtInt(summary.total_reach)}
+            info="Reach summed across the posts above. Instagram reports reach per post, and the same person reached by two posts counts in both, so this is larger than the number of people reached."
+          />
+          <Tile
+            label="Total likes"
+            value={fmtInt(summary.total_likes)}
+            info="Likes summed across the posts above, as they stood at the last ingest. Counts keep moving on Instagram; these do not until the next run."
+          />
+          <Tile
+            label="Total comments"
+            value={fmtInt(summary.total_comments)}
+            info="Comments summed across the posts above, as they stood at the last ingest."
+          />
           <Tile
             label="Engagement rate"
             value={fmtPct(summary.avg_engagement_rate_pct)}
@@ -336,12 +352,55 @@ export function Instagram() {
 
 // ─────────────────────────────────────────────────────────────────
 
-function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Tile({
+  label,
+  value,
+  hint,
+  info,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  /** What the number counts. These tiles sit beside a profile strip
+   *  quoting Instagram's own totals, and the two do not agree -- the
+   *  header says 1,414 posts while the tile says 1,361. Both are right
+   *  about different things, and nothing on screen said which. */
+  info?: string;
+}) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-lg border border-border-primary bg-white p-2 shadow-sm">
-      <div className="text-[10px] uppercase tracking-wide text-text-secondary">{label}</div>
+    <div className="relative rounded-lg border border-border-primary bg-white p-2 shadow-sm">
+      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-secondary">
+        {label}
+        {info && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-label={`What ${label} counts`}
+            aria-expanded={open}
+            className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-border-primary text-[8px] leading-none text-text-tertiary hover:bg-bg-muted"
+          >
+            i
+          </button>
+        )}
+      </div>
       <div className="font-mono text-lg font-semibold text-text-primary">{value}</div>
       {hint && <div className="text-[9px] text-text-tertiary">{hint}</div>}
+      {info && open && (
+        <div
+          role="tooltip"
+          className="absolute left-0 top-full z-20 mt-1 w-72 rounded-md border border-border-primary bg-white p-2 text-[11px] leading-snug text-text-secondary shadow-lg"
+        >
+          {info}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="mt-1.5 block text-[10px] text-text-tertiary underline"
+          >
+            close
+          </button>
+        </div>
+      )}
     </div>
   );
 }
