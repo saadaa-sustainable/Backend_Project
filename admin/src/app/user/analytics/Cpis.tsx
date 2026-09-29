@@ -775,6 +775,34 @@ function CpisView() {
                     [INVENTORY] units_in_stock
                   Colored top-border on the first col of each group is
                   kwikengage's column-grouping treatment. */}
+              {/* Group row. The three last-click tiers answer three
+                  different questions and the column names alone did not
+                  say which: "Orders" and "Units Sold" sit four columns
+                  apart and count different things. Naming the tiers is
+                  the cheapest way to stop a reader adding a whole-order
+                  number to a per-product one.
+
+                  The leading span follows the mode toggle, because
+                  "Spend (named ads)" only renders in ad_name mode. If
+                  this count ever drifts the row will visibly misalign
+                  against the header below it. */}
+              <tr className="whitespace-nowrap text-[9px] font-semibold uppercase tracking-[0.12em] text-text-tertiary">
+                {/* NOT sticky. As a sticky left-0 cell it spanned 27
+                    columns with a white background, so once the table
+                    was scrolled it sat on top of the three labels and
+                    painted them out. */}
+                <th colSpan={spendMatchMode === "ad_name" ? 28 : 27} />
+                <th colSpan={6} className="border-l border-border-soft px-3 pt-2 text-center text-text-secondary">
+                  Whole orders
+                </th>
+                <th colSpan={9} className="border-l border-border-soft px-3 pt-2 text-center text-text-secondary">
+                  This product only
+                </th>
+                <th colSpan={5} className="border-l border-border-soft px-3 pt-2 text-center text-text-secondary">
+                  Other products in those orders
+                </th>
+                <th colSpan={10} />
+              </tr>
               <tr className="whitespace-nowrap border-b border-border-primary text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
                 {/* PRODUCT group (sticky). SKU Code is pinned to a
                     fixed w-[110px] so its right edge lines up EXACTLY
@@ -920,48 +948,48 @@ function CpisView() {
                     ? "Equal-per-order allocation: ad spend split evenly across orders driven, then within-order by line-item revenue"
                     : "Value-weighted allocation: ad spend split proportional to each order's total revenue"
                 }>
-                  LC Ad Spend
+                  Ad Spend
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to an ad and contain this SKU.">LC Orders</th>
-                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of those orders, counted once per order. Equals LC Revenue + Halo Rev exactly \u2014 this SKU's lines plus everything else in the same baskets.">Order Sales</th>
-                <th className="px-3 py-3 text-right" title="Total units in those orders, every SKU counted. The unit-count twin of Order Sales, and equal to LC Units + Halo Units.">Order Units</th>
-                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales \u00f7 LC Orders.">LC AOV</th>
+                <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to an ad and contain this SKU.">Orders</th>
+                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of those orders, counted once per order. Equals LC Revenue + Halo Rev exactly \u2014 this SKU's lines plus everything else in the same baskets.">Order Value</th>
+                <th className="px-3 py-3 text-right" title="Total units in those orders, every SKU counted. The unit-count twin of Order Sales, and equal to LC Units + Halo Units.">Total Items</th>
+                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales \u00f7 LC Orders.">Avg Order Value</th>
                 <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Orders. What one ORDER cost to win. Runs above Cost/Unit by the Qty/Order factor.">
-                  LC Cost/Order
+                  Cost / Order
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Units of THIS SKU sold in those orders. An order holding 3 counts as 3.">LC Units</th>
-                <th className="px-3 py-3 text-right" title="Sales value of THIS SKU's units only. The rest of the basket is Halo Rev.">LC Revenue</th>
-                <th className="px-3 py-3 text-right" title="Average selling price net \u2014 LC Revenue \u00f7 LC Units.">ASP Net</th>
-                <th className="px-3 py-3 text-right" title="Average units of THIS SKU per order. What separates Cost/Order from Cost/Unit.">Qty/Order</th>
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Units of THIS SKU sold in those orders. An order holding 3 counts as 3.">Units Sold</th>
+                <th className="px-3 py-3 text-right" title="Sales value of THIS SKU's units only. The rest of the basket is Halo Rev.">Product Sales</th>
+                <th className="px-3 py-3 text-right" title="Average selling price net \u2014 LC Revenue \u00f7 LC Units.">Avg Price</th>
+                <th className="px-3 py-3 text-right" title="Average units of THIS SKU per order. What separates Cost/Order from Cost/Unit.">Units / Order</th>
                 <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Units \u2014 what one UNIT cost to sell. Compare against ASP Net and Break-even CPIS.">
-                  LC Cost/Unit
+                  Cost / Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
                 <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend \u00f7 this SKU's sales, as a percentage. The inverse of LC ROAS. Profitable while under the break-even ACoS (unit profit \u00f7 price).">
-                  LC ACoS
+                  Ad Cost %
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
                 <th className="px-3 py-3 text-right" title="LC Revenue \u00f7 allocated ad spend.">
-                  LC ROAS
+                  Return on Spend
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
                 <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising \u2014 the most ad spend a unit can carry before it loses money. A property of the product, so it does not change with the attribution mode.">
-                  Break-even CPIS
+                  Break-even Cost
                 </th>
                 <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS \u2212 LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money.">
-                  Headroom
+                  Profit / Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
@@ -974,13 +1002,13 @@ function CpisView() {
                     it in the same order. Independent of ad_spend --
                     includes both paid ads and organic Meta traffic.
                     Symmetric across the basket. See refresh_cpis_utm.py. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Halo revenue: revenue from OTHER SKUs in the same Meta/IG-sourced basket, credited to this SKU. Basket {A ₹700 + B ₹300} gives A halo_revenue=₹300 and B halo_revenue=₹700. Includes paid + organic Meta traffic.">Halo Rev</th>
-                <th className="px-3 py-3 text-right" title="Halo units: unit count of OTHER SKUs in the same Meta/IG-sourced basket. Symmetric across the basket.">Halo Units</th>
-                <th className="px-3 py-3 text-right" title="Halo orders: number of Meta/IG-sourced orders that also contained at least one other master SKU alongside this one.">Halo Orders</th>
-                <th className="px-3 py-3 text-right" title="Halo Spend intentionally 0. Ad spend is already fully distributed across every SKU in the basket via ad_spend/ad_spend_vw -- charging halo_spend on top would double-count.">Halo Spend</th>
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Halo revenue: revenue from OTHER SKUs in the same Meta/IG-sourced basket, credited to this SKU. Basket {A ₹700 + B ₹300} gives A halo_revenue=₹300 and B halo_revenue=₹700. Includes paid + organic Meta traffic.">Other Sales</th>
+                <th className="px-3 py-3 text-right" title="Halo units: unit count of OTHER SKUs in the same Meta/IG-sourced basket. Symmetric across the basket.">Other Units</th>
+                <th className="px-3 py-3 text-right" title="Halo orders: number of Meta/IG-sourced orders that also contained at least one other master SKU alongside this one.">Mixed Orders</th>
+                <th className="px-3 py-3 text-right" title="Halo Spend intentionally 0. Ad spend is already fully distributed across every SKU in the basket via ad_spend/ad_spend_vw -- charging halo_spend on top would double-count.">Other Spend</th>
                 <th className="px-3 py-3 text-right"
                     title="Halo Sale % = halo_orders / (attributed_orders + halo_orders). High = this SKU rides along in baskets rather than being the reason for the sale.">
-                  Halo Sale %
+                  Rides Along %
                 </th>
                 <th className="px-3 py-3 text-right"
                     title="Pipeline available to test = untested video + untested graphic backlog. Rolled together since the merchant thinks of them as one pool.">
