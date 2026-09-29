@@ -148,17 +148,35 @@ jobs:
 
       - name: Restore BigQuery service account
         if: steps.guard.outputs.skip != 'true'
-        # GH secret GOOGLE_CREDS_JSON holds the raw JSON (paste the whole
-        # file content into the secret). We write it to disk, then point
-        # GOOGLE_APPLICATION_CREDENTIALS at the path so the BQ client
-        # picks it up transparently.
+        # GH secret GOOGLE_CREDS_JSON holds the RAW key file, written
+        # with `gh secret set GOOGLE_CREDS_JSON < key.json` so nothing
+        # re-escapes it. We write it to disk and point
+        # GOOGLE_APPLICATION_CREDENTIALS at the path.
+        #
+        # printf, not echo: echo interprets backslash escapes in some
+        # shells, and a service-account key is full of them -- the
+        # private_key field is one long string of \n separators.
+        #
+        # The JSON is then parsed before we commit to it. This step used
+        # to write the file and move on, so a malformed secret surfaced
+        # four steps later as "DefaultCredentialsError: not a valid json
+        # file" from inside the BigQuery client. It did exactly that from
+        # 2026-09-03 to 2026-09-29: the secret had been stored ESCAPED,
+        # as {\"type\": ...}, and every nightly run failed bq_inventory
+        # and silver_returns while reporting only "partial".
         env:
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
         run: |
-          if [ -n "$GOOGLE_CREDS_JSON" ]; then
-            echo "$GOOGLE_CREDS_JSON" > "$RUNNER_TEMP/gcp.json"
-            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
+          if [ -z "$GOOGLE_CREDS_JSON" ]; then
+            echo "::error::GOOGLE_CREDS_JSON is not set -- bq_inventory and silver_returns will fail."
+            exit 1
           fi
+          printf '%s' "$GOOGLE_CREDS_JSON" > "$RUNNER_TEMP/gcp.json"
+          # -c, not a heredoc: inside a YAML block scalar the terminator
+          # and the body both carry indentation, which breaks the shell's
+          # delimiter match and Python's own parser.
+          python3 -c 'import json,sys; k=json.load(open(sys.argv[1])); m=[f for f in ("type","project_id","private_key","client_email") if not k.get(f)]; sys.exit("::error::service-account key missing "+",".join(m)) if m else print("service account", k["client_email"], "on", k["project_id"])' "$RUNNER_TEMP/gcp.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
 
       - name: Run daily refresh
         if: steps.guard.outputs.skip != 'true'
