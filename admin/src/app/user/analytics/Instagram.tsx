@@ -28,7 +28,7 @@ import {
   fetchInstagram,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
-import { instagramThumbUrl } from "@/lib/api";
+import { instagramAvatarUrl, instagramThumbUrl } from "@/lib/api";
 
 const PAGE_SIZE = 60;
 
@@ -48,12 +48,14 @@ const MEDIA_TYPE_COLORS: Record<string, string> = {
   CAROUSEL_ALBUM: "bg-success-bg text-success-text",
 };
 
+// Whole numbers, grouped Indian-style like every other figure in this
+// dashboard. The compact form rounded to one decimal, so 552,572
+// followers read as "552.6K" and 1,361 posts as "1.4K" -- close enough
+// to look precise and wrong enough to be useless for reconciling
+// against Instagram itself.
 function fmtInt(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
+  return Math.round(n).toLocaleString("en-IN");
 }
 function fmtPct(n: number | null | undefined) {
   if (n === null || n === undefined) return "—";
@@ -185,18 +187,7 @@ export function Instagram() {
               }
               title={username === p.username ? "Click to clear filter" : `Filter to @${p.username}`}
             >
-              {p.profile_picture_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={p.profile_picture_url}
-                  alt={p.username ?? ""}
-                  className="h-11 w-11 rounded-full object-cover"
-                />
-              ) : (
-                <div className="flex h-11 w-11 items-center justify-center rounded-full bg-bg-muted text-xs text-text-secondary">
-                  IG
-                </div>
-              )}
+              <ProfileAvatar username={p.username} />
               <div>
                 <div className="text-sm font-semibold">@{p.username ?? "?"}</div>
                 <div className="text-[10px] text-text-secondary">
@@ -397,6 +388,35 @@ function embedUrl(permalink: string | null | undefined): string | null {
   // slash Instagram sometimes omits.
   if (!/^https:\/\/(www\.)?instagram\.com\//.test(permalink)) return null;
   return `${permalink.replace(/\/?$/, "/")}embed`;
+}
+
+/** Profile picture, or the account's initial.
+ *
+ *  Never the stored profile_picture_url: those are expired CDN links
+ *  that 403 to the server as well as the browser, which is why this
+ *  row showed three broken-image icons. The proxy serves the freshest
+ *  capture in raw_dump_instagram, and 404s when even that has aged out
+ *  -- true today for two of the three accounts, where only a fresh
+ *  ingest can help. A letter is a better answer than a broken frame.
+ */
+function ProfileAvatar({ username }: { username: string | null }) {
+  const [failed, setFailed] = useState(false);
+  if (!username || failed) {
+    return (
+      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-bg-muted text-sm font-semibold uppercase text-text-secondary">
+        {username?.[0] ?? "IG"}
+      </div>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={instagramAvatarUrl(username)}
+      alt={username}
+      className="h-11 w-11 shrink-0 rounded-full object-cover"
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 function PostCard({ r, onClick }: { r: InstagramPostRow; onClick: () => void }) {

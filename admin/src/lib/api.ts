@@ -18,6 +18,15 @@ const API_BASE_URL =
  *  403 in the browser, the first because the URL has expired and the
  *  second because the CDN URL it redirects to is signed against the
  *  requester. The server can fetch it; we cannot. */
+/** Our proxy for a profile picture. Same reason as the post
+ *  thumbnail, one step worse: the URLs flattened into insta_data are
+ *  long dead, 403 even to a server fetch, so there is nothing to proxy
+ *  there. The endpoint reads the freshest capture in
+ *  raw_dump_instagram instead. */
+export function instagramAvatarUrl(username: string): string {
+  return `${API_BASE_URL}/admin/analytics/instagram/avatar/${encodeURIComponent(username)}`;
+}
+
 export function instagramThumbUrl(shortcode: string): string {
   return `${API_BASE_URL}/admin/analytics/instagram/thumb/${encodeURIComponent(shortcode)}`;
 }

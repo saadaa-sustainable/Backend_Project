@@ -5910,6 +5910,87 @@ _IG_ROW_COLUMNS = (
 _IG_SHORTCODE_RE = _re.compile(r"^[A-Za-z0-9_-]{5,32}$")
 
 
+#: Instagram usernames: letters, digits, dot, underscore. Anchored
+#: because it reaches a SQL parameter and, through it, an outbound
+#: fetch.
+_IG_USERNAME_RE = _re.compile(r"^[A-Za-z0-9._]{1,30}$")
+
+
+@router.get("/instagram/avatar/{username}")
+async def get_instagram_avatar(session: SessionDep, username: str) -> Response:
+    """Serve a profile picture, fetched server-side.
+
+    Profile picture URLs expire like every other Instagram CDN link, and
+    the ones flattened into insta_data are long dead -- all three 403 to
+    a server fetch, not just to the browser, so there is nothing to
+    proxy there.
+
+    raw_dump_instagram keeps every payload it has ever ingested, so the
+    NEWEST one per username is the freshest URL that exists anywhere in
+    this database. For an account the nightly ingest still reaches, that
+    is hours old and works; measured today, saadaadesigns returned a
+    48 KB JPEG while an August capture for saadaa_women returned 403.
+
+    A stale one 404s here and the caller draws initials instead. The
+    only real fix for those is the ingest running again, which is not
+    something a read endpoint can do.
+    """
+    if not _IG_USERNAME_RE.match(username):
+        raise HTTPException(status_code=400, detail="Bad username.")
+    # Walked in Python, not with jsonb_path_query: the two ingest paths
+    # nest the profile at different depths and under different keys, and
+    # a path expression that matched one returned NULL for the other.
+    rows = (await session.execute(text(
+        # BOTH predicates. Filtering on the username alone returned the
+        # 40 newest MEDIA payloads, which mention the account constantly
+        # and carry no profile block at all -- so the walk found nothing
+        # and every account 404'd.
+        "SELECT raw_payload FROM public.raw_dump_instagram "
+        " WHERE raw_payload::text ILIKE :like "
+        "   AND raw_payload::text ILIKE '%profile_picture_url%' "
+        " ORDER BY ingested_at DESC LIMIT 40"
+    ), {"like": f'%"{username}"%'})).scalars().all()
+
+    def _find_avatar(node: object) -> str | None:
+        """First profile_picture_url sitting beside this username."""
+        if isinstance(node, dict):
+            if node.get("username") == username and node.get("profile_picture_url"):
+                return str(node["profile_picture_url"])
+            for value in node.values():
+                if (hit := _find_avatar(value)):
+                    return hit
+        elif isinstance(node, list):
+            for value in node:
+                if (hit := _find_avatar(value)):
+                    return hit
+        return None
+
+    url = None
+    for payload in rows:
+        raw = payload if isinstance(payload, (dict, list)) else _json.loads(payload)
+        if (url := _find_avatar(raw)):
+            break
+    if not url:
+        raise HTTPException(status_code=404, detail="No avatar on file.")
+    try:
+        import httpx
+        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
+            r = await client.get(url)
+    except Exception:
+        raise HTTPException(status_code=502, detail="Instagram unreachable.")
+    ctype = r.headers.get("content-type", "")
+    if r.status_code != 200 or not ctype.startswith("image/"):
+        # Expired capture. The caller falls back to initials.
+        raise HTTPException(status_code=404, detail="Avatar expired.")
+    return Response(
+        content=r.content,
+        media_type=ctype,
+        # Shorter than the post thumbnail's day: a profile picture can
+        # change, and the URL behind this one expires on its own clock.
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @router.get("/instagram/thumb/{shortcode}")
 async def get_instagram_thumb(shortcode: str) -> Response:
     """Serve a post's thumbnail, fetched server-side.
