@@ -805,8 +805,12 @@ export function CreativeTesting() {
   const newCount = kindCounts.new ?? 0;
   const histCount = kindCounts.historical_discarded ?? 0;
   const refreshCount = kindCounts.refresh_discarded ?? 0;
-  const unmatchedTotal =
+  // Windowed, like the tiles beside it. The media keys count assets MADE
+  // inside the picked dates that no ad has ever carried; `backlog` is
+  // every untested asset regardless of age.
+  const unmatchedInWindow =
     (unmatched.video ?? 0) + (unmatched.graphic ?? 0) + (unmatched.influencer ?? 0);
+  const unmatchedBacklog = unmatched.backlog ?? 0;
 
   // ── funnel + focus strips, derived over the full row set ──────────
   const derived = useMemo(() => {
@@ -963,24 +967,29 @@ export function CreativeTesting() {
 
         {/* NOT a tab. The two beside it filter the table below; this
             counts assets that have no ad at all, so there is nothing for
-            the table to show and nothing to click. Rendered as a plain
-            card so it reads as a number rather than a control.
+            the table to show and nothing to click. A plain card, so it
+            reads as a number rather than a control.
 
             Same rule the Untested Assets tab uses -- a link exists, and
             ad_asset_map holds no row for the asset. A second definition
             here would sooner or later disagree with that tab.
 
-            Also not windowed, unlike everything else on this strip: an
-            asset no ad has ever carried has no date to fall inside the
-            picked range. */}
+            Windowed on the date the asset was MADE, which is the only
+            date an untested asset has. "New creatives" beside it windows
+            on first_original_ad_date, the day a creative first went
+            live. So the two split this window's output on whether it
+            reached the air: 555 did, these did not. The backlog line
+            underneath is every untested asset regardless of age, which
+            is much larger and is the queue the team works through. */}
         <div
           className="rounded-lg border border-dashed border-border-primary bg-white px-3 py-2 text-left"
           title={
-            `${unmatchedTotal.toLocaleString("en-IN")} assets have a link but no ad has ever used them` +
+            `${unmatchedInWindow.toLocaleString("en-IN")} creatives made in these dates that no ad has used yet` +
             ` \u2014 ${(unmatched.video ?? 0).toLocaleString("en-IN")} video,` +
             ` ${(unmatched.graphic ?? 0).toLocaleString("en-IN")} graphic,` +
             ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer.` +
-            ` Counted across the whole register, not the picked dates.`
+            ` Across the whole register, ${unmatchedBacklog.toLocaleString("en-IN")} assets` +
+            ` are still waiting for their first ad.`
           }
         >
           <div className="flex items-center gap-0.5">
@@ -989,12 +998,10 @@ export function CreativeTesting() {
             </span>
           </div>
           <div className="text-lg font-semibold text-text-secondary">
-            {unmatchedTotal.toLocaleString("en-IN")}
+            {unmatchedInWindow.toLocaleString("en-IN")}
           </div>
           <div className="text-[10px] text-text-tertiary">
-            {(unmatched.video ?? 0).toLocaleString("en-IN")} vid ·{" "}
-            {(unmatched.graphic ?? 0).toLocaleString("en-IN")} gfx ·{" "}
-            {(unmatched.influencer ?? 0).toLocaleString("en-IN")} inf
+            {unmatchedBacklog.toLocaleString("en-IN")} in backlog
           </div>
         </div>
       </div>

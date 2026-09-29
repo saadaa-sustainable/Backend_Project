@@ -7060,38 +7060,59 @@ async def get_creative_testing(
     )
 
 
-# Assets that exist, carry a link, and have never been matched to an ad.
+# Creatives that have never been matched to an ad, windowed the way the
+# tiles beside them are.
 #
-# SAME definition /untested and CPIS's untested_* columns use: a link is
-# present, so somebody could test it tomorrow, and ad_asset_map holds no
-# row for its id, so no ad has ever carried it. Repeating the rule here
-# rather than inventing a second one -- a "not matched" tile that
-# disagreed with the Untested Assets tab would be worse than no tile.
+# SAME rule /untested and CPIS use: a link exists, so somebody could test
+# it tomorrow, and ad_asset_map holds no row for its id, so no ad has
+# ever carried it. Repeating that rule rather than inventing a second --
+# a "not matched" tile disagreeing with the Untested Assets tab it sits
+# one click from would be worse than no tile.
 #
-# Deliberately NOT windowed. Creative Testing's other counts are "in the
-# picked dates"; this one cannot be, because the population is assets
-# with no ad at all, and an asset with no ad has no date to fall inside.
+# TWO numbers per media, because they answer different questions:
 #
-# Folded into the endpoint's single statement rather than run on its own.
-# That endpoint is deliberately ONE round trip -- there is a test named
-# for it -- and three scalar counts over small registers do not justify
-# breaking that.
+#   in_window   made inside the picked dates and still not tested. This
+#               is what pairs with the tiles beside it. An asset no ad
+#               has ever carried has no ad date, so the date it was MADE
+#               is the only one it has -- which is a different basis
+#               from "New creatives", where _CT_IS_NEW windows on
+#               first_original_ad_date, the day it first went live.
+#               Made-and-not-tested against first-tested is the honest
+#               pairing: both count this window's creative output, split
+#               on whether it reached the air.
+#
+#   backlog     every untested asset regardless of age. The queue the
+#               team is actually working through, and much larger -- it
+#               carries assets made long before this window that never
+#               went live.
 _CT_UNMATCHED_SQL = """
+WITH reg AS (
+  SELECT car.asset_id AS id, car.date_of_production AS made, 'video' AS media
+    FROM public.content_asset_register car
+   WHERE btrim(COALESCE(car.link_to_asset, '')) <> ''
+  UNION ALL
+  SELECT cgr.requisition_id, cgr.asset_date, 'graphic'
+    FROM public.content_graphic_register cgr
+   WHERE btrim(COALESCE(cgr.link_1, cgr.link_2, cgr.link_3,
+                        cgr.creative, '')) <> ''
+  UNION ALL
+  SELECT cip.post_id, cip.post_date, 'influencer'
+    FROM public.content_influencer_posts cip
+   WHERE btrim(COALESCE(cip.post_link, '')) <> '' AND cip.post_id IS NOT NULL
+),
+untested AS (
+  SELECT media, made FROM reg
+   WHERE NOT EXISTS (SELECT 1 FROM public.ad_asset_map m WHERE m.asset_id = reg.id)
+)
 SELECT
-  (SELECT COUNT(*) FROM public.content_asset_register car
-    WHERE btrim(COALESCE(car.link_to_asset, '')) <> ''
-      AND NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                       WHERE m.asset_id = car.asset_id))::int          AS video,
-  (SELECT COUNT(*) FROM public.content_graphic_register cgr
-    WHERE btrim(COALESCE(cgr.link_1, cgr.link_2, cgr.link_3,
-                         cgr.creative, '')) <> ''
-      AND NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                       WHERE m.asset_id = cgr.requisition_id))::int    AS graphic,
-  (SELECT COUNT(*) FROM public.content_influencer_posts cip
-    WHERE btrim(COALESCE(cip.post_link, '')) <> ''
-      AND cip.post_id IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM public.ad_asset_map m
-                       WHERE m.asset_id = cip.post_id))::int           AS influencer
+  COUNT(*) FILTER (WHERE media = 'video'
+                     AND made BETWEEN :from_date AND :to_date)::int      AS video,
+  COUNT(*) FILTER (WHERE media = 'graphic'
+                     AND made BETWEEN :from_date AND :to_date)::int      AS graphic,
+  COUNT(*) FILTER (WHERE media = 'influencer'
+                     AND made BETWEEN :from_date AND :to_date)::int      AS influencer,
+  COUNT(*)::int                                                          AS backlog
+FROM untested
 """
 
 
