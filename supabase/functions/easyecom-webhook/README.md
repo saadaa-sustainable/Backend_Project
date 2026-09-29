@@ -1,12 +1,26 @@
 # ⚠️ PAUSED IN PRODUCTION — 2026-09-29
 
-The deployed function (version 3) is NOT the code in this directory. It
-accepts the call, answers 200 and writes nothing. `index.ts` here is the
-real receiver and is unchanged.
+The deployed function (version 4) is NOT the code in this directory,
+and it is paused **at the gateway**: the deployment carries
+`verify_jwt: true`, so Supabase demands a Supabase JWT before the
+function body runs. EasyEcom sends its own `Access-Token` and no JWT, so
+every delivery is refused with 401 at the edge — the code never
+executes, no compute is spent, no database client is constructed.
 
-**To restore:** redeploy `index.ts` from this directory. Nothing else
-changed — same slug, same `verify_jwt: false`, same
-`EASYECOM_WEBHOOK_TOKEN`.
+`index.ts` here is the real receiver and is unchanged.
+
+**To restore — BOTH halves are required:**
+
+1. redeploy `index.ts` from this directory, and
+2. set `verify_jwt: false`
+
+Deploying the file alone leaves the gateway rejecting every call, which
+looks like EasyEcom being broken. `EASYECOM_WEBHOOK_TOKEN` is unchanged
+and still the real auth once traffic reaches the function.
+
+EasyEcom records these 401s as failed deliveries and retries. The
+retries are refused at the gateway, cost nothing, and never reach
+Postgres — which is the point.
 
 **Why:** the webhook was switched off in EasyEcom's own settings weeks
 earlier and kept firing regardless — roughly 4,000 inserts a day into
