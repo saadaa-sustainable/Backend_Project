@@ -1804,31 +1804,37 @@ function CpisKpiStrip({
   // tile says otherwise, so spell out the three reasons the API measured.
   // They sum to the untethered figure exactly, on both the pre-computed
   // windows and a custom range.
+  // Short on purpose. This ran to twelve lines: how the split works,
+  // why it cannot reach the full total, a bullet for every bucket
+  // including the zero ones, and a closing note about organic traffic.
+  // All of it true, none of it answerable at a glance -- and the reader
+  // is looking at a tile, not a document. What they need is the total,
+  // how much of it landed on an order, and where the rest went. Buckets
+  // holding nothing are left out entirely rather than printed as
+  // "Rs 0 (0%)", which was most of the length.
   const untetheredInfo = (() => {
     if (!isFractional || untetheredSpend === null || metaTotalSpend === null) return undefined;
     const { adUnknown, lag, noConversion } = untetheredParts;
     if (adUnknown === null || lag === null || noConversion === null) return undefined;
-    const pct = (n: number) => (metaTotalSpend > 0 ? ` (${((n / metaTotalSpend) * 100).toFixed(0)}%)` : "");
+    const pct = (n: number) =>
+      metaTotalSpend > 0 ? `${((n / metaTotalSpend) * 100).toFixed(0)}%` : "";
     const lines = [
-      `This is every product's slice of your ad money added together. ` +
-        `Each ad's cost is shared out across the orders it led to, and then ` +
-        `across the products inside each order, so no rupee is counted twice.`,
-      `It does not reach your full Meta spend, because some spend never ` +
-        `ties to an order. Here is where the rest went:`,
-      `Of ${fmtINRCompact(metaTotalSpend)} Meta spend in this window, ` +
-        `${fmtINRCompact(attributedSpend ?? 0)} is claimed by an attributed order. ` +
-        `The remaining ${fmtINRCompact(untetheredSpend)} breaks down as:`,
-      `• ${fmtINRCompact(adUnknown)}${pct(adUnknown)} \u2014 an order pointed at this ad, but we have no record of the ad, so the two could not be joined up.`,
+      `Of ${fmtINRCompact(metaTotalSpend)} spent, ` +
+        `${fmtINRCompact(attributedSpend ?? 0)} reached an order — ${pct(attributedSpend ?? 0)}.`,
     ];
-    if (lag > 0) {
-      lines.push(
-        `• ${fmtINRCompact(lag)}${pct(lag)} \u2014 the ad did sell in this window, just not on the same day it spent. Picking your own dates matches day by day; the preset windows look across the whole period.`,
-      );
+    const rest: string[] = [];
+    if (noConversion > 0) {
+      rest.push(`• ${fmtINRCompact(noConversion)} (${pct(noConversion)}) — the ad sold nothing yet`);
     }
-    lines.push(
-      `• ${fmtINRCompact(noConversion)}${pct(noConversion)} \u2014 the ad led to no order we can see. Prospecting and awareness spend sits here.`,
-      `Separately, about a third of all orders arrive with no ad tag at all \u2014 organic, direct, and other channels \u2014 so they can never be matched to Meta spend.`,
-    );
+    if (lag > 0) {
+      rest.push(`• ${fmtINRCompact(lag)} (${pct(lag)}) — it sold, but not on the day it spent`);
+    }
+    if (adUnknown > 0) {
+      rest.push(`• ${fmtINRCompact(adUnknown)} (${pct(adUnknown)}) — we have no record of the ad`);
+    }
+    if (rest.length) {
+      lines.push("", `The other ${fmtINRCompact(untetheredSpend)} did not:`, ...rest);
+    }
     return lines.join("\n");
   })();
 
