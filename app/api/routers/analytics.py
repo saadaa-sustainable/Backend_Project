@@ -6369,6 +6369,11 @@ class KpisResponse(BaseModel):
     total_impressions: float
     total_shopify_revenue: float
     total_shopify_orders: int
+    #: Earliest day insights_daily_by_ad actually covers. Only set on a
+    #: windowed request, and only when the window reaches back past it --
+    #: spend/impressions before this day are NOT in the daily table, so the
+    #: UI must say the figure is partial rather than let it read as a drop.
+    spend_data_from: str | None = None
 
 
 # ------------------------------------------------------------------
@@ -6384,23 +6389,84 @@ class KpisResponse(BaseModel):
 # ------------------------------------------------------------------
 @router.get("/dashboard/kpis", response_model=KpisResponse)
 @cached_analytics(ttl=60.0)
-async def get_dashboard_kpis(session: SessionDep) -> KpisResponse:
-    totals = (await session.execute(text(
-        "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0), "
-        "COALESCE(SUM(shopify_revenue),0), COALESCE(SUM(shopify_orders),0) "
-        "FROM ad_performance_summary"
-    ))).one()
+async def get_dashboard_kpis(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> KpisResponse:
+    """Lifetime from the gold table; windowed from the daily sources.
+
+    The two paths read DIFFERENT tables on purpose, because neither can do
+    both jobs:
+
+      ad_performance_summary  one row per ad, lifetime, no date column. It is
+                              the only source that spans all history, so the
+                              unwindowed view must keep using it -- its spend
+                              is 40.4cr against the daily table's 11.4cr.
+      insights_daily_by_ad    day grain, but only back to SPEND_DATA_FLOOR
+                              (2025-12-29). Correct inside that span, 72%
+                              short of lifetime outside it.
+      shopify_order_attribution  created_at spans 2020-11 onward, so revenue
+                              and orders window exactly with no floor.
+
+    Swapping the lifetime view to the daily table would have silently cut the
+    headline spend by ~72%, so it is left alone; a windowed request reports
+    spend_data_from when it reaches past the floor.
+    """
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+
+    if not (df and dt):
+        totals = (await session.execute(text(
+            "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0), "
+            "COALESCE(SUM(shopify_revenue),0), COALESCE(SUM(shopify_orders),0) "
+            "FROM ad_performance_summary"
+        ))).one()
+        return KpisResponse(
+            total_spend=float(totals[0]),
+            total_impressions=float(totals[1]),
+            total_shopify_revenue=float(totals[2]),
+            total_shopify_orders=int(totals[3]),
+        )
+
+    ads = (await session.execute(text(
+        "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0) "
+        "FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt"
+    ), {"df": df, "dt": dt})).one()
+    shop = (await session.execute(text(
+        "SELECT COALESCE(SUM(total_price),0), COUNT(*) "
+        "FROM shopify_order_attribution WHERE created_at::date BETWEEN :df AND :dt"
+    ), {"df": df, "dt": dt})).one()
+    floor = (await session.execute(text(
+        "SELECT MIN(day) FROM insights_daily_by_ad"
+    ))).scalar()
     return KpisResponse(
-        total_spend=float(totals[0]),
-        total_impressions=float(totals[1]),
-        total_shopify_revenue=float(totals[2]),
-        total_shopify_orders=int(totals[3]),
+        total_spend=float(ads[0]),
+        total_impressions=float(ads[1]),
+        total_shopify_revenue=float(shop[0]),
+        total_shopify_orders=int(shop[1]),
+        spend_data_from=floor.isoformat() if floor and df < floor else None,
     )
 
 
 @router.get("/dashboard/category-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_category_breakdown(session: SessionDep) -> list[BreakdownItem]:
+async def get_dashboard_category_breakdown(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[BreakdownItem]:
+    # Windowed: daily spend joined to the gold table purely for `category`,
+    # which only exists at ad grain. Same floor caveat as /dashboard/kpis.
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    if df and dt:
+        rows = (await session.execute(text(
+            "SELECT COALESCE(s.category,'Uncategorized'), SUM(d.spend) "
+            "FROM insights_daily_by_ad d "
+            "LEFT JOIN ad_performance_summary s ON s.ad_id = d.ad_id "
+            "WHERE d.day BETWEEN :df AND :dt "
+            "GROUP BY 1 ORDER BY 2 DESC"
+        ), {"df": df, "dt": dt})).all()
+        return [BreakdownItem(label=r[0], value=float(r[1] or 0)) for r in rows]
     rows = (await session.execute(text(
         "SELECT COALESCE(category,'Uncategorized'), SUM(spend) "
         "FROM ad_performance_summary GROUP BY 1 ORDER BY 2 DESC"
@@ -6408,20 +6474,82 @@ async def get_dashboard_category_breakdown(session: SessionDep) -> list[Breakdow
     return [BreakdownItem(label=r[0], value=float(r[1] or 0)) for r in rows]
 
 
+# Date filtering across these tiles is deliberately PARTIAL, because the five
+# sources do not share a grain:
+#
+#   ad_performance_summary        one row per ad, LIFETIME aggregate. Its only
+#                                 timestamp is gold_refreshed_at (when the row
+#                                 was computed), so kpis + category cannot be
+#                                 windowed without re-deriving them from daily
+#                                 ad data. They stay lifetime.
+#   shopify_order_attribution     has created_at -> genuinely filterable.
+#   shopify_landing_page_analysis has day -> filterable. The no-range path
+#                                 still reads landing_page_analysis_30d, a
+#                                 FIXED 30-day rollup that ignores any range.
+#   cpis_by_sku                   pre-aggregated per window_key ('1d'/'7d'/
+#                                 '30d'), so a range SNAPS to the nearest
+#                                 bucket rather than being honoured exactly.
+#
+# The UI labels each tile with the window that was actually applied, so a
+# single picker never implies one global range it cannot deliver. The cache
+# key already includes these params (see cached_analytics), so switching
+# range cannot serve another range's rows.
+
+def _parse_day(value: str | None, field: str) -> date | None:
+    """ISO string -> date, or a 400. Never hand asyncpg the raw string.
+
+    asyncpg types each bind param from its SQL context and then encodes the
+    Python value itself -- given a date column it calls .toordinal() on the
+    argument, so a str raises
+        DataError: invalid input ... ('str' object has no attribute 'toordinal')
+    and the endpoint 500s. psycopg2 coerces strings silently, so the same SQL
+    verified by hand against psycopg2 still fails here. Parse, then bind.
+    """
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field} must be YYYY-MM-DD, got {value!r}")
+
+
+def _cpis_window_for(date_from: str | None, date_to: str | None) -> str:
+    """Snap a requested range to the nearest precomputed cpis window_key."""
+    if not (date_from and date_to):
+        return "7d"
+    try:
+        span = (date.fromisoformat(date_to) - date.fromisoformat(date_from)).days + 1
+    except ValueError:
+        return "7d"
+    return min((("1d", 1), ("7d", 7), ("30d", 30)), key=lambda w: abs(w[1] - span))[0]
+
+
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_channel_breakdown(session: SessionDep) -> list[BreakdownItem]:
+async def get_dashboard_channel_breakdown(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[BreakdownItem]:
     # Aggregate in SQL first (340k rows -> ~200 distinct sources),
     # THEN apply _classify_channel in Python. The branching logic
     # stays in Python (per project convention) but the row shuffle
     # doesn't. This alone drops 27s -> <1s.
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    where, params = "", {}
+    if df and dt:
+        # created_at is a timestamp; ::date keeps `to` inclusive of that day.
+        # Binds are real date objects -- see _parse_day for why a str 500s.
+        where = "WHERE created_at::date BETWEEN :df AND :dt "
+        params = {"df": df, "dt": dt}
     rows = (await session.execute(text(
         "SELECT utm_source, "
         "       (lower(COALESCE(utm_content, '')) IN "
         "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
         "       SUM(total_price) FROM shopify_order_attribution "
+        + where +
         "GROUP BY utm_source, 2"
-    ))).all()
+    ), params)).all()
     channel_totals: dict[str, float] = {}
     for utm_source, organic_ig, total_price in rows:
         ch = _classify_channel(utm_source, "link_in_bio" if organic_ig else None)
@@ -6431,7 +6559,25 @@ async def get_dashboard_channel_breakdown(session: SessionDep) -> list[Breakdown
 
 @router.get("/dashboard/top-landing-pages", response_model=list[TopLandingPage])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_top_landing_pages(session: SessionDep) -> list[TopLandingPage]:
+async def get_dashboard_top_landing_pages(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[TopLandingPage]:
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    if df and dt:
+        # Day-grain table, so the requested range is honoured exactly.
+        # ad_spend is not carried at day grain here; the tile shows sessions,
+        # and 0.0 keeps the response model stable.
+        rows = (await session.execute(text(
+            "SELECT landing_page_path, SUM(sessions) AS sessions "
+            "FROM shopify_landing_page_analysis "
+            "WHERE day BETWEEN :df AND :dt "
+            "  AND landing_page_path IS NOT NULL "
+            "GROUP BY landing_page_path ORDER BY sessions DESC LIMIT 5"
+        ), {"df": df, "dt": dt})).all()
+        return [TopLandingPage(landing_page_path=r[0], sessions=int(r[1] or 0), ad_spend=0.0)
+                for r in rows]
     rows = (await session.execute(text(
         "SELECT landing_page_path, sessions, ad_spend "
         "FROM landing_page_analysis_30d ORDER BY sessions DESC LIMIT 5"
@@ -6441,12 +6587,19 @@ async def get_dashboard_top_landing_pages(session: SessionDep) -> list[TopLandin
 
 @router.get("/dashboard/top-cpis-skus", response_model=list[TopCpisSku])
 @cached_analytics(ttl=60.0)
-async def get_dashboard_top_cpis_skus(session: SessionDep) -> list[TopCpisSku]:
+async def get_dashboard_top_cpis_skus(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> list[TopCpisSku]:
+    # Snaps to a precomputed bucket -- see the note above. A 14-day request
+    # resolves to '7d', NOT to a 14-day aggregate.
+    window = _cpis_window_for(date_from, date_to)
     rows = (await session.execute(text(
         "SELECT master_sku, ad_spend, cost_per_ncp FROM cpis_by_sku "
-        "WHERE window_key = '7d' AND matched_ad_count > 0 "
+        "WHERE window_key = :w AND matched_ad_count > 0 "
         "ORDER BY ad_spend DESC LIMIT 5"
-    ))).all()
+    ), {"w": window})).all()
     return [
         TopCpisSku(master_sku=r[0], ad_spend=float(r[1] or 0), cost_per_ncp=float(r[2]) if r[2] is not None else None)
         for r in rows

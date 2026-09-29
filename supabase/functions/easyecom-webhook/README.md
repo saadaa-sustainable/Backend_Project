@@ -1,3 +1,34 @@
+# ⚠️ PAUSED IN PRODUCTION — 2026-09-29
+
+The deployed function (version 3) is NOT the code in this directory. It
+accepts the call, answers 200 and writes nothing. `index.ts` here is the
+real receiver and is unchanged.
+
+**To restore:** redeploy `index.ts` from this directory. Nothing else
+changed — same slug, same `verify_jwt: false`, same
+`EASYECOM_WEBHOOK_TOKEN`.
+
+**Why:** the webhook was switched off in EasyEcom's own settings weeks
+earlier and kept firing regardless — roughly 4,000 inserts a day into
+`webhook_events`, around the clock, into a table nothing currently
+reads. Over 28–29 Sep: 444 writes at 22:00, 460 at 01:00, 266 at 08:00.
+
+On 2026-09-29 this database became unreachable. Postgres logs before it
+went silent show a checkpoint writing 429 buffers in 145 seconds and
+trivial queries taking 10–18s — disk I/O exhaustion, not connections.
+The first failed webhook writes appear at 04:00 and become sustained at
+09:00, an hour before any manual job ran that day.
+
+The paused version answers **200, not 5xx**, on purpose. The real
+receiver returns 5xx so EasyEcom records a failed delivery and retries,
+which is right when losing no event matters and exactly wrong here: a
+retry storm against a struggling database is the thing being stopped.
+
+**Events arriving while paused are dropped, not queued.** EasyEcom's own
+delivery log is the record of what was sent.
+
+---
+
 # EasyEcom webhook → Supabase
 
 Receives EasyEcom webhooks directly in Supabase and appends them to
