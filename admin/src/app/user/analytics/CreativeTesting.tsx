@@ -337,6 +337,11 @@ const yn = (b: boolean | null | undefined) =>
  *  the threshold panel, and the fixed ones are spelled out where they
  *  matter. */
 const BUCKET_INFO: Record<string, { what: string; rule: string; note?: string }> = {
+  not_matched: {
+    what: "Creatives made in these dates that no ad has ever used.",
+    rule: "The asset has a link, so it could be tested tomorrow, and no ad name has ever carried its id. Same rule as the Untested Assets tab.",
+    note: "Read against New creatives: together they split this window's output on whether it reached the air. The date basis differs and has to — New creatives counts the day a creative first went LIVE, and a creative no ad has carried has no ad date, so the day it was MADE is the only one it has. The backlog line underneath ignores dates entirely: it is every untested asset regardless of age, which is the queue the team is working through.",
+  },
   all: {
     what: "Every creative that was put into a new ad during the dates you picked.",
     rule: "At least one of its ads was built inside these dates.",
@@ -984,18 +989,20 @@ export function CreativeTesting() {
         <div
           className="rounded-lg border border-dashed border-border-primary bg-white px-3 py-2 text-left"
           title={
-            `${unmatchedInWindow.toLocaleString("en-IN")} creatives made in these dates that no ad has used yet` +
-            ` \u2014 ${(unmatched.video ?? 0).toLocaleString("en-IN")} video,` +
+            `${(unmatched.video ?? 0).toLocaleString("en-IN")} video,` +
             ` ${(unmatched.graphic ?? 0).toLocaleString("en-IN")} graphic,` +
-            ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer.` +
-            ` Across the whole register, ${unmatchedBacklog.toLocaleString("en-IN")} assets` +
-            ` are still waiting for their first ad.`
+            ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer`
           }
         >
+          {/* An InfoDot, like the two tiles beside it. This had a `title`
+              only, so the definition appeared on hover and nowhere else
+              -- unreachable by keyboard, invisible on touch, and gone the
+              moment the pointer moved. */}
           <div className="flex items-center gap-0.5">
             <span className="text-[11px] uppercase tracking-wide opacity-70 text-text-secondary">
               Not matched
             </span>
+            <InfoDot id="not_matched" />
           </div>
           <div className="text-lg font-semibold text-text-secondary">
             {unmatchedInWindow.toLocaleString("en-IN")}
