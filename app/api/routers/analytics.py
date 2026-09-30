@@ -7090,7 +7090,8 @@ class CreativeTestingResponse(BaseModel):
     #: the same filters as `rows` minus `kind` itself, so every tab shows
     #: its true size whichever one is open.
     kind_counts: dict[str, int]
-    #: Assets with a link that no ad has ever carried, by media. NOT
+    #: Assets with a link whose id never appears in an ad name, by media.
+    #: That is not the same as never having run -- see _CT_UNMATCHED_SQL. NOT
     #: windowed -- see _CT_UNMATCHED_SQL.
     unmatched_counts: dict[str, int] = {}
 
@@ -7344,11 +7345,19 @@ async def get_creative_testing(
 # Creatives that have never been matched to an ad, windowed the way the
 # tiles beside them are.
 #
-# SAME rule /untested and CPIS use: a link exists, so somebody could test
-# it tomorrow, and ad_asset_map holds no row for its id, so no ad has
-# ever carried it. Repeating that rule rather than inventing a second --
-# a "not matched" tile disagreeing with the Untested Assets tab it sits
-# one click from would be worse than no tile.
+# SAME rule /untested and CPIS use: a link exists, and ad_asset_map holds
+# no row for the asset's id. Repeating that rule rather than inventing a
+# second -- a "not matched" tile disagreeing with the Untested Assets tab
+# it sits one click from would be worse than no tile.
+#
+# WHAT THE RULE ACTUALLY PROVES. ad_asset_map ties an asset to an ad if
+# and only if the asset's own identifier appears inside that ad's NAME
+# (see scripts/refresh_ad_asset_map.py). So a row here means the id was
+# never written into any ad name -- NOT that the creative never ran. An
+# ad built from this creative but named without its id is invisible to
+# every figure in this section and counts as unmatched. The number is
+# therefore a backlog and a naming-hygiene signal mixed together, and
+# nothing in the data separates them.
 #
 # TWO numbers per media, because they answer different questions:
 #
