@@ -1222,6 +1222,39 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "cost_per_purchase", header: "₹/purchase", group: "Meta", align: "right",
     render: (r) => <>{rMoney(r.cost_per_purchase)}</> },
 
+  /* The same five de-duplicated reach columns the ad table carries,
+     from the same snapshots — scripts/fetch_reach_cumulative.py has
+     always stored adset and campaign grain, these were simply never
+     wired up here.
+
+     Reach Weight % differs from the ad table's on purpose: there it is a
+     share of every ad under the filters, here it is a share of the rows
+     on this page. Meta de-duplicates per entity, so summing ad-set reach
+     into a fleet total would count a person once per ad set that reached
+     them — there is no honest whole to divide by without another API
+     call per filter combination. The header says "page" so the column
+     cannot be misread as a share of the account. */
+  { key: "reach_weight_pct", header: "Reach % of page", group: "Reach", defaultVisible: true, align: "right",
+    title: "Share of the reach of the entities listed on this page. Not a share of the account — "
+         + "reach cannot be summed across entities, so there is no account-wide unique total to divide by.",
+    render: (r) => <span className="num">{r.reach_weight_pct === null ? "—" : `${rNum(r.reach_weight_pct)}%`}</span> },
+  { key: "previous_reach", header: "Prev Reach", group: "Reach", defaultVisible: true, align: "right",
+    render: (r) => <ReachCell value={r.previous_reach} asOf={r.reach_prev_as_of}
+      what="Cumulative unique people reached from the reach epoch up to the day before this window"
+      emptyReason="No snapshot before this window — the entity's counting starts inside it, so every person in Latest Reach is new." /> },
+  { key: "latest_reach", header: "Latest Reach", group: "Reach", defaultVisible: true, align: "right",
+    render: (r) => <ReachCell value={r.latest_reach} asOf={r.reach_latest_as_of}
+      what="Cumulative unique people reached from the reach epoch up to the end of this window" /> },
+  { key: "incremental_reach", header: "Incr. Reach", group: "Reach", defaultVisible: true, align: "right",
+    render: (r) => <ReachCell value={r.incremental_reach} asOf={r.reach_latest_as_of} asOfFrom={r.reach_prev_as_of}
+      what="Latest − Prev: people reached during this window who had never been reached before it" /> },
+  { key: "cost_per_1000_incremental_reach", header: "Cost / 1k Incr.", group: "Reach", defaultVisible: true, align: "right",
+    render: (r) => <span className="num" title={
+      r.cost_per_1000_incremental_reach === null
+        ? "Needs spend over the snapshots' own span beside a non-zero incremental reach."
+        : "Spend over the span the incremental reach covers, per 1,000 genuinely new people."
+    }>{r.cost_per_1000_incremental_reach === null ? "—" : `₹${rNum(r.cost_per_1000_incremental_reach)}`}</span> },
+
   { key: "shopify_orders", header: "Shop. orders", group: "Shopify", defaultVisible: true, align: "right",
     title: "Shopify orders last-click-attributed to this entity, over the selected dates",
     render: (r) => <>{!r.shopify_orders ? "—" : r.shopify_orders.toLocaleString("en-IN")}</> },
@@ -1270,12 +1303,16 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <span className="num">₹{money(r.d3_lc_revenue)}</span> },
   { key: "d3_lc_roas", header: "3D LC ROAS", group: "Rolling 3D", align: "right",
     render: (r) => <span className="num">{num2(r.d3_lc_roas)}</span> },
+  { key: "d3_reach_unique", header: "3D Reach", group: "Rolling 3D", align: "right",
+    render: (r) => <span className="num" title="Meta's de-duplicated unique reach for the last 3 days — real people, counted once. Blank when this window has not been fetched; run scripts/fetch_reach_cumulative.py --preset-windows.">{fmt(r.d3_reach_unique, { maximumFractionDigits: 0 })}</span> },
   { key: "d3_reach_proxy", header: "3D Reach Proxy", group: "Rolling 3D", align: "right",
-    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d3_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure. Typically 2-3x the 3D Reach beside it.">{fmt(r.d3_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d3_reach_delta", header: "3D Reach Δ", group: "Rolling 3D", align: "right",
+    title: "Change in de-duplicated unique reach against the previous 3 days. Blank when either window is unfetched.",
     render: (r) => <span className={"num " + ((r.d3_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d3_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d3_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d3_reach_delta_pct", header: "3D Reach Δ%", group: "Rolling 3D", align: "right",
-    render: (r) => <span className={"num " + ((r.d3_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d3_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d3_reach_delta_pct)}%</span> },
+    title: "Same change as 3D Reach Δ, relative to the previous window.",
+    render: (r) => <span className={"num " + ((r.d3_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d3_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{r.d3_reach_delta_pct === null ? "—" : `${pct(r.d3_reach_delta_pct)}%`}</span> },
   { key: "d3_ftewv", header: "3D FTEWV", group: "Rolling 3D", align: "right",
     render: (r) => <span className="num">{fmt(r.d3_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d3_cost_per_ftewv", header: "3D Cost/FTEWV", group: "Rolling 3D", align: "right",
@@ -1286,12 +1323,16 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <span className="num">₹{money(r.d7_lc_revenue)}</span> },
   { key: "d7_lc_roas", header: "7D LC ROAS", group: "Rolling 7D", align: "right",
     render: (r) => <span className="num">{num2(r.d7_lc_roas)}</span> },
+  { key: "d7_reach_unique", header: "7D Reach", group: "Rolling 7D", align: "right",
+    render: (r) => <span className="num" title="Meta's de-duplicated unique reach for the last 7 days — real people, counted once. Blank when this window has not been fetched; run scripts/fetch_reach_cumulative.py --preset-windows.">{fmt(r.d7_reach_unique, { maximumFractionDigits: 0 })}</span> },
   { key: "d7_reach_proxy", header: "7D Reach Proxy", group: "Rolling 7D", align: "right",
-    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d7_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure. Typically 2-3x the 7D Reach beside it.">{fmt(r.d7_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d7_reach_delta", header: "7D Reach Δ", group: "Rolling 7D", align: "right",
+    title: "Change in de-duplicated unique reach against the previous 7 days. Blank when either window is unfetched.",
     render: (r) => <span className={"num " + ((r.d7_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d7_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d7_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d7_reach_delta_pct", header: "7D Reach Δ%", group: "Rolling 7D", align: "right",
-    render: (r) => <span className={"num " + ((r.d7_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d7_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d7_reach_delta_pct)}%</span> },
+    title: "Same change as 7D Reach Δ, relative to the previous window.",
+    render: (r) => <span className={"num " + ((r.d7_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d7_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{r.d7_reach_delta_pct === null ? "—" : `${pct(r.d7_reach_delta_pct)}%`}</span> },
   { key: "d7_ftewv", header: "7D FTEWV", group: "Rolling 7D", align: "right",
     render: (r) => <span className="num">{fmt(r.d7_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d7_cost_per_ftewv", header: "7D Cost/FTEWV", group: "Rolling 7D", align: "right",
@@ -1302,12 +1343,16 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <span className="num">₹{money(r.d14_lc_revenue)}</span> },
   { key: "d14_lc_roas", header: "14D LC ROAS", group: "Rolling 14D", align: "right",
     render: (r) => <span className="num">{num2(r.d14_lc_roas)}</span> },
+  { key: "d14_reach_unique", header: "14D Reach", group: "Rolling 14D", align: "right",
+    render: (r) => <span className="num" title="Meta's de-duplicated unique reach for the last 14 days — real people, counted once. Blank when this window has not been fetched; run scripts/fetch_reach_cumulative.py --preset-windows.">{fmt(r.d14_reach_unique, { maximumFractionDigits: 0 })}</span> },
   { key: "d14_reach_proxy", header: "14D Reach Proxy", group: "Rolling 14D", align: "right",
-    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d14_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure. Typically 2-3x the 14D Reach beside it.">{fmt(r.d14_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d14_reach_delta", header: "14D Reach Δ", group: "Rolling 14D", align: "right",
+    title: "Change in de-duplicated unique reach against the previous 14 days. Blank when either window is unfetched.",
     render: (r) => <span className={"num " + ((r.d14_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d14_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d14_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d14_reach_delta_pct", header: "14D Reach Δ%", group: "Rolling 14D", align: "right",
-    render: (r) => <span className={"num " + ((r.d14_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d14_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d14_reach_delta_pct)}%</span> },
+    title: "Same change as 14D Reach Δ, relative to the previous window.",
+    render: (r) => <span className={"num " + ((r.d14_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d14_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{r.d14_reach_delta_pct === null ? "—" : `${pct(r.d14_reach_delta_pct)}%`}</span> },
   { key: "d14_ftewv", header: "14D FTEWV", group: "Rolling 14D", align: "right",
     render: (r) => <span className="num">{fmt(r.d14_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d14_cost_per_ftewv", header: "14D Cost/FTEWV", group: "Rolling 14D", align: "right",
@@ -1318,12 +1363,16 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     render: (r) => <span className="num">₹{money(r.d28_lc_revenue)}</span> },
   { key: "d28_lc_roas", header: "28D LC ROAS", group: "Rolling 28D", align: "right",
     render: (r) => <span className="num">{num2(r.d28_lc_roas)}</span> },
+  { key: "d28_reach_unique", header: "28D Reach", group: "Rolling 28D", align: "right",
+    render: (r) => <span className="num" title="Meta's de-duplicated unique reach for the last 28 days — real people, counted once. Blank when this window has not been fetched; run scripts/fetch_reach_cumulative.py --preset-windows.">{fmt(r.d28_reach_unique, { maximumFractionDigits: 0 })}</span> },
   { key: "d28_reach_proxy", header: "28D Reach Proxy", group: "Rolling 28D", align: "right",
-    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure.">{fmt(r.d28_reach_proxy, { maximumFractionDigits: 0 })}</span> },
+    render: (r) => <span className="num" title="Summed daily reach — person-days, NOT de-duplicated people. Directional volume only; the Reach column is the de-duplicated figure. Typically 2-3x the 28D Reach beside it.">{fmt(r.d28_reach_proxy, { maximumFractionDigits: 0 })}</span> },
   { key: "d28_reach_delta", header: "28D Reach Δ", group: "Rolling 28D", align: "right",
+    title: "Change in de-duplicated unique reach against the previous 28 days. Blank when either window is unfetched.",
     render: (r) => <span className={"num " + ((r.d28_reach_delta ?? 0) < 0 ? "text-error-text" : (r.d28_reach_delta ?? 0) > 0 ? "text-success-text" : "")}>{fmt(r.d28_reach_delta, { maximumFractionDigits: 0, signDisplay: "exceptZero" })}</span> },
   { key: "d28_reach_delta_pct", header: "28D Reach Δ%", group: "Rolling 28D", align: "right",
-    render: (r) => <span className={"num " + ((r.d28_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d28_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{pct(r.d28_reach_delta_pct)}%</span> },
+    title: "Same change as 28D Reach Δ, relative to the previous window.",
+    render: (r) => <span className={"num " + ((r.d28_reach_delta_pct ?? 0) < 0 ? "text-error-text" : (r.d28_reach_delta_pct ?? 0) > 0 ? "text-success-text" : "")}>{r.d28_reach_delta_pct === null ? "—" : `${pct(r.d28_reach_delta_pct)}%`}</span> },
   { key: "d28_ftewv", header: "28D FTEWV", group: "Rolling 28D", align: "right",
     render: (r) => <span className="num">{fmt(r.d28_ftewv, { maximumFractionDigits: 0 })}</span> },
   { key: "d28_cost_per_ftewv", header: "28D Cost/FTEWV", group: "Rolling 28D", align: "right",

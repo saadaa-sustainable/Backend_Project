@@ -258,6 +258,44 @@ def preset_windows(today: date) -> list[tuple[date, date]]:
         (yesterday - timedelta(days=29), yesterday),
         (yesterday - timedelta(days=89), yesterday),
     ]
+    # The Rolling 3D / 7D / 14D / 28D column groups in Ads Analyse
+    # (_ROLLING_PERIODS in app/api/routers/analytics.py). Without these
+    # rows those groups can only show SUM(daily reach), which is
+    # person-days: someone reached on three days counts three times. On
+    # the largest campaign that reads 29.8M against 3.2M real people.
+    #
+    # Anchored on BOTH today and yesterday because the rolling columns
+    # window on the data's last date, which is usually yesterday but is
+    # today once the day's insights land.
+    #
+    # Each period contributes TWO windows per anchor: the current one
+    # and the equally long one immediately before it, because the
+    # Rolling columns show a delta. Comparing a de-duplicated current
+    # window against a person-days previous one would produce a change
+    # figure that is not a change in anything.
+    #
+    #     current   [L - (P-1), L]
+    #     previous  [L - (2P-1), L - P]
+    #
+    # exactly the two spans _rolling_metrics_sql filters for.
+    #
+    # L is not `today`. The roll-up anchors on MAX(day) of the daily
+    # insights table, because Meta's daily rows land in arrears and
+    # anchoring on the clock would give every entity an empty day and
+    # make the whole fleet look stalled. That lag has been observed at
+    # one AND two days (on 2026-09-30 the table ended 2026-09-28), and
+    # it depends on when the nightly refresh last ran, so it is not a
+    # constant this script can assume.
+    #
+    # Three anchors therefore, covering the lag range. Guessing wrong is
+    # not a graceful degradation: the columns match on an exact
+    # (epoch, as_of) pair, so an anchor that is off by one day leaves
+    # every cell blank -- which is what two anchors did here.
+    for period in (3, 7, 14, 28):
+        for last in (today, yesterday, today - timedelta(days=2)):
+            windows.append((last - timedelta(days=period - 1), last))
+            windows.append((last - timedelta(days=2 * period - 1),
+                            last - timedelta(days=period)))
     return sorted({(f, t) for f, t in windows if f >= DEFAULT_EPOCH and f <= t})
 
 
