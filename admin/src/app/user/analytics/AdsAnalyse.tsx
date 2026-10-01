@@ -1770,11 +1770,13 @@ export function AdsAnalyse() {
   // not exist and silently sums six days against Meta's seven -- a
   // whole day of spend missing from every row.
   const [dataThrough, setDataThrough] = useState<string | null>(null);
+  const [freshnessReady, setFreshnessReady] = useState(false);
   useEffect(() => {
     let live = true;
     fetchCpisDataFreshness()
       .then((f) => { if (live && f.max_meta_day) setDataThrough(f.max_meta_day); })
-      .catch(() => { /* fall back to the clock; the picker still works */ });
+      .catch(() => { /* fall back to the clock; the picker still works */ })
+      .finally(() => { if (live) setFreshnessReady(true); });
     return () => { live = false; };
   }, []);
   // The window the page actually queries. Derived, not stored: once the
@@ -1892,6 +1894,7 @@ export function AdsAnalyse() {
   // ── fetch data ──────────────────────────────────────────────
   useEffect(() => {
     if (levelToggle === "ad") return;
+    if (!freshnessReady && datePreset !== "custom") return;
     let cancelled = false;
     setRollupLoading(true);
     setRollupError(null);
@@ -1928,7 +1931,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [levelToggle, account, debouncedRollupSearch, rollupSort, rollupRetryCount, winFrom, winTo, budgetType, statusFilter, roasBounds, decisionFilter, newEntities]);
+  }, [levelToggle, freshnessReady, datePreset, account, debouncedRollupSearch, rollupSort, rollupRetryCount, winFrom, winTo, budgetType, statusFilter, roasBounds, decisionFilter, newEntities]);
 
   const filters = useMemo(
     () => ({
@@ -1957,9 +1960,24 @@ export function AdsAnalyse() {
   // useCachedFetch default. Filter-scoped key so a filter change
   // always misses the cache and fetches fresh. Version 3 invalidates
   // cached rows from before the API included the restored timeline data.
+  const resolvedAdsQuery = useRef<string | null>(null);
   useEffect(() => {
+    // Resolve preset dates first: a clock-based request immediately followed
+    // by the source's latest date doubled the expensive SQL on every visit.
+    if (!freshnessReady && datePreset !== "custom") return;
+    if (levelToggle !== "ad") return;
     let cancelled = false;
     const cacheKey = "ae-ads-analyse-v3|" + JSON.stringify(filters);
+    const queryKey = `${cacheKey}|retry:${retryCount}`;
+    // Returning from Campaigns/Ad Sets keeps all loaded pages in memory.
+    // Only changed filters or an explicit retry should replace those rows.
+    if (resolvedAdsQuery.current === queryKey) {
+      // A different filter may have started loading before the user returned
+      // to this already-resolved query. Its cancelled request cannot clear it.
+      setLoading(false);
+      setError(null);
+      return;
+    }
     const TTL_MS = 5 * 60 * 1000;
     type Cached = {
       rows: AdsAnalyseRow[];
@@ -1974,6 +1992,7 @@ export function AdsAnalyse() {
         if (raw) {
           const c = JSON.parse(raw) as Cached;
           if (Date.now() - c.ts < TTL_MS) {
+            resolvedAdsQuery.current = queryKey;
             setError(null);
             setFailedLoadMore(false);
             setRows(c.rows);
@@ -1999,6 +2018,7 @@ export function AdsAnalyse() {
     fetchAdsAnalyse({ ...filters, limit: PAGE_SIZE, offset: 0 })
       .then((res) => {
         if (cancelled) return;
+        resolvedAdsQuery.current = queryKey;
         setRows(res.rows);
         setTotal(res.total);
         setCategoryCountsFromApi(res.category_counts ?? {});
@@ -2039,7 +2059,7 @@ export function AdsAnalyse() {
     return () => {
       cancelled = true;
     };
-  }, [filters, retryCount]);
+  }, [filters, retryCount, freshnessReady, datePreset, levelToggle]);
 
   async function loadMore() {
     setLoadingMore(true);

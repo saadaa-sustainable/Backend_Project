@@ -14,8 +14,10 @@ from app.services.ad_efficiency import EfficiencyAnchors
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
+def clear_cache(monkeypatch):
+    monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     analytics.get_ads_analyse.analytics_cache.entries.clear()
+    analytics._get_ads_analyse_summary.analytics_cache.entries.clear()
     yield
     analytics.get_ads_analyse.analytics_cache.entries.clear()
 
@@ -42,6 +44,7 @@ def test_timing_projection_preserves_authoritative_nulls_without_local_day_count
     from pglast import ast
 
     statement = _parse(analytics._ads_analyse_rows_sql("", "aps.spend"))
+    statement = statement.fromClause[0].rarg.subquery
     fields = {}
     for target in statement.targetList:
         if isinstance(target.val, ast.ColumnRef):
@@ -130,16 +133,20 @@ async def test_lifetime_timing_serializes_unchanged_when_delivery_metrics_change
     unknown = dict.fromkeys(analytics.AdsAnalyseRow.model_fields)
     unknown.update(ad_id="unknown", date_of_result=date(2026, 10, 3), spend=0)
     rows = _rows_result(SimpleNamespace(_mapping=row), SimpleNamespace(_mapping=unknown))
-    count = MagicMock()
-    count.scalar_one.return_value = 2
     totals = MagicMock()
-    totals.one.return_value = SimpleNamespace(**dict.fromkeys(analytics.AdsAnalyseTotals.model_fields, 0))
-    results = [rows]
+    totals.mappings.return_value.one.return_value = {
+        "totals": {**dict.fromkeys(analytics.AdsAnalyseTotals.model_fields, 0), "ad_count": 2},
+        "category_counts": {"Winner": 2},
+    }
+    empty = MagicMock()
+    empty.all.return_value = []
+    results = [rows, empty]
     if date_field == "delivery":
         daily = MagicMock()
         daily.all.return_value = [("known", 10, 200, 100, 20, 1, 5, 1, 2, None, None)]
         results.append(daily)
-    results.extend([count, _rows_result(("Winner", 2)), totals])
+        results.append(empty)
+    results.append(totals)
     session = SimpleNamespace(execute=AsyncMock(side_effect=results))
     monkeypatch.setattr(analytics, "_daily_mirror_ready", AsyncMock(return_value=True))
     monkeypatch.setattr(analytics, "get_efficiency_anchors", AsyncMock(return_value=EfficiencyAnchors(

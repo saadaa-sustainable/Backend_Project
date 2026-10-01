@@ -19,6 +19,7 @@ import statistics
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -348,32 +349,34 @@ _LOCAL_DAILY = (
 # the table rows come from, so the strip totals what is on screen and
 # not a different population.
 #
-# LEFT JOIN LATERAL rather than a plain LEFT JOIN: the join key is
-# (ad_id, day-range) and a plain join would fan each ad out to one row
-# per active day before the outer aggregate ran, multiplying every
-# lifetime column beside it by that ad's number of active days.
-_DELIVERY_TOTALS_JOIN = (
-    " LEFT JOIN LATERAL ("
-    "  SELECT SUM(d.spend) AS spend, SUM(d.impressions) AS impressions,"
+# Aggregate the date range once, then join one row per ad. This avoids
+# thousands of separate daily-table probes and keeps the outer ad count
+# from being multiplied by the number of active days.
+_DELIVERY_TOTALS_SQL = (
+    "  SELECT d.ad_id, SUM(d.spend) AS spend, SUM(d.impressions) AS impressions,"
     "         SUM(d.reach) AS reach, SUM(d.conv_value) AS conv_value,"
     "         SUM(d.purchases) AS purchases, SUM(d.link_clicks) AS link_clicks,"
     "         SUM(d.ncp_count) AS ncp_count, SUM(d.ftewv_count) AS ftewv_count,"
     "         SUM(d.shopify_orders) AS shopify_orders,"
-    "         SUM(d.shopify_sales) AS shopify_sales"
+    "         SUM(d.shopify_sales) AS shopify_sales,"
+    "         BOOL_OR(d.impressions > 0) AS delivered"
     "    FROM public.ad_daily_external d"
-    "   WHERE d.ad_id = aps.ad_id AND d.day BETWEEN :from_date AND :to_date"
-    " ) w ON true"
+    "   WHERE d.day BETWEEN :from_date AND :to_date GROUP BY d.ad_id"
 )
+_DELIVERY_TOTALS_JOIN = f" LEFT JOIN ({_DELIVERY_TOTALS_SQL}) w ON w.ad_id = aps.ad_id"
 
 # Restricts the ad set to ads that actually delivered in the window --
 # the source system's own 'delivery' semantics. Without it the table
 # kept every ad ever created and zero-filled the ones that did not run,
 # so a one-day window rendered ~14k rows of zeroes and the category
 # tiles counted every one of them.
+_DELIVERED_ADS_SQL = (
+    "SELECT DISTINCT d.ad_id FROM public.ad_daily_external d "
+    "WHERE d.day BETWEEN :from_date AND :to_date AND d.impressions > 0"
+)
 _DELIVERED_IN_WINDOW = (
-    "EXISTS (SELECT 1 FROM public.ad_daily_external d "
-    "WHERE d.ad_id = aps.ad_id AND d.day BETWEEN :from_date AND :to_date "
-    "AND d.impressions > 0)"
+    f"aps.ad_id IN (WITH delivered AS MATERIALIZED ({_DELIVERED_ADS_SQL}) "
+    "SELECT ad_id FROM delivered)"
 )
 
 
@@ -919,16 +922,25 @@ def _ads_analyse_rows_sql(where_sql: str, sort_column: str) -> str:
         f" SELECT aps.ad_id, {sort_column} AS _sort {pick_from} {where_sql}"
         f" ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
         ") "
+        # OFFSET 0 keeps this parameterized lookup from being flattened.
+        # A materialized page alone still let the planner join all 20k wide
+        # lifecycle rows before joining picked at the end of the plan.
+        "SELECT details.* FROM picked CROSS JOIN LATERAL ("
         f"SELECT {_ADS_ANALYSE_SELECT} {_ADS_ANALYSE_FROM_ROWS} "
-        "JOIN picked ON picked.ad_id = aps.ad_id "
+        "WHERE aps.ad_id = picked.ad_id OFFSET 0) details "
         "ORDER BY picked._sort DESC NULLS LAST"
     )
 
 
-def _ads_analyse_aggregate_from(where_sql: str) -> str:
+def _ads_analyse_aggregate_from(where_sql: str, *, lifetime_totals: bool = False) -> str:
     # Counts, categories and totals must resolve the same first_seen
     # date as the page picker; other filters avoid this join entirely.
-    return _ADS_ANALYSE_FROM_AGG + (_ROWS_PICK_FS if "fs." in where_sql else "")
+    source = "FROM ad_performance_summary aps"
+    if lifetime_totals or "al." in where_sql:
+        source += _ROWS_PICK_AL
+    if "fs." in where_sql:
+        source += _ROWS_PICK_FS
+    return source
 
 
 def _ads_analyse_count_sql(where_sql: str) -> str:
@@ -1002,8 +1014,47 @@ def _ads_analyse_totals_sql(where_sql: str, *, windowed: bool) -> str:
         "COALESCE(SUM(al.three_sec_video_plays),0) AS three_sec_video_plays, "
         "COALESCE(SUM(((al.outbound_clicks->0)->>'value')::numeric),0) AS outbound_clicks, "
         "COALESCE(SUM(al.post_engagements),0) AS post_engagements "
-        f"{_ads_analyse_aggregate_from(where_sql)} {where_sql}"
+        f"{_ads_analyse_aggregate_from(where_sql, lifetime_totals=True)} {where_sql}"
     )
+
+
+def _ads_analyse_summary_sql(row_where: str, base_where: str, *, windowed: bool) -> str:
+    # Category tiles intentionally ignore the selected category. Totals and
+    # the row count include it. Share the costly delivery scan across both.
+    prefix = ""
+    if _DELIVERED_IN_WINDOW in base_where:
+        if windowed:
+            # Delivery membership and KPI values need the same date range.
+            # Scan it once, retaining zero-impression days in the sums while
+            # requiring at least one positive-impression day for membership.
+            prefix = (
+                f"WITH window_metrics AS MATERIALIZED ({_DELIVERY_TOTALS_SQL}), "
+                "delivered AS MATERIALIZED (SELECT ad_id FROM window_metrics WHERE delivered) "
+            )
+        else:
+            prefix = f"WITH delivered AS MATERIALIZED ({_DELIVERED_ADS_SQL}) "
+        row_where = row_where.replace(_DELIVERED_IN_WINDOW, "aps.ad_id IN (SELECT ad_id FROM delivered)")
+        base_where = base_where.replace(_DELIVERED_IN_WINDOW, "aps.ad_id IN (SELECT ad_id FROM delivered)")
+    totals = _ads_analyse_totals_sql(row_where, windowed=windowed)
+    if windowed and prefix:
+        totals = totals.replace(_DELIVERY_TOTALS_JOIN, " LEFT JOIN window_metrics w ON w.ad_id = aps.ad_id")
+    return (
+        prefix + "SELECT (SELECT to_jsonb(t) FROM (" + totals + ") t) AS totals, "
+        "COALESCE((SELECT jsonb_object_agg(category, n) FROM ("
+        "SELECT COALESCE(aps.category, 'Uncategorized') AS category, COUNT(*) AS n "
+        f"{_ads_analyse_aggregate_from(base_where)} {base_where} GROUP BY 1"
+        ") c), '{}'::jsonb) AS category_counts"
+    )
+
+
+@cached_analytics(ttl=300.0)
+async def _get_ads_analyse_summary(
+    session: AsyncSession, row_where: str, base_where: str, params: dict[str, Any], windowed: bool,
+) -> dict[str, Any]:
+    result = (await session.execute(
+        text(_ads_analyse_summary_sql(row_where, base_where, windowed=windowed)), params,
+    )).mappings().one()
+    return {key: _json.loads(value) if isinstance(value, str) else value for key, value in result.items()}
 
 
 class AdsAnalyseRow(BaseModel):
@@ -1267,13 +1318,14 @@ async def warm_ads_analyse_cache() -> None:
     today = date.today()
     try:
         async with session_scope() as session:
+            freshness = await get_cpis_utm_data_freshness(session)
             # Match AdsAnalyse's Lifetime preset (DateRangePicker.DATA_FLOOR),
             # delivery mode and first-page size. Warming an unbounded request
             # misses the browser's cache key and repeats all of its SQL.
             # The decorator resolves Query defaults exactly as FastAPI does.
             await get_ads_analyse(
                 session=session, limit=100, from_date=date(2026, 1, 1),
-                to_date=today, date_field="delivery",
+                to_date=freshness.max_meta_day or today, date_field="delivery",
             )
     except Exception:
         logging.getLogger(__name__).exception("ads_analyse_warmer_failed")
@@ -1285,6 +1337,14 @@ async def warm_ads_analyse_cache() -> None:
                 )
         except Exception:
             logging.getLogger(__name__).exception("creative_testing_warmer_failed")
+
+    try:
+        async with session_scope() as session:
+            # CPIS opens its published 30-day window and paginates the loaded
+            # SKU catalogue locally. Match the browser's response-cache key.
+            await get_cpis_utm(session=session, window="30d", limit=250)
+    except Exception:
+        logging.getLogger(__name__).exception("cpis_warmer_failed")
 
     # Also warm /last-click-utm's default filter (no filters, sort by
     # created_at). The tab loads without a preset, so the very first hit
@@ -1828,16 +1888,6 @@ async def get_ads_analyse(
             if spend and r.incremental_reach:
                 r.cost_per_1000_incremental_reach = spend * 1000.0 / r.incremental_reach
 
-    total = (
-        await session.execute(text(_ads_analyse_count_sql(row_where_sql)), params)
-    ).scalar_one()
-
-    counts_result = await session.execute(
-        text(_ads_analyse_category_counts_sql(base_where_sql)),
-        {k: v for k, v in params.items() if k != "category"},
-    )
-    category_counts = {row[0]: row[1] for row in counts_result}
-
     # Aggregate totals for the KPI strip -- kwikengage's Marketing
     # Insights row. Same filter set as `rows` (row_where_sql includes
     # category + F1..F4 flags + date_field filter).
@@ -1849,12 +1899,12 @@ async def get_ads_analyse(
     # headline. Every other mode keeps the lifetime aggregate, which is
     # correct there: those modes filter the ad set by the window and
     # then report what those ads did in total.
-    totals_row = (
-        await session.execute(
-            text(_ads_analyse_totals_sql(row_where_sql, windowed=windowed_delivery)),
-            params,
-        )
-    ).one()
+    summary = await _get_ads_analyse_summary(
+        session, row_where_sql, base_where_sql, params, windowed_delivery,
+    )
+    totals_row = SimpleNamespace(**summary["totals"])
+    total = int(totals_row.ad_count or 0)
+    category_counts = summary["category_counts"]
     # Overview-Performance sums exist only on the non-windowed branch --
     # the windowed totals SQL sums from the per-day mirror w, which does
     # not carry thruplays/three_sec/etc. Return 0 there so the frontend
@@ -4088,18 +4138,18 @@ class CpisUtmRow(BaseModel):
 # window but not on the day it spent -- and the caller derives it by
 # subtraction, so the four numbers always sum to the Meta total no
 # matter which attribution rule the active view used.
-_CPIS_UNTETHERED_BREAKDOWN = """
-WITH spend AS (
+_CPIS_RECONCILIATION_INPUTS = """
+WITH spend AS MATERIALIZED (
     SELECT ad_id, day AS d, spend
       FROM public.insights_daily_by_ad
-     WHERE day BETWEEN :wf AND :wt AND spend > 0
+     WHERE day BETWEEN :wf AND :wt
 ),
 orders_in_window AS MATERIALIZED (
     -- IST, because Meta counts its spend days in the ad account's
     -- timezone (Asia/Kolkata) and this joins order days to spend days.
     -- processed_at::date casts at the session timezone, UTC, which put
     -- 16.7% of orders on the day either side of the one they belong to.
-    SELECT so.utm_content AS ad_id,
+    SELECT so.order_id, so.utm_content AS ad_id,
            (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date AS d,
            jsonb_typeof(so.line_items->'edges') = 'array' AS has_items
       FROM shopify_orders so
@@ -4108,7 +4158,10 @@ orders_in_window AS MATERIALIZED (
        AND so.processed_at <  ((CAST(:wt AS date) + 1)::timestamp
                                  AT TIME ZONE 'Asia/Kolkata')
        AND so.utm_content ~ '^[0-9]{10,20}$'
-),
+)
+"""
+
+_CPIS_BREAKDOWN_CTES = """
 cited AS (
     SELECT DISTINCT ad_id, d FROM orders_in_window
 ),
@@ -4117,7 +4170,8 @@ attributable AS (
      WHERE o.has_items
        AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = o.ad_id)
 ),
-converted_ads AS (SELECT DISTINCT ad_id FROM attributable)
+converted_ads AS (SELECT DISTINCT ad_id FROM attributable),
+breakdown AS (
 SELECT
     COALESCE(SUM(s.spend) FILTER (
         WHERE a.ad_id IS NULL AND c.ad_id IS NOT NULL), 0) AS ad_unknown,
@@ -4127,7 +4181,13 @@ FROM spend s
 LEFT JOIN attributable  a  ON a.ad_id  = s.ad_id AND a.d = s.d
 LEFT JOIN cited         c  ON c.ad_id  = s.ad_id AND c.d = s.d
 LEFT JOIN converted_ads ca ON ca.ad_id = s.ad_id
+WHERE s.spend > 0
+)
 """
+
+_CPIS_UNTETHERED_BREAKDOWN = (
+    _CPIS_RECONCILIATION_INPUTS + ", " + _CPIS_BREAKDOWN_CTES + "SELECT * FROM breakdown"
+)
 
 
 def _cpis_reconciliation_sql(custom: bool) -> str:
@@ -4137,7 +4197,9 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         "SELECT COALESCE(SUM(ad_spend), 0) FROM cpis_by_sku_utm WHERE window_key = :window"
     )
     return (
-        "WITH breakdown AS (" + _CPIS_UNTETHERED_BREAKDOWN + ") "
+        # The breakdown, headline and distinct-order count reuse the same
+        # narrow inputs. In particular, detoast order line_items only once.
+        _CPIS_RECONCILIATION_INPUTS + ", " + _CPIS_BREAKDOWN_CTES + " "
         # AD grain for the headline total.
         #
         # This read campaign grain for a while, because the grains
@@ -4166,34 +4228,28 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         # per-ad and per-SKU work already uses, so the headline and
         # the rows beneath it come from one place.
         "SELECT b.*, (SELECT COALESCE(SUM(spend), 0) "
-        "FROM public.insights_daily_by_ad WHERE day BETWEEN :wf AND :wt) AS meta_total_spend, "
+        "FROM spend) AS meta_total_spend, "
         # The newest day the sum above actually covers. Meta lands
         # insights a day in arrears, so a window ending today is
         # summed only to yesterday. Printing the requested end date
         # beside a total that stops earlier is how a correct number
         # gets read as a 4% shortfall against Ads Manager.
-        "(SELECT MAX(day) FROM public.insights_daily_by_ad "
-        "WHERE day BETWEEN :wf AND :wt) AS spend_through, "
+        "(SELECT MAX(d) FROM spend) AS spend_through, "
         # DISTINCT orders, not the sum of per-SKU order counts. A basket
         # holding two master SKUs is one order but appears once under
         # each, so summing the per-SKU column overstated the headline by
         # 14.7% (22,162 against 19,317 real orders over 30 days). The
         # per-SKU column itself is right -- "orders containing this SKU"
         # -- it just does not add up across SKUs.
-        "(SELECT COUNT(DISTINCT so.order_id) FROM shopify_orders so "
-        " WHERE so.processed_at >= (CAST(:wf AS date)::timestamp "
-        "                            AT TIME ZONE 'Asia/Kolkata') "
-        "   AND so.processed_at <  ((CAST(:wt AS date) + 1)::timestamp "
-        "                            AT TIME ZONE 'Asia/Kolkata') "
-        "   AND so.utm_content ~ '^[0-9]{10,20}$' "
-        "   AND jsonb_typeof(so.line_items->'edges') = 'array' "
+        "(SELECT COUNT(DISTINCT so.order_id) FROM orders_in_window so "
+        " WHERE so.has_items "
         "   AND EXISTS (SELECT 1 FROM ad_lifecycle al "
-        "               WHERE al.ad_id = so.utm_content)) AS attributed_orders_distinct, "
+        "               WHERE al.ad_id = so.ad_id)) AS attributed_orders_distinct, "
         f"({attributed}) AS attributed_spend FROM breakdown b"
     )
 
 
-@cached_analytics()
+@cached_analytics(ttl=300.0)
 async def _get_cpis_reconciliation(
     session: AsyncSession, wf: date, wt: date, window: str, custom: bool,
 ) -> dict[str, Any]:
@@ -4247,7 +4303,7 @@ class CpisUtmResponse(BaseModel):
 
 
 @router.get("/cpis-utm", response_model=CpisUtmResponse)
-@cached_analytics(ttl=60.0)
+@cached_analytics(ttl=300.0)
 async def get_cpis_utm(
     session: SessionDep,
     window: Literal["7d", "30d", "90d"] = Query(default="30d"),
@@ -4680,9 +4736,9 @@ async def get_cpis_utm(
         SELECT am.aid, am.media, COALESCE(SUM(i.spend), 0) AS spend
           FROM asset_media am
           JOIN public.ad_asset_map map ON map.asset_id = am.aid
-          CROSS JOIN bounds b
-          LEFT JOIN public.insights_daily_by_ad i
-                 ON i.ad_id = map.ad_id AND i.day BETWEEN b.lo AND b.hi
+          -- Reuse the identical per-ad window sum instead of expanding
+          -- every asset into all of its daily rows and summing again.
+          LEFT JOIN insights_windowed i ON i.ad_id = map.ad_id
          GROUP BY am.aid, am.media
       ),
       asset_sku AS (
@@ -5155,7 +5211,7 @@ class CpisSpendTrendsResponse(BaseModel):
 
 
 @router.post("/cpis-utm/spend-trends", response_model=CpisSpendTrendsResponse)
-@cached_analytics()
+@cached_analytics(ttl=300.0)
 async def get_cpis_utm_spend_trends(
     session: SessionDep, body: CpisSpendTrendsRequest,
 ) -> CpisSpendTrendsResponse:
@@ -6769,6 +6825,7 @@ _CT_WINDOW_METRICS = (
     "         sum(i.add_to_cart)       AS atc_count,"
     "         sum(i.checkout_initiate) AS ci_count"
     "    FROM public.insights_daily_by_ad i"
+    "    JOIN scoped_ads scope ON scope.ad_id = i.ad_id"
     "   WHERE i.day BETWEEN :from_date AND :to_date"
     "   GROUP BY i.ad_id"
 )
@@ -6781,8 +6838,10 @@ _CT_WINDOW_SHOPIFY = (
     "         COUNT(*)                        AS shopify_orders,"
     "         COALESCE(SUM(a.total_price), 0) AS shopify_revenue"
     "    FROM public.shopify_order_attribution a"
+    "    JOIN scoped_ads scope ON scope.ad_id = a.matched_ad_id"
     "   WHERE a.matched_ad_id IS NOT NULL"
-    "     AND a.created_at::date BETWEEN :from_date AND :to_date"
+    "     AND a.created_at >= CAST(:from_date AS date)"
+    "     AND a.created_at < (CAST(:to_date AS date) + 1)"
     "   GROUP BY a.matched_ad_id"
 )
 
@@ -6791,7 +6850,15 @@ _CT_WINDOW_SHOPIFY = (
 #: that asset's spend INSIDE the window, so the column sums reconcile
 #: with what Meta charged over the same dates.
 _CT_AGG = (
-    "WITH asset_dates AS (" + _CT_ASSET_DATES + "), "
+    # Decide which assets are in the window before reading their metrics.
+    # Keep ALL ads of each qualifying asset: its original/iteration dates,
+    # lifetime counters and latest verdict still use exactly the old scope.
+    "WITH mapped AS MATERIALIZED (SELECT * FROM public.ad_asset_map m), "
+    "in_scope AS (SELECT asset_id, media FROM mapped "
+    " WHERE ad_created_date BETWEEN :from_date AND :to_date GROUP BY asset_id, media), "
+    "scoped_ads AS MATERIALIZED (SELECT m.* FROM mapped m JOIN in_scope s "
+    " ON s.asset_id = m.asset_id AND s.media IS NOT DISTINCT FROM m.media), "
+    "asset_dates AS (" + _CT_ASSET_DATES + "), "
     "win AS (" + _CT_WINDOW_METRICS + "), "
     "winshop AS (" + _CT_WINDOW_SHOPIFY + "), "
     "agg AS ("
@@ -6887,7 +6954,7 @@ _CT_AGG = (
     "         sum(COALESCE(w.ci_count, 0))                                AS ci_count,"
     "         sum(COALESCE(al.engagement_count, 0))                       AS engagement_count,"
     "         min(aps.campaign_name)                                      AS sample_campaign_name"
-    "    FROM public.ad_asset_map m"
+    "    FROM scoped_ads m"
     "    LEFT JOIN win w ON w.ad_id = m.ad_id"
     "    LEFT JOIN public.ad_performance_summary aps ON aps.ad_id = m.ad_id"
     "    LEFT JOIN public.ad_lifecycle al ON al.ad_id = m.ad_id"

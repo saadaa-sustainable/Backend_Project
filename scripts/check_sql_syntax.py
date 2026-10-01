@@ -114,6 +114,13 @@ def _composed() -> dict[str, str]:
             analytics._ads_analyse_totals_sql(where, windowed=True),
         "analytics:ads_analyse_totals[lifetime]":
             analytics._ads_analyse_totals_sql(where, windowed=False),
+        **{
+            f"analytics:ads_analyse_summary[{windowed}]":
+                analytics._ads_analyse_summary_sql(
+                    where, "WHERE " + analytics._DELIVERED_IN_WINDOW, windowed=windowed,
+                )
+            for windowed in (True, False)
+        },
         "analytics:_EXTERNAL_DAILY": analytics._EXTERNAL_DAILY,
         "analytics:_LOCAL_DAILY": analytics._LOCAL_DAILY,
         "analytics:_AD_DAILY_EXTERNAL_EXISTS": analytics._AD_DAILY_EXTERNAL_EXISTS,
