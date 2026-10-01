@@ -148,6 +148,20 @@ jobs:
 
       - name: Restore BigQuery service account
         if: steps.guard.outputs.skip != 'true'
+        # NOT allowed to fail the job. BigQuery feeds exactly two steps --
+        # bq_inventory and silver_returns -- yet a bad secret here used to
+        # abort the run before Meta, Shopify or CPIS had fetched anything.
+        # It did that on every run from 2026-09-30 to 2026-10-01: first a
+        # secret stored ESCAPED (JSONDecodeError), then one holding an
+        # OAuth client instead of a service-account key (all four required
+        # fields missing). Ad spend went five days stale over a credential
+        # that none of those steps use.
+        #
+        # The step still fails loudly and still annotates -- it just no
+        # longer takes the other 30 steps with it. The two BigQuery steps
+        # then fail on their own and the run reports `partial`, which is
+        # how it already treats ad_edit_log.
+        continue-on-error: true
         # GH secret GOOGLE_CREDS_JSON holds the RAW key file, written
         # with `gh secret set GOOGLE_CREDS_JSON < key.json` so nothing
         # re-escapes it. We write it to disk and point
@@ -164,6 +178,12 @@ jobs:
         # 2026-09-03 to 2026-09-29: the secret had been stored ESCAPED,
         # as {\"type\": ...}, and every nightly run failed bq_inventory
         # and silver_returns while reporting only "partial".
+        #
+        # Store it with a REDIRECT, never a paste:
+        #     gh secret set GOOGLE_CREDS_JSON < key.json
+        # and give it a service-account key -- `type`, `project_id`,
+        # `private_key`, `client_email` -- not an OAuth client, whose
+        # top level is {"web": {...}} and therefore has none of them.
         env:
           GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
         run: |
