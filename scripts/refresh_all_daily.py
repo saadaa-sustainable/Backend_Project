@@ -108,7 +108,14 @@ DEFAULT_SHOPIFY_OBJECT_TYPES = (
     # grain -- one query for the whole range, and the only source of the
     # distinct-customer counts and net_items_sold, which cannot be
     # derived from `sales` (see ingest_shopify.py's SALES_DAILY_*).
-    "products,inventory,orders,sales,sales_daily,customer_analytics,discounts,fulfillments"
+    # `sessions` was MISSING from this list, which is why
+    # public.shopify_sessions stopped at 2026-08-27 while orders stayed
+    # current -- the nightly never asked for it. The last pull was a
+    # manual one on 2026-09-02. It is the only source of
+    # added_to_cart_rate and sessions_with_cart_additions; nothing else
+    # in the warehouse records a cart addition, because a cart is not an
+    # order and the Admin API has no cart object.
+    "products,inventory,orders,sales,sales_daily,customer_analytics,discounts,fulfillments,sessions"
 )
 
 #: --incremental makes orders/customers/products resume from the newest
@@ -205,6 +212,26 @@ PHASE_INGEST = [
     ("meta_reach_cumulative", ["scripts/fetch_reach_cumulative.py",
                                "--anchors",
                                "--levels", "ad,adset,campaign"],            3600),
+    # EXACT-WINDOW unique reach, which --anchors above does not fetch:
+    # the two flags are mutually exclusive, and they collect different
+    # shapes of row. --anchors stores cumulative snapshots [epoch, as_of],
+    # feeding Prev / Latest / Incr. Reach. --preset-windows stores one row
+    # per (since, until) pair, feeding the Rolling 3/7/14/28D reach
+    # columns in the Ads Analyse roll-up.
+    #
+    # This step is NOT optional for those columns to work. They match on
+    # an exact (epoch_date, as_of_date) pair against windows anchored on
+    # the last date in the daily insights table, so the day after this
+    # stops running every one of them reads blank -- there is no nearest
+    # -snapshot fallback, deliberately, because a window of the wrong
+    # length is not a worse answer, it is a different quantity.
+    #
+    # adset and campaign only. The roll-up is the only reader, and at ad
+    # level 33 windows would be ~900 requests against a token whose
+    # hourly budget is small. Measured 2026-09-30: 120s for both levels.
+    ("meta_reach_windows",    ["scripts/fetch_reach_cumulative.py",
+                               "--preset-windows",
+                               "--levels", "adset,campaign"],               1800),
     ("meta_dpa_products",     ["scripts/fetch_ad_product_insights.py"],     1800),
     ("instagram_posts",       ["scripts/ingest_instagram_chronological.py"], 1800),
     ("shopify_daily",         SHOPIFY_INGEST_CMD,        SHOPIFY_INGEST_TIMEOUT_S),
