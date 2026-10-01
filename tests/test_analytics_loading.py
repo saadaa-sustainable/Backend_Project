@@ -14,11 +14,12 @@ from app.api.routers import analytics
 
 
 @pytest.fixture(autouse=True)
-def clear_analytics_caches():
+def clear_analytics_caches(monkeypatch):
+    monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     caches = [
         getattr(analytics, name).analytics_cache
         for name in ("get_creative_testing", "get_creative_testing_ads", "get_ads_analyse", "_daily_mirror_ready",
-                     "_get_cpis_reconciliation", "get_efficiency_anchors")
+                     "_get_cpis_reconciliation", "get_efficiency_anchors", "_get_ads_analyse_summary")
     ]
     for cache in caches:
         cache.entries.clear()
@@ -308,12 +309,12 @@ async def test_cpis_reconciliation_executes_exact_combined_sql_with_indexable_da
     query, params = session.execute.call_args.args
     assert str(query) == analytics._cpis_reconciliation_sql(custom)
     statement, _ = _parsed_statement(query)
-    assert statement.withClause.ctes[0].ctename == "breakdown"
+    assert "breakdown" in {cte.ctename for cte in statement.withClause.ctes}
     sql = " ".join(str(query).split())
-    # Two scans of shopify_orders: the untethered breakdown, and the
-    # DISTINCT attributed-order count. The second exists because summing
-    # the per-SKU attributed_orders column double-counts mixed baskets.
-    assert sql.count("FROM shopify_orders so") == 2
+    # The breakdown and distinct-order count share one scan, while mixed
+    # baskets are still counted once in the headline.
+    assert sql.count("FROM shopify_orders so") == 1
+    assert "COUNT(DISTINCT so.order_id) FROM orders_in_window so" in sql
     assert "orders_in_window AS MATERIALIZED" in sql
     # IST bounds, because Meta counts its spend days in the ad account's
     # timezone (Asia/Kolkata) and this joins order days to spend days.
@@ -326,10 +327,10 @@ async def test_cpis_reconciliation_executes_exact_combined_sql_with_indexable_da
     # over nine minutes. That is what this test is guarding.
     assert sql.count(
         "so.processed_at >= (CAST(:wf AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')"
-    ) == 2
+    ) == 1
     assert sql.count(
         "so.processed_at < ((CAST(:wt AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')"
-    ) == 2
+    ) == 1
     assert "WHERE so.processed_at::date" not in sql
     assert "WHERE (so.processed_at AT TIME ZONE" not in sql
     assert "AND (so.processed_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN" not in sql
@@ -347,6 +348,38 @@ async def test_cpis_reconciliation_executes_exact_combined_sql_with_indexable_da
     assert result == data
 
 
+@pytest.mark.parametrize("windowed", [False, True])
+async def test_ads_summary_shares_delivery_scan_and_keeps_category_scopes(windowed: bool) -> None:
+    base = "WHERE aps.account_name = :account_name"
+    if windowed:
+        base += " AND " + analytics._DELIVERED_IN_WINDOW
+    rows = base + " AND aps.category = :category"
+    payload = {"totals": {"ad_count": 3, "spend": 150}, "category_counts": {"Winner": 3, "Discarded": 8}}
+    session = SimpleNamespace(execute=AsyncMock(return_value=_mapped_result(payload)))
+    params = {"account_name": "Main", "category": "Winner"}
+    if windowed:
+        params.update(from_date=date(2026, 9, 1), to_date=date(2026, 9, 15))
+    result = await analytics._get_ads_analyse_summary(session, rows, base, params, windowed)
+    statement, compiled = _parsed_statement(session.execute.call_args.args[0])
+    panels = _panel_queries(statement)
+    assert "category" in _where_parameters(panels["totals"], compiled)
+    assert "category" not in _where_parameters(panels["category_counts"], compiled)
+    sql = str(session.execute.call_args.args[0])
+    assert sql.count("delivered AS MATERIALIZED") == int(windowed)
+    if windowed:
+        assert sql.count("FROM public.ad_daily_external") == 1
+        assert "BOOL_OR(d.impressions > 0)" in sql
+        assert "WHERE delivered" in sql
+    assert "ad_history_milestones" not in sql
+    assert "meta_adsets" not in sql
+    assert result == payload
+    # The summary is independent of the requesting session/page. Keep the
+    # global counts and totals reusable as a visitor loads more rows.
+    other = SimpleNamespace(execute=AsyncMock())
+    assert await analytics._get_ads_analyse_summary(other, rows, base, params, windowed) == payload
+    other.execute.assert_not_awaited()
+
+
 @pytest.mark.parametrize(("shopify_orders", "shopify_revenue"), [(None, None), (0, 0), (2, 200)])
 async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify_metrics(
     shopify_orders: int | None, shopify_revenue: int | None,
@@ -360,24 +393,23 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
     daily_result.all.return_value = [
         ("123", 100, 1000, 500, 300, 5, 20, 2, 10, shopify_orders, shopify_revenue),
     ]
-    count_result = MagicMock()
-    count_result.scalar_one.return_value = 1
-    categories_result = MagicMock()
-    categories_result.__iter__.return_value = iter([("Winner", 1)])
     totals_data = {name: 0 for name in analytics.AdsAnalyseTotals.model_fields}
     totals_data.update(ad_count=1, spend=100, impressions=1000, reach=500, conv_value=300,
                        shopify_orders=shopify_orders, shopify_revenue=shopify_revenue)
     totals_result = MagicMock()
-    totals_result.one.return_value = SimpleNamespace(**totals_data)
+    totals_result.mappings.return_value.one.return_value = {
+        "totals": totals_data, "category_counts": {"Winner": 1},
+    }
     exists_result = MagicMock()
     exists_result.first.return_value = (1,)
     anchors_result = _mapped_result({
         "g_spend": 1000, "g_reach": 10000, "g_ftewv": 100,
         "g_ncp": 20, "g_conv": 2000, "med_ftewv": 5, "med_profit": 100,
     })
+    empty = MagicMock()
+    empty.all.return_value = []
     session = SimpleNamespace(execute=AsyncMock(side_effect=[
-        exists_result, exists_result, rows_result, anchors_result, daily_result, count_result,
-        categories_result, totals_result,
+        exists_result, exists_result, rows_result, empty, anchors_result, daily_result, empty, totals_result,
     ]))
 
     response = await analytics.get_ads_analyse(
@@ -385,7 +417,7 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
     )
 
     assert session.execute.await_count == 8
-    daily_query, daily_params = session.execute.call_args_list[4].args
+    daily_query, daily_params = session.execute.call_args_list[5].args
     assert str(daily_query) == analytics._EXTERNAL_DAILY
     _parsed_statement(daily_query)
     assert daily_params == {"ad_ids": ["123"], "from_str": date(2026, 9, 1),

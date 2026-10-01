@@ -12,10 +12,11 @@ from app.services import ad_efficiency
 
 
 @pytest.fixture(autouse=True)
-def clear_caches():
+def clear_caches(monkeypatch):
+    monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     caches = [fn.analytics_cache for fn in (
         analytics.get_ads_analyse, analytics._daily_mirror_ready,
-        ad_efficiency.get_efficiency_anchors,
+        ad_efficiency.get_efficiency_anchors, analytics._get_ads_analyse_summary,
     )]
     for cache in caches:
         cache.entries.clear()
@@ -52,13 +53,12 @@ def _anchor_result():
 
 
 def _response_results():
-    count = MagicMock()
-    count.scalar_one.return_value = 2
     totals = MagicMock()
-    totals.one.return_value = SimpleNamespace(**dict.fromkeys(
-        analytics.AdsAnalyseTotals.model_fields, 0,
-    ))
-    return [count, _rows_result(("Winner", 2)), totals]
+    totals.mappings.return_value.one.return_value = {
+        "totals": {**dict.fromkeys(analytics.AdsAnalyseTotals.model_fields, 0), "ad_count": 2},
+        "category_counts": {"Winner": 2},
+    }
+    return [totals]
 
 
 EXPECTED = {
@@ -69,9 +69,11 @@ EXPECTED = {
 
 
 async def test_scores_serialize_and_reuse_global_anchors_across_filters_and_pages():
+    empty = MagicMock()
+    empty.all.return_value = []
     session = SimpleNamespace(execute=AsyncMock(side_effect=[
-        _rows_result(_lifetime_row()), _anchor_result(), *_response_results(),
-        _rows_result(_lifetime_row()), *_response_results(),
+        _rows_result(_lifetime_row()), empty, _anchor_result(), *_response_results(),
+        _rows_result(_lifetime_row()), empty, *_response_results(),
     ]))
 
     first = await analytics.get_ads_analyse(session, limit=1)
@@ -89,7 +91,7 @@ async def test_scores_serialize_and_reuse_global_anchors_across_filters_and_page
     assert len(anchor_calls[0].args) == 1  # No row filters or page parameters.
     assert "WHERE" not in ad_efficiency._ANCHORS_SQL
     assert "LIMIT" not in ad_efficiency._ANCHORS_SQL
-    assert session.execute.await_count == 9
+    assert session.execute.await_count == 7
 
 
 async def test_delivery_overlay_keeps_original_lifetime_efficiencies():
@@ -98,8 +100,10 @@ async def test_delivery_overlay_keeps_original_lifetime_efficiencies():
     daily = MagicMock()
     # Distinct window inputs must not silently replace the lifetime scores.
     daily.all.return_value = [("1", 10, 200, 100, 20, 1, 5, 1, 2, None, None)]
+    empty = MagicMock()
+    empty.all.return_value = []
     session = SimpleNamespace(execute=AsyncMock(side_effect=[
-        exists, exists, _rows_result(_lifetime_row()), _anchor_result(), daily,
+        exists, exists, _rows_result(_lifetime_row()), empty, _anchor_result(), daily, empty,
         *_response_results(),
     ]))
 
@@ -119,7 +123,7 @@ async def test_empty_page_does_not_query_efficiency_anchors():
     ]))
     response = await analytics.get_ads_analyse(session, search="missing ad")
     assert response.rows == []
-    assert session.execute.await_count == 4
+    assert session.execute.await_count == 2
 
 
 def test_anchor_query_is_valid_postgres_and_keeps_zero_ads_in_medians():

@@ -2,7 +2,8 @@
 
 from contextlib import asynccontextmanager
 from datetime import date
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import ANY, AsyncMock
 
 from app.api.routers import analytics
 from app.services.analytics_cache import cached_analytics
@@ -22,13 +23,18 @@ async def test_warmup_is_reused_by_the_first_browser_page(monkeypatch):
 
     monkeypatch.setattr("app.database.session.session_scope", session_scope)
     monkeypatch.setattr(analytics, "get_ads_analyse", read)
-    for name in ("get_creative_testing", "get_last_click_utm", "get_landing_pages"):
+    source_day = date(2026, 9, 26)
+    monkeypatch.setattr(analytics, "get_cpis_utm_data_freshness", AsyncMock(
+        return_value=SimpleNamespace(max_meta_day=source_day),
+    ))
+    for name in ("get_creative_testing", "get_cpis_utm", "get_last_click_utm", "get_landing_pages"):
         monkeypatch.setattr(analytics, name, AsyncMock())
 
     await analytics.warm_ads_analyse_cache()
     browser_response = await read(
         session=object(), limit=100, from_date=date(2026, 1, 1),
-        to_date=date.today(), date_field="delivery",
+        to_date=source_day, date_field="delivery",
     )
     assert browser_response == {"total": 5976}
     assert len(calls) == 1, "Opening the page should reuse the warm response."
+    analytics.get_cpis_utm.assert_awaited_once_with(session=ANY, window="30d", limit=250)
