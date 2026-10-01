@@ -26,6 +26,13 @@ anthropic==0.120.2
 google-cloud-bigquery==3.27.0
 google-api-python-client==2.149.0
 google-auth==2.35.0
+# GA4. Two packages, not one: -data runs the reports, -admin lists the
+# properties and reads the property TIMEZONE, which fetch_ga4_daily.py
+# refuses to run without -- a property on a timezone other than the
+# warehouse's puts traffic in a different day from the spend that
+# caused it, and nothing downstream would show it.
+google-analytics-data==0.23.2
+google-analytics-admin==0.30.1
 
 # dev / test
 pytest==8.3.3
