@@ -1,3 +1,28 @@
+# HARDENED REPLACEMENT for daily-refresh.yml.
+#
+# Same steps, same schedule, same script. What changed is how failure is
+# reported, because the old one was red every single night and therefore
+# told nobody anything:
+#
+#   * refresh_all_daily.py now exits red ONLY for a CRITICAL step or a
+#     run that did no work. bq_inventory and ad_edit_log fail on every
+#     run for want of credentials the runner does not have, so "fail if
+#     anything failed" meant permanent red. Three nights of TOTAL failure
+#     (2026-09-30..2026-10-01, aborting before a single fetch) looked
+#     identical to every other night, and ad spend went five days stale.
+#
+#   * Restoring the BigQuery key is continue-on-error. It feeds two of
+#     ~32 steps; it used to abort the job before Meta, Shopify or CPIS
+#     ran at all.
+#
+#   * The run writes a GitHub step summary, so the outcome is readable
+#     from the run page instead of a 200MB log.
+#
+#   * SUPABASE_DB_URL is mapped through for ad_edit_log.
+#
+# daily-refresh.yml is kept, un-scheduled, as a manual fallback until
+# this has a green run. Delete it then.
+
 # Backend_Project daily refresh via GitHub Actions.
 #
 # Runs scripts/refresh_all_daily.py once a day. Each step writes its
@@ -33,7 +58,7 @@
 # trade-off, not an oversight.
 # ---------------------------------------------------------------------
 
-name: Backend_Project daily refresh (LEGACY - manual only)
+name: Backend_Project daily refresh v2
 
 on:
   workflow_dispatch:
@@ -47,11 +72,11 @@ on:
         required: false
         default: "false"
 
-  # schedule:  # moved to daily-refresh-v2.yml
+  schedule:
     # 01:30 UTC = 07:00 IST, daily. Cron in GitHub Actions is always UTC,
     # so this is the 7am-IST run -- do not "correct" it to 30 7 * * *,
     # which would fire at 13:00 IST.
-    # - cron: "30 1 * * *"
+    - cron: "30 1 * * *"
     # BACKUP, 02:30 UTC = 08:00 IST. GitHub does not guarantee scheduled
     # runs: it drops them under load and delays them routinely. Measured
     # on the sibling project 2026-09-05, its 19:30 UTC schedule started
@@ -62,7 +87,7 @@ on:
     # Two crons an hour apart make that far less likely, and the guard
     # step below makes the second one free: it exits immediately when
     # the first already ran. Both are cheap when nothing is wrong.
-    # - cron: "30 2 * * *"
+    - cron: "30 2 * * *"
 
 concurrency:
   # Never let two refreshes race against the same Supabase tables.
@@ -114,7 +139,7 @@ jobs:
           CUTOFF="$(date -u -d '5 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           RECENT="$(gh run list \
               --repo "${{ github.repository }}" \
-              --workflow daily-refresh.yml \
+              --workflow daily-refresh-v2.yml \
               --limit 20 \
               --json databaseId,createdAt \
               --jq "[.[] | select(.databaseId != ${{ github.run_id }})
@@ -209,6 +234,11 @@ jobs:
           AD_METRICS_SOURCE_URL:            ${{ secrets.AD_METRICS_SOURCE_URL }}
           DATABASE_URL:                     ${{ secrets.DATABASE_URL }}
           DATABASE_SERVICE_KEY:             ${{ secrets.DATABASE_SERVICE_KEY }}
+          # ad_edit_log reads from a SECOND Supabase project and writes
+          # into this one. Without this it fails on every run -- which is
+          # exactly what it has been doing. Add the secret and it works;
+          # leave it unset and the step fails alone, non-critically.
+          SUPABASE_DB_URL:                  ${{ secrets.SUPABASE_DB_URL }}
 
           # --- Meta ads (required for Phase 1 Meta ingest) ---
           META_ACCESS_TOKEN:                ${{ secrets.META_ACCESS_TOKEN }}

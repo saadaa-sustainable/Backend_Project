@@ -39,6 +39,7 @@ Wall time: ~35-60 min depending on Meta throttle.
 from __future__ import annotations
 
 import argparse
+import os
 import io
 import pathlib
 import sys
@@ -499,6 +500,35 @@ def main() -> int:
             for label, cmd, timeout in steps
         ]
 
+    #: Steps whose failure means the dashboard is showing WRONG data, as
+    #: opposed to merely incomplete data. Only these turn the job red.
+    #:
+    #: Why this distinction has to exist: the old rule was "fail if any
+    #: step failed", and 6 to 10 steps fail on a normal night -- bq_inventory
+    #: and ad_edit_log fail on EVERY run by design, for want of credentials
+    #: the runner does not have. So the job went red every single night,
+    #: and a red that never goes green is not a signal. Three consecutive
+    #: nights of total failure (2026-09-30 to 2026-10-01, where the job
+    #: aborted before fetching anything at all) looked exactly like every
+    #: other night, and ad spend went five days stale unnoticed.
+    #:
+    #: The list is deliberately short. Everything here feeds a headline
+    #: number: Meta spend, the daily insight tables the whole Ads Analyse
+    #: page reads, Shopify orders, or the CPIS attribution built on them.
+    #: Instagram, DPA products, inventory, returns and the edit log are
+    #: all real, but a day without them leaves the dashboard thinner, not
+    #: wrong.
+    CRITICAL_STEPS = {
+        "meta_roster", "meta_insights_15d", "meta_insights_daily_entity",
+        "meta_insights_lifetime",
+        "silver_raw_dump_meta", "silver_meta_entities",
+        "silver_insights_daily", "silver_insights_entity",
+        "silver_insights_tables",
+        "ad_lifecycle",
+        "shopify_daily", "silver_shopify",
+        "silver_cpis_daily", "silver_cpis_utm",
+    }
+
     with CronRun(project="backend_project") as run:
         for name, cmd, timeout in steps:
             with run.step(name, timeout=timeout) as step:
@@ -507,9 +537,45 @@ def main() -> int:
                 full_cmd = [PY, str(ROOT / cmd[0]), *cmd[1:]]
                 step.run(full_cmd, cwd=str(ROOT))
 
-    # Exit red if ANY step failed so GitHub marks the run failed and
-    # sends a notification. Partial success still fails the job.
-    return 0 if run.steps and all(s["status"] == "ok" for s in run.steps.values()) else 1
+    failed = sorted(n for n, st in run.steps.items() if st["status"] == "failed")
+    critical = [n for n in failed if n in CRITICAL_STEPS]
+    other = [n for n in failed if n not in CRITICAL_STEPS]
+
+    print("\n" + "=" * 62)
+    if not run.steps:
+        print("NO STEPS RAN -- the run aborted before doing any work.")
+    elif critical:
+        print(f"CRITICAL FAILURES ({len(critical)}): {', '.join(critical)}")
+        print("The dashboard is now showing WRONG data, not just thinner data.")
+    elif other:
+        print(f"Degraded: {len(other)} non-critical step(s) failed.")
+        print("Every headline number refreshed; some extras are missing.")
+    else:
+        print("All steps ok.")
+    if other:
+        print(f"  non-critical: {', '.join(other)}")
+    print("=" * 62)
+
+    # Also write it where GitHub actually shows it, so the outcome is
+    # readable from the run page without opening a 200MB log.
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        ok = [n for n, st in run.steps.items() if st["status"] == "ok"]
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write(f"## Daily refresh: {len(ok)} ok, {len(failed)} failed\n\n")
+            if critical:
+                fh.write(f"**CRITICAL — wrong data:** {', '.join(critical)}\n\n")
+            if other:
+                fh.write(f"Non-critical (expected): {', '.join(other)}\n\n")
+            if not failed and run.steps:
+                fh.write("Everything refreshed.\n")
+
+    # Red ONLY for a critical failure or a run that did nothing. A night
+    # where Instagram timed out but Meta spend landed is not an incident,
+    # and calling it one is what trained everybody to ignore the alert.
+    if not run.steps or critical:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
