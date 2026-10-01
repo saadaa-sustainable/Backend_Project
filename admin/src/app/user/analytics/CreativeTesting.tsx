@@ -337,6 +337,11 @@ const yn = (b: boolean | null | undefined) =>
  *  the threshold panel, and the fixed ones are spelled out where they
  *  matter. */
 const BUCKET_INFO: Record<string, { what: string; rule: string; note?: string }> = {
+  not_matched: {
+    what: "Creatives made in these dates whose id never appeared in an ad name.",
+    rule: "The asset has a link, and no ad name anywhere contains its identifier. Same rule as the Untested Assets tab — this whole section is built on ad_asset_map, which ties an asset to an ad only when the asset's own id is written into that ad's name.",
+    note: "NOT proof the creative was never run. It is proof we cannot SEE it running: an ad built from this creative but named without its id is invisible to every number on this page, and lands here. So this tile counts two different things at once — a genuine backlog, and ads that were named carelessly. The split between them cannot be read off the screen. The dates also differ from New creatives, and have to: that tile counts the day a creative first went live, and a creative with no matched ad has no ad date, so the day it was made is the only one it has. The backlog line ignores dates entirely.",
+  },
   all: {
     what: "Every creative that was put into a new ad during the dates you picked.",
     rule: "At least one of its ads was built inside these dates.",
@@ -806,8 +811,13 @@ export function CreativeTesting() {
   const histCount = kindCounts.historical_discarded ?? 0;
   const refreshCount = kindCounts.refresh_discarded ?? 0;
   // Windowed, like the tiles beside it. The media keys count assets MADE
-  // inside the picked dates that no ad has ever carried; `backlog` is
-  // every untested asset regardless of age.
+  // inside the picked dates whose id never appears in an ad name;
+  // `backlog` is the same test without the date bound.
+  //
+  // "Never appears in an ad name" is NOT "never ran". ad_asset_map ties
+  // an asset to an ad only when the asset's own id is written into that
+  // ad's name, so a creative that ran under a carelessly named ad counts
+  // here too.
   const unmatchedInWindow =
     (unmatched.video ?? 0) + (unmatched.graphic ?? 0) + (unmatched.influencer ?? 0);
   const unmatchedBacklog = unmatched.backlog ?? 0;
@@ -984,18 +994,20 @@ export function CreativeTesting() {
         <div
           className="rounded-lg border border-dashed border-border-primary bg-white px-3 py-2 text-left"
           title={
-            `${unmatchedInWindow.toLocaleString("en-IN")} creatives made in these dates that no ad has used yet` +
-            ` \u2014 ${(unmatched.video ?? 0).toLocaleString("en-IN")} video,` +
+            `${(unmatched.video ?? 0).toLocaleString("en-IN")} video,` +
             ` ${(unmatched.graphic ?? 0).toLocaleString("en-IN")} graphic,` +
-            ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer.` +
-            ` Across the whole register, ${unmatchedBacklog.toLocaleString("en-IN")} assets` +
-            ` are still waiting for their first ad.`
+            ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer`
           }
         >
+          {/* An InfoDot, like the two tiles beside it. This had a `title`
+              only, so the definition appeared on hover and nowhere else
+              -- unreachable by keyboard, invisible on touch, and gone the
+              moment the pointer moved. */}
           <div className="flex items-center gap-0.5">
             <span className="text-[11px] uppercase tracking-wide opacity-70 text-text-secondary">
               Not matched
             </span>
+            <InfoDot id="not_matched" />
           </div>
           <div className="text-lg font-semibold text-text-secondary">
             {unmatchedInWindow.toLocaleString("en-IN")}

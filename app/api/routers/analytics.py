@@ -617,10 +617,19 @@ _BUDGET_TYPE_CAMPAIGN_SQL = """
 # stored anchors still answers -- and `as_of_date` comes back with the
 # value so the caller can say which day it actually describes instead
 # of implying the one that was asked for.
+# `epoch_date = :epoch` is NOT optional. The table stores two unrelated
+# shapes of row under the same columns: CUMULATIVE snapshots, whose
+# epoch is the fetcher's --epoch, and EXACT WINDOWS (the Rolling 3/7/14/
+# 28D groups), whose epoch is the window's own start. Without the epoch
+# predicate a 3-day window row is the newest row for its entity, so
+# DISTINCT ON returns 3 days of reach where the caller asked for
+# cumulative -- reading Latest Reach as a few thousand people instead of
+# a few million, and Incr. Reach as a large negative clamped to 0.
 _REACH_ANCHOR_SQL = (
     "SELECT DISTINCT ON (entity_id) entity_id, cumulative_reach, as_of_date "
     "  FROM public.ad_reach_cumulative "
     " WHERE level = :level AND entity_id = ANY(:entity_ids) "
+    "   AND epoch_date = :epoch "
     "   AND as_of_date <= :anchor "
     " ORDER BY entity_id, as_of_date DESC"
 )
@@ -640,6 +649,7 @@ _REACH_RECENT_TWO_SQL = (
     "                            ORDER BY as_of_date DESC) AS rn"
     "    FROM public.ad_reach_cumulative"
     "   WHERE level = :level AND entity_id = ANY(:entity_ids)"
+    "     AND epoch_date = :epoch"
     "     AND as_of_date <= :anchor"
     ") t WHERE rn <= 2"
 )
@@ -650,12 +660,20 @@ _REACH_RECENT_TWO_SQL = (
 # the row's spend is lifetime there, and pairing lifetime spend with a
 # windowed reach is the basis mismatch that has produced a wrong
 # headline number in this file twice.
-_REACH_INTERVAL_SPEND_SQL = (
-    "SELECT ad_id, COALESCE(SUM(spend), 0) "
-    "  FROM public.insights_daily_by_ad "
-    " WHERE ad_id = ANY(:ad_ids) AND day > :after AND day <= :until "
-    " GROUP BY ad_id"
-)
+#
+# Parameterised by grain so the ad-set and campaign roll-ups get the same
+# column rather than a blank one: the arithmetic is identical, only the
+# daily table and its id column change.
+def _reach_interval_spend_sql(table: str, id_col: str) -> str:
+    return (
+        f"SELECT {id_col}, COALESCE(SUM(spend), 0) "
+        f"  FROM public.{table} "
+        f" WHERE {id_col} = ANY(:ad_ids) AND day > :after AND day <= :until "
+        f" GROUP BY {id_col}"
+    )
+
+
+_REACH_INTERVAL_SPEND_SQL = _reach_interval_spend_sql("insights_daily_by_ad", "ad_id")
 
 _REACH_TABLE_EXISTS = (
     "SELECT 1 FROM information_schema.tables "
@@ -680,18 +698,21 @@ async def _reach_snapshots_ready(session: AsyncSession) -> bool:
 
 async def _reach_anchor(
     session: AsyncSession, *, level: str, entity_ids: list[str], anchor: date,
+    epoch: date,
 ) -> dict[str, tuple[int, date]]:
     """{entity_id: (cumulative_reach, snapshot_date)} at or before `anchor`."""
     if not entity_ids:
         return {}
     result = await session.execute(text(_REACH_ANCHOR_SQL), {
         "level": level, "entity_ids": entity_ids, "anchor": anchor,
+        "epoch": epoch,
     })
     return {r[0]: (int(r[1] or 0), r[2]) for r in result}
 
 
 async def _reach_recent_two(
     session: AsyncSession, *, level: str, entity_ids: list[str], anchor: date,
+    epoch: date,
 ) -> tuple[dict[str, tuple[int, date]], dict[str, tuple[int, date]]]:
     """(latest, previous) maps from each entity's two newest snapshots.
 
@@ -704,6 +725,7 @@ async def _reach_recent_two(
         return {}, {}
     result = await session.execute(text(_REACH_RECENT_TWO_SQL), {
         "level": level, "entity_ids": entity_ids, "anchor": anchor,
+        "epoch": epoch,
     })
     latest: dict[str, tuple[int, date]] = {}
     prev: dict[str, tuple[int, date]] = {}
@@ -720,20 +742,29 @@ async def _reach_epoch(session: AsyncSession) -> date | None:
     and a constant duplicated here would silently disagree with the data
     the first time someone changes it.
     """
+    # MIN, and across every level. MAX was safe only while the table
+    # held cumulative rows alone; the exact-window rows that feed the
+    # Rolling groups carry their own window start as `epoch_date`, and
+    # the newest of those is a few days ago -- so MAX now returns a
+    # rolling window start rather than the epoch. The `level = 'ad'`
+    # scope went with it: the fetcher can be run per level, and the
+    # epoch is a property of the fetch, not of a grain.
     return (await session.execute(text(
-        "SELECT MAX(epoch_date) FROM public.ad_reach_cumulative WHERE level = 'ad'"
+        "SELECT MIN(epoch_date) FROM public.ad_reach_cumulative"
     ))).scalar_one_or_none()
 
 
 async def _reach_interval_spend(
     session: AsyncSession, *, ad_ids: list[str], after: date, until: date,
+    table: str = "insights_daily_by_ad", id_col: str = "ad_id",
 ) -> dict[str, float]:
-    """Spend per ad over (after, until] -- the incremental reach's own span."""
+    """Spend per entity over (after, until] -- the incremental reach's own span."""
     if not ad_ids or after >= until:
         return {}
-    result = await session.execute(text(_REACH_INTERVAL_SPEND_SQL), {
-        "ad_ids": ad_ids, "after": after, "until": until,
-    })
+    result = await session.execute(
+        text(_reach_interval_spend_sql(table, id_col)),
+        {"ad_ids": ad_ids, "after": after, "until": until},
+    )
     return {r[0]: float(r[1] or 0) for r in result}
 
 # True for exactly the ads the asset resolver below produces a non-NULL
@@ -1725,15 +1756,35 @@ async def get_ads_analyse(
         # 1k had no spend to divide. A window the user picked is honoured
         # as given -- they asked for that end date.
         anchor = to_date or (date.today() - timedelta(days=1))
-        if from_date:
+        # Read before the lookups, not after: it now scopes them. Both
+        # queries must be pinned to the epoch or an exact-window row
+        # answers in place of a cumulative snapshot.
+        epoch = await _reach_epoch(session)
+        # `from_date > epoch` and not merely `from_date`. A window that
+        # opens AT the epoch has nothing before it by construction: the
+        # previous anchor is the day before the epoch, no snapshot can
+        # exist there, and Prev Reach comes back empty -- which makes
+        # Incr. Reach equal Latest Reach on every row, i.e. the column
+        # stops being incremental.
+        #
+        # That is not a corner case, it is the DEFAULT. "Lifetime" is
+        # this page's default preset and the client sends it as an
+        # explicit from_date of 2026-01-01, which is exactly the epoch,
+        # so the strict branch was taken every time and the unbounded
+        # reading below was unreachable from the UI. Measured 2026-09-30
+        # on the Lifetime preset: 300 of 300 ads had a blank Prev Reach
+        # and an Incr. Reach identical to Latest Reach.
+        if from_date and epoch and from_date > epoch:
             latest_map = await _reach_anchor(
-                session, level="ad", entity_ids=ad_ids, anchor=anchor)
+                session, level="ad", entity_ids=ad_ids, anchor=anchor,
+                epoch=epoch)
             prev_map = await _reach_anchor(
                 session, level="ad", entity_ids=ad_ids,
-                anchor=from_date - timedelta(days=1))
+                anchor=from_date - timedelta(days=1), epoch=epoch)
         else:
             latest_map, prev_map = await _reach_recent_two(
-                session, level="ad", entity_ids=ad_ids, anchor=anchor)
+                session, level="ad", entity_ids=ad_ids, anchor=anchor,
+                epoch=epoch)
 
         for r in rows:
             latest = latest_map.get(r.ad_id)
@@ -1757,7 +1808,6 @@ async def get_ads_analyse(
         # headline number in this file twice. Ads are grouped by their
         # (prev, latest) snapshot pair -- with shared anchor dates that
         # is normally one or two groups, so one or two extra queries.
-        epoch = await _reach_epoch(session)
         spans: dict[tuple[date, date], list[str]] = defaultdict(list)
         for r in rows:
             if r.incremental_reach and r.reach_latest_as_of:
@@ -7090,7 +7140,8 @@ class CreativeTestingResponse(BaseModel):
     #: the same filters as `rows` minus `kind` itself, so every tab shows
     #: its true size whichever one is open.
     kind_counts: dict[str, int]
-    #: Assets with a link that no ad has ever carried, by media. NOT
+    #: Assets with a link whose id never appears in an ad name, by media.
+    #: That is not the same as never having run -- see _CT_UNMATCHED_SQL. NOT
     #: windowed -- see _CT_UNMATCHED_SQL.
     unmatched_counts: dict[str, int] = {}
 
@@ -7344,11 +7395,19 @@ async def get_creative_testing(
 # Creatives that have never been matched to an ad, windowed the way the
 # tiles beside them are.
 #
-# SAME rule /untested and CPIS use: a link exists, so somebody could test
-# it tomorrow, and ad_asset_map holds no row for its id, so no ad has
-# ever carried it. Repeating that rule rather than inventing a second --
-# a "not matched" tile disagreeing with the Untested Assets tab it sits
-# one click from would be worse than no tile.
+# SAME rule /untested and CPIS use: a link exists, and ad_asset_map holds
+# no row for the asset's id. Repeating that rule rather than inventing a
+# second -- a "not matched" tile disagreeing with the Untested Assets tab
+# it sits one click from would be worse than no tile.
+#
+# WHAT THE RULE ACTUALLY PROVES. ad_asset_map ties an asset to an ad if
+# and only if the asset's own identifier appears inside that ad's NAME
+# (see scripts/refresh_ad_asset_map.py). So a row here means the id was
+# never written into any ad name -- NOT that the creative never ran. An
+# ad built from this creative but named without its id is invisible to
+# every figure in this section and counts as unmatched. The number is
+# therefore a backlog and a naming-hygiene signal mixed together, and
+# nothing in the data separates them.
 #
 # TWO numbers per media, because they answer different questions:
 #
@@ -7570,6 +7629,67 @@ def _rolling_metrics_sql(table: str, id_col: str) -> str:
         f" FROM public.{table} "
         f" WHERE day > CAST(:last_date AS date) - {2 * max(_ROLLING_PERIODS)} AND day <= CAST(:last_date AS date) "
         f" GROUP BY {id_col}"
+    )
+
+
+#: De-duplicated unique reach for each rolling window, and for the
+#: equally long window before it.
+#:
+#: This is what `d{P}_reach_proxy` above could never be. The proxy sums
+#: daily reach, so a person seen on three days counts three times.
+#: Measured on the 28D window, campaign level, 2026-09-28:
+#:
+#:     fleet          39,100,399 people   vs  80,239,692 person-days  2.05x
+#:     top campaign   10,523,710          vs  28,513,881             2.71x
+#:     worst campaign                                                3.1x
+#:
+#: The multiple is not a constant, so the proxy is not even a rescalable
+#: stand-in: it overstates the busiest entities most, which are the ones
+#: these columns are read for. A delta between two such numbers is a
+#: change in person-days, which is not a quantity anybody wants to read
+#: next to spend.
+#:
+#: The figures here are Meta's own, fetched one /insights call per window
+#: with an explicit time_range and no time_increment -- the shape
+#: `getAdsetReach` uses in the Apps Script this dashboard replaced. The
+#: fetcher stores a window as (epoch_date = since, as_of_date = until),
+#: so the lookup is an equality match on the pair:
+#:
+#:     current   epoch = L - (P-1),  as_of = L
+#:     previous  epoch = L - (2P-1), as_of = L - P
+#:
+#: which are exactly the two spans _rolling_metrics_sql filters for, so
+#: the unique figure and the proxy beside it describe the same days.
+#:
+#: NULL when the window has not been fetched -- deliberately, so the
+#: column goes blank rather than falling back to the proxy. A cell that
+#: silently switches between de-duplicated people and person-days is
+#: worse than an empty one. `scripts/fetch_reach_cumulative.py
+#: --preset-windows` fetches every window this reads, for the anchors
+#: `last_date` can take (today, or yesterday while Meta is a day behind).
+def _rolling_unique_reach_sql(level_param: str = "reach_level") -> str:
+    parts = []
+    for p in _ROLLING_PERIODS:
+        parts += [
+            f"MAX(cumulative_reach) FILTER ("
+            f"  WHERE epoch_date = CAST(:last_date AS date) - {p - 1} "
+            f"    AND as_of_date = CAST(:last_date AS date)"
+            f") AS d{p}_reach_unique",
+            f"MAX(cumulative_reach) FILTER ("
+            f"  WHERE epoch_date = CAST(:last_date AS date) - {2 * p - 1} "
+            f"    AND as_of_date = CAST(:last_date AS date) - {p}"
+            f") AS d{p}_reach_unique_prev",
+        ]
+    return (
+        "SELECT entity_id, " + ", ".join(parts) +
+        "  FROM public.ad_reach_cumulative "
+        f" WHERE level = :{level_param} "
+        # Bounded so this does not scan the whole cumulative history.
+        # The longest span read is the 28D previous window, which opens
+        # 2*28-1 days before last_date.
+        f"   AND as_of_date <= CAST(:last_date AS date) "
+        f"   AND as_of_date >= CAST(:last_date AS date) - {2 * max(_ROLLING_PERIODS)} "
+        " GROUP BY entity_id"
     )
 
 
@@ -7948,6 +8068,22 @@ class RollupRow(BaseModel):
     #: than trusted.
     decision_reason: str | None = None
 
+    # -- de-duplicated reach, the same five columns the ad table has --
+    #: Share of the reach of every entity under the current filters.
+    reach_weight_pct: float | None = None
+    #: Cumulative unique people from the reach epoch to the day before
+    #: the window opened, and to the window's end.
+    previous_reach: float | None = None
+    latest_reach: float | None = None
+    #: Latest - Prev: people reached in the window who had never been
+    #: reached before it. The only figure here that means "new people".
+    incremental_reach: float | None = None
+    cost_per_1000_incremental_reach: float | None = None
+    #: The days the two snapshots above actually describe, which is not
+    #: necessarily the days that were asked for.
+    reach_prev_as_of: date | None = None
+    reach_latest_as_of: date | None = None
+
     #: Rolling 3-day window ending at the data's last date.
     d3_spend: float | None = None
     d3_lc_revenue: float | None = None
@@ -7955,6 +8091,10 @@ class RollupRow(BaseModel):
     #: SUMMED daily reach -- person-days, NOT de-duplicated people.
     d3_reach_proxy: float | None = None
     d3_reach_prev: float | None = None
+    #: Meta's de-duplicated unique reach for this window, and for
+    #: the equally long window before it. NULL when unfetched.
+    d3_reach_unique: float | None = None
+    d3_reach_unique_prev: float | None = None
     d3_reach_delta: float | None = None
     d3_reach_delta_pct: float | None = None
     d3_ftewv: float | None = None
@@ -7966,6 +8106,10 @@ class RollupRow(BaseModel):
     #: SUMMED daily reach -- person-days, NOT de-duplicated people.
     d7_reach_proxy: float | None = None
     d7_reach_prev: float | None = None
+    #: Meta's de-duplicated unique reach for this window, and for
+    #: the equally long window before it. NULL when unfetched.
+    d7_reach_unique: float | None = None
+    d7_reach_unique_prev: float | None = None
     d7_reach_delta: float | None = None
     d7_reach_delta_pct: float | None = None
     d7_ftewv: float | None = None
@@ -7977,6 +8121,10 @@ class RollupRow(BaseModel):
     #: SUMMED daily reach -- person-days, NOT de-duplicated people.
     d14_reach_proxy: float | None = None
     d14_reach_prev: float | None = None
+    #: Meta's de-duplicated unique reach for this window, and for
+    #: the equally long window before it. NULL when unfetched.
+    d14_reach_unique: float | None = None
+    d14_reach_unique_prev: float | None = None
     d14_reach_delta: float | None = None
     d14_reach_delta_pct: float | None = None
     d14_ftewv: float | None = None
@@ -7988,6 +8136,10 @@ class RollupRow(BaseModel):
     #: SUMMED daily reach -- person-days, NOT de-duplicated people.
     d28_reach_proxy: float | None = None
     d28_reach_prev: float | None = None
+    #: Meta's de-duplicated unique reach for this window, and for
+    #: the equally long window before it. NULL when unfetched.
+    d28_reach_unique: float | None = None
+    d28_reach_unique_prev: float | None = None
     d28_reach_delta: float | None = None
     d28_reach_delta_pct: float | None = None
     d28_ftewv: float | None = None
@@ -8290,7 +8442,11 @@ async def get_ads_analyse_rollup(
         f"            THEN COALESCE(sh.shopify_revenue, 0) / {spend} END AS shopify_roas, "
         "        CASE WHEN COALESCE(sh.shopify_orders, 0) > 0 "
         f"            THEN {spend} / sh.shopify_orders END AS cost_per_shopify_order, "
-        "        rm.d3_spend, rm.d3_reach_proxy, rm.d3_reach_prev, rm.d3_ftewv, rl.d3_lc_revenue, rm.d7_spend, rm.d7_reach_proxy, rm.d7_reach_prev, rm.d7_ftewv, rl.d7_lc_revenue, rm.d14_spend, rm.d14_reach_proxy, rm.d14_reach_prev, rm.d14_ftewv, rl.d14_lc_revenue, rm.d28_spend, rm.d28_reach_proxy, rm.d28_reach_prev, rm.d28_ftewv, rl.d28_lc_revenue "
+        "        rm.d3_spend, rm.d3_reach_proxy, rm.d3_reach_prev, rm.d3_ftewv, rl.d3_lc_revenue, rm.d7_spend, rm.d7_reach_proxy, rm.d7_reach_prev, rm.d7_ftewv, rl.d7_lc_revenue, rm.d14_spend, rm.d14_reach_proxy, rm.d14_reach_prev, rm.d14_ftewv, rl.d14_lc_revenue, rm.d28_spend, rm.d28_reach_proxy, rm.d28_reach_prev, rm.d28_ftewv, rl.d28_lc_revenue, "
+        "        ur.d3_reach_unique, ur.d3_reach_unique_prev, "
+        "        ur.d7_reach_unique, ur.d7_reach_unique_prev, "
+        "        ur.d14_reach_unique, ur.d14_reach_unique_prev, "
+        "        ur.d28_reach_unique, ur.d28_reach_unique_prev "
         f"FROM public.{table} i "
         "LEFT JOIN (SELECT account_id, MIN(account_name) AS account_name "
         "             FROM ad_lifecycle "
@@ -8305,6 +8461,7 @@ async def get_ads_analyse_rollup(
         f"LEFT JOIN ({_ROLLUP_REACH_SQL}) rw ON rw.entity_id = i.{id_col} "
         f"LEFT JOIN ({_rolling_metrics_sql(daily_table, daily_id)}) rm "
         f"       ON rm.entity_id = i.{id_col} "
+        f"LEFT JOIN ({_rolling_unique_reach_sql()}) ur ON ur.entity_id = i.{id_col} "
         f"LEFT JOIN ({_rolling_lc_sql(level)}) rl ON rl.entity_id = i.{id_col} "
         f"LEFT JOIN ({_ncp_rollup_sql(level)}) npc ON npc.entity_id = i.{id_col} "
         f"LEFT JOIN ({_customer_mix_sql(level)}) cmx ON cmx.entity_id = i.{id_col} "
@@ -8333,30 +8490,37 @@ async def get_ads_analyse_rollup(
             r.d3_lc_roas = (r.d3_lc_revenue or 0) / r.d3_spend
         if r.d3_ftewv:
             r.d3_cost_per_ftewv = (r.d3_spend or 0) / r.d3_ftewv
-        cur, prev = r.d3_reach_proxy or 0, r.d3_reach_prev or 0
-        r.d3_reach_delta = cur - prev
-        r.d3_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
         if r.d7_spend:
             r.d7_lc_roas = (r.d7_lc_revenue or 0) / r.d7_spend
         if r.d7_ftewv:
             r.d7_cost_per_ftewv = (r.d7_spend or 0) / r.d7_ftewv
-        cur, prev = r.d7_reach_proxy or 0, r.d7_reach_prev or 0
-        r.d7_reach_delta = cur - prev
-        r.d7_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
         if r.d14_spend:
             r.d14_lc_roas = (r.d14_lc_revenue or 0) / r.d14_spend
         if r.d14_ftewv:
             r.d14_cost_per_ftewv = (r.d14_spend or 0) / r.d14_ftewv
-        cur, prev = r.d14_reach_proxy or 0, r.d14_reach_prev or 0
-        r.d14_reach_delta = cur - prev
-        r.d14_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
         if r.d28_spend:
             r.d28_lc_roas = (r.d28_lc_revenue or 0) / r.d28_spend
         if r.d28_ftewv:
             r.d28_cost_per_ftewv = (r.d28_spend or 0) / r.d28_ftewv
-        cur, prev = r.d28_reach_proxy or 0, r.d28_reach_prev or 0
-        r.d28_reach_delta = cur - prev
-        r.d28_reach_delta_pct = ((cur - prev) / prev * 100.0) if prev else 0.0
+
+        # Reach delta, from the DE-DUPLICATED figures rather than the
+        # proxy beside them. It used to subtract two summed-daily-reach
+        # numbers, which is a change in person-days -- and since the
+        # proxy overstates by 2.0x to 3.1x depending on how many days an
+        # entity ran, the two windows it subtracted were not even
+        # inflated by the same amount.
+        #
+        # Left NULL, not 0, when the window has not been fetched. A zero
+        # there is indistinguishable from "reach did not move", which is
+        # the one thing these columns exist to tell you.
+        for _p in _ROLLING_PERIODS:
+            cur = getattr(r, f"d{_p}_reach_unique")
+            if cur is None:
+                continue
+            prev = getattr(r, f"d{_p}_reach_unique_prev") or 0
+            setattr(r, f"d{_p}_reach_delta", cur - prev)
+            setattr(r, f"d{_p}_reach_delta_pct",
+                    (cur - prev) / prev * 100.0 if prev else 0.0)
 
         # Framework verdict. Cost/FTEWV is read on BOTH windows: a kill
         # needs the 3D and the 7D figure to agree that the entity is
@@ -8365,6 +8529,86 @@ async def get_ads_analyse_rollup(
             r.d3_lc_roas, r.d7_lc_roas, r.account_name,
             d3_spend=r.d3_spend, d3_ftewv=r.d3_ftewv,
             d7_spend=r.d7_spend, d7_ftewv=r.d7_ftewv)
+
+    # -- de-duplicated reach overlay, the ad table's five columns -------
+    #
+    # Same helpers, same definitions, only `level` changes: the fetcher
+    # already stores adset and campaign snapshots, so these columns were
+    # missing here for no reason other than that nobody had wired them.
+    #
+    # Reach Weight % is the one column that CANNOT be lifted from the ad
+    # table's arithmetic. There it divides by the summed reach of every
+    # ad under the filters. Here the denominator is the summed reach of
+    # the rows returned, i.e. this page -- Meta de-duplicates per entity,
+    # so there is no honest "total unique reach of every ad set" to
+    # divide by short of another API call per filter combination. It is
+    # therefore a share of what is on screen, which is what the header
+    # says and what sorting by it is useful for.
+    if rows and await _reach_snapshots_ready(session):
+        entity_ids = [r.entity_id for r in rows]
+        epoch = await _reach_epoch(session)
+        # Same epoch test the ad table makes, and for the same reason:
+        # from_date is ALWAYS set here (it defaults above), so without
+        # it this branch was unconditional and a Lifetime window --
+        # which opens at the epoch -- left Prev Reach blank on every
+        # row, collapsing Incr. Reach onto Latest Reach.
+        if epoch and params["from_date"] > epoch:
+            latest_map = await _reach_anchor(
+                session, level=level, entity_ids=entity_ids,
+                anchor=params["to_date"], epoch=epoch)
+            prev_map = await _reach_anchor(
+                session, level=level, entity_ids=entity_ids,
+                anchor=params["from_date"] - timedelta(days=1), epoch=epoch)
+        else:
+            # Each entity's two newest snapshots: what it added most
+            # recently, a question a window opening at the epoch can
+            # still answer. ReachCell prints both snapshot dates, so the
+            # cell says which days it describes.
+            latest_map, prev_map = await _reach_recent_two(
+                session, level=level, entity_ids=entity_ids,
+                anchor=params["to_date"], epoch=epoch)
+
+        for r in rows:
+            latest = latest_map.get(r.entity_id)
+            if latest is None:
+                continue
+            r.latest_reach, r.reach_latest_as_of = float(latest[0]), latest[1]
+            prev = prev_map.get(r.entity_id)
+            if prev is not None:
+                r.previous_reach, r.reach_prev_as_of = float(prev[0]), prev[1]
+            # No earlier snapshot means nothing was counted for this
+            # entity before the window, so everyone in `latest` is new
+            # to it -- the reading GREATEST(0, ...) gives for a NULL prev.
+            r.incremental_reach = max(0.0, r.latest_reach - (r.previous_reach or 0.0))
+
+        # Spend over exactly the span the incremental reach covers, not
+        # the row's own windowed spend. The two usually agree here
+        # (the roll-up's spend is already windowed) but they diverge
+        # whenever a snapshot lands on a different day from the window
+        # edge, which DISTINCT ON allows by design.
+        spans: dict[tuple[date, date], list[str]] = defaultdict(list)
+        for r in rows:
+            if r.incremental_reach and r.reach_latest_as_of:
+                start = r.reach_prev_as_of or (
+                    epoch - timedelta(days=1) if epoch else None)
+                if start is None:
+                    continue
+                spans[(start, r.reach_latest_as_of)].append(r.entity_id)
+        spend_by_entity: dict[str, float] = {}
+        for (after, until), ids in spans.items():
+            spend_by_entity.update(await _reach_interval_spend(
+                session, ad_ids=ids, after=after, until=until,
+                table=daily_table, id_col=daily_id))
+        for r in rows:
+            spend = spend_by_entity.get(r.entity_id)
+            if spend and r.incremental_reach:
+                r.cost_per_1000_incremental_reach = spend * 1000.0 / r.incremental_reach
+
+        page_reach = sum(r.reach or 0 for r in rows)
+        if page_reach:
+            for r in rows:
+                if r.reach is not None:
+                    r.reach_weight_pct = r.reach * 100.0 / page_reach
 
     # Same account join as the row query: where_sql now references
     # `acct`, and a count without it fails with "missing FROM-clause

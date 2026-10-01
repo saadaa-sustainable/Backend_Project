@@ -154,49 +154,95 @@ def main() -> None:
     columns = [f.name for f in schema]
     col_list = ", ".join(_quote_pg_ident(c) for c in columns)
 
-    # Commit-per-N-rows so a crash mid-fetch leaves partially loaded data
-    # behind (better than losing all 1M+ rows). The initial DDL + TRUNCATE
-    # is its own quick transaction; subsequent inserts commit every
-    # COMMIT_EVERY rows.
-    COMMIT_EVERY = 50_000
+    # COMMIT EVERY BATCH, and RECONNECT when the pooler drops us.
+    #
+    # This held one connection for the whole load and committed every
+    # 50k rows. Supabase's pooler drops a long-lived connection, and on
+    # 2026-09-29 it did exactly that 550,000 rows into a 3.7M-row pull:
+    #
+    #   psycopg2.OperationalError: server closed the connection
+    #   unexpectedly ... at line 182, execute_values
+    #
+    # The script then died with the table holding a SEVENTH of the data
+    # and no indication in the table itself that it was partial -- worse
+    # than failing outright, because the rollup downstream read it and
+    # published numbers from it.
+    #
+    # Two changes. Short transactions, because a pooler is far more
+    # tolerant of many small ones than of one that runs for half an
+    # hour. And a reconnect, because being dropped is normal here rather
+    # than exceptional: the TRUNCATE has already committed by then, so
+    # resuming is just a fresh connection and a retry of the batch that
+    # was in flight.
+    def _fresh_conn():
+        c = psycopg2.connect(_pg_dsn())
+        c.autocommit = False
+        with c.cursor() as cur:
+            cur.execute("SET statement_timeout = '900s'")
+        return c
 
-    conn = psycopg2.connect(_pg_dsn())
-    conn.autocommit = False
+    conn = _fresh_conn()
     inserted = 0
+    reconnects = 0
     try:
         # Step 1: DDL + TRUNCATE in its own txn.
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = '900s'")
             cur.execute(ddl)
         conn.commit()
 
         sql = f"INSERT INTO {PG_TABLE} ({col_list}) VALUES %s"
 
-        # Step 2: stream + commit periodically.
+        def _flush(rows: list[tuple]) -> None:
+            """Insert one batch, reconnecting if the pooler drops us."""
+            nonlocal conn, reconnects
+            for attempt in range(5):
+                try:
+                    with conn.cursor() as cur:
+                        psycopg2.extras.execute_values(
+                            cur, sql, rows, page_size=len(rows))
+                    conn.commit()
+                    return
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+                    # The batch is not committed, so replaying it cannot
+                    # duplicate rows.
+                    reconnects += 1
+                    print(f"[pg]   connection lost ({type(exc).__name__}), "
+                          f"reconnecting and retrying batch "
+                          f"[attempt {attempt + 1}/5]", flush=True)
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    time.sleep(2 * (attempt + 1))
+                    conn = _fresh_conn()
+            raise RuntimeError(
+                f"could not insert batch after 5 attempts at row {inserted:,}")
+
+        # Step 2: stream + flush.
         batch: list[tuple] = []
-        last_commit = 0
-        with conn.cursor() as cur:
-            for row in it:
-                batch.append(tuple(row.get(c) for c in columns))
-                if len(batch) >= BATCH_SIZE:
-                    psycopg2.extras.execute_values(cur, sql, batch, page_size=BATCH_SIZE)
-                    inserted += len(batch)
-                    batch.clear()
-                    if inserted - last_commit >= COMMIT_EVERY:
-                        conn.commit()
-                        last_commit = inserted
-                        print(f"[pg]   inserted {inserted:,} rows (committed)")
-            if batch:
-                psycopg2.extras.execute_values(cur, sql, batch, page_size=len(batch))
+        for row in it:
+            batch.append(tuple(row.get(c) for c in columns))
+            if len(batch) >= BATCH_SIZE:
+                _flush(batch)
                 inserted += len(batch)
-            conn.commit()
+                batch.clear()
+                if inserted % 250_000 == 0:
+                    print(f"[pg]   inserted {inserted:,} rows", flush=True)
+        if batch:
+            _flush(batch)
+            inserted += len(batch)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     dt = time.time() - t0
     print(f"\n[OK] bq_inventory_daily refreshed in {dt:.1f}s")
     print(f"    columns       : {len(columns)}")
     print(f"    rows inserted : {inserted:,}")
+    if reconnects:
+        print(f"    reconnects    : {reconnects} (pooler dropped the connection)")
     if inserted:
         rate = inserted / max(dt, 0.001)
         print(f"    throughput    : {rate:,.0f} rows/sec")

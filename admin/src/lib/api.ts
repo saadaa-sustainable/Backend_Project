@@ -2429,6 +2429,21 @@ export interface RollupRow {
   /** The arithmetic behind the verdict. */
   decision_reason: string | null;
 
+  /** Share of the reach of the entities on this page. */
+  reach_weight_pct: number | null;
+  /** Cumulative unique people from the reach epoch to the day before the
+   *  window opened, and to its end. */
+  previous_reach: number | null;
+  latest_reach: number | null;
+  /** Latest − Prev: people reached in the window who had never been
+   *  reached before it. */
+  incremental_reach: number | null;
+  cost_per_1000_incremental_reach: number | null;
+  /** The days those two snapshots describe, which need not be the days
+   *  that were asked for. */
+  reach_prev_as_of: string | null;
+  reach_latest_as_of: string | null;
+
   /** Rolling 3-day window ending at the data's last date, not today. */
   d3_spend: number | null;
   d3_lc_revenue: number | null;
@@ -2436,6 +2451,11 @@ export interface RollupRow {
   /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
   d3_reach_proxy: number | null;
   d3_reach_prev: number | null;
+  /** Meta's de-duplicated unique reach for this window, and for the
+   *  equally long window before it. null when that window has not
+   *  been fetched — the delta below reads these two, not the proxy. */
+  d3_reach_unique: number | null;
+  d3_reach_unique_prev: number | null;
   d3_reach_delta: number | null;
   d3_reach_delta_pct: number | null;
   d3_ftewv: number | null;
@@ -2447,6 +2467,11 @@ export interface RollupRow {
   /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
   d7_reach_proxy: number | null;
   d7_reach_prev: number | null;
+  /** Meta's de-duplicated unique reach for this window, and for the
+   *  equally long window before it. null when that window has not
+   *  been fetched — the delta below reads these two, not the proxy. */
+  d7_reach_unique: number | null;
+  d7_reach_unique_prev: number | null;
   d7_reach_delta: number | null;
   d7_reach_delta_pct: number | null;
   d7_ftewv: number | null;
@@ -2458,6 +2483,11 @@ export interface RollupRow {
   /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
   d14_reach_proxy: number | null;
   d14_reach_prev: number | null;
+  /** Meta's de-duplicated unique reach for this window, and for the
+   *  equally long window before it. null when that window has not
+   *  been fetched — the delta below reads these two, not the proxy. */
+  d14_reach_unique: number | null;
+  d14_reach_unique_prev: number | null;
   d14_reach_delta: number | null;
   d14_reach_delta_pct: number | null;
   d14_ftewv: number | null;
@@ -2469,6 +2499,11 @@ export interface RollupRow {
   /** SUMMED daily reach: person-days, deliberately not de-duplicated. */
   d28_reach_proxy: number | null;
   d28_reach_prev: number | null;
+  /** Meta's de-duplicated unique reach for this window, and for the
+   *  equally long window before it. null when that window has not
+   *  been fetched — the delta below reads these two, not the proxy. */
+  d28_reach_unique: number | null;
+  d28_reach_unique_prev: number | null;
   d28_reach_delta: number | null;
   d28_reach_delta_pct: number | null;
   d28_ftewv: number | null;
