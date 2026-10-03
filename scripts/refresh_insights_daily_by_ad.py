@@ -382,6 +382,9 @@ def refresh(conn) -> tuple:
             cur.execute("ANALYZE pg_temp.insights_daily_by_ad_stage")
             print("[pg] publishing daily ad metrics ...", flush=True)
             changed, removed, stats = publish_stage(cur)
+            # Reconciliation can remove old synthetic rows. Refresh planner
+            # estimates before downstream analytics read the smaller table.
+            cur.execute("ANALYZE public.insights_daily_by_ad")
             print(f"[pg] {changed:,} inserted/changed; {removed:,} obsolete rows removed", flush=True)
     return stats
 
