@@ -3,10 +3,9 @@ conv_value, ncp_count, ftewv_count, impressions, clicks) table so CPIS + Creativ
 read windowed metrics without paying the per-row JSONB extraction cost
 that made the /cpis-utm endpoint hit 60+ seconds at 50-row pagination.
 
-Refresh cadence: run after every daily meta ingestion. Idempotent, and
-built into a side table that is swapped in at the end, so readers are
-never blocked for longer than the rename (see main() for what the old
-TRUNCATE cost once an endpoint depended on this table).
+Refresh cadence: run after every daily meta ingestion. Build in a temporary
+table, then reconcile rows in one transaction. The live table keeps its OID,
+views, indexes and permissions, and ordinary dashboard reads remain available.
 
 The columns are DERIVED here from Meta's actions[] / action_values[]
 JSONB arrays -- ncp_count comes from actions[first_time_customer_purchase]
@@ -24,12 +23,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
-
 import psycopg2  # noqa: E402
-
-
-DSN = os.environ["DATABASE_URL_SYNC"].replace("postgresql+psycopg2://", "postgresql://")
 
 
 DDL = """
@@ -81,6 +75,7 @@ ALTER TABLE public.insights_daily_by_ad
     ADD COLUMN IF NOT EXISTS all_clicks        numeric;
 CREATE INDEX IF NOT EXISTS ix_idba_ad_day ON public.insights_daily_by_ad(ad_id, day);
 CREATE INDEX IF NOT EXISTS ix_idba_day    ON public.insights_daily_by_ad(day);
+ALTER TABLE public.insights_daily_by_ad ENABLE ROW LEVEL SECURITY;
 """
 
 
@@ -140,11 +135,12 @@ raw_dedup AS (
       AND raw_payload->>'ad_id' IS NOT NULL
       AND raw_payload->>'date_start' IS NOT NULL
       AND raw_payload->>'date_stop' IS NOT NULL
+      AND raw_payload->>'date_start' = raw_payload->>'date_stop'
     ORDER BY
       raw_payload->>'ad_id',
       raw_payload->>'date_start',
       raw_payload->>'date_stop',
-      ingested_at DESC
+      ingested_at DESC, id DESC
 ),
 extracted AS (
     SELECT
@@ -290,121 +286,119 @@ FROM best
 """
 
 
-# 3600s, raised from 1200s on 2026-09-05.
-#
-# The Meta history backfill landed 174,625 rows in raw_dump_meta, taking
-# it to 708,780 insights rows, and this rebuild expands each one across
-# every day of its date range before deduplicating -- 1,752,382 output
-# rows. At 1200s it died mid-INSERT, exactly 1200.2s in:
-#
-#     [pg] rebuilding from raw_dump_meta ...
-#     psycopg2.errors.QueryCanceled: canceling statement due to
-#     statement timeout
-#
-# and because this step failed, every step after it in the workflow was
-# skipped -- so the metric mirrors were never synced and the dashboard
-# saw none of it. The fetch had worked; only the flatten was too slow
-# for its own limit.
-#
-# The job's own ceiling is 350 minutes, so an hour here is still a
-# safety net rather than an expectation. If it ever approaches this,
-# the rebuild wants to go incremental rather than get a bigger number.
-_TIMEOUT = "SET statement_timeout = '3600s'"
+# Keep the live relation stable. Renaming it strands existing views on the
+# predecessor's OID, and a later DROP fails because those views still use it.
+# Only changed rows are rewritten; a normal SELECT never waits on these DML
+# locks. The temporary stage is private to this transaction/pool connection.
+METRIC_COLUMNS = (
+    "spend", "conv_value", "ncp_count", "ftewv_count", "impressions", "clicks",
+    "all_clicks", "reach", "purchases", "add_to_cart", "checkout_initiate",
+    "thruplays", "three_sec_plays", "outbound_clicks", "post_engagements",
+    "video_play_time",
+)
+_COLUMNS = ", ".join(("ad_id", "day", *METRIC_COLUMNS, "refreshed_at"))
+_UPDATES = ", ".join(f"{c} = EXCLUDED.{c}" for c in (*METRIC_COLUMNS, "refreshed_at"))
+_CURRENT = ", ".join(f"live.{c}" for c in METRIC_COLUMNS)
+_INCOMING = ", ".join(f"EXCLUDED.{c}" for c in METRIC_COLUMNS)
+
+STAGE_DDL = """
+CREATE TEMP TABLE insights_daily_by_ad_stage
+    (LIKE public.insights_daily_by_ad INCLUDING DEFAULTS) ON COMMIT DROP
+"""
+STAGE_SQL = REBUILD_SQL.replace(
+    "INSERT INTO public.insights_daily_by_ad (",
+    "INSERT INTO pg_temp.insights_daily_by_ad_stage (",
+)
+PUBLISH_SQL = f"""
+INSERT INTO public.insights_daily_by_ad AS live ({_COLUMNS})
+SELECT {_COLUMNS} FROM pg_temp.insights_daily_by_ad_stage
+ON CONFLICT (ad_id, day) DO UPDATE SET {_UPDATES}
+WHERE ROW({_CURRENT}) IS DISTINCT FROM ROW({_INCOMING})
+"""
+DELETE_MISSING_SQL = """
+DELETE FROM public.insights_daily_by_ad AS live
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_temp.insights_daily_by_ad_stage staged
+    WHERE staged.ad_id = live.ad_id AND staged.day = live.day
+)
+"""
+LIVE_MAX_DAY_SQL = "SELECT MAX(day) FROM public.insights_daily_by_ad"
+STAGE_STATS_SQL = """
+SELECT COUNT(*), COUNT(DISTINCT ad_id), MIN(day), MAX(day)
+FROM pg_temp.insights_daily_by_ad_stage
+"""
+
+
+def publish_stage(cur) -> tuple[int, int, tuple]:
+    """Publish a complete snapshot atomically; caller owns commit/rollback."""
+    cur.execute(STAGE_STATS_SQL)
+    stats = cur.fetchone()
+    cur.execute(LIVE_MAX_DAY_SQL)
+    live_through = cur.fetchone()[0]
+    if not stats[0]:
+        raise RuntimeError("Daily insight rebuild is empty; preserving the live table")
+    if live_through is not None and stats[3] < live_through:
+        raise RuntimeError(
+            f"Daily insight coverage regressed: {stats[3]} < {live_through}; "
+            "preserving the live table"
+        )
+    cur.execute(PUBLISH_SQL)
+    changed = cur.rowcount
+    cur.execute(DELETE_MISSING_SQL)
+    removed = cur.rowcount
+    return changed, removed, stats
+
+
+def ensure_table(conn) -> None:
+    # Avoid running ALTER TABLE on every refresh: even ADD IF NOT EXISTS
+    # takes an exclusive lock and can queue behind a dashboard query.
+    with conn:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'insights_daily_by_ad'
+            """)
+            columns = {r[0] for r in cur.fetchall()}
+            if not set(("ad_id", "day", "refreshed_at", *METRIC_COLUMNS)) <= columns:
+                cur.execute(DDL)
+
+
+def refresh(conn) -> tuple:
+    ensure_table(conn)
+    with conn:
+        with conn.cursor() as cur:
+            # LOCAL settings and the temporary stage live inside ONE transaction,
+            # so they also work through Supabase's transaction pooler.
+            cur.execute("SET LOCAL statement_timeout = '3600s'")
+            cur.execute("SET LOCAL lock_timeout = '5s'")
+            cur.execute("SELECT pg_try_advisory_xact_lock(hashtext('refresh_insights_daily_by_ad'))")
+            if not cur.fetchone()[0]:
+                raise RuntimeError("Another daily ad metrics refresh is already running")
+            print("[pg] building daily ad metrics in a temporary table ...", flush=True)
+            cur.execute(STAGE_DDL)
+            cur.execute(STAGE_SQL)
+            cur.execute("ALTER TABLE pg_temp.insights_daily_by_ad_stage ADD PRIMARY KEY (ad_id, day)")
+            cur.execute("ANALYZE pg_temp.insights_daily_by_ad_stage")
+            print("[pg] publishing daily ad metrics ...", flush=True)
+            changed, removed, stats = publish_stage(cur)
+            # Reconciliation can remove old synthetic rows. Refresh planner
+            # estimates before downstream analytics read the smaller table.
+            cur.execute("ANALYZE public.insights_daily_by_ad")
+            print(f"[pg] {changed:,} inserted/changed; {removed:,} obsolete rows removed", flush=True)
+    return stats
 
 
 def main() -> None:
-    t0 = time.time()
-    conn = psycopg2.connect(DSN)
-    conn.autocommit = False
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+    dsn = os.environ["DATABASE_URL_SYNC"].replace("postgresql+psycopg2://", "postgresql://")
+    t0 = time.monotonic()
+    conn = psycopg2.connect(dsn, connect_timeout=15, application_name="daily_ad_metrics_refresh")
     try:
-        with conn.cursor() as cur:
-            cur.execute(_TIMEOUT)
-            cur.execute(DDL)
-            conn.commit()
-
-            # The DDL commit above ended that transaction, and a session
-            # SET does not reliably survive one under Supavisor's
-            # transaction pooling -- the connection goes back to the pool
-            # and the next statement can land on a different backend.
-            # Re-apply inside the transaction that actually matters, so
-            # the rebuild cannot inherit the server default. Same lesson
-            # as app/services/silver/shopify_ad_attribution.py, where a
-            # single SET let a 34-minute job die on the 2-minute default.
-            cur.execute(_TIMEOUT)
-
-            # BUILD INTO A SIDE TABLE, THEN SWAP.
-            #
-            # This used to TRUNCATE and re-INSERT in one transaction.
-            # That kept the data safe -- a failed rebuild rolled the
-            # truncate back with it -- but TRUNCATE takes an ACCESS
-            # EXCLUSIVE lock, so every reader of this table blocked for
-            # the WHOLE rebuild, not just the commit. Once Creative
-            # Testing started reading it for windowed spend, that turned
-            # a routine nightly refresh into a visibly broken section:
-            # the endpoint sat on the lock and died on its statement
-            # timeout, HTTP 500 after 121 seconds.
-            #
-            # Building into a side table and swapping keeps the same
-            # all-or-nothing guarantee -- readers see the old rows until
-            # the swap and the new rows after -- while holding the
-            # exclusive lock only for the rename, which is instant.
-            print("[pg] building insights_daily_by_ad_new ...", flush=True)
-            cur.execute("DROP TABLE IF EXISTS public.insights_daily_by_ad_new")
-            cur.execute(
-                "CREATE TABLE public.insights_daily_by_ad_new "
-                "(LIKE public.insights_daily_by_ad INCLUDING DEFAULTS)"
-            )
-            cur.execute(REBUILD_SQL.replace(
-                "INSERT INTO public.insights_daily_by_ad (",
-                "INSERT INTO public.insights_daily_by_ad_new (",
-            ))
-            # Indexes AFTER the insert -- building them once over the
-            # finished table beats maintaining them row by row.
-            print("[pg] indexing ...", flush=True)
-            cur.execute("ALTER TABLE public.insights_daily_by_ad_new "
-                        "ADD PRIMARY KEY (ad_id, day)")
-            cur.execute("CREATE INDEX ix_idba_ad_day_new "
-                        "ON public.insights_daily_by_ad_new(ad_id, day)")
-            cur.execute("CREATE INDEX ix_idba_day_new "
-                        "ON public.insights_daily_by_ad_new(day)")
-
-            # Renaming a table does NOT rename its indexes, so the old
-            # table's indexes keep the canonical names and would collide
-            # the moment the new ones claim them. Move the old names out
-            # of the way first, inside the same transaction as the swap.
-            print("[pg] swapping ...", flush=True)
-            cur.execute("DROP TABLE IF EXISTS public.insights_daily_by_ad_old")
-            cur.execute("ALTER TABLE public.insights_daily_by_ad "
-                        "RENAME TO insights_daily_by_ad_old")
-            for name in ("ix_idba_ad_day", "ix_idba_day", "insights_daily_by_ad_pkey"):
-                cur.execute(f"ALTER INDEX IF EXISTS {name} RENAME TO {name}_old")
-
-            cur.execute("ALTER TABLE public.insights_daily_by_ad_new "
-                        "RENAME TO insights_daily_by_ad")
-            # And claim the canonical names for the new table's indexes,
-            # PK included: leaving it as insights_daily_by_ad_new_pkey
-            # would make the NEXT run's ADD PRIMARY KEY collide with it.
-            cur.execute("ALTER INDEX ix_idba_ad_day_new RENAME TO ix_idba_ad_day")
-            cur.execute("ALTER INDEX ix_idba_day_new RENAME TO ix_idba_day")
-            cur.execute("ALTER INDEX IF EXISTS insights_daily_by_ad_new_pkey "
-                        "RENAME TO insights_daily_by_ad_pkey")
-            conn.commit()
-
-            # Outside the swap transaction: the old table is unreferenced
-            # now, and dropping it is not worth holding the swap open for.
-            cur.execute("DROP TABLE IF EXISTS public.insights_daily_by_ad_old")
-            conn.commit()
-
-            cur.execute(
-                "SELECT COUNT(*), COUNT(DISTINCT ad_id), MIN(day), MAX(day) "
-                "FROM public.insights_daily_by_ad"
-            )
-            n, distinct_ads, mn, mx = cur.fetchone()
+        n, distinct_ads, mn, mx = refresh(conn)
     finally:
         conn.close()
-
-    dt = time.time() - t0
-    print(f"\n[OK] insights_daily_by_ad refreshed in {dt:.1f}s")
+    print(f"\n[OK] insights_daily_by_ad refreshed in {time.monotonic() - t0:.1f}s")
     print(f"    rows          : {n:,}")
     print(f"    distinct ads  : {distinct_ads:,}")
     print(f"    date range    : {mn} -> {mx}")

@@ -255,11 +255,9 @@ PHASE_SILVER = [
     # data through the 20th, and every Creative Testing window past that
     # date silently read zeros.
     #
-    # It got slower on purpose. Building into a side table and swapping
-    # does more work than TRUNCATE + INSERT, and that is the trade: the
-    # old form held ACCESS EXCLUSIVE for its whole run, so a routine
-    # refresh took the section down with HTTP 500s. Pay the extra minutes
-    # rather than block every reader, and give the step room to finish.
+    # Build into a temporary stage, then publish changed rows in place.
+    # Readers remain available and dependent views retain the live table's
+    # identity. The earlier rename-swap stranded views on the old table.
     ("silver_insights_daily", ["scripts/refresh_insights_daily_by_ad.py"],  2400),
     # Adset/campaign daily grain. Feeds the Ads Analyse rollup's Meta
     # metrics and its rolling 3/7/14/28-day columns, both of which are
