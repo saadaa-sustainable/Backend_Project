@@ -17,8 +17,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from urllib.parse import unquote
 
 from sqlalchemy import text
@@ -493,9 +494,9 @@ def _global_name_match(utm_content: str, universe: AdUniverse) -> AdMeta | None:
     # A raw/normalized substring is one evidence layer; do not pick a
     # higher-spend candidate, or retry a weaker layer after an ambiguous hit.
     hits = []
+    normalized_values = [(value.lower(), _sep_key(value)) for value in values]
     for name_lower, name_sep, _, ad in universe.name_index:
-        for value in values:
-            raw, sep = value.lower(), _sep_key(value)
+        for raw, sep in normalized_values:
             if (
                 min(len(name_lower), len(raw)) >= SUBSTRING_MIN_LEN
                 and (name_lower in raw or raw in name_lower)
@@ -613,6 +614,31 @@ def _attribute_order(
 
     ad = _global_name_match(utm_content, universe) if utm_content else None
     return matched("ad_name_match", ad) if ad else _UNMATCHED
+
+
+def _build_order_matcher(universe: AdUniverse) -> Callable[..., AttributionResult]:
+    """Reuse identical signals within one rebuild, preserving per-order splits.
+
+    The Oct 3 refresh had 391k orders but only 10.7k distinct signal tuples.
+    Repeating the name scan for every order exhausted the step's time budget.
+    This cache belongs to one immutable roster snapshot and is discarded at
+    the end of the rebuild. It never carries matches into the next refresh.
+    """
+    @lru_cache(maxsize=32_768)
+    def match_signals(content: str, term: str, campaign: str) -> AttributionResult:
+        return _attribute_order(content, term, campaign, universe)
+
+    def match_order(content: str, term: str, campaign: str, order_id: str = "") -> AttributionResult:
+        signals = tuple((value or "").strip() for value in (content, term, campaign))
+        result = match_signals(*signals)
+        # Overrides can split identical UTM signals using the ORDER ID.
+        # Re-evaluate that tier per order, including historical-name matches
+        # conservatively, so caching cannot assign a whole group to one ad.
+        if result.tier == "edit_name_match":
+            return _attribute_order(*signals, universe, order_id=order_id)
+        return result
+
+    return match_order
 
 
 # ----------------------------------------------------------------------
@@ -757,11 +783,12 @@ _ATTRIBUTION_INSERT = (
 async def _refresh_order_attribution(session: AsyncSession) -> int:
     universe = await _load_ad_universe(session)
     orders = await _load_orders(session)
+    match_order = _build_order_matcher(universe)
+    logger.info("order_attribution_matching_started", orders=len(orders))
 
     rows = []
-    for o in orders:
-        result = _attribute_order(o.utm_content, o.utm_term, o.utm_campaign, universe,
-                                  order_id=o.order_id or "")
+    for index, o in enumerate(orders, 1):
+        result = match_order(o.utm_content, o.utm_term, o.utm_campaign, order_id=o.order_id or "")
         rows.append({
             "order_id": o.order_id, "name": o.name, "total_price": o.total_price,
             "created_at": o.created_at, "customer_id": o.customer_id,
@@ -773,11 +800,18 @@ async def _refresh_order_attribution(session: AsyncSession) -> int:
             "matched_campaign_id": result.matched_campaign_id,
             "matched_campaign_name": result.matched_campaign_name,
         })
+        if index % 25_000 == 0:
+            logger.info("order_attribution_matching_progress", processed=index, total=len(orders))
 
+    logger.info("order_attribution_writing_started", rows=len(rows))
     await session.execute(text("TRUNCATE shopify_order_attribution"))
-    if rows:
-        await session.execute(text(_ATTRIBUTION_INSERT), rows)
+    for start in range(0, len(rows), 10_000):
+        batch = rows[start:start + 10_000]
+        await session.execute(text(_ATTRIBUTION_INSERT), batch)
+        logger.info("order_attribution_write_progress", written=start + len(batch), total=len(rows))
+    # All batches commit together. A failed write preserves the prior table.
     await session.commit()
+    logger.info("order_attribution_committed", rows=len(rows))
     return len(rows)
 
 

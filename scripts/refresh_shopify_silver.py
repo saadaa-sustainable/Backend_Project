@@ -1,7 +1,7 @@
 """One-shot Shopify silver-layer refresh.
 
 After ingest_shopify.py lands fresh rows in raw_dump_shopify, this
-script rebuilds the two silver tables the CPIS + Landing Page views
+script rebuilds the Shopify silver and attribution tables the dashboard
 read from:
 
   1. refresh_shopify_tables()
@@ -35,6 +35,8 @@ import argparse
 import asyncio
 import sys
 from datetime import datetime
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Make sure the app package is importable from the repo root.
 from pathlib import Path
@@ -43,6 +45,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.database.session import session_scope, dispose_engine  # noqa: E402
 from app.services.silver.shopify_flatten import refresh_shopify_tables  # noqa: E402
 from app.services.silver.shopify_ad_attribution import refresh_attribution_tables  # noqa: E402
+
+
+async def verify_attribution_freshness(session: AsyncSession) -> None:
+    source, attributed, refreshed = (await session.execute(text("""
+        SELECT (SELECT MAX(created_at) FROM public.shopify_orders),
+               MAX(created_at), MAX(flattened_at)
+          FROM public.shopify_order_attribution
+    """))).one()
+    print(f"  Attribution freshness (UTC): source={source}, attributed={attributed}, "
+          f"rebuilt={refreshed}", flush=True)
+    if source is not None and (attributed is None or attributed < source):
+        raise RuntimeError("Last Click attribution is still behind shopify_orders after its rebuild")
 
 
 async def main(force: bool, only_attribution: bool, skip_attribution: bool) -> None:
@@ -83,6 +97,8 @@ async def main(force: bool, only_attribution: bool, skip_attribution: bool) -> N
         counts_b = await refresh_attribution_tables(session)
     for k, v in counts_b.items():
         print(f"        {k:35s} {v:,} rows", flush=True)
+    async with session_scope() as session:
+        await verify_attribution_freshness(session)
 
     dt = (datetime.utcnow() - t0).total_seconds()
     print(f"\n[OK] Shopify silver refresh complete in {dt:.1f}s", flush=True)

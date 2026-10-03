@@ -96,10 +96,9 @@ jobs:
         # Only the 02:30 UTC backup can be a duplicate; a manual dispatch
         # is always deliberate and a 01:30 run is the primary.
         #
-        # Looks for any OTHER run of this workflow created in the last 5
-        # hours. If one exists the primary fired and this backup has
-        # nothing to do, so every real step below is skipped and the job
-        # ends green in seconds.
+        # Skip the backup only after a successful recent refresh. A failed
+        # primary needs recovery; merely seeing that it started hid stale
+        # attribution behind a green, entirely skipped backup on Oct 2.
         #
         # 5 hours, not 1: a healthy run takes 45-60 min and a
         # Meta-throttle day stretches past 3h. A window shorter than the
@@ -111,17 +110,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ github.event.schedule }}" != "30 2 * * *" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           CUTOFF="$(date -u -d '5 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           RECENT="$(gh run list \
               --repo "${{ github.repository }}" \
               --workflow daily-refresh.yml \
               --limit 20 \
-              --json databaseId,createdAt \
+              --branch "${{ github.ref_name }}" \
+              --json databaseId,createdAt,conclusion \
               --jq "[.[] | select(.databaseId != ${{ github.run_id }})
+                        | select(.conclusion == \"success\")
                         | select(.createdAt > \"$CUTOFF\")] | length")"
-          echo "runs of this workflow since $CUTOFF (excluding this one): $RECENT"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$RECENT" -gt 0 ]; then
-            echo "A refresh already ran in that window -- skipping this one."
+          echo "successful runs since $CUTOFF (excluding this one): $RECENT"
+          if [ "$RECENT" -gt 0 ]; then
+            echo "A refresh succeeded in that window -- skipping the backup."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -297,6 +302,9 @@ jobs:
                   for table in ("shopify_orders", "shopify_inventory"):
                       cur.execute(f"SELECT MAX(extracted_at) FROM {table}")
                       print(f"  {table:20s} {cur.fetchone()[0] or '(empty)'}")
+                  cur.execute("SELECT MAX(created_at), MAX(flattened_at) FROM shopify_order_attribution")
+                  latest_order, rebuilt = cur.fetchone()
+                  print(f"Last Click UTM: latest order={latest_order}, rebuilt={rebuilt}")
           except Exception as exc:
               # Never fail the job on the report itself -- the refresh
               # result is what matters.
