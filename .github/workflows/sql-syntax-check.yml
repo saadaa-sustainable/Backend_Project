@@ -30,3 +30,8 @@ jobs:
           pip install -r requirements.txt
       - name: Parse SQL constants
         run: python scripts/check_sql_syntax.py
+      - name: Verify Shopify Silver refresh
+        run: >-
+          python -m pytest tests/test_attribution_refresh.py
+          tests/test_daily_silver_pipeline.py tests/test_daily_workflow_guard.py
+          tests/test_shopify_utm.py -q

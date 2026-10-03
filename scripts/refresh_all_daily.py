@@ -11,6 +11,7 @@ Also runnable manually:
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --skip-meta
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --only-silver
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --only-shopify
+    ./.venv/Scripts/python.exe scripts/refresh_all_daily.py --only-shopify-silver
 
 Phase layout mirrors CTD's _refresh_all_dashboard_data.py:
 
@@ -43,13 +44,6 @@ import io
 import pathlib
 import sys
 from dotenv import load_dotenv
-
-# UTF-8 for GH Actions (default is fine but be explicit).
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
-except Exception:
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="backslashreplace")
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -333,7 +327,10 @@ PHASE_SILVER = [
     # `utm_content` against names an ad USED to have, and a stale mirror
     # silently narrows that step rather than failing.
     ("ad_edit_log",           ["scripts/ingest_ad_edit_log.py"],             900),
-    ("silver_shopify",        ["scripts/refresh_shopify_silver.py"],        3600),
+    # Separate budgets: on Oct 3 flattening used 25 minutes of a shared
+    # hour, then attribution was killed before publishing its new rows.
+    ("silver_shopify",        ["scripts/refresh_shopify_silver.py", "--skip-attribution"], 3600),
+    ("silver_shopify_attribution", ["scripts/refresh_shopify_silver.py", "--only-attribution"], 3600),
     # Gold: the table Ads Analyse reads. Fifth registry-only job --
     # registered in app/services/silver/registry.py and wired to nothing,
     # so it had not refreshed in ten days while ad_lifecycle beside it
@@ -401,7 +398,7 @@ PHASE_SILVER = [
 #: dashboard showing the previous snapshot.) Pass --skip-cpis to stop
 #: after silver when you only care about inventory.
 SHOPIFY_INGEST_STEPS = ["shopify_daily"]
-SHOPIFY_SILVER_STEPS = ["silver_shopify", "cpis_sku_context"]
+SHOPIFY_SILVER_STEPS = ["silver_shopify", "silver_shopify_attribution", "cpis_sku_context"]
 SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm"]
 
 
@@ -434,6 +431,9 @@ def main() -> int:
                     help="only the Shopify chain: ingest -> silver -> CPIS "
                          "aggregates. For refreshing store data (inventory, "
                          "prices, orders) without waiting on Meta.")
+    ap.add_argument("--only-shopify-silver", action="store_true",
+                    help="rebuild Shopify silver, attribution and CPIS from "
+                         "existing bronze without fetching external sources")
     ap.add_argument("--shopify-object-types", default=DEFAULT_SHOPIFY_OBJECT_TYPES,
                     help="With --only-shopify, the object types to fetch "
                          f"(default: {DEFAULT_SHOPIFY_OBJECT_TYPES}). Pass a "
@@ -450,17 +450,19 @@ def main() -> int:
                          "like 'nothing to do'.")
     args = ap.parse_args()
 
-    if args.only_shopify and (args.skip_meta or args.only_silver):
+    if (args.only_shopify or args.only_shopify_silver) and (args.skip_meta or args.only_silver):
         raise SystemExit(
-            "--only-shopify cannot be combined with --skip-meta/--only-silver: "
+            "Shopify-only modes cannot be combined with --skip-meta/--only-silver: "
             "they select different, overlapping step sets. Pick one."
         )
-    if args.skip_cpis and not args.only_shopify:
-        raise SystemExit("--skip-cpis only applies together with --only-shopify.")
+    if args.only_shopify and args.only_shopify_silver:
+        raise SystemExit("Choose --only-shopify or --only-shopify-silver, not both.")
+    if args.skip_cpis and not (args.only_shopify or args.only_shopify_silver):
+        raise SystemExit("--skip-cpis only applies to a Shopify-only mode.")
 
     steps: list[tuple[str, list[str], int]] = []
-    if args.only_shopify:
-        labels = SHOPIFY_INGEST_STEPS + SHOPIFY_SILVER_STEPS
+    if args.only_shopify or args.only_shopify_silver:
+        labels = ([] if args.only_shopify_silver else SHOPIFY_INGEST_STEPS) + SHOPIFY_SILVER_STEPS
         if not args.skip_cpis:
             labels += SHOPIFY_CPIS_STEPS
         steps = _steps_by_label(labels)
@@ -495,13 +497,20 @@ def main() -> int:
     # PHASE_SILVER so the default stays the cheap path.
     if args.force_silver:
         steps = [
-            (label, [*cmd, "--force"] if label in SHOPIFY_SILVER_STEPS else cmd, timeout)
+            (label, [*cmd, "--force"] if label == "silver_shopify" else cmd, timeout)
             for label, cmd, timeout in steps
         ]
 
     with CronRun(project="backend_project") as run:
         for name, cmd, timeout in steps:
             with run.step(name, timeout=timeout) as step:
+                dependency = {
+                    "silver_shopify_attribution": "silver_shopify",
+                    "gold_ad_performance": "silver_shopify_attribution",
+                }.get(name)
+                if dependency in run.steps and run.steps[dependency]["status"] != "ok":
+                    step.skip(f"{dependency} did not finish; preserving the previous derived table")
+                    continue
                 # Prepend the interpreter so the workflow doesn't need to
                 # know each script's shebang; also lets us pin the venv.
                 full_cmd = [PY, str(ROOT / cmd[0]), *cmd[1:]]
@@ -513,4 +522,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Keep encoding changes out of imports used by orchestration tests.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except AttributeError:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="backslashreplace")
     sys.exit(main())

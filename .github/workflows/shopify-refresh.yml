@@ -12,7 +12,8 @@
 #   2. refresh_shopify_silver.py    bronze -> shopify_orders / _inventory /
 #                                   _customers / _sessions / _sales /
 #                                   _discounts / _fulfillments /
-#                                   _customer_analytics + attribution
+#                                   _customer_analytics, then a separate
+#                                   attribution step with its own budget
 #                                   Only rebuilds a table whose BRONZE has
 #                                   moved. This run fetches three object
 #                                   types, so the other five silver tables
@@ -39,6 +40,11 @@ name: Shopify refresh (manual)
 on:
   workflow_dispatch:
     inputs:
+      only_silver:
+        description: "Rebuild Silver and attribution from existing Bronze without fetching Shopify again?"
+        type: boolean
+        required: false
+        default: false
       skip_cpis:
         description: "Skip the CPIS aggregates? (faster; inventory/price columns still update)"
         type: boolean
@@ -83,11 +89,9 @@ jobs:
     # ingest 5400s, so the job needs headroom above that plus silver
     # and the two CPIS rebuilds.
     # Must exceed the sum of the step budgets it can actually spend:
-    # ingest 5400s + silver 3600s + cpis_daily 900s + cpis_utm 1200s
-    # = 11100s = 185 min. A 150-minute cap would kill the job before its
-    # own steps could finish -- the same class of mistake as the 900s
-    # step budget sitting under a 1800s statement timeout.
-    timeout-minutes: 240
+    # ingest 90m + flatten 60m + attribution 60m + SKU context 10m +
+    # CPIS 35m = 255m, plus setup/reporting. Silver-only omits ingestion.
+    timeout-minutes: 300
 
     steps:
       - name: Checkout
@@ -150,6 +154,9 @@ jobs:
           # them, and they are not required to construct Settings.
         run: |
           FLAGS="--only-shopify"
+          if [ "${{ inputs.only_silver }}" = "true" ]; then
+            FLAGS="--only-shopify-silver"
+          fi
           if [ "${{ inputs.skip_cpis }}" = "true" ]; then
             FLAGS="$FLAGS --skip-cpis"
           fi
