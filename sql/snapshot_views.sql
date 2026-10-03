@@ -30,14 +30,32 @@
 --     from the last row inside the window.
 -- ---------------------------------------------------------------------
 
-DROP VIEW IF EXISTS public.meta_direct_active_30d;
-DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_active_30d;
-DROP VIEW IF EXISTS public.meta_direct_active_90d;
-DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_active_90d;
-DROP VIEW IF EXISTS public.meta_direct_daily_30d;
-DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_daily_30d;
-DROP VIEW IF EXISTS public.meta_direct_daily_90d;
-DROP MATERIALIZED VIEW IF EXISTS public.meta_direct_daily_90d;
+-- IF EXISTS only tolerates an absent object, not the wrong relation kind.
+-- The previous DROP VIEW failed on existing materialized views before their
+-- definitions could be rebound from insights_daily_by_ad_old to the live table.
+DO $snapshot_cleanup$
+DECLARE
+  snapshot record;
+BEGIN
+  FOR snapshot IN
+    SELECT c.relname, c.relkind
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relname IN (
+      'meta_direct_active_30d', 'meta_direct_active_90d',
+      'meta_direct_daily_30d', 'meta_direct_daily_90d'
+    )
+  LOOP
+    IF snapshot.relkind = 'm' THEN
+      EXECUTE format('DROP MATERIALIZED VIEW public.%I', snapshot.relname);
+    ELSIF snapshot.relkind = 'v' THEN
+      EXECUTE format('DROP VIEW public.%I', snapshot.relname);
+    ELSE
+      RAISE EXCEPTION 'Unexpected relation kind for snapshot %: %',
+        snapshot.relname, snapshot.relkind;
+    END IF;
+  END LOOP;
+END
+$snapshot_cleanup$;
 
 -- The newest day the Meta insights actually cover. Every view below
 -- anchors on this so spend and orders always describe the same dates.

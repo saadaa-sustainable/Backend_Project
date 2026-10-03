@@ -107,8 +107,9 @@ def main() -> int:
                 print(f"[fix]  re-applying {DDL_PATH.name} to rebind", flush=True)
                 cur.execute(DDL_PATH.read_text())
                 still = _verify_bindings(cur)
-                print("[fix]  rebound" if not still
-                      else f"[FAIL] still drifted: {', '.join(still)}", flush=True)
+                if still:
+                    raise RuntimeError(f"Snapshot sources still drifted: {', '.join(still)}")
+                print("[fix]  rebound", flush=True)
             for v in VIEWS:
                 t = time.time()
                 try:

@@ -54,7 +54,8 @@ os.environ.setdefault("DATABASE_URL_SYNC", "postgresql://user@localhost/db")
 SQL_SOURCES: dict[str, tuple[str, ...]] = {
     "scripts/refresh_cpis_sku_context.py":      ("DDL", "REFRESH"),
     "scripts/refresh_ad_history_milestones.py": ("DDL", "REFRESH"),
-    "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL"),
+    "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL", "STAGE_SQL",
+                                                "STAGE_DDL", "PUBLISH_SQL", "DELETE_MISSING_SQL"),
     "scripts/ingest_asset_sources.py":          ("DDL",),
     "scripts/recover_asset_ids.py":             ("DDL", "UNMAPPED_ADS"),
     "scripts/refresh_ad_asset_map.py":          ("DDL", "CANDIDATES_SQL", "INSERT_SQL", "CONFLICT_SQL",

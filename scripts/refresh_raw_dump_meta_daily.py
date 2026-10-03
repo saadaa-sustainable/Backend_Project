@@ -30,7 +30,6 @@ import argparse
 import os
 import sys
 import time
-from datetime import date, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -82,7 +81,7 @@ INSERT INTO public.raw_dump_meta_daily (
     sync_type, payload_hash, processing_status,
     object_type, parent_ids, is_nested
 )
-SELECT
+SELECT DISTINCT ON (r.raw_payload->>'ad_id', r.raw_payload->>'date_start')
     r.id, r.meta_id, r.raw_payload, r.api_endpoint, r.api_version,
     r.batch_id, r.request_params, r.extracted_at, r.ingested_at,
     r.sync_type, r.payload_hash, r.processing_status,
@@ -93,6 +92,8 @@ WHERE r.object_type = 'insights'
   AND r.raw_payload->>'ad_id' IS NOT NULL
   AND r.raw_payload->>'date_start' IS NOT NULL
   {extra_where}
+ORDER BY r.raw_payload->>'ad_id', r.raw_payload->>'date_start',
+         r.ingested_at DESC, r.id DESC
 ON CONFLICT ((raw_payload->>'ad_id'), (raw_payload->>'date_start'))
   WHERE raw_payload->>'ad_id' IS NOT NULL
     AND raw_payload->>'date_start' IS NOT NULL
@@ -157,6 +158,8 @@ def main() -> int:
     conn = psycopg2.connect(url, connect_timeout=30)
     conn.autocommit = False
     cur = conn.cursor()
+    cur.execute("SET LOCAL statement_timeout = '900s'")
+    cur.execute("SET LOCAL lock_timeout = '5s'")
 
     # Pre-flight report
     cur.execute(COUNT_SQL.format(extra_where=extra_where), query_params)
