@@ -204,11 +204,20 @@ async def check_and_maybe_run(
 async def run_auto_enabled_jobs(session: AsyncSession) -> None:
     """Poller entry point (see app/scheduler/jobs.py) -- checks every job with
     auto_enabled=true and runs any that are stale. Errors in one job never block the rest."""
+    await ensure_flatten_tables(session)
+    enabled = set((await session.execute(text(
+        "SELECT job_key FROM flatten_settings WHERE auto_enabled = true"
+    ))).scalars().all())
+    # Disabled jobs must not inspect their source. Several jobs share the
+    # multi-GB Meta bronze table; checking staleness before this toggle made
+    # even an entirely disabled poller scan it repeatedly on every interval.
     for job in FLATTEN_REGISTRY.values():
-        state = await get_job_state(session, job)
-        if not state.auto_enabled:
+        if job.key not in enabled:
             continue
         try:
             await check_and_maybe_run(session, job, force=False, triggered_by="auto_poll")
         except Exception as exc:  # noqa: BLE001 -- one job's failure shouldn't block the others
+            # A timeout during the initial state check also aborts the
+            # transaction, before check_and_maybe_run's refresh error handler.
+            await session.rollback()
             logger.error("flatten_auto_poll_job_failed", job_key=job.key, error=str(exc))

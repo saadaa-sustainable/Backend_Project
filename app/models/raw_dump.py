@@ -71,6 +71,7 @@ class RawDumpMeta(Base, BronzeMixin):
     is_nested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     __table_args__ = (
+        Index("ix_raw_dump_meta_extracted_at", "extracted_at"),
         Index("ix_raw_dump_meta_batch_meta", "batch_id", "meta_id"),
         Index("ix_raw_dump_meta_object_type_meta_id", "object_type", "meta_id"),
         Index("ix_raw_dump_meta_raw_payload_gin", "raw_payload", postgresql_using="gin"),
