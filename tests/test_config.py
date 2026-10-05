@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import MetaAPISettings, _discover_meta_accounts
+from app.config import MetaAPISettings, SchedulerSettings, _discover_meta_accounts
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +22,16 @@ def _clear_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("META_ACCOUNT_1_NAME", raising=False)
     monkeypatch.delenv("META_ACCOUNT_2_ID", raising=False)
     monkeypatch.delenv("META_ACCOUNT_2_NAME", raising=False)
+
+
+def test_in_process_scheduler_is_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("SCHEDULER_ENABLED", raising=False)
+    assert SchedulerSettings(_env_file=None).enabled is False
+
+
+def test_in_process_scheduler_can_be_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("SCHEDULER_ENABLED", "true")
+    assert SchedulerSettings(_env_file=None).enabled is True
 
 
 def test_discover_meta_accounts_finds_numbered_pairs(monkeypatch: pytest.MonkeyPatch) -> None:

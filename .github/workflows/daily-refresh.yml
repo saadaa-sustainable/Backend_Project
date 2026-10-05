@@ -46,23 +46,17 @@ on:
         description: "Only run Phase 2 (silver rebuild)?"
         required: false
         default: "false"
+      force_refresh:
+        description: "Run again even if a refresh was already attempted today (IST)?"
+        type: boolean
+        required: false
+        default: false
 
   schedule:
     # 01:30 UTC = 07:00 IST, daily. Cron in GitHub Actions is always UTC,
     # so this is the 7am-IST run -- do not "correct" it to 30 7 * * *,
     # which would fire at 13:00 IST.
     - cron: "30 1 * * *"
-    # BACKUP, 02:30 UTC = 08:00 IST. GitHub does not guarantee scheduled
-    # runs: it drops them under load and delays them routinely. Measured
-    # on the sibling project 2026-09-05, its 19:30 UTC schedule started
-    # at 21:40 one night (2h10m late) and did not fire at all the next.
-    # A dropped nightly refresh means a whole day of stale dashboards
-    # with nothing to indicate it.
-    #
-    # Two crons an hour apart make that far less likely, and the guard
-    # step below makes the second one free: it exits immediately when
-    # the first already ran. Both are cheap when nothing is wrong.
-    - cron: "30 2 * * *"
 
 concurrency:
   # Never let two refreshes race against the same Supabase tables.
@@ -92,41 +86,39 @@ jobs:
       actions: read
 
     steps:
-      - name: Skip if the primary schedule already ran
-        # Only the 02:30 UTC backup can be a duplicate; a manual dispatch
-        # is always deliberate and a 01:30 run is the primary.
-        #
-        # Skip the backup only after a successful recent refresh. A failed
-        # primary needs recovery; merely seeing that it started hid stale
-        # attribution behind a green, entirely skipped backup on Oct 2.
-        #
-        # 5 hours, not 1: a healthy run takes 45-60 min and a
-        # Meta-throttle day stretches past 3h. A window shorter than the
-        # run itself would let the backup start a second refresh on top
-        # of a slow first one -- exactly what the concurrency group
-        # exists to prevent.
+      - name: Allow only one refresh attempt per IST day
+        # A delayed cron can arrive after an external workflow_dispatch.
+        # Count earlier attempts regardless of their conclusion: an optional
+        # source failing must not automatically rerun the entire pipeline.
+        # Manual/API dispatches use the same guard unless force_refresh is
+        # explicitly selected. Concurrency serializes this check with writes.
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
+          REFRESH_EVENT: ${{ github.event_name }}
+          FORCE_REFRESH: ${{ inputs.force_refresh || false }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ github.event.schedule }}" != "30 2 * * *" ]; then
+          if [ "$REFRESH_EVENT" = "workflow_dispatch" ] && [ "$FORCE_REFRESH" = "true" ]; then
+            echo "Explicit repeat refresh requested."
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          CUTOFF="$(date -u -d '5 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          IST_DAY="$(TZ=Asia/Kolkata date +%F)"
+          CUTOFF="$(date -u -d "$IST_DAY 00:00:00 +0530" +%Y-%m-%dT%H:%M:%SZ)"
           RECENT="$(gh run list \
               --repo "${{ github.repository }}" \
               --workflow daily-refresh.yml \
-              --limit 20 \
-              --branch "${{ github.ref_name }}" \
-              --json databaseId,createdAt,conclusion \
+              --limit 100 \
+              --json databaseId,createdAt,status \
               --jq "[.[] | select(.databaseId != ${{ github.run_id }})
-                        | select(.conclusion == \"success\")
-                        | select(.createdAt > \"$CUTOFF\")] | length")"
-          echo "successful runs since $CUTOFF (excluding this one): $RECENT"
+                        | select(.status == \"completed\" or .status == \"in_progress\")
+                        | select(.createdAt >= \"$CUTOFF\")] | length")"
+          echo "Refresh attempts for $IST_DAY IST (excluding this one): $RECENT"
           if [ "$RECENT" -gt 0 ]; then
-            echo "A refresh succeeded in that window -- skipping the backup."
+            echo "A refresh was already attempted today -- skipping duplicate."
+            echo "### Daily refresh skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "A refresh was already attempted on $IST_DAY IST. To deliberately retry, run this workflow with force_refresh enabled." >> "$GITHUB_STEP_SUMMARY"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"

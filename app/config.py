@@ -180,7 +180,9 @@ class SchedulerSettings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
+    # GitHub Actions owns the daily production refresh. A web/dev server
+    # must opt in before it can start a second independent scheduler.
+    enabled: bool = Field(default=False, alias="SCHEDULER_ENABLED")
     daily_sync_hour: int = Field(default=3, alias="SCHEDULER_DAILY_SYNC_HOUR")
     daily_sync_minute: int = Field(default=0, alias="SCHEDULER_DAILY_SYNC_MINUTE")
     hourly_sync_enabled: bool = Field(default=False, alias="SCHEDULER_HOURLY_SYNC_ENABLED")
