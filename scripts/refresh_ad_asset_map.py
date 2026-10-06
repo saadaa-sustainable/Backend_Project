@@ -260,6 +260,48 @@ SELECT al.ad_id, al.ad_name, cir.requisition_id, 'video'::text, 2, 'asset_id',
     ON length(cir.requisition_id) >= 6
    AND al.ad_name ~* ('(^|[^0-9A-Za-z])' || cir.requisition_id || '([^0-9]|$)')
 UNION ALL
+-- "Edited Content": newer video cuts, the one register whose identifiers
+-- carry no family prefix. ITE / GAD / SIF say what they are; these are
+-- bare months ('Feb-97'), so the same regex that is precise for the
+-- others is looser here. Measured on the live tab: a bare id reaches a
+-- median of 5 ads against 3 for the ITE- prefixed register.
+--
+-- Hence TWO branches over one register, nomenclature first:
+-- 'EDU_IF_916_Feb-97' can only be the asset it names, while 'Feb-97'
+-- could be a coincidence in a longer name. Where both fire they agree
+-- (1,683 of 1,722 ads), and the ordering means the strict one is what
+-- gets recorded; where only the bare id fires it still contributes the
+-- 454 ads nomenclature alone would miss.
+--
+-- Ranked 5, BELOW graphic and influencer, deliberately. Those
+-- identifiers are unambiguous and these are not, so an ad that a GAD- or
+-- SIF- code already explains keeps that answer. Measured cost of the
+-- choice: 11 ads, the entire overlap with every existing register.
+SELECT al.ad_id, al.ad_name, cec.requisition_id, 'video'::text, 5, 'nomenclature',
+       al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
+       al.spend, al.impressions, al.purchases, al.conv_value,
+       al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
+       al.thruplays, al.three_sec_video_plays AS three_sec_plays,
+       ((al.outbound_clicks->0)->>'value')::numeric AS outbound_clicks,
+       al.post_engagements
+  FROM ad_lifecycle al
+  JOIN (SELECT DISTINCT requisition_id, nomenclature
+          FROM public.content_edited_content WHERE nomenclature <> '') cec
+    ON length(cec.nomenclature) >= 6
+   AND position(lower(cec.nomenclature) in lower(al.ad_name)) > 0
+UNION ALL
+SELECT al.ad_id, al.ad_name, cec.requisition_id, 'video'::text, 6, 'asset_id',
+       al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
+       al.spend, al.impressions, al.purchases, al.conv_value,
+       al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,
+       al.thruplays, al.three_sec_video_plays AS three_sec_plays,
+       ((al.outbound_clicks->0)->>'value')::numeric AS outbound_clicks,
+       al.post_engagements
+  FROM ad_lifecycle al
+  JOIN (SELECT DISTINCT requisition_id FROM public.content_edited_content) cec
+    ON length(cec.requisition_id) >= 6
+   AND al.ad_name ~* ('(^|[^0-9A-Za-z])' || cec.requisition_id || '([^0-9]|$)')
+UNION ALL
 SELECT al.ad_id, al.ad_name, cgr.requisition_id, 'graphic'::text, 3, 'asset_id',
        al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
        al.spend, al.impressions, al.purchases, al.conv_value,
@@ -290,10 +332,13 @@ UNION ALL
 -- register, so this join adds no new asset -- only a new way of
 -- reaching one.
 --
--- media_pri 5, the lowest: a VERBATIM id in the same ad name always
+-- media_pri 7, the lowest: a VERBATIM id in the same ad name always
 -- wins. A re-spelling is only ever the answer when nothing was spelled
--- correctly.
-SELECT al.ad_id, al.ad_name, r.asset_id, r.media, 5, 'recovered',
+-- correctly. Moved 5 -> 7 when the Edited Content register took 5 and 6;
+-- leaving it at 5 would have tied it with that register's nomenclature
+-- branch, and DISTINCT ON would then have broken the tie on asset_id --
+-- alphabetically, which is to say arbitrarily.
+SELECT al.ad_id, al.ad_name, r.asset_id, r.media, 7, 'recovered',
        al.ad_created_time::date AS ad_created_date, al.account_name, al.category,
        al.spend, al.impressions, al.purchases, al.conv_value,
        al.ncp_count, al.ftewv_count, al.inline_link_clicks AS link_clicks,

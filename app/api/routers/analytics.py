@@ -5944,6 +5944,51 @@ _UNTESTED_SQL: dict[str, str] = {
         FROM public.content_iterated_register cir
 
         GROUP BY cir.requisition_id
+
+        UNION ALL
+        -- "Edited Content": the newer video cuts, a second sheet-era
+        -- register alongside Iterated Content. Both are historical, but
+        -- they are NAMED apart rather than merged into one bucket --
+        -- these ids carry no family prefix (bare 'Feb-97', not
+        -- 'ITE-Sep-273'), so when a row looks wrong it matters which
+        -- sheet it came from.
+        SELECT
+          -- Grouped on requisition_id alone, for the same reason as the
+          -- iterated branch above: one requisition can hold several cuts
+          -- whose editor and format differ, and grouping on those too
+          -- would split one asset into several "untested" rows.
+          cec.requisition_id                                    AS id,
+          MIN(cec.edited_by)                                    AS title,
+          MIN(cec.nomenclature)                                 AS nomenclature,
+          MIN(cec.video_format)                                 AS kind,
+          MIN(cec.approval_status)                              AS sub_kind,
+          MIN(cec.edited_link)                                  AS link,
+          NULL::text                                            AS thumbnail,
+          -- The sheet stores completion as dd/mm/yyyy TEXT. Converted
+          -- only when it matches that shape: a bare to_date() would
+          -- raise on the first hand-typed cell and take the whole
+          -- Untested Assets tab down with it.
+          (CASE WHEN MIN(cec.date_of_completion) ~ '^[0-9]{2}/[0-9]{2}/[0-9]{4}$'
+                THEN to_date(MIN(cec.date_of_completion), 'DD/MM/YYYY') END)
+                                                                AS date_produced,
+          NULL::timestamptz                                     AS created_at,
+          NULLIF(split_part(MIN(COALESCE(cec.nomenclature, '')), '_', 1), '')
+                                                                AS candidate_master_sku,
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Edited', MIN(cec.edited_link))) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Counts BOTH branches the map writes for this register --
+          -- asset_id and nomenclature -- because both record the same
+          -- requisition_id as asset_id. Counting one would under-report
+          -- and park tested assets in the untested list.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cec.requisition_id)::int                        AS matched_ads,
+          'historical'::text                                    AS origin,
+          'Sheet · Edited Content'::text                        AS source_system
+        FROM public.content_edited_content cec
+
+        GROUP BY cec.requisition_id
     """,
     "graphic": """
         SELECT
