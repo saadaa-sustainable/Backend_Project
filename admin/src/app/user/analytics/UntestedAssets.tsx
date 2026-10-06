@@ -72,7 +72,7 @@ const ORIGIN_LABELS: Record<
     databaseHint:
       "Assets recorded in the DAM Project.",
     historicalHint:
-      "Iterated video, recorded only in the \u201cIterated Content\u201d Google Sheet from before that register existed.",
+      "Video recorded only in the Creative Mastersheet, from before the DAM register existed: the \u201cIterated Content\u201d tab and the newer \u201cEdited Content\u201d tab. Each row names which of the two it came from.",
   },
   graphic: {
     all: "All graphic assets",

@@ -224,6 +224,27 @@ ITERATED_HEADER_MAP = {
     "testing week": "testing_week",
 }
 
+#: Sheet header -> BP column for the "Edited Content" tab.
+#:
+#: The same form shape as ITERATED_HEADER_MAP with one swap: this tab
+#: carries DATE OF COMPLETION where the iterated form carries Priority.
+#: Mapped separately rather than reusing the iterated map, because a
+#: silently-missing header would land as NULL instead of failing.
+EDITED_HEADER_MAP = {
+    "requisition id": "requisition_id",
+    "nomenclature": "nomenclature",
+    "timestamp": "submitted_at",
+    "edited video link": "edited_link",
+    "edited by": "edited_by",
+    "format of the video": "video_format",
+    "remarks / comments": "remarks",
+    "approval status": "approval_status",
+    "date of completion": "date_of_completion",
+    "testing status": "testing_status",
+    "ad id": "source_ad_id",
+    "testing date": "testing_date",
+}
+
 #: Sheet header -> BP column. Header text is matched case-insensitively
 #: with surrounding whitespace stripped. Anything not listed is ignored.
 #: Two columns in the tab are literally both named "Date"; only the first
@@ -338,6 +359,35 @@ CREATE TABLE IF NOT EXISTS public.content_iterated_register (
     testing_date      text,
     testing_week      text,
     mirrored_at       timestamptz,
+    PRIMARY KEY (requisition_id, nomenclature)
+);
+
+-- "Edited Content" -- newer video cuts, a sibling form to the iterated
+-- tab and the same column shape bar DATE OF COMPLETION where that one
+-- has Priority.
+--
+-- Keyed (requisition_id, nomenclature) for the same reason: one
+-- requisition can yield several cuts, each its own sheet row. Measured
+-- on the live tab: 675 rows over 634 distinct requisition ids.
+--
+-- NOT ONE row carries an Ad Id (0 of 675), so unlike the other
+-- registers there is no hand-maintained pointer to fall back on -- an
+-- asset here reaches an ad through its name or not at all. That is why
+-- the map matches this register on BOTH identifiers rather than one.
+CREATE TABLE IF NOT EXISTS public.content_edited_content (
+    requisition_id     text NOT NULL,
+    nomenclature       text NOT NULL DEFAULT '',
+    submitted_at       text,
+    edited_link        text,
+    edited_by          text,
+    video_format       text,
+    remarks            text,
+    approval_status    text,
+    date_of_completion text,
+    testing_status     text,
+    source_ad_id       text,
+    testing_date       text,
+    mirrored_at        timestamptz,
     PRIMARY KEY (requisition_id, nomenclature)
 );
 """
@@ -484,6 +534,70 @@ def _iterated_rows() -> tuple[list[str], list[tuple]]:
         rows.append(tuple(rec.get(c) for c in cols))
     print(f"    iterated sheet: {len(rows)} rows, {skipped} without a usable "
           f"requisition id", flush=True)
+    return cols, rows
+
+
+def _edited_rows() -> tuple[list[str], list[tuple]]:
+    """Mirror the "Edited Content" tab of the Videos mastersheet.
+
+    Same workbook and the same CSV-export route as the iterated tab, a
+    different gid. Both forms feed video assets; this one holds the newer
+    cuts.
+
+    The ids here are NOT cleaned through _clean_requisition_id. That
+    helper repairs ITE- prefixed ids, and these are bare ('Feb-97',
+    'Jan-56') by design -- the names in this tab do not encode what kind
+    of asset they are, unlike the ITE / GAD / SIF families. Running them
+    through a repair built for a different shape would damage them.
+
+    They are, however, length-guarded the same way the map guards every
+    identifier: a short bare id is an invitation to match half the ad
+    library. Measured on the live tab, all 675 rows clear 6 characters.
+    """
+    sheet_id = os.environ.get("EDITED_SHEET_ID") or os.environ.get("ITERATED_SHEET_ID")
+    gid = os.environ.get("EDITED_SHEET_GID")
+    if not sheet_id:
+        raise SystemExit("EDITED_SHEET_ID (or ITERATED_SHEET_ID) is not set.")
+    if not gid:
+        raise SystemExit("EDITED_SHEET_GID is not set (the Edited Content tab's gid).")
+    url = (f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+           f"/export?format=csv&gid={gid}")
+    with urllib.request.urlopen(url, timeout=120) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+
+    reader = csv.DictReader(io.StringIO(text))
+    cols = ["requisition_id", "nomenclature", "submitted_at", "edited_link",
+            "edited_by", "video_format", "remarks", "approval_status",
+            "date_of_completion", "testing_status", "source_ad_id", "testing_date"]
+    header_lookup = {(h or "").strip().lower(): h for h in (reader.fieldnames or [])}
+    missing = [h for h in EDITED_HEADER_MAP if h not in header_lookup]
+    if missing:
+        # Loud, not silent: a renamed column would otherwise land as NULL
+        # for every row and look like an empty tab.
+        print(f"    edited sheet: WARNING unmatched headers {missing}", flush=True)
+
+    seen: set[tuple[str, str]] = set()
+    rows: list[tuple] = []
+    skipped = 0
+    for raw in reader:
+        rec: dict[str, str | None] = {}
+        for sheet_header, bp_col in EDITED_HEADER_MAP.items():
+            src = header_lookup.get(sheet_header)
+            val = (raw.get(src) or "").strip() if src else ""
+            rec[bp_col] = val or None
+        rid = (rec.get("requisition_id") or "").strip()
+        if len(rid) < 6:
+            skipped += 1
+            continue
+        rec["requisition_id"] = rid
+        rec["nomenclature"] = (rec.get("nomenclature") or "").strip()
+        key = (rid, rec["nomenclature"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(tuple(rec.get(c) for c in cols))
+    print(f"    edited sheet: {len(rows)} rows, {skipped} with an id under "
+          f"6 characters", flush=True)
     return cols, rows
 
 
@@ -733,7 +847,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--source",
                     choices=["video", "influencer", "historic", "graphics",
-                             "graphics_historic", "iterated", "all"],
+                             "graphics_historic", "iterated", "edited", "all"],
                     default="all")
     ap.add_argument("--dry-run", action="store_true",
                     help="fetch from every source and report counts, then ROLL BACK.")
@@ -858,6 +972,13 @@ def main() -> int:
                                "requisition_id, nomenclature", cols, rows)
 
             _run("iterated", _iterated)
+
+            def _edited() -> int:
+                cols, rows = _edited_rows()
+                return _upsert(cur, "content_edited_content",
+                               "requisition_id, nomenclature", cols, rows)
+
+            _run("edited", _edited)
 
             # Historic BEFORE live, deliberately: both upsert into
             # content_graphic_register keyed on requisition_id, so if a
