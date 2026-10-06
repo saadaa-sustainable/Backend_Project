@@ -141,6 +141,11 @@ async def test_lifetime_timing_serializes_unchanged_when_delivery_metrics_change
     empty = MagicMock()
     empty.all.return_value = []
     results = [rows, empty]
+    if date_field != "delivery":
+        # Non-delivery modes now re-read the Shopify pair from our own
+        # attribution, so there is one more execute() to satisfy. The
+        # delivery branch already did this and re-sums everything anyway.
+        results.append(empty)
     if date_field == "delivery":
         daily = MagicMock()
         daily.all.return_value = [("known", 10, 200, 100, 20, 1, 5, 1, 2, None, None)]

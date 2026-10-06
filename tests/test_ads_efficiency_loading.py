@@ -73,7 +73,10 @@ async def test_scores_serialize_and_reuse_global_anchors_across_filters_and_page
     empty.all.return_value = []
     session = SimpleNamespace(execute=AsyncMock(side_effect=[
         _rows_result(_lifetime_row()), empty, _anchor_result(), *_response_results(),
-        _rows_result(_lifetime_row()), empty, *_response_results(),
+        # The second call passes a date window on date_field='created', so
+        # it also re-reads the Shopify pair from our own attribution --
+        # one extra execute() the first (undated) call does not make.
+        _rows_result(_lifetime_row()), empty, empty, *_response_results(),
     ]))
 
     first = await analytics.get_ads_analyse(session, limit=1)
@@ -91,7 +94,10 @@ async def test_scores_serialize_and_reuse_global_anchors_across_filters_and_page
     assert len(anchor_calls[0].args) == 1  # No row filters or page parameters.
     assert "WHERE" not in ad_efficiency._ANCHORS_SQL
     assert "LIMIT" not in ad_efficiency._ANCHORS_SQL
-    assert session.execute.await_count == 7
+    # 8, not 7: the dated second call also re-reads the Shopify pair
+    # from our own attribution, so the two columns cannot disagree
+    # with the new/repeat customer columns beside them.
+    assert session.execute.await_count == 8
 
 
 async def test_delivery_overlay_keeps_original_lifetime_efficiencies():

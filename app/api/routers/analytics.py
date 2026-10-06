@@ -283,12 +283,22 @@ _EXTERNAL_DAILY = (
 # evidence of no sales, which is the same distinction the overlay
 # already draws between NULL and 0 further down. This gives it a second
 # opinion to check against.
+#: Windowed on the IST calendar day, NOT created_at::date.
+#:
+#: created_at is UTC, so dating by it puts an order placed at 18:32 UTC
+#: -- 00:02 the next morning in IST -- in the previous day. That is 7.7%
+#: of orders, and it put these columns on a different day boundary from
+#: the customer-mix columns beside them, which key on
+#: order_customer_type.order_day (IST, like every other analytics table).
+#:
+#: Verified equal to order_day on all 393,764 orders since 2026-01-01,
+#: so this aligns the two without needing the extra join.
 _ATTRIBUTION_DAILY = (
     "SELECT matched_ad_id, COUNT(*), COALESCE(SUM(total_price), 0) "
     "FROM public.shopify_order_attribution "
     "WHERE matched_ad_id = ANY(:ad_ids) "
-    "  AND created_at >= CAST(:from_str AS date) "
-    "  AND created_at <  (CAST(:to_str AS date) + 1) "
+    "  AND (created_at AT TIME ZONE 'Asia/Kolkata')::date "
+    "        BETWEEN CAST(:from_str AS date) AND CAST(:to_str AS date) "
     "GROUP BY matched_ad_id"
 )
 
@@ -1610,6 +1620,50 @@ async def get_ads_analyse(
         _r.repeat_customers = _rc
         _r.new_customer_sales = _ns
         _r.repeat_customer_sales = _rs
+
+    # The Shopify pair comes from OUR attribution on every date_field,
+    # not just 'delivery'.
+    #
+    # It used to be overridden only in the delivery branch below, so on
+    # 'created' and 'first_seen' these two columns kept the mirror's
+    # figures while the four customer-mix columns above always came from
+    # our own attribution. A row could then show a new-customer total
+    # LARGER than the Shopify sales it is a subset of: ad
+    # 120254015637550422 over 30 days read 8,067 of Shopify sales (9
+    # orders, the mirror) beside 15,524 of new-customer sales (15
+    # orders, ours). Both were right about their own source; neither was
+    # comparable with the other.
+    #
+    # Our attribution is the one to keep -- the same evidence the
+    # delivery branch already records: the daily mirror carries 29% of
+    # Meta-sourced orders against our 95%. This simply stops that
+    # judgement from depending on which date mode is selected.
+    #
+    # Skipped for delivery, which re-sums every metric from daily grain
+    # a few lines down and would overwrite this anyway.
+    if rows and from_date and to_date and not windowed_delivery:
+        _attr = {
+            aid: (int(n or 0), float(rev or 0))
+            for aid, n, rev in (await session.execute(text(_ATTRIBUTION_DAILY), {
+                "ad_ids": [r.ad_id for r in rows],
+                "from_str": from_date,
+                "to_str": to_date,
+            })).all()
+        }
+        for _r in rows:
+            _n, _rev = _attr.get(_r.ad_id, (0, 0.0))
+            _r.shopify_orders = float(_n)
+            _r.shopify_revenue = _rev
+            # Rebuilt from the replaced pair. Leaving these as the SQL
+            # computed them would leave ROAS and the Meta-vs-Shopify gap
+            # describing the mirror's revenue beside ours.
+            _r.shopify_aov = (_rev / _n) if _n else None
+            _r.shopify_roas = (_rev / _r.spend) if _r.spend else None
+            _r.cost_per_shopify_order = (_r.spend / _n) if _n else None
+            _r.meta_shop_diff_pct = (
+                (_rev - _r.conv_value) * 100.0 / _r.conv_value
+                if _r.conv_value else None
+            )
 
     # The legacy table keeps efficiency scores on lifetime inputs even
     # when delivery metrics are overlaid. Calculate before that overlay,
@@ -5944,6 +5998,51 @@ _UNTESTED_SQL: dict[str, str] = {
         FROM public.content_iterated_register cir
 
         GROUP BY cir.requisition_id
+
+        UNION ALL
+        -- "Edited Content": the newer video cuts, a second sheet-era
+        -- register alongside Iterated Content. Both are historical, but
+        -- they are NAMED apart rather than merged into one bucket --
+        -- these ids carry no family prefix (bare 'Feb-97', not
+        -- 'ITE-Sep-273'), so when a row looks wrong it matters which
+        -- sheet it came from.
+        SELECT
+          -- Grouped on requisition_id alone, for the same reason as the
+          -- iterated branch above: one requisition can hold several cuts
+          -- whose editor and format differ, and grouping on those too
+          -- would split one asset into several "untested" rows.
+          cec.requisition_id                                    AS id,
+          MIN(cec.edited_by)                                    AS title,
+          MIN(cec.nomenclature)                                 AS nomenclature,
+          MIN(cec.video_format)                                 AS kind,
+          MIN(cec.approval_status)                              AS sub_kind,
+          MIN(cec.edited_link)                                  AS link,
+          NULL::text                                            AS thumbnail,
+          -- The sheet stores completion as dd/mm/yyyy TEXT. Converted
+          -- only when it matches that shape: a bare to_date() would
+          -- raise on the first hand-typed cell and take the whole
+          -- Untested Assets tab down with it.
+          (CASE WHEN MIN(cec.date_of_completion) ~ '^[0-9]{2}/[0-9]{2}/[0-9]{4}$'
+                THEN to_date(MIN(cec.date_of_completion), 'DD/MM/YYYY') END)
+                                                                AS date_produced,
+          NULL::timestamptz                                     AS created_at,
+          NULLIF(split_part(MIN(COALESCE(cec.nomenclature, '')), '_', 1), '')
+                                                                AS candidate_master_sku,
+          (SELECT jsonb_agg(jsonb_build_object('label', l.label, 'url', btrim(l.url))
+                            ORDER BY l.ord)
+             FROM (VALUES (1, 'Edited', MIN(cec.edited_link))) AS l(ord, label, url)
+            WHERE l.url IS NOT NULL AND btrim(l.url) <> '')        AS links,
+          -- Counts BOTH branches the map writes for this register --
+          -- asset_id and nomenclature -- because both record the same
+          -- requisition_id as asset_id. Counting one would under-report
+          -- and park tested assets in the untested list.
+          (SELECT COUNT(*) FROM public.ad_asset_map m
+            WHERE m.asset_id = cec.requisition_id)::int                        AS matched_ads,
+          'historical'::text                                    AS origin,
+          'Sheet · Edited Content'::text                        AS source_system
+        FROM public.content_edited_content cec
+
+        GROUP BY cec.requisition_id
     """,
     "graphic": """
         SELECT
@@ -8021,7 +8120,7 @@ def _scalable_creative_sql(level: str) -> str:
         "                         FROM public.shopify_sales) ss "
         "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
         "           WHERE a.matched_ad_id IS NOT NULL "
-        "             AND a.created_at::date BETWEEN :from_date AND :to_date "
+        "             AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date "
         "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
         f"    WHERE {parent} IS NOT NULL "
         "      AND i.day BETWEEN :from_date AND :to_date "
@@ -8202,6 +8301,12 @@ _ROLLUP_REACH_SQL = """
 #:
 #: Windowed on the ORDER's own date: an ad set that ran in July did not
 #: earn a September order.
+#:
+#: That date is the IST calendar day, not created_at::date. created_at is
+#: UTC, so dating by it moved every order placed after 18:30 IST into the
+#: previous day -- 7.7% of them -- and left these columns on a different
+#: boundary from the new/repeat customer columns beside them, which key
+#: on order_customer_type.order_day. The two now select the same orders.
 _ROLLUP_SHOPIFY_SQL = {
     "campaign": """
         SELECT a.matched_campaign_id                  AS entity_id,
@@ -8209,7 +8314,7 @@ _ROLLUP_SHOPIFY_SQL = {
                COALESCE(SUM(a.total_price), 0)        AS shopify_revenue
           FROM public.shopify_order_attribution a
          WHERE a.matched_campaign_id IS NOT NULL
-           AND a.created_at::date BETWEEN :from_date AND :to_date
+           AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date
          GROUP BY a.matched_campaign_id
     """,
     # Grouped on utm_term -- the ad set id the click itself carried --
@@ -8241,7 +8346,7 @@ _ROLLUP_SHOPIFY_SQL = {
           JOIN public.meta_adsets s ON s.adset_id = a.utm_term
          WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> ''
            AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'
-           AND a.created_at::date BETWEEN :from_date AND :to_date
+           AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date
          GROUP BY a.utm_term
     """,
 }
@@ -9024,7 +9129,7 @@ async def get_scalable_creatives(
         "                         FROM public.shopify_sales) ss "
         "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
         "           WHERE a.matched_ad_id IS NOT NULL "
-        "             AND a.created_at::date BETWEEN :from_date AND :to_date "
+        "             AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date "
         "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
         f"    WHERE {parent} = :entity_id "
         "      AND i.day BETWEEN :from_date AND :to_date "
