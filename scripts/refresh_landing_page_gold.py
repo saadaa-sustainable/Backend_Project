@@ -62,23 +62,26 @@ def _async_dsn() -> str:
 
 
 async def _main() -> None:
-    # 10-min statement_timeout on every connection this engine hands
-    # out. Default Supabase role has an 8s cap on transaction-pool
-    # roles and a few minutes on session-pool; both are less than
-    # the ~1.4M-row shopify_sessions scan below needs. connect_args
-    # takes an asyncpg 'server_settings' dict.
+    # 10-min statement_timeout, applied with an explicit SET.
+    #
+    # It used to be passed as an asyncpg `server_settings` startup
+    # parameter, and Supabase's pooler SILENTLY IGNORED it: the
+    # connection still reported `2min`, so this job was killed at ~127
+    # seconds on every run and both gold tables stayed EMPTY -- which is
+    # why the Landing Page Analysis tab had nothing to show. Measured
+    # 2026-10-05 on the same DSN:
+    #
+    #     server_settings={"statement_timeout": "600000"}  ->  2min
+    #     SET statement_timeout = '600s'                   -> 10min
+    #
+    # The SET runs inside the session below, so it applies to the
+    # connection that actually executes the scan rather than relying on
+    # a startup parameter the pooler may drop.
     from sqlalchemy import text  # noqa: E402
-    engine = create_async_engine(
-        _async_dsn(),
-        pool_pre_ping=True,
-        connect_args={
-            "server_settings": {
-                "statement_timeout": "600000",   # ms, = 10 minutes
-            },
-        },
-    )
+    engine = create_async_engine(_async_dsn(), pool_pre_ping=True)
     Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with Session() as session:
+        await session.execute(text("SET statement_timeout = '600s'"))
         counts = await refresh_landing_page_tables(session)
         await session.commit()
     for name, n in counts.items():

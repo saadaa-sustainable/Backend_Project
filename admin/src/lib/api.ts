@@ -1073,23 +1073,41 @@ export function fetchLastClickUtm(params: LastClickUtmParams = {}): Promise<UtmO
 // Landing Page Analysis
 // ---------------------------------------------------------------------
 
+/** One landing page with metrics from BOTH sources, deliberately not
+ *  merged. They disagree on the same page because each defines a
+ *  session and a landing page differently, so the column labels carry
+ *  the source and the reader can see the gap. */
 export interface LandingPageRow {
   landing_page_path: string;
-  window_from: string | null;
-  window_to: string | null;
-  sessions: number | null;
-  visitors: number | null;
-  cart_addition_sessions: number | null;
-  checkout_sessions: number | null;
-  bounces: number | null;
-  ad_spend: number | null;
-  ad_impressions: number | null;
-  ad_conv_value: number | null;
-  distinct_ads: number | null;
-  atc_rate: number | null;
-  checkout_rate: number | null;
-  bounce_rate: number | null;
-  cost_per_session: number | null;
+  /** Shopify: reliable at the top of the funnel. */
+  shopify_sessions: number | null;
+  shopify_atc_rate: number | null;
+  shopify_bounce_rate: number | null;
+  /** GA4: the only working checkout tail — Shopify's reads ~10x low
+   *  because GoKwik owns the checkout and Shopify never sees it. */
+  ga4_sessions: number | null;
+  ga4_pdp_views: number | null;
+  ga4_add_to_carts: number | null;
+  ga4_checkouts: number | null;
+  ga4_purchases: number | null;
+  ga4_bounce_rate: number | null;
+  /** How far apart the two sources are on what they BOTH measure, as
+   *  GA4 minus Shopify. Null whenever either side is missing: a page
+   *  only one source saw has no disagreement to report. */
+  sessions_delta: number | null;
+  sessions_delta_pct: number | null;
+  /** Percentage POINTS, not percent — it is the gap between two rates. */
+  bounce_rate_delta: number | null;
+  /** Funnel ratios, derived in SQL from the summed counts above — not
+   *  stored, because each depends on the chosen date range. Computed
+   *  server-side so ORDER BY works across all 21,667 pages rather than
+   *  just the 50 currently on screen. */
+  conversion_rate: number | null;
+  pdp_to_atc_rate: number | null;
+  pdp_to_checkout_rate: number | null;
+  atc_to_checkout_rate: number | null;
+  checkout_to_purchase_rate: number | null;
+  pdp_to_purchase_rate: number | null;
 }
 
 export interface LandingPageResponse {
@@ -1099,7 +1117,11 @@ export interface LandingPageResponse {
 
 export interface LandingPageParams {
   search?: string;
-  sort?: "sessions" | "ad_spend" | "cost_per_session" | "checkout_rate";
+  /** One of "collections" | "products" | "home" | "pages" | "other"; omit for all pages. */
+  page_type?: string;
+  sort?: string;
+  from_date?: string;
+  to_date?: string;
   limit?: number;
   offset?: number;
 }
@@ -1107,7 +1129,10 @@ export interface LandingPageParams {
 export function fetchLandingPages(params: LandingPageParams = {}): Promise<LandingPageResponse> {
   const qs = new URLSearchParams();
   if (params.search) qs.set("search", params.search);
+  if (params.page_type) qs.set("page_type", params.page_type);
   if (params.sort) qs.set("sort", params.sort);
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
   const s = qs.toString();

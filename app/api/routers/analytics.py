@@ -2879,30 +2879,114 @@ async def get_customer_journey_detail(session: SessionDep, customer_id: str) -> 
 # ----------------------------------------------------------------------
 
 _LANDING_PAGE_SORT_COLUMNS = {
-    "sessions": "sessions",
-    "ad_spend": "ad_spend",
-    "cost_per_session": "cost_per_session",
-    "checkout_rate": "checkout_rate",
+    "ga4_sessions":              "ga4_sessions",
+    "ga4_purchases":             "ga4_purchases",
+    "ga4_pdp_views":             "ga4_pdp_views",
+    "ga4_add_to_carts":          "ga4_add_to_carts",
+    "ga4_checkouts":             "ga4_checkouts",
+    "ga4_bounce_rate":           "ga4_bounce_rate",
+    "shopify_sessions":          "shopify_sessions",
+    "shopify_atc_rate":          "shopify_atc_rate",
+    "shopify_bounce_rate":       "shopify_bounce_rate",
+    "sessions_delta":            "sessions_delta",
+    "sessions_delta_pct":        "sessions_delta_pct",
+    "bounce_rate_delta":         "bounce_rate_delta",
+    "conversion_rate":           "conversion_rate",
+    "pdp_to_atc_rate":           "pdp_to_atc_rate",
+    "pdp_to_checkout_rate":      "pdp_to_checkout_rate",
+    "atc_to_checkout_rate":      "atc_to_checkout_rate",
+    "checkout_to_purchase_rate": "checkout_to_purchase_rate",
+    "pdp_to_purchase_rate":      "pdp_to_purchase_rate",
 }
+
+#: Page-type buckets, as predicates over the joined landing_page_path.
+#:
+#: Anchored regexes rather than LIKE '/collections%': the bare section
+#: index pages (/collections, /products) are real rows with real
+#: sessions and belong in their bucket, but a prefix wildcard would
+#: also swallow an unrelated /collections-sale. '(/|$)' takes the
+#: section page and everything under it, and nothing else.
+#:
+#: Shopify and GA4 agree on this shape -- both sources' top segments
+#: are collections, products, '/', pages, then a long tail of
+#: apps/account/cart/search/checkouts/blogs/policies -- so one set of
+#: predicates classifies rows from either side of the FULL OUTER JOIN.
+_LANDING_PAGE_TYPE_SQL: dict[str, str] = {
+    "collections": "landing_page_path ~ '^/collections(/|$)'",
+    "products":    "landing_page_path ~ '^/products(/|$)'",
+    "home":        "landing_page_path IN ('/', '')",
+    "pages":       "landing_page_path ~ '^/pages(/|$)'",
+}
+
+#: Everything the named buckets do not claim: cart, account, search,
+#: checkouts, blogs, policies, app proxies, and GA4's '(not set)'.
+#:
+#: COALESCE(..., TRUE) is load-bearing. landing_page_path is
+#: COALESCE(ga.path, sh.path) and can still be NULL if a source stored
+#: a NULL path; NOT (NULL) is NULL, which a WHERE drops. A row whose
+#: page is unknown is not a collection or a product, so "other" is
+#: where it belongs -- silently vanishing from every bucket would make
+#: the four filtered counts fail to add up to the unfiltered one.
+_LANDING_PAGE_TYPE_OTHER_SQL = (
+    "COALESCE(NOT (" + " OR ".join(_LANDING_PAGE_TYPE_SQL.values()) + "), TRUE)"
+)
 
 
 class LandingPageRow(BaseModel):
+    """One landing page, with metrics from BOTH sources side by side.
+
+    The two are deliberately not merged into single columns. They
+    disagree substantially on the same page -- GA4 reported 223,593
+    sessions for /collections/men-cotton-pant in July where Shopify's
+    own count differs -- because they define a session and a landing
+    page differently. Presenting one blended number would hide that;
+    presenting both, labelled, lets a reader see it.
+
+    Shopify supplies the top of the funnel, where it is reliable. GA4
+    supplies the tail, where Shopify is not: its checkout and purchase
+    counts read about 10x low on this store because GoKwik owns the
+    checkout and Shopify never observes the completion.
+
+    Rates are computed from SUMMED COMPONENTS over the requested window
+    (cart-addition sessions / sessions), never by averaging the stored
+    daily rates -- an unweighted mean of per-day rates lets a day with
+    three sessions count as much as a day with thirty thousand.
+    """
     landing_page_path: str
-    window_from: date | None
-    window_to: date | None
-    sessions: int | None
-    visitors: int | None
-    cart_addition_sessions: int | None
-    checkout_sessions: int | None
-    bounces: int | None
-    ad_spend: float | None
-    ad_impressions: int | None
-    ad_conv_value: float | None
-    distinct_ads: int | None
-    atc_rate: float | None
-    checkout_rate: float | None
-    bounce_rate: float | None
-    cost_per_session: float | None
+    #: Shopify
+    shopify_sessions: int | None
+    shopify_atc_rate: float | None
+    shopify_bounce_rate: float | None
+    #: GA4 counts
+    ga4_sessions: int | None
+    ga4_pdp_views: int | None
+    ga4_add_to_carts: int | None
+    ga4_checkouts: int | None
+    ga4_purchases: int | None
+    ga4_bounce_rate: float | None
+    #: How far apart the two sources are on the metrics they BOTH
+    #: measure. NULL whenever either side is missing: a page only one
+    #: source ever saw has no disagreement to report, and rendering a
+    #: delta against an absent number would invent one.
+    #:
+    #: sessions_delta is GA4 minus Shopify, so a negative figure means
+    #: GA4 recorded fewer -- the usual direction, since client-side
+    #: tracking loses sessions that Shopify's server-side count keeps.
+    sessions_delta: int | None
+    sessions_delta_pct: float | None
+    #: In percentage POINTS, not percent. It is the difference between
+    #: two rates, and calling it a percentage would invite reading a
+    #: 10-point gap as a 10% relative change, which it is not.
+    bounce_rate_delta: float | None
+    #: Funnel ratios, derived in SQL from the sums above. Not stored:
+    #: each depends on the requested window, so a persisted value would
+    #: be correct for exactly one date range.
+    conversion_rate: float | None
+    pdp_to_atc_rate: float | None
+    pdp_to_checkout_rate: float | None
+    atc_to_checkout_rate: float | None
+    checkout_to_purchase_rate: float | None
+    pdp_to_purchase_rate: float | None
 
 
 class LandingPageResponse(BaseModel):
@@ -2910,36 +2994,158 @@ class LandingPageResponse(BaseModel):
     total: int
 
 
+#: FULL OUTER JOIN, not INNER: a page that only one source saw still
+#: has to appear. The two disagree about which pages exist at all --
+#: GA4 records a landing page for sessions Shopify's own analytics
+#: never attributed, and vice versa -- and dropping those rows would
+#: quietly shorten the list of pages the section is meant to cover.
+_LANDING_PAGE_SQL = """
+WITH sh AS (
+  SELECT landing_page_path AS path,
+         SUM(sessions)::bigint                     AS sessions,
+         SUM(sessions_with_cart_additions)::bigint AS atc,
+         SUM(bounces)::bigint                      AS bounces
+    FROM public.landing_page_sessions_daily
+   WHERE session_date BETWEEN :from_date AND :to_date
+   GROUP BY 1
+), ga AS (
+  SELECT landing_page AS path,
+         SUM(sessions)::bigint     AS sessions,
+         SUM(pdp_views)::bigint    AS pdp_views,
+         SUM(add_to_carts)::bigint AS add_to_carts,
+         SUM(checkouts)::bigint    AS checkouts,
+         SUM(purchases)::bigint    AS purchases,
+         -- bounce_rate is a RATE, stored per day x page x channel, so it
+         -- cannot be summed. Weighting by sessions recovers the true
+         -- overall figure EXACTLY rather than approximately: each row's
+         -- rate is bounces/sessions, so rate * sessions = bounces, and
+         -- SUM(bounces) / SUM(sessions) is the real rate. A plain AVG()
+         -- would instead let a channel with nine sessions weigh as much
+         -- as one with ninety thousand.
+         SUM(bounce_rate * sessions) / NULLIF(SUM(sessions), 0) AS bounce_rate
+    FROM public.ga4_daily_landing
+   WHERE day BETWEEN :from_date AND :to_date
+   GROUP BY 1
+), joined AS (
+  SELECT COALESCE(ga.path, sh.path)                            AS landing_page_path,
+         sh.sessions                                           AS shopify_sessions,
+         ROUND(100.0 * sh.atc     / NULLIF(sh.sessions, 0), 2) AS shopify_atc_rate,
+         ROUND(100.0 * sh.bounces / NULLIF(sh.sessions, 0), 2) AS shopify_bounce_rate,
+         ga.sessions                                           AS ga4_sessions,
+         ga.pdp_views                                          AS ga4_pdp_views,
+         ga.add_to_carts                                       AS ga4_add_to_carts,
+         ga.checkouts                                          AS ga4_checkouts,
+         ga.purchases                                          AS ga4_purchases,
+         ROUND(100.0 * ga.bounce_rate, 2)                      AS ga4_bounce_rate,
+         -- Source disagreement, on the two metrics both sources report.
+         --
+         -- Subtraction, so a row missing either side yields NULL and the
+         -- column renders an em dash: there is no gap to state between a
+         -- number and an absence.
+         (ga.sessions - sh.sessions)                           AS sessions_delta,
+         ROUND(100.0 * (ga.sessions - sh.sessions)
+                     / NULLIF(sh.sessions, 0), 2)              AS sessions_delta_pct,
+         -- Differenced BEFORE rounding, from the same expressions the
+         -- two bounce columns round for display. Subtracting the two
+         -- already-rounded values would let their rounding errors add,
+         -- so the delta could disagree with the columns beside it by up
+         -- to 0.01 -- small, but it would make the row look inconsistent.
+         ROUND(100.0 * ga.bounce_rate
+             - 100.0 * sh.bounces / NULLIF(sh.sessions, 0), 2) AS bounce_rate_delta,
+         -- Funnel ratios, every one of them GA4-only.
+         --
+         -- Each is computed from SUMS over the window, never by
+         -- averaging per-day ratios: an unweighted mean would let a day
+         -- with three sessions count as much as one with thirty
+         -- thousand. NULLIF makes a zero denominator yield NULL rather
+         -- than an error or a misleading 0 -- "no PDP views, so the
+         -- rate is undefined" is a different statement from "0%", and
+         -- the column renders an em dash for it.
+         --
+         -- Deliberately NOT mixed across sources: conversion rate uses
+         -- GA4 sessions, not Shopify's, because its numerator
+         -- (purchases) is GA4's. The two count sessions differently,
+         -- and dividing one source's numerator by the other's
+         -- denominator produces a number that belongs to neither.
+         ROUND(100.0 * ga.purchases    / NULLIF(ga.sessions, 0),     2) AS conversion_rate,
+         ROUND(100.0 * ga.add_to_carts / NULLIF(ga.pdp_views, 0),    2) AS pdp_to_atc_rate,
+         ROUND(100.0 * ga.checkouts    / NULLIF(ga.pdp_views, 0),    2) AS pdp_to_checkout_rate,
+         ROUND(100.0 * ga.checkouts    / NULLIF(ga.add_to_carts, 0), 2) AS atc_to_checkout_rate,
+         ROUND(100.0 * ga.purchases    / NULLIF(ga.checkouts, 0),    2) AS checkout_to_purchase_rate,
+         ROUND(100.0 * ga.purchases    / NULLIF(ga.pdp_views, 0),    2) AS pdp_to_purchase_rate
+    FROM ga FULL OUTER JOIN sh ON sh.path = ga.path
+)
+SELECT * FROM joined
+"""
+
+
 @router.get("/landing-pages", response_model=LandingPageResponse)
 @cached_analytics(ttl=900.0)
 async def get_landing_pages(
     session: SessionDep,
     search: str | None = Query(default=None, description="Matches landing_page_path, case-insensitive substring."),
-    sort: Literal["sessions", "ad_spend", "cost_per_session", "checkout_rate"] = Query(default="sessions"),
+    page_type: str | None = Query(
+        default=None,
+        description="Restrict to one section: " + ", ".join(_LANDING_PAGE_TYPE_SQL) + ", other. Omit for all pages.",
+    ),
+    sort: str = Query(default="ga4_sessions", description="One of " + ", ".join(_LANDING_PAGE_SORT_COLUMNS)),
+    from_date: date | None = Query(default=None, description="Start of the window (defaults to 30 days back)."),
+    to_date: date | None = Query(default=None, description="End of the window (defaults to today)."),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> LandingPageResponse:
+    if sort not in _LANDING_PAGE_SORT_COLUMNS:
+        raise HTTPException(400, f"sort must be one of {sorted(_LANDING_PAGE_SORT_COLUMNS)}")
     sort_column = _LANDING_PAGE_SORT_COLUMNS[sort]
+    to_d = to_date or date.today()
+    from_d = from_date or (to_d - timedelta(days=29))
+    params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
 
-    where_clauses = []
-    params: dict[str, object] = {}
+    # Filtered in SQL, not in the client. The response is paginated and
+    # carries a total, and both have to describe the filtered set: a
+    # client-side filter would hide rows out of a 50-row page while the
+    # count still claimed every page, and sorting by sessions would rank
+    # within whatever happened to be fetched rather than within the
+    # section being looked at.
+    where_clauses: list[str] = []
     if search:
         where_clauses.append("landing_page_path ILIKE :search")
         params["search"] = f"%{search}%"
-    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    if page_type:
+        if page_type == "other":
+            where_clauses.append(_LANDING_PAGE_TYPE_OTHER_SQL)
+        elif page_type in _LANDING_PAGE_TYPE_SQL:
+            where_clauses.append(_LANDING_PAGE_TYPE_SQL[page_type])
+        else:
+            raise HTTPException(
+                400, f"page_type must be one of {sorted(_LANDING_PAGE_TYPE_SQL) + ['other']}")
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
+    # ONE statement, not two. The previous form ran the whole FULL OUTER
+    # JOIN twice -- once for the page of rows, once for COUNT(*) -- which
+    # cost two full aggregations AND two network round trips.
+    #
+    # The round trips are what actually hurt: the aggregation itself
+    # measures ~60ms warm, while a bare "SELECT 1" to this database
+    # measures ~500ms from a developer machine. Halving the statements
+    # halves the dominant cost, and on an API colocated with the database
+    # it still halves the work.
+    #
+    # COUNT(*) OVER () is evaluated across the whole filtered result
+    # BEFORE LIMIT applies, so it is the same total the separate COUNT
+    # returned -- the window sees every matching row, not just the 50
+    # being sent back.
     rows_result = await session.execute(
         text(
-            f"SELECT * FROM landing_page_analysis_30d {where_sql} "
+            f"SELECT *, COUNT(*) OVER () AS _total FROM ({_LANDING_PAGE_SQL}) t {where_sql} "
             f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
         ),
         {**params, "limit": limit, "offset": offset},
     )
-    rows = [LandingPageRow(**dict(r._mapping)) for r in rows_result]
-
-    total = (
-        await session.execute(text(f"SELECT COUNT(*) FROM landing_page_analysis_30d {where_sql}"), params)
-    ).scalar_one()
+    mappings = [dict(r._mapping) for r in rows_result]
+    # Popped, not just ignored: LandingPageRow would reject the extra key.
+    total = mappings[0]["_total"] if mappings else 0
+    rows = [LandingPageRow(**{k: v for k, v in m.items() if k != "_total"}) for m in mappings]
 
     return LandingPageResponse(rows=rows, total=total)
 
