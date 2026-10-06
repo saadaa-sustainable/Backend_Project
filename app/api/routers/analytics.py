@@ -293,12 +293,14 @@ _EXTERNAL_DAILY = (
 #:
 #: Verified equal to order_day on all 393,764 orders since 2026-01-01,
 #: so this aligns the two without needing the extra join.
+#:
+#: Written as the IST day expressed as a UTC RANGE, not an expression on the column: (created_at AT TIME ZONE ...)::date cannot use the created_at index and degrades to a filter -- measured 1,925ms against 20ms for this form, on identical rows (19,365).
 _ATTRIBUTION_DAILY = (
     "SELECT matched_ad_id, COUNT(*), COALESCE(SUM(total_price), 0) "
     "FROM public.shopify_order_attribution "
     "WHERE matched_ad_id = ANY(:ad_ids) "
-    "  AND (created_at AT TIME ZONE 'Asia/Kolkata')::date "
-    "        BETWEEN CAST(:from_str AS date) AND CAST(:to_str AS date) "
+    "  AND created_at >= (CAST(:from_str AS date)::timestamp AT TIME ZONE 'Asia/Kolkata') "
+    "  AND created_at <  ((CAST(:to_str AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata') "
     "GROUP BY matched_ad_id"
 )
 
@@ -8116,11 +8118,28 @@ def _scalable_creative_sql(level: str) -> str:
         "                 SUM(a.total_price) AS revenue, "
         "                 SUM(a.total_price) FILTER (WHERE ss.kind = 'New') AS new_revenue "
         "            FROM public.shopify_order_attribution a "
+        # Scoped to the window. Unscoped, this DISTINCT scanned all
+        # 400,481 rows of shopify_sales and spilled to temp files on
+        # EVERY rollup request, no matter which dates were picked -- the
+        # single largest node in the plan, inside the subquery that was
+        # 57% of the query. The attribution rows it joins to are already
+        # window-filtered, so only those orders' customer kind is needed.
+        #
+        # Verified on a 30-day window: 19,365 of 19,365 orders still
+        # resolve. The one-day margin either side is insurance for an
+        # order whose sales row lands on the far side of a day boundary;
+        # extra rows here cannot change a result, because the join is on
+        # order_id and the attribution set is already scoped.
         "            LEFT JOIN (SELECT DISTINCT order_id, new_or_returning_customer AS kind "
-        "                         FROM public.shopify_sales) ss "
+        "                         FROM public.shopify_sales "
+        "                        WHERE day BETWEEN (CAST(:from_date AS date) - 1) "
+        "                                      AND (CAST(:to_date AS date) + 1)) ss "
         "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
         "           WHERE a.matched_ad_id IS NOT NULL "
-        "             AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date "
+        "             AND a.created_at >= (CAST(:from_date AS date)::timestamp "
+        "                                   AT TIME ZONE 'Asia/Kolkata') "
+        "             AND a.created_at <  ((CAST(:to_date AS date) + 1)::timestamp "
+        "                                   AT TIME ZONE 'Asia/Kolkata') "
         "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
         f"    WHERE {parent} IS NOT NULL "
         "      AND i.day BETWEEN :from_date AND :to_date "
@@ -8314,7 +8333,8 @@ _ROLLUP_SHOPIFY_SQL = {
                COALESCE(SUM(a.total_price), 0)        AS shopify_revenue
           FROM public.shopify_order_attribution a
          WHERE a.matched_campaign_id IS NOT NULL
-           AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date
+           AND a.created_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+           AND a.created_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
          GROUP BY a.matched_campaign_id
     """,
     # Grouped on utm_term -- the ad set id the click itself carried --
@@ -8346,7 +8366,8 @@ _ROLLUP_SHOPIFY_SQL = {
           JOIN public.meta_adsets s ON s.adset_id = a.utm_term
          WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> ''
            AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'
-           AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date
+           AND a.created_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+           AND a.created_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
          GROUP BY a.utm_term
     """,
 }
@@ -9125,11 +9146,28 @@ async def get_scalable_creatives(
         "                 SUM(a.total_price) AS revenue, "
         "                 SUM(a.total_price) FILTER (WHERE ss.kind = 'New') AS new_revenue "
         "            FROM public.shopify_order_attribution a "
+        # Scoped to the window. Unscoped, this DISTINCT scanned all
+        # 400,481 rows of shopify_sales and spilled to temp files on
+        # EVERY rollup request, no matter which dates were picked -- the
+        # single largest node in the plan, inside the subquery that was
+        # 57% of the query. The attribution rows it joins to are already
+        # window-filtered, so only those orders' customer kind is needed.
+        #
+        # Verified on a 30-day window: 19,365 of 19,365 orders still
+        # resolve. The one-day margin either side is insurance for an
+        # order whose sales row lands on the far side of a day boundary;
+        # extra rows here cannot change a result, because the join is on
+        # order_id and the attribution set is already scoped.
         "            LEFT JOIN (SELECT DISTINCT order_id, new_or_returning_customer AS kind "
-        "                         FROM public.shopify_sales) ss "
+        "                         FROM public.shopify_sales "
+        "                        WHERE day BETWEEN (CAST(:from_date AS date) - 1) "
+        "                                      AND (CAST(:to_date AS date) + 1)) ss "
         "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
         "           WHERE a.matched_ad_id IS NOT NULL "
-        "             AND (a.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN :from_date AND :to_date "
+        "             AND a.created_at >= (CAST(:from_date AS date)::timestamp "
+        "                                   AT TIME ZONE 'Asia/Kolkata') "
+        "             AND a.created_at <  ((CAST(:to_date AS date) + 1)::timestamp "
+        "                                   AT TIME ZONE 'Asia/Kolkata') "
         "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
         f"    WHERE {parent} = :entity_id "
         "      AND i.day BETWEEN :from_date AND :to_date "
