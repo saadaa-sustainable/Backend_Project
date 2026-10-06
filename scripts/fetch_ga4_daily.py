@@ -148,11 +148,14 @@ CREATE TABLE IF NOT EXISTS public.ga4_daily_landing (
     channel_group  text        NOT NULL,
     sessions                bigint,
     total_users             bigint,
-    new_users               bigint,
+    pdp_views               bigint,
+    add_to_carts            bigint,
+    checkouts               bigint,
+    purchases               bigint,
+    revenue                 numeric,
+    bounce_rate             numeric,
+    key_event_rate          numeric,
     engaged_sessions        bigint,
-    avg_session_duration    numeric,
-    conversions             numeric,
-    total_revenue           numeric,
     property_timezone       text,
     sampled                 boolean DEFAULT false,
     thresholded             boolean DEFAULT false,
@@ -167,35 +170,62 @@ CREATE INDEX IF NOT EXISTS ix_ga4_landing_channel ON public.ga4_daily_landing(ch
 UPSERT = """
 INSERT INTO public.ga4_daily_landing
     (property_id, day, landing_page, channel_group,
-     sessions, total_users, new_users, engaged_sessions,
-     avg_session_duration, conversions, total_revenue,
-     property_timezone, sampled, thresholded, fetched_at)
+     sessions, total_users, pdp_views, add_to_carts, checkouts, purchases, revenue, bounce_rate, key_event_rate, engaged_sessions, property_timezone, sampled, thresholded, fetched_at)
 VALUES %s
 ON CONFLICT (property_id, day, landing_page, channel_group) DO UPDATE SET
-    sessions             = EXCLUDED.sessions,
-    total_users          = EXCLUDED.total_users,
-    new_users            = EXCLUDED.new_users,
-    engaged_sessions     = EXCLUDED.engaged_sessions,
-    avg_session_duration = EXCLUDED.avg_session_duration,
-    conversions          = EXCLUDED.conversions,
-    total_revenue        = EXCLUDED.total_revenue,
-    property_timezone    = EXCLUDED.property_timezone,
-    sampled              = EXCLUDED.sampled,
-    thresholded          = EXCLUDED.thresholded,
-    fetched_at           = EXCLUDED.fetched_at
+    sessions           = EXCLUDED.sessions,
+    total_users        = EXCLUDED.total_users,
+    pdp_views          = EXCLUDED.pdp_views,
+    add_to_carts       = EXCLUDED.add_to_carts,
+    checkouts          = EXCLUDED.checkouts,
+    purchases          = EXCLUDED.purchases,
+    revenue            = EXCLUDED.revenue,
+    bounce_rate        = EXCLUDED.bounce_rate,
+    key_event_rate     = EXCLUDED.key_event_rate,
+    engaged_sessions   = EXCLUDED.engaged_sessions,
+    property_timezone  = EXCLUDED.property_timezone,
+    sampled            = EXCLUDED.sampled,
+    thresholded        = EXCLUDED.thresholded,
+    fetched_at         = EXCLUDED.fetched_at
 """
 
 #: Order matters: the response returns dimension and metric values as
 #: positional arrays, so these lists ARE the parsing contract.
-DIMENSIONS = ["date", "landingPagePlusQueryString", "sessionDefaultChannelGroup"]
+#: `landingPage`, NOT `landingPagePlusQueryString`.
+#:
+#: The query-string form splits one page into a separate row per URL
+#: variant -- 312,658 distinct values in a single week on this property,
+#: because nearly every session arrives with ?utm_source=META&... An
+#: exact match on the bare path then captures only 1.6% of sessions.
+#: `landingPage` is the same dimension with the query string stripped,
+#: which is what a per-page analysis wants and what the Shopify side of
+#: this section already aggregates to. 1,805 distinct pages.
+#:
+#: Rates (bounce_rate, key_event_rate) MUST come from GA4 at this grain
+#: rather than be re-derived downstream: their denominators are not
+#: exposed by the API, so they cannot be re-weighted across query-string
+#: variants or channels after the fact.
+DIMENSIONS = ["date", "landingPage", "sessionDefaultChannelGroup"]
+
+#: Ten is the Data API's cap per request, so this is the whole budget.
+#: Chosen to span the funnel end to end -- arrival, product interest,
+#: intent, checkout, purchase -- because the point of the section is to
+#: see WHERE a page loses people, not just how many it gets.
+#:
+#: itemViewEvents is the PDP step (the `view_item` count). checkouts and
+#: ecommercePurchases replace Shopify's own funnel tail, which reads ~10x
+#: low here: GoKwik owns the checkout, so Shopify never sees completion.
 METRICS = [
     "sessions",
     "totalUsers",
-    "newUsers",
-    "engagedSessions",
-    "averageSessionDuration",
-    "conversions",
+    "itemViewEvents",        # PDP views
+    "addToCarts",
+    "checkouts",
+    "ecommercePurchases",
     "totalRevenue",
+    "bounceRate",
+    "sessionKeyEventRate",
+    "engagedSessions",
 ]
 
 
@@ -455,11 +485,18 @@ def _to_tuples(rows, *, property_id: str, tz: str, sampled: bool,
         m = [v.value for v in r.metric_values]
         # GA4 returns the date as YYYYMMDD with no separators.
         day = date(int(d[0][:4]), int(d[0][4:6]), int(d[0][6:8]))
+        # Positional, in METRICS order: sessions, totalUsers,
+        # itemViewEvents, addToCarts, checkouts, ecommercePurchases,
+        # totalRevenue, bounceRate, sessionKeyEventRate, engagedSessions.
+        # The rates arrive as fractions; stored as fractions, formatted
+        # as percentages at the edge.
+        i = lambda x: int(float(x or 0))
+        f = lambda x: float(x or 0)
         out.append((
             property_id, day, d[1] or "(not set)", d[2] or "(not set)",
-            int(float(m[0] or 0)), int(float(m[1] or 0)), int(float(m[2] or 0)),
-            int(float(m[3] or 0)), float(m[4] or 0), float(m[5] or 0),
-            float(m[6] or 0), tz, sampled, thresholded, now,
+            i(m[0]), i(m[1]), i(m[2]), i(m[3]), i(m[4]), i(m[5]),
+            f(m[6]), f(m[7]), f(m[8]), i(m[9]),
+            tz, sampled, thresholded, now,
         ))
     return out
 

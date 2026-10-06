@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { AppNav } from "@/components/AppNav";
+import { PageShell } from "@/components/PageShell";
 import { SelectionProvider } from "@/lib/SelectionContext";
 import "./globals.css";
 
@@ -29,7 +30,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <SelectionProvider>
           <AppNav />
           <main className="min-w-0 flex-1 overflow-y-auto bg-bg-base">
-            <div className="mx-auto w-full max-w-[1600px] px-8 py-8">{children}</div>
+            <PageShell>{children}</PageShell>
           </main>
         </SelectionProvider>
       </body>
