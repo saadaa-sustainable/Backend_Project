@@ -81,27 +81,43 @@ def last_click_results(*, total: int = 2):
 
 
 def landing_page_results():
+    """One result set, not two.
+
+    The endpoint carries its total in the rows via COUNT(*) OVER ()
+    rather than running the whole FULL OUTER JOIN a second time, so the
+    mock supplies a single execute() result and every row carries
+    `_total`. A fixture shaped like the old two-query form would pass a
+    count object the endpoint never asks for, and the second request in
+    these tests would consume it as if it were rows.
+    """
     row = {
         "landing_page_path": "/collections/autumn",
-        "window_from": date(2026, 8, 20),
-        "window_to": date(2026, 9, 18),
-        "sessions": 100,
-        "visitors": 85,
-        "cart_addition_sessions": 20,
-        "checkout_sessions": 10,
-        "bounces": 25,
-        "ad_spend": Decimal("500.00"),
-        "ad_impressions": 1000,
-        "ad_conv_value": Decimal("1500.00"),
-        "distinct_ads": 2,
-        "atc_rate": Decimal("0.20"),
-        "checkout_rate": Decimal("0.10"),
-        "bounce_rate": Decimal("0.25"),
-        "cost_per_session": Decimal("5.00"),
+        # Shopify: the top of the funnel, where it is reliable.
+        "shopify_sessions": 100,
+        "shopify_atc_rate": Decimal("20.00"),
+        "shopify_bounce_rate": Decimal("25.00"),
+        # GA4: deliberately disagreeing with Shopify on the same page,
+        # which is the condition the section exists to show.
+        "ga4_sessions": 85,
+        "ga4_pdp_views": 60,
+        "ga4_add_to_carts": 12,
+        "ga4_checkouts": 6,
+        "ga4_purchases": 3,
+        "ga4_bounce_rate": Decimal("30.00"),
+        # GA4 minus Shopify. Negative is the usual direction.
+        "sessions_delta": -15,
+        "sessions_delta_pct": Decimal("-15.00"),
+        "bounce_rate_delta": Decimal("5.00"),
+        # Funnel ratios, all GA4-only.
+        "conversion_rate": Decimal("3.53"),
+        "pdp_to_atc_rate": Decimal("20.00"),
+        "pdp_to_checkout_rate": Decimal("10.00"),
+        "atc_to_checkout_rate": Decimal("50.00"),
+        "checkout_to_purchase_rate": Decimal("50.00"),
+        "pdp_to_purchase_rate": Decimal("5.00"),
+        "_total": 1,
     }
-    count = MagicMock()
-    count.scalar_one.return_value = 1
-    return [[SimpleNamespace(_mapping=row)], count]
+    return [[SimpleNamespace(_mapping=row)]]
 
 
 async def test_last_click_http_response_serializes_rows_summaries_and_reuses_cache(client, session):
@@ -171,23 +187,37 @@ async def test_landing_pages_http_response_and_cache(client, session):
     first = await client.get("/admin/analytics/landing-pages")
     assert first.status_code == 200, first.text
     payload = first.json()
+    # The total comes from COUNT(*) OVER () inside the rows, so it has to
+    # survive being stripped off before the row model is built.
     assert payload["total"] == 1
-    assert payload["rows"][0]["landing_page_path"] == "/collections/autumn"
-    assert payload["rows"][0]["window_from"] == "2026-08-20"
-    assert payload["rows"][0]["cost_per_session"] == 5
+    row = payload["rows"][0]
+    assert row["landing_page_path"] == "/collections/autumn"
+    assert "_total" not in row, "the window-function column must not leak into the response"
+    # Both sources present and NOT merged.
+    assert row["shopify_sessions"] == 100
+    assert row["ga4_sessions"] == 85
+    assert row["sessions_delta"] == -15
+
     query, params = session.execute.await_args_list[0].args
-    assert params == {"limit": 50, "offset": 0}
-    assert "ORDER BY sessions DESC" in str(query)
+    # Dates are always sent: every ratio is computed over the requested
+    # window, so "which window" is never implicit.
+    assert params["limit"] == 50 and params["offset"] == 0
+    assert "from_date" in params and "to_date" in params
+    assert "ORDER BY ga4_sessions DESC" in str(query)
+    assert "COUNT(*) OVER ()" in str(query)
 
     second = await client.get("/admin/analytics/landing-pages")
     assert second.status_code == 200
     assert second.json() == payload
-    assert session.execute.await_count == 2
+    # ONE execute, not two: the second request is served from cache and
+    # the first no longer runs a separate COUNT(*).
+    assert session.execute.await_count == 1
 
 
 @pytest.mark.parametrize(("path", "results", "successful_query_count"), [
     ("/admin/analytics/last-click-utm", last_click_results, 3),
-    ("/admin/analytics/landing-pages", landing_page_results, 2),
+    # 1, not 2: the landing-pages endpoint no longer runs a separate COUNT(*).
+    ("/admin/analytics/landing-pages", landing_page_results, 1),
 ])
 async def test_query_failure_can_retry_then_cache_success(
     client, session, path, results, successful_query_count,
