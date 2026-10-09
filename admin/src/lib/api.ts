@@ -1115,6 +1115,60 @@ export interface LandingPageResponse {
   total: number;
 }
 
+/** One source, seen from both ends of the order's journey.
+ *
+ *  kept / handed_off / captured partition every order the source
+ *  touched at either end — an order falls in exactly one of the three,
+ *  so they can be summed. The two revenue figures cannot: an order the
+ *  source both started and closed counts in both, which is the point of
+ *  showing them side by side. */
+export interface FirstClickRow {
+  source: string;
+  /** What to show: the source name, or the ad/ad set name where the id
+   *  resolves, falling back to the raw id where it does not. */
+  label: string;
+  /** The channel the entity belongs to — what explains an unresolved id. */
+  channel: string;
+  /** Introduced here and closed here. Uncontested. */
+  kept: number;
+  /** Introduced here, closed elsewhere — what last click never counts. */
+  handed_off: number;
+  /** Closed here, introduced elsewhere — what last click counts in full. */
+  captured: number;
+  first_click_revenue: number;
+  last_click_revenue: number;
+  /** Null when the source only ever appears as a closer in this window. */
+  avg_days_to_convert: number | null;
+  avg_sessions: number | null;
+}
+
+export interface FirstClickResponse {
+  rows: FirstClickRow[];
+  total: number;
+  orders_reattributed: number;
+  orders_total: number;
+}
+
+export interface FirstClickParams {
+  /** "source" | "ad" | "adset" — what the journey's two ends are keyed on. */
+  grain?: string;
+  from_date?: string;
+  to_date?: string;
+  sort?: string;
+  limit?: number;
+}
+
+export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstClickResponse> {
+  const qs = new URLSearchParams();
+  if (params.grain) qs.set("grain", params.grain);
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const s = qs.toString();
+  return request<FirstClickResponse>(`/admin/analytics/first-click${s ? `?${s}` : ""}`);
+}
+
 export interface LandingPageParams {
   search?: string;
   /** One of "collections" | "products" | "home" | "pages" | "other"; omit for all pages. */
