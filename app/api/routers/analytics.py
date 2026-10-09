@@ -8113,34 +8113,28 @@ def _scalable_creative_sql(level: str) -> str:
         "          MAX(lc.new_revenue) AS new_revenue "
         "     FROM public.insights_daily_by_ad i "
         "     JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id "
-        "     LEFT JOIN ( "
-        "          SELECT a.matched_ad_id AS ad_id, "
-        "                 SUM(a.total_price) AS revenue, "
-        "                 SUM(a.total_price) FILTER (WHERE ss.kind = 'New') AS new_revenue "
-        "            FROM public.shopify_order_attribution a "
-        # Scoped to the window. Unscoped, this DISTINCT scanned all
-        # 400,481 rows of shopify_sales and spilled to temp files on
-        # EVERY rollup request, no matter which dates were picked -- the
-        # single largest node in the plan, inside the subquery that was
-        # 57% of the query. The attribution rows it joins to are already
-        # window-filtered, so only those orders' customer kind is needed.
+        # Per-ad revenue comes PRECOMPUTED, from ad_revenue_daily.
         #
-        # Verified on a 30-day window: 19,365 of 19,365 orders still
-        # resolve. The one-day margin either side is insurance for an
-        # order whose sales row lands on the far side of a day boundary;
-        # extra rows here cannot change a result, because the join is on
-        # order_id and the attribution set is already scoped.
-        "            LEFT JOIN (SELECT DISTINCT order_id, new_or_returning_customer AS kind "
-        "                         FROM public.shopify_sales "
-        "                        WHERE day BETWEEN (CAST(:from_date AS date) - 1) "
-        "                                      AND (CAST(:to_date AS date) + 1)) ss "
-        "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
-        "           WHERE a.matched_ad_id IS NOT NULL "
-        "             AND a.created_at >= (CAST(:from_date AS date)::timestamp "
-        "                                   AT TIME ZONE 'Asia/Kolkata') "
-        "             AND a.created_at <  ((CAST(:to_date AS date) + 1)::timestamp "
-        "                                   AT TIME ZONE 'Asia/Kolkata') "
-        "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
+        # This used to aggregate shopify_order_attribution and
+        # shopify_sales inline and join the result against all 21,971
+        # rows of ad_lifecycle. EXPLAIN (ANALYZE) on 2026-10-06 put that
+        # at 11,248ms of a 19,739ms query -- 57% of the whole rollup --
+        # to produce ten rows, and on production the ad set rollup
+        # failed outright after 129s. The cost was never the data
+        # volume; it was rebuilding the same aggregate per request.
+        #
+        # The precomputed table is 49,501 rows over 283 days, so this is
+        # an index range scan. Verified equal to the inline form before
+        # the swap on a 30-day window: 1,024 ads both sides, no ad on
+        # only one side, no revenue or new-revenue difference above a
+        # paisa -- the four scaling gates below read the same numbers
+        # they did before.
+        "     LEFT JOIN ( "
+        "          SELECT ad_id, SUM(revenue) AS revenue, "
+        "                 SUM(new_revenue) AS new_revenue "
+        "            FROM public.ad_revenue_daily "
+        "           WHERE day BETWEEN :from_date AND :to_date "
+        "           GROUP BY ad_id) lc ON lc.ad_id = al.ad_id "
         f"    WHERE {parent} IS NOT NULL "
         "      AND i.day BETWEEN :from_date AND :to_date "
         f"    GROUP BY {parent}, al.ad_id) x "
@@ -8643,6 +8637,23 @@ async def get_ads_analyse_rollup(
     offset: int = Query(default=0, ge=0),
 ) -> RollupResponse:
     """Ad set / campaign rollup for the Ads Analyse level toggle."""
+    # The database cancels any statement at 120s by default, and this
+    # one gets close enough to cross it whenever the instance is busy --
+    # measured on production 2026-10-09, all four combinations of level
+    # and window died at 121-129s with QueryCanceledError, which the UI
+    # shows as a section that never loads.
+    #
+    # A cancel here is strictly worse than a slow answer. The query is
+    # read-only, it holds no locks worth freeing, and it is cached for
+    # 15 minutes once it lands, so one caller waiting three minutes is
+    # the cost of every caller after them waiting none. 300s is the
+    # ceiling it is allowed to be slow under, NOT a target: the work to
+    # bring it back under 120s on its own is tracked separately.
+    #
+    # SET LOCAL, so it expires with this request's transaction and no
+    # other query on the pooled connection inherits it.
+    await session.execute(text("SET LOCAL statement_timeout = '300s'"))
+
     table, id_col, name_col = _ROLLUP_CFG[level]
     purchases = _action_sql("actions", "omni_purchase", "purchase")
     conv_value = _action_sql("action_values", "omni_purchase", "purchase")
@@ -9141,34 +9152,28 @@ async def get_scalable_creatives(
         "          MAX(lc.revenue) AS revenue, MAX(lc.new_revenue) AS new_revenue "
         "     FROM public.insights_daily_by_ad i "
         "     JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id "
-        "     LEFT JOIN ( "
-        "          SELECT a.matched_ad_id AS ad_id, "
-        "                 SUM(a.total_price) AS revenue, "
-        "                 SUM(a.total_price) FILTER (WHERE ss.kind = 'New') AS new_revenue "
-        "            FROM public.shopify_order_attribution a "
-        # Scoped to the window. Unscoped, this DISTINCT scanned all
-        # 400,481 rows of shopify_sales and spilled to temp files on
-        # EVERY rollup request, no matter which dates were picked -- the
-        # single largest node in the plan, inside the subquery that was
-        # 57% of the query. The attribution rows it joins to are already
-        # window-filtered, so only those orders' customer kind is needed.
+        # Per-ad revenue comes PRECOMPUTED, from ad_revenue_daily.
         #
-        # Verified on a 30-day window: 19,365 of 19,365 orders still
-        # resolve. The one-day margin either side is insurance for an
-        # order whose sales row lands on the far side of a day boundary;
-        # extra rows here cannot change a result, because the join is on
-        # order_id and the attribution set is already scoped.
-        "            LEFT JOIN (SELECT DISTINCT order_id, new_or_returning_customer AS kind "
-        "                         FROM public.shopify_sales "
-        "                        WHERE day BETWEEN (CAST(:from_date AS date) - 1) "
-        "                                      AND (CAST(:to_date AS date) + 1)) ss "
-        "                   ON ss.order_id = split_part(a.order_id, '/', 5) "
-        "           WHERE a.matched_ad_id IS NOT NULL "
-        "             AND a.created_at >= (CAST(:from_date AS date)::timestamp "
-        "                                   AT TIME ZONE 'Asia/Kolkata') "
-        "             AND a.created_at <  ((CAST(:to_date AS date) + 1)::timestamp "
-        "                                   AT TIME ZONE 'Asia/Kolkata') "
-        "           GROUP BY a.matched_ad_id) lc ON lc.ad_id = al.ad_id "
+        # This used to aggregate shopify_order_attribution and
+        # shopify_sales inline and join the result against all 21,971
+        # rows of ad_lifecycle. EXPLAIN (ANALYZE) on 2026-10-06 put that
+        # at 11,248ms of a 19,739ms query -- 57% of the whole rollup --
+        # to produce ten rows, and on production the ad set rollup
+        # failed outright after 129s. The cost was never the data
+        # volume; it was rebuilding the same aggregate per request.
+        #
+        # The precomputed table is 49,501 rows over 283 days, so this is
+        # an index range scan. Verified equal to the inline form before
+        # the swap on a 30-day window: 1,024 ads both sides, no ad on
+        # only one side, no revenue or new-revenue difference above a
+        # paisa -- the four scaling gates below read the same numbers
+        # they did before.
+        "     LEFT JOIN ( "
+        "          SELECT ad_id, SUM(revenue) AS revenue, "
+        "                 SUM(new_revenue) AS new_revenue "
+        "            FROM public.ad_revenue_daily "
+        "           WHERE day BETWEEN :from_date AND :to_date "
+        "           GROUP BY ad_id) lc ON lc.ad_id = al.ad_id "
         f"    WHERE {parent} = :entity_id "
         "      AND i.day BETWEEN :from_date AND :to_date "
         "     GROUP BY al.ad_id) x "
