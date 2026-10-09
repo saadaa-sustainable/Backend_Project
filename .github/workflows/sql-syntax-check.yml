@@ -47,7 +47,7 @@ jobs:
         run: >-
           python -m pytest tests/test_attribution_refresh.py
           tests/test_daily_silver_pipeline.py tests/test_daily_workflow_guard.py
-          tests/test_shopify_utm.py -q
+          tests/test_shopify_utm.py tests/test_config.py -q
       - name: Verify daily ad metrics with PostgreSQL
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metrics_tests

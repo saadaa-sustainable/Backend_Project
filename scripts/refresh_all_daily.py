@@ -4,7 +4,7 @@ Runs the whole ingest + silver chain in dependency-correct order, wraps
 each step in the cron_log helper, and returns a non-zero exit code if
 any critical step failed so GitHub Actions marks the run red.
 
-Called by .github/workflows/daily-refresh.yml at 05:00 IST daily.
+Scheduled by .github/workflows/daily-refresh.yml for 07:00 IST daily.
 Also runnable manually:
 
     ./.venv/Scripts/python.exe scripts/refresh_all_daily.py
