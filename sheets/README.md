@@ -6,16 +6,41 @@ keeps them current nightly.
 ## Setup
 
 1. In the sheet: **Extensions → Apps Script**, paste `MetaDirectSync.gs`.
-2. **Project Settings → Script Properties**:
+2. **Services → + → Google Sheets API → Add.** Required: the write path
+   uses `Sheets.Spreadsheets.Values.update` rather than
+   `Range.setValues()`. Without the advanced service added, the script
+   fails on the first write with `Sheets is not defined`.
+
+   Why it is not optional: `setValues()` is one round trip through the
+   Spreadsheet service per call, and growing a tab with
+   `insertRowsAfter()` costs more the bigger the grid already is. The
+   90-day view is 63,194 rows x 36 columns; writing it a page at a time
+   meant 63 writes plus 63 structural resizes against a document that
+   got heavier with each one, until the service timed out on ANY access
+   to it -- including the nine-cell Status write, which is where the
+   error surfaced and where it was not.
+3. **Project Settings → tick "Show `appsscript.json` manifest file in
+   editor"**, open it, and make it match `sheets/appsscript.json`.
+
+   The manifest carries a `urlFetchWhitelist`, and UrlFetch to anything
+   not listed there fails with *"the URL has not been whitelisted in the
+   script manifest"* — which is what adding the Sheets advanced service
+   surfaces, because adding a service rewrites the manifest.
+
+   The whitelist is worth keeping rather than deleting. This script
+   holds a `service_role` key, and the entry pins the only host it is
+   allowed to send that key to. Entries are prefix matches, must be
+   https, and must end with `/`.
+4. **Project Settings → Script Properties**:
 
    | Property | Value |
    |---|---|
    | `SUPABASE_URL` | `https://gtcdyfmlvglzpiwzklhx.supabase.co` |
    | `SUPABASE_KEY` | the **service_role** key (Supabase → Settings → API) |
 
-3. **Project Settings → Timezone → Asia/Kolkata.**
-4. Run `setupNightlyTrigger()` once and authorise it.
-5. Run `syncMetaDirect()` once by hand to confirm it works.
+5. **Project Settings → Timezone → Asia/Kolkata.**
+6. Run `setupNightlyTrigger()` once and authorise it.
+7. Run `syncMetaDirect()` once by hand to confirm it works.
 
 ## Why service_role rather than anon
 

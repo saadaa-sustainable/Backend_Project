@@ -47,7 +47,7 @@ var VIEWS = [
 ];
 
 var PAGE = 1000;          // PostgREST's own maximum per request
-var WRITE_CHUNK = 5000;   // rows per setValues call
+var WRITE_CHUNK = 20000;  // rows per Sheets API write
 
 function _cfg() {
   var p = PropertiesService.getScriptProperties();
@@ -77,38 +77,64 @@ function _fetchPage(cfg, view, order, offset) {
   return JSON.parse(res.getContentText());
 }
 
-/** Make sure the sheet is physically big enough to be written to.
+/** Resize a tab's grid in ONE call, before any data is written.
  *
- *  A new sheet is 1000 rows x 26 columns and clear() does not change
- *  that, so getRange() past those bounds throws "The coordinates or
- *  dimensions of the range are invalid". Daily 30d is 41,807 rows x 36
- *  columns, so every daily view needs this before its first write.
+ *  The old code grew the sheet with insertRowsAfter() once per 1,000-row
+ *  page. For the 90-day view that is 63 structural row insertions on a
+ *  grid on its way to 63,000 rows, and a structural edit costs more the
+ *  bigger the grid already is. That, not the volume of data, is what
+ *  made the document stop responding: the Spreadsheet service ended up
+ *  timing out on any access, including a nine-cell status write.
+ *
+ *  Setting rowCount and columnCount once is a single API call whatever
+ *  the size, and it shrinks as readily as it grows, so it doubles as
+ *  the tail trim the old deleteRows() pass did.
  */
-function _ensureSize(sh, rows, cols) {
-  var needRows = rows + 1;                       // +1 for the header
-  if (sh.getMaxRows() < needRows) {
-    sh.insertRowsAfter(sh.getMaxRows(), needRows - sh.getMaxRows());
-  }
-  if (sh.getMaxColumns() < cols) {
-    sh.insertColumnsAfter(sh.getMaxColumns(), cols - sh.getMaxColumns());
-  }
+function _setGrid(ssId, sh, rows, cols) {
+  Sheets.Spreadsheets.batchUpdate({
+    requests: [{
+      updateSheetProperties: {
+        properties: {
+          sheetId: sh.getSheetId(),
+          gridProperties: { rowCount: Math.max(rows, 2), columnCount: Math.max(cols, 1) }
+        },
+        fields: 'gridProperties.rowCount,gridProperties.columnCount'
+      }
+    }]
+  }, ssId);
 }
 
 /** Replace one tab with the full contents of one view.
  *
- *  Each page is written as it arrives rather than accumulated and
- *  written at the end. Holding 100k objects in memory and then
- *  rows.concat(page) per page -- which reallocates the whole array
- *  every time -- is what made the 90-day view unsafe to enable.
- *  Streaming keeps memory flat and the wall time roughly linear.
+ *  Pages are still STREAMED from PostgREST -- holding 100k objects in
+ *  memory and rows.concat(page) per page reallocates the whole array
+ *  every time, which is what made the 90-day view unsafe to enable --
+ *  but they are buffered into large blocks before being written.
+ *
+ *  Writes go through the Sheets API rather than Range.setValues().
+ *  setValues is a per-call round trip through the Spreadsheet service,
+ *  so 63 of them plus 63 grid resizes is 126 interactions with a
+ *  document that gets heavier each time. Values.update takes the whole
+ *  block in one request, and the grid is sized once up front.
  */
 function _syncView(cfg, spec) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ssId = ss.getId();
   var sh = ss.getSheetByName(spec.tab) || ss.insertSheet(spec.tab);
-  sh.clear();
 
   var headers = null;
   var written = 0;
+  var buf = [];
+
+  function flushBuf() {
+    if (!buf.length) return;
+    // A1 is the header row, so data starts at row 2.
+    var a1 = "'" + spec.tab.replace(/'/g, "''") + "'!A" + (written + 2);
+    Sheets.Spreadsheets.Values.update(
+      { values: buf }, ssId, a1, { valueInputOption: 'RAW' });
+    written += buf.length;
+    buf = [];
+  }
 
   for (var offset = 0; ; offset += PAGE) {
     var page = _fetchPage(cfg, spec.view, spec.order, offset);
@@ -116,35 +142,60 @@ function _syncView(cfg, spec) {
     if (page.length) {
       if (!headers) {
         headers = Object.keys(page[0]);
-        _ensureSize(sh, PAGE, headers.length);
-        sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+        // Clear by VALUE, not Sheet.clear(): clearing values leaves the
+        // grid alone, and the grid is about to be set deliberately.
+        Sheets.Spreadsheets.Values.clear({}, ssId,
+          "'" + spec.tab.replace(/'/g, "''") + "'");
+        // Generous up front so no second resize is needed mid-write;
+        // trimmed to the real count once the row total is known.
+        _setGrid(ssId, sh, 100000, headers.length);
+        Sheets.Spreadsheets.Values.update(
+          { values: [headers] }, ssId,
+          "'" + spec.tab.replace(/'/g, "''") + "'!A1",
+          { valueInputOption: 'RAW' });
         sh.setFrozenRows(1);
+        sh.getRange(1, 1, 1, headers.length).setFontWeight('bold');
       }
-      // Grow before the write, not after: the range has to exist first.
-      _ensureSize(sh, written + page.length, headers.length);
-      var values = page.map(function (r) {
+      buf = buf.concat(page.map(function (r) {
         return headers.map(function (h) { return r[h] === null ? '' : r[h]; });
-      });
-      sh.getRange(written + 2, 1, values.length, headers.length).setValues(values);
-      written += values.length;
+      }));
+      if (buf.length >= WRITE_CHUNK) flushBuf();
     }
 
     if (page.length < PAGE) break;       // short page means the last one
     if (offset > 500000) throw new Error(spec.view + ': runaway pagination');
   }
+  flushBuf();
 
   if (!written) {
     sh.getRange(1, 1).setValue('No rows returned for ' + spec.view);
   } else {
-    // Trim the empty tail a previous, larger run may have left behind.
-    var extra = sh.getMaxRows() - (written + 1);
-    if (extra > 0) sh.deleteRows(written + 2, extra);
+    // Shrink to fit. Same single call that grew it.
+    _setGrid(ssId, sh, written + 1, headers.length);
   }
   return written;
 }
 
 /** The entry point. This is what the nightly trigger calls. */
 function syncMetaDirect() {
+  // One run at a time. The 07:00 trigger and a manual run overlapping
+  // means two executions writing the same document, which the
+  // Spreadsheet service reports as a timeout rather than as contention.
+  // Returning rather than waiting: the other run is doing this work
+  // already, so a second one has nothing to add.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    Logger.log('Another sync is already running; skipping this one.');
+    return;
+  }
+  try {
+    _syncMetaDirect();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _syncMetaDirect() {
   var cfg = _cfg();
   var started = new Date();
   var log = [];
@@ -164,6 +215,16 @@ function syncMetaDirect() {
     if (!spec.enabled) { log.push([spec.view, 'skipped', 'disabled in VIEWS']); return; }
     try {
       var n = _syncView(cfg, spec);
+      // Drain this view's writes before starting the next one.
+      //
+      // Apps Script queues Spreadsheet operations and flushes them
+      // lazily, so without this the four views pile ~90,000 rows of
+      // pending work into one queue and the FIRST call that forces a
+      // flush pays for all of it. That call was _writeStatus, which is
+      // why a timeout kept being reported there -- against a function
+      // that writes nine cells. Flushing per view bounds the queue and
+      // makes a timeout name the view that actually caused it.
+      SpreadsheetApp.flush();
       log.push([spec.view, 'ok', n + ' rows']);
     } catch (e) {
       // One view failing must not cost the others.
@@ -171,7 +232,14 @@ function syncMetaDirect() {
     }
   });
 
-  _writeStatus(started, through, log);
+  // The data is already in the sheet by this point. A failure writing
+  // the status tab must not turn a good run into a red one -- that is
+  // what made the timeout look like the sync had failed outright.
+  try {
+    _writeStatus(started, through, log);
+  } catch (e) {
+    Logger.log('Status tab not written: ' + e);
+  }
 }
 
 function _writeStatus(started, through, log) {
