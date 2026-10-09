@@ -1124,6 +1124,11 @@ export interface LandingPageResponse {
  *  showing them side by side. */
 export interface FirstClickRow {
   source: string;
+  /** What to show: the source name, or the ad/ad set name where the id
+   *  resolves, falling back to the raw id where it does not. */
+  label: string;
+  /** The channel the entity belongs to — what explains an unresolved id. */
+  channel: string;
   /** Introduced here and closed here. Uncontested. */
   kept: number;
   /** Introduced here, closed elsewhere — what last click never counts. */
@@ -1145,6 +1150,8 @@ export interface FirstClickResponse {
 }
 
 export interface FirstClickParams {
+  /** "source" | "ad" | "adset" — what the journey's two ends are keyed on. */
+  grain?: string;
   from_date?: string;
   to_date?: string;
   sort?: string;
@@ -1153,6 +1160,7 @@ export interface FirstClickParams {
 
 export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstClickResponse> {
   const qs = new URLSearchParams();
+  if (params.grain) qs.set("grain", params.grain);
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
   if (params.sort) qs.set("sort", params.sort);

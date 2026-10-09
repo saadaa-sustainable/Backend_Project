@@ -27,6 +27,22 @@ import { DateRangePicker } from "@/components/DateRangePicker";
 import { ApiError, FirstClickRow, fetchFirstClick } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
 
+/** What the journey's two ends are keyed on.
+ *
+ *  Ad grain is the one that pays: 17.6% of orders change SOURCE between
+ *  the first and last click, but 46% change AD. Most hand-offs happen
+ *  inside one channel, between its own creatives, and the source view
+ *  hides every one of them.
+ *
+ *  Campaign is absent on purpose — GA4's campaign id carries a
+ *  per-session suffix, so first and last never match and the grain
+ *  reported every campaign handing off 100% of its orders. */
+const GRAIN_OPTIONS: { value: string; label: string }[] = [
+  { value: "ad", label: "Ad" },
+  { value: "adset", label: "Ad set" },
+  { value: "source", label: "Source" },
+];
+
 const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: "handed_off", label: "Handed off" },
   { value: "captured", label: "Captured" },
@@ -42,6 +58,7 @@ function num(n: number | null | undefined, digits = 0) {
 }
 
 export function FirstClick() {
+  const [grain, setGrain] = useState("ad");
   const [sort, setSort] = useState("handed_off");
   const [datePreset, setDatePreset] = useState<string>("last30");
   const [fromDate, setFromDate] = useState<string>(() => {
@@ -57,8 +74,8 @@ export function FirstClick() {
   const [error, setError] = useState<string | null>(null);
 
   const filters = useMemo(
-    () => ({ sort, from_date: fromDate, to_date: toDate, limit: 50 }),
-    [sort, fromDate, toDate],
+    () => ({ grain, sort, from_date: fromDate, to_date: toDate, limit: 50 }),
+    [grain, sort, fromDate, toDate],
   );
 
   useEffect(() => {
@@ -101,6 +118,15 @@ export function FirstClick() {
           onApply={(r, pk) => { setDatePreset(pk); setFromDate(r.from); setToDate(r.to); }}
         />
         <select
+          value={grain}
+          onChange={(e) => setGrain(e.target.value)}
+          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
+        >
+          {GRAIN_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>By: {o.label}</option>
+          ))}
+        </select>
+        <select
           value={sort}
           onChange={(e) => setSort(e.target.value)}
           className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
@@ -133,8 +159,16 @@ export function FirstClick() {
             <thead>
               <tr>
                 <th className="sticky left-0 top-0 z-30 h-10 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[11px] font-medium">
-                  Source
+                  {grain === "ad" ? "Ad" : grain === "adset" ? "Ad set" : "Source"}
                 </th>
+                {grain !== "source" && (
+                  <th
+                    title="The channel this belongs to. Also what explains a row showing a raw id: only Meta ad ids resolve to names, while kwikengage, sagepilot-ai and google put their own tokens in the same GA4 field."
+                    className="sticky top-0 z-20 h-10 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[11px] font-medium"
+                  >
+                    Channel
+                  </th>
+                )}
                 {([
                   ["Kept", "Introduced here and closed here. Uncontested by any other source."],
                   ["Handed off", "Introduced here, closed elsewhere. Last click never counts these."],
@@ -160,10 +194,18 @@ export function FirstClick() {
                 // credit the last-click table moves to someone else.
                 const net = r.handed_off - r.captured;
                 return (
-                  <tr key={r.source} className="border-b border-border-soft hover:bg-bg-surface">
-                    <td className="sticky left-0 z-10 max-w-[220px] truncate border-r border-border-soft bg-white px-3 py-1.5 text-xs text-text-primary" title={r.source}>
-                      {r.source}
+                  <tr key={`${r.source}-${r.channel}`} className="border-b border-border-soft hover:bg-bg-surface">
+                    <td
+                      className="sticky left-0 z-10 max-w-[300px] truncate border-r border-border-soft bg-white px-3 py-1.5 text-xs text-text-primary"
+                      title={r.label === r.source ? r.source : `${r.label}  ·  ${r.source}`}
+                    >
+                      {r.label}
                     </td>
+                    {grain !== "source" && (
+                      <td className="border-b border-border-soft px-3 py-1.5 text-xs text-text-secondary">
+                        {r.channel}
+                      </td>
+                    )}
                     <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.kept)}</td>
                     <td
                       className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${net > 0 ? "font-semibold text-amber-700" : "text-text-primary"}`}

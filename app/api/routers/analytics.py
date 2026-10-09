@@ -2323,46 +2323,121 @@ class SourceBreakdown(BaseModel):
 # captured is its last-click population. A source whose handed_off far
 # exceeds its captured is doing work the last-click table bills to
 # someone else.
-_FIRST_CLICK_SQL = """
+#: What a journey's two ends are keyed on.
+#:
+#: Source grain answers "which channel introduces buyers". Ad grain
+#: answers the sharper question -- which CREATIVE introduces them --
+#: and the two disagree far more than the channel view suggests:
+#: measured over 30 days, 17.6% of orders change source between the
+#: first and last click, but 46% change AD (8,097 of the 17,628 orders
+#: carrying an ad at both ends). Most hand-offs happen inside one
+#: channel, between its own creatives, and the source view hides every
+#: one of them.
+_FIRST_CLICK_GRAINS = {
+    "source": ("COALESCE(NULLIF(btrim(first_source), ''), '(none)')",
+               "COALESCE(NULLIF(btrim(last_source), ''), '(none)')"),
+    "ad":      ("first_ad_id",      "last_ad_id"),
+    "adset":   ("first_adset_id",   "last_adset_id"),
+}
+
+#: Campaign grain is deliberately absent.
+#:
+#: GA4's first_campaign_id carries a per-session suffix --
+#: "120233707955260431_v2_s02" and "..._v2_s03" are the same campaign
+#: seen in two sessions -- so first and last can never be equal and the
+#: grain reported kept=0 for every campaign: a claim that every campaign
+#: hands off 100% of its orders, which is an artifact of the id format
+#: and not true.
+#:
+#: The sibling column first_campaign holds a bare numeric id that does
+#: match more often (8,569 against 6,762), but only 121 of its 478
+#: distinct values resolve against meta_campaigns, and none against
+#: meta_adsets or ad_lifecycle. Neither column is a campaign key this
+#: can stand behind, so the grain is left out rather than shipped
+#: looking authoritative.
+
+
+def _first_click_sql(grain: str) -> str:
+    """Both ends of each order, aggregated per entity at one grain.
+
+    Unions the two ENDS rather than joining an entity list back onto the
+    orders. "first_key = entity OR last_key = entity" cannot hash, so
+    the planner falls to a nested loop over every order per entity --
+    the first version of this timed out at 150s. Unioning costs one pass
+    over 2N rows and hash-aggregates.
+
+    At ad grain the label comes from ad_lifecycle where the id resolves,
+    and falls back to the raw id where it does not. Both happen: of
+    1,688 distinct first-click ad ids in a 30-day window only 877
+    resolve, because Meta ads resolve at 86% while kwikengage,
+    sagepilot-ai and google put their own tokens in the same field.
+    Those rows are kept and labelled by their channel rather than
+    dropped -- they are real orders, and silently losing a third of the
+    population would be worse than showing an unresolved id.
+    """
+    first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    # Source is never NULL after the COALESCE above; every id grain can
+    # be, when an order's journey never touched a paid click at that end.
+    not_null = "" if grain == "source" else (
+        f"     AND ({first_k} IS NOT NULL OR {last_k} IS NOT NULL)\n")
+    # Each id grain has its own name source. Falling back to the raw id
+    # rather than hiding the row: an unresolved id is still a real order
+    # the entity above it earned.
+    names = {
+        "ad":       ("ad_lifecycle",         "ad_id",       "ad_name"),
+        "adset":    ("public.meta_adsets",   "adset_id",    "adset_name"),
+    }
+    if grain == "source":
+        label, join = "e.entity", ""
+    else:
+        tbl, key, col = names[grain]
+        label = f"COALESCE(NULLIF(btrim(n.{col}), ''), e.entity)"
+        join = f"  LEFT JOIN {tbl} n ON n.{key} = e.entity\n"
+    return f"""
 WITH j AS (
-  SELECT COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS first_src,
+  SELECT {first_k} AS first_k, {last_k} AS last_k,
+         COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS first_src,
          COALESCE(NULLIF(btrim(last_source), ''),  '(none)') AS last_src,
          revenue, days_to_convert, total_sessions
     FROM public.ga4_order_attribution
    WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
      AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
-), ends AS (
-  -- Each order contributes one row per END of its journey, tagged with
-  -- which end it is. Deliberately NOT a join from a source list back
-  -- onto the orders: "first_src = source OR last_src = source" cannot
-  -- hash, so the planner falls to a nested loop over every order per
-  -- source and the statement times out. Unioning the two ends costs one
-  -- pass over 2N rows and hash-aggregates.
-  SELECT first_src AS source, 'first'::text AS side,
-         (first_src = last_src) AS uncontested,
+{not_null}), ends AS (
+  SELECT first_k AS entity, first_src AS channel, 'first'::text AS side,
+         (first_k IS NOT DISTINCT FROM last_k) AS uncontested,
          revenue, days_to_convert, total_sessions
-    FROM j
+    FROM j WHERE first_k IS NOT NULL
   UNION ALL
-  SELECT last_src, 'last'::text,
-         (first_src = last_src),
+  SELECT last_k, last_src, 'last'::text,
+         (first_k IS NOT DISTINCT FROM last_k),
          revenue, days_to_convert, total_sessions
-    FROM j
+    FROM j WHERE last_k IS NOT NULL
+), agg AS (
+  SELECT entity,
+         -- One entity can carry rows from two spellings of its channel
+         -- (META and Meta both appear). MIN keeps the pick stable
+         -- across rebuilds instead of leaving it to row order.
+         MIN(channel)                                                   AS channel,
+         COUNT(*) FILTER (WHERE side = 'first' AND uncontested)::int     AS kept,
+         COUNT(*) FILTER (WHERE side = 'first' AND NOT uncontested)::int AS handed_off,
+         COUNT(*) FILTER (WHERE side = 'last'  AND NOT uncontested)::int AS captured,
+         COALESCE(SUM(revenue) FILTER (WHERE side = 'first'), 0)         AS first_click_revenue,
+         COALESCE(SUM(revenue) FILTER (WHERE side = 'last'),  0)         AS last_click_revenue,
+         -- Rounded to one place: the inputs are whole days and whole
+         -- sessions, so more precision would imply a resolution the
+         -- source does not have. Averaged over orders this entity
+         -- STARTED -- a journey's length belongs to whoever began it.
+         ROUND(AVG(days_to_convert) FILTER (WHERE side = 'first'), 1)    AS avg_days_to_convert,
+         ROUND(AVG(total_sessions)  FILTER (WHERE side = 'first'), 1)    AS avg_sessions
+    FROM ends
+   GROUP BY entity
 )
-SELECT source,
-       COUNT(*) FILTER (WHERE side = 'first' AND uncontested)::int       AS kept,
-       COUNT(*) FILTER (WHERE side = 'first' AND NOT uncontested)::int   AS handed_off,
-       COUNT(*) FILTER (WHERE side = 'last'  AND NOT uncontested)::int   AS captured,
-       COALESCE(SUM(revenue) FILTER (WHERE side = 'first'), 0)           AS first_click_revenue,
-       COALESCE(SUM(revenue) FILTER (WHERE side = 'last'),  0)           AS last_click_revenue,
-       -- Rounded to one place: the inputs are whole days and whole
-       -- sessions, so more precision would imply a resolution the
-       -- source does not have. Averaged over orders this source
-       -- STARTED -- a journey's length belongs to whoever began it.
-       ROUND(AVG(days_to_convert) FILTER (WHERE side = 'first'), 1)      AS avg_days_to_convert,
-       ROUND(AVG(total_sessions)  FILTER (WHERE side = 'first'), 1)      AS avg_sessions
-  FROM ends
- GROUP BY source
-"""
+SELECT e.entity AS source, {label} AS label, e.channel AS channel,
+       e.kept, e.handed_off, e.captured,
+       e.first_click_revenue, e.last_click_revenue,
+       e.avg_days_to_convert, e.avg_sessions
+  FROM agg e
+{join}"""
 
 
 class FirstClickRow(BaseModel):
@@ -2379,6 +2454,12 @@ class FirstClickRow(BaseModel):
     point of showing them side by side rather than summing them.
     """
     source: str
+    #: What to show. At source grain the key itself; at ad grain the
+    #: ad's name, falling back to the raw id when it does not resolve.
+    label: str
+    #: The channel this entity belongs to. At source grain it repeats
+    #: `source`; at ad grain it is what explains an unresolved id.
+    channel: str
     kept: int
     handed_off: int
     captured: int
@@ -2466,6 +2547,7 @@ async def get_first_click(
     session: SessionDep,
     from_date: date | None = Query(default=None, description="Start of the window (defaults to 30 days back)."),
     to_date: date | None = Query(default=None, description="End of the window (defaults to today)."),
+    grain: str = Query(default="source", description="Key the journey's two ends on: " + ", ".join(_FIRST_CLICK_GRAINS)),
     sort: str = Query(default="handed_off", description="One of " + ", ".join(_FIRST_CLICK_SORTS)),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> FirstClickResponse:
@@ -2477,12 +2559,14 @@ async def get_first_click(
     """
     if sort not in _FIRST_CLICK_SORTS:
         raise HTTPException(400, f"sort must be one of {sorted(_FIRST_CLICK_SORTS)}")
+    if grain not in _FIRST_CLICK_GRAINS:
+        raise HTTPException(400, f"grain must be one of {sorted(_FIRST_CLICK_GRAINS)}")
     to_d = to_date or date.today()
     from_d = from_date or (to_d - timedelta(days=29))
     params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
 
     rows_result = await session.execute(
-        text(f"SELECT * FROM ({_FIRST_CLICK_SQL}) t "
+        text(f"SELECT * FROM ({_first_click_sql(grain)}) t "
              f"ORDER BY {_FIRST_CLICK_SORTS[sort]} DESC NULLS LAST LIMIT :limit"),
         {**params, "limit": limit},
     )
