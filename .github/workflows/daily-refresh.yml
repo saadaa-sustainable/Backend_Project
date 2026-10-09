@@ -46,23 +46,35 @@ on:
         description: "Only run Phase 2 (silver rebuild)?"
         required: false
         default: "false"
+      force_refresh:
+        description: "Run again even if one already ran today (IST)?"
+        required: false
+        type: boolean
+        default: false
 
   schedule:
     # 01:30 UTC = 07:00 IST, daily. Cron in GitHub Actions is always UTC,
     # so this is the 7am-IST run -- do not "correct" it to 30 7 * * *,
     # which would fire at 13:00 IST.
     - cron: "30 1 * * *"
-    # BACKUP, 02:30 UTC = 08:00 IST. GitHub does not guarantee scheduled
-    # runs: it drops them under load and delays them routinely. Measured
-    # on the sibling project 2026-09-05, its 19:30 UTC schedule started
-    # at 21:40 one night (2h10m late) and did not fire at all the next.
-    # A dropped nightly refresh means a whole day of stale dashboards
-    # with nothing to indicate it.
+
+    # ONE cron, deliberately. There used to be a 02:30 UTC backup here,
+    # on the reasoning that GitHub drops and delays scheduled runs and a
+    # missed refresh is a day of stale dashboards. That is still true,
+    # and the backup still cost more than it was worth.
     #
-    # Two crons an hour apart make that far less likely, and the guard
-    # step below makes the second one free: it exits immediately when
-    # the first already ran. Both are cheap when nothing is wrong.
-    - cron: "30 2 * * *"
+    # Measured 2026-10-07..09: GitHub delayed these schedules by SIX to
+    # SEVEN hours, not the ~2h the comment above anticipated, so the
+    # 01:30 run landed around 07:40Z and the 02:30 backup around 09:20Z.
+    # The guard only skipped the backup after a SUCCESSFUL primary, and
+    # a primary that had itself been cancelled did not qualify -- so the
+    # backup went ahead, queued behind the concurrency group, waited
+    # 2h19m, and then ran for hours. Three days running, the pipeline
+    # was ingesting through the middle of the working day and the
+    # dashboard timed out against a database busy serving it.
+    #
+    # Recovery now goes through `force_refresh` on a manual dispatch
+    # rather than a second cron that fires whether or not it is needed.
 
 concurrency:
   # Never let two refreshes race against the same Supabase tables.
@@ -92,41 +104,55 @@ jobs:
       actions: read
 
     steps:
-      - name: Skip if the primary schedule already ran
-        # Only the 02:30 UTC backup can be a duplicate; a manual dispatch
-        # is always deliberate and a 01:30 run is the primary.
+      - name: Allow one refresh attempt per IST day
+        # Counts ATTEMPTS, not successes, and counts them against the
+        # IST calendar day rather than a rolling window.
         #
-        # Skip the backup only after a successful recent refresh. A failed
-        # primary needs recovery; merely seeing that it started hid stale
-        # attribution behind a green, entirely skipped backup on Oct 2.
+        # Both choices come from what actually went wrong. The old guard
+        # looked back a rolling 5 hours for a SUCCESSFUL run; GitHub
+        # then delayed the schedules by six to seven hours, so the
+        # primary landed outside the window of anything it could see,
+        # and a primary that had been cancelled did not count as success
+        # anyway. The backup went ahead every time, queued behind the
+        # concurrency group for 2h19m, and ran through the afternoon.
         #
-        # 5 hours, not 1: a healthy run takes 45-60 min and a
-        # Meta-throttle day stretches past 3h. A window shorter than the
-        # run itself would let the backup start a second refresh on top
-        # of a slow first one -- exactly what the concurrency group
-        # exists to prevent.
+        # Counting attempts means a cancelled or failed run still holds
+        # the slot for the day. That is the point: an optional source
+        # failing must not rerun the entire pipeline against a database
+        # people are using. Recovery is a deliberate act --
+        # workflow_dispatch with force_refresh -- not an automatic
+        # retry.
+        #
+        # The concurrency group below still serialises writes; this
+        # stops a second run being started at all, which the group
+        # alone would only queue.
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
+          REFRESH_EVENT: ${{ github.event_name }}
+          FORCE_REFRESH: ${{ inputs.force_refresh || false }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ github.event.schedule }}" != "30 2 * * *" ]; then
+          if [ "$REFRESH_EVENT" = "workflow_dispatch" ] && [ "$FORCE_REFRESH" = "true" ]; then
+            echo "Explicit repeat refresh requested."
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          CUTOFF="$(date -u -d '5 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
-          RECENT="$(gh run list \
+          # Midnight IST, expressed in UTC, so "today" means the same
+          # day the rest of the warehouse means.
+          IST_DAY="$(TZ=Asia/Kolkata date +%F)"
+          CUTOFF="$(date -u -d "$IST_DAY 00:00:00 +0530" +%Y-%m-%dT%H:%M:%SZ)"
+          EARLIER="$(gh run list \
               --repo "${{ github.repository }}" \
               --workflow daily-refresh.yml \
-              --limit 20 \
-              --branch "${{ github.ref_name }}" \
-              --json databaseId,createdAt,conclusion \
+              --limit 30 \
+              --json databaseId,createdAt,event \
               --jq "[.[] | select(.databaseId != ${{ github.run_id }})
-                        | select(.conclusion == \"success\")
+                        | select(.event != \"pull_request\")
                         | select(.createdAt > \"$CUTOFF\")] | length")"
-          echo "successful runs since $CUTOFF (excluding this one): $RECENT"
-          if [ "$RECENT" -gt 0 ]; then
-            echo "A refresh succeeded in that window -- skipping the backup."
+          echo "refresh attempts since $CUTOFF (IST day $IST_DAY, excluding this one): $EARLIER"
+          if [ "$EARLIER" -gt 0 ]; then
+            echo "One already ran today -- skipping. Dispatch with force_refresh to override."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
