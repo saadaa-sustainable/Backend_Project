@@ -14,6 +14,7 @@ const Dashboard = dynamic(() => import("./Dashboard").then((m) => m.Dashboard), 
 const AdsAnalyse = dynamic(() => import("./AdsAnalyse").then((m) => m.AdsAnalyse), { loading: TabLoading });
 const CreativeTesting = dynamic(() => import("./CreativeTesting").then((m) => m.CreativeTesting), { loading: TabLoading });
 const LastClickUtm = dynamic(() => import("./LastClickUtm").then((m) => m.LastClickUtm), { loading: TabLoading });
+const FirstClick = dynamic(() => import("./FirstClick").then((m) => m.FirstClick), { loading: TabLoading });
 const CustomerJourney = dynamic(() => import("./CustomerJourney").then((m) => m.CustomerJourney), { loading: TabLoading });
 const LandingPageAnalysis = dynamic(() => import("./LandingPageAnalysis").then((m) => m.LandingPageAnalysis), { loading: TabLoading });
 const ShopifyExplorer = dynamic(() => import("./ShopifyExplorer").then((m) => m.ShopifyExplorer), { loading: TabLoading });
@@ -28,6 +29,7 @@ type Tab =
   | "creative-testing"
   | "ads-analyse"
   | "last-click-utm"
+  | "first-click"
   | "customer-journey"
   | "landing-page"
   | "cpis"
@@ -49,6 +51,8 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "creative-testing": { label: "Creative Testing", render: () => <CreativeTesting /> },
   "ads-analyse": { label: "Ads Analyse", render: () => <AdsAnalyse /> },
   "last-click-utm": { label: "Last Click UTM", render: () => <LastClickUtm /> },
+  // Beside Last Click, deliberately: the pair is the comparison.
+  "first-click": { label: "First Click", render: () => <FirstClick /> },
   "customer-journey": { label: "Customer Journey", render: () => <CustomerJourney /> },
   "landing-page": { label: "Landing Page Analysis", render: () => <LandingPageAnalysis /> },
   cpis: { label: "CPIS", render: () => <Cpis /> },
@@ -70,6 +74,7 @@ const DEFAULT_TAB_ORDER: Tab[] = [
   "creative-testing",
   "ads-analyse",
   "last-click-utm",
+  "first-click",
   "customer-journey",
   "landing-page",
   "cpis",

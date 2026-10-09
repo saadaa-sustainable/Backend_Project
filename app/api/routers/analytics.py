@@ -2294,6 +2294,113 @@ class SourceBreakdown(BaseModel):
     sales: float
 
 
+# ══════════════════════════════════════════════════════════════════════
+# First click vs last click -- where attribution credit MOVES
+# ══════════════════════════════════════════════════════════════════════
+#
+# ga4_order_attribution holds both ends of each order's journey: the
+# source of the session that FIRST brought the person in, and of the
+# session they converted on. Reporting first click on its own would
+# just be the last-click table with different numbers in it.
+#
+# What a buyer cannot get anywhere else is the DIFFERENCE. Measured over
+# 30 days, 17.4% of orders are introduced by one source and closed by
+# another, and the imbalance is not evenly spread: Meta keeps 13,729 of
+# the orders it introduces and loses 1,075, while Google keeps 2,843 and
+# loses 1,111 -- more than a quarter of everything it starts. A channel
+# judged on last click alone is judged on the half of its work that
+# happens to land last.
+#
+# Three numbers per source, and they answer three different questions:
+#
+#   kept       introduced here AND closed here. Uncontested.
+#   handed_off introduced here, closed somewhere else. Last click never
+#              counts these, so they are exactly what it understates.
+#   captured   closed here, introduced somewhere else. Last click counts
+#              all of these, so they are what it overstates.
+#
+# kept + handed_off is the source's first-click population; kept +
+# captured is its last-click population. A source whose handed_off far
+# exceeds its captured is doing work the last-click table bills to
+# someone else.
+_FIRST_CLICK_SQL = """
+WITH j AS (
+  SELECT COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS first_src,
+         COALESCE(NULLIF(btrim(last_source), ''),  '(none)') AS last_src,
+         revenue, days_to_convert, total_sessions
+    FROM public.ga4_order_attribution
+   WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+     AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+), ends AS (
+  -- Each order contributes one row per END of its journey, tagged with
+  -- which end it is. Deliberately NOT a join from a source list back
+  -- onto the orders: "first_src = source OR last_src = source" cannot
+  -- hash, so the planner falls to a nested loop over every order per
+  -- source and the statement times out. Unioning the two ends costs one
+  -- pass over 2N rows and hash-aggregates.
+  SELECT first_src AS source, 'first'::text AS side,
+         (first_src = last_src) AS uncontested,
+         revenue, days_to_convert, total_sessions
+    FROM j
+  UNION ALL
+  SELECT last_src, 'last'::text,
+         (first_src = last_src),
+         revenue, days_to_convert, total_sessions
+    FROM j
+)
+SELECT source,
+       COUNT(*) FILTER (WHERE side = 'first' AND uncontested)::int       AS kept,
+       COUNT(*) FILTER (WHERE side = 'first' AND NOT uncontested)::int   AS handed_off,
+       COUNT(*) FILTER (WHERE side = 'last'  AND NOT uncontested)::int   AS captured,
+       COALESCE(SUM(revenue) FILTER (WHERE side = 'first'), 0)           AS first_click_revenue,
+       COALESCE(SUM(revenue) FILTER (WHERE side = 'last'),  0)           AS last_click_revenue,
+       -- Rounded to one place: the inputs are whole days and whole
+       -- sessions, so more precision would imply a resolution the
+       -- source does not have. Averaged over orders this source
+       -- STARTED -- a journey's length belongs to whoever began it.
+       ROUND(AVG(days_to_convert) FILTER (WHERE side = 'first'), 1)      AS avg_days_to_convert,
+       ROUND(AVG(total_sessions)  FILTER (WHERE side = 'first'), 1)      AS avg_sessions
+  FROM ends
+ GROUP BY source
+"""
+
+
+class FirstClickRow(BaseModel):
+    """One source, seen from both ends of the journey.
+
+    `kept`, `handed_off` and `captured` partition every order this
+    source touched at either end, so they never double-count: an order
+    appears in exactly one of the three for a given source.
+
+    The revenue pair does NOT partition. first_click_revenue is every
+    order this source introduced and last_click_revenue every order it
+    closed, so the same order's value appears under both when it kept
+    it. They are two separate claims on the same money, which is the
+    point of showing them side by side rather than summing them.
+    """
+    source: str
+    kept: int
+    handed_off: int
+    captured: int
+    first_click_revenue: float
+    last_click_revenue: float
+    #: NULL when the source introduced nothing in the window -- it only
+    #: ever appears as a closer. Averaged over the orders it STARTED,
+    #: because a journey's length belongs to whoever began it.
+    avg_days_to_convert: float | None
+    avg_sessions: float | None
+
+
+class FirstClickResponse(BaseModel):
+    rows: list[FirstClickRow]
+    total: int
+    #: Orders in the window whose first and last source disagree, and
+    #: the window's order count. The share of one in the other is the
+    #: single number that says how much last click is deciding.
+    orders_reattributed: int
+    orders_total: int
+
+
 class UtmOrderResponse(BaseModel):
     rows: list[UtmOrderRow]
     total: int
@@ -2341,6 +2448,65 @@ def _parse_text_filter(raw: str | None, key_prefix: str) -> tuple[list[str], dic
         clauses.append(f"(soa.{key_prefix} IS NULL OR soa.{key_prefix} NOT ILIKE :{key})")
         params[key] = f"%{val}%"
     return clauses, params
+
+
+_FIRST_CLICK_SORTS = {
+    "handed_off": "handed_off",
+    "captured": "captured",
+    "kept": "kept",
+    "first_click_revenue": "first_click_revenue",
+    "last_click_revenue": "last_click_revenue",
+    "avg_days_to_convert": "avg_days_to_convert",
+}
+
+
+@router.get("/first-click", response_model=FirstClickResponse)
+@cached_analytics(ttl=900.0)
+async def get_first_click(
+    session: SessionDep,
+    from_date: date | None = Query(default=None, description="Start of the window (defaults to 30 days back)."),
+    to_date: date | None = Query(default=None, description="End of the window (defaults to today)."),
+    sort: str = Query(default="handed_off", description="One of " + ", ".join(_FIRST_CLICK_SORTS)),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> FirstClickResponse:
+    """Where attribution credit moves between the first and last click.
+
+    Windowed on the order's IST day, the same boundary every other
+    order-based figure in this API uses, so a row here counts the same
+    orders the last-click table counts.
+    """
+    if sort not in _FIRST_CLICK_SORTS:
+        raise HTTPException(400, f"sort must be one of {sorted(_FIRST_CLICK_SORTS)}")
+    to_d = to_date or date.today()
+    from_d = from_date or (to_d - timedelta(days=29))
+    params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
+
+    rows_result = await session.execute(
+        text(f"SELECT * FROM ({_FIRST_CLICK_SQL}) t "
+             f"ORDER BY {_FIRST_CLICK_SORTS[sort]} DESC NULLS LAST LIMIT :limit"),
+        {**params, "limit": limit},
+    )
+    rows = [FirstClickRow(**dict(r._mapping)) for r in rows_result]
+
+    # One statement for both headline numbers: a second round trip to
+    # count the same rows twice over is what the landing-page endpoint
+    # was just corrected for.
+    head = (await session.execute(text("""
+        SELECT COUNT(*)::int AS orders_total,
+               COUNT(*) FILTER (WHERE COALESCE(NULLIF(btrim(first_source),''),'(none)')
+                             IS DISTINCT FROM
+                                COALESCE(NULLIF(btrim(last_source),''),'(none)'))::int
+                 AS orders_reattributed
+          FROM public.ga4_order_attribution
+         WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+           AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+    """), params)).one()
+
+    return FirstClickResponse(
+        rows=rows, total=len(rows),
+        orders_reattributed=head.orders_reattributed,
+        orders_total=head.orders_total,
+    )
 
 
 @router.get("/last-click-utm", response_model=UtmOrderResponse)
