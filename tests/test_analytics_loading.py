@@ -18,7 +18,7 @@ def clear_analytics_caches(monkeypatch):
     monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     caches = [
         getattr(analytics, name).analytics_cache
-        for name in ("get_creative_testing", "get_creative_testing_ads", "get_ads_analyse", "_daily_mirror_ready",
+        for name in ("get_creative_testing", "get_creative_testing_ads", "get_ads_analyse", "_daily_mirror_bound",
                      "_get_cpis_reconciliation", "get_efficiency_anchors", "_get_ads_analyse_summary")
     ]
     for cache in caches:
@@ -402,6 +402,11 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
     }
     exists_result = MagicMock()
     exists_result.first.return_value = (1,)
+    # _daily_mirror_bound's second query: MAX(day) over the mirror. The
+    # window below sits inside that coverage, so every figure here comes
+    # from the mirror branch of _DAILY_WINDOW_SOURCE.
+    bound_result = MagicMock()
+    bound_result.first.return_value = (date(2026, 9, 30),)
     anchors_result = _mapped_result({
         "g_spend": 1000, "g_reach": 10000, "g_ftewv": 100,
         "g_ncp": 20, "g_conv": 2000, "med_ftewv": 5, "med_profit": 100,
@@ -409,7 +414,7 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
     empty = MagicMock()
     empty.all.return_value = []
     session = SimpleNamespace(execute=AsyncMock(side_effect=[
-        exists_result, exists_result, rows_result, empty, anchors_result, daily_result, empty, totals_result,
+        exists_result, bound_result, rows_result, empty, anchors_result, daily_result, empty, totals_result,
     ]))
 
     response = await analytics.get_ads_analyse(
@@ -420,8 +425,11 @@ async def test_delivery_overlay_awaits_daily_query_and_preserves_unknown_shopify
     daily_query, daily_params = session.execute.call_args_list[5].args
     assert str(daily_query) == analytics._EXTERNAL_DAILY
     _parsed_statement(daily_query)
+    # mirror_max travels with the query: _EXTERNAL_DAILY spans the mirror
+    # AND insights_daily_by_ad, and the boundary is what divides them.
     assert daily_params == {"ad_ids": ["123"], "from_str": date(2026, 9, 1),
-                            "to_str": date(2026, 9, 15)}
+                            "to_str": date(2026, 9, 15),
+                            "mirror_max": date(2026, 9, 30)}
     row = response.rows[0]
     assert row.spend == 100
     assert row.impressions == 1000
