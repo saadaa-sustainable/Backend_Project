@@ -2,17 +2,26 @@
  * Pulls the meta_direct_* snapshots from Supabase into this sheet and
  * keeps them current on a nightly trigger.
  *
- * SETUP (once)
+ * SETUP (once, and ONCE PER SHEET -- none of it carries over)
  *   1. Extensions > Apps Script, paste this file.
- *   2. Project Settings > Script Properties, add:
+ *   2. Services > + > Google Sheets API, v4, identifier `Sheets`.
+ *      Without it every run dies on `ReferenceError: Sheets is not
+ *      defined` at the first write. `Sheets` is the advanced service,
+ *      not a built-in, and it is enabled per SCRIPT PROJECT -- so a new
+ *      sheet starts without it however many sheets already have it.
+ *      Equivalently, paste appsscript.json from this directory, which
+ *      declares the service, the scopes and the Supabase host in one
+ *      go; changing the scopes invalidates the existing grant, so
+ *      re-authorise afterwards.
+ *   3. Project Settings > Script Properties, add:
  *        SUPABASE_URL  https://gtcdyfmlvglzpiwzklhx.supabase.co
  *        SUPABASE_KEY  <the service_role key from Supabase >
  *                      Settings > API > service_role>
  *      Script Properties, NOT a constant in the code: anyone with edit
  *      access to the sheet can read the code, and the service_role key
  *      bypasses row-level security on the whole project.
- *   3. Project Settings > set the timezone to Asia/Kolkata.
- *   4. Run setupNightlyTrigger() once, and authorise when prompted.
+ *   4. Project Settings > set the timezone to Asia/Kolkata.
+ *   5. Run setupNightlyTrigger() once, and authorise when prompted.
  *
  * WHY service_role AND NOT anon
  *   anon was deliberately revoked on these views. That key ships in
