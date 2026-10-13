@@ -2294,6 +2294,241 @@ class SourceBreakdown(BaseModel):
     sales: float
 
 
+# ══════════════════════════════════════════════════════════════════════
+# First click vs last click -- where attribution credit MOVES
+# ══════════════════════════════════════════════════════════════════════
+#
+# ga4_order_attribution holds both ends of each order's journey: the
+# source of the session that FIRST brought the person in, and of the
+# session they converted on. Reporting first click on its own would
+# just be the last-click table with different numbers in it.
+#
+# What a buyer cannot get anywhere else is the DIFFERENCE. Measured over
+# 30 days, 17.4% of orders are introduced by one source and closed by
+# another, and the imbalance is not evenly spread: Meta keeps 13,729 of
+# the orders it introduces and loses 1,075, while Google keeps 2,843 and
+# loses 1,111 -- more than a quarter of everything it starts. A channel
+# judged on last click alone is judged on the half of its work that
+# happens to land last.
+#
+# The table states that difference in money, on both ends, at FULL
+# credit. An order worth Rs 100 that ad X opened and ad Y closed adds
+# 100 to X's first_click_revenue and 100 to Y's last_click_revenue --
+# no fractional split. The question each column answers is "what is
+# every rupee this ad OPENED worth" against "what is every rupee it
+# CLOSED worth", and an ad is doing unbilled work exactly when the
+# first number runs well ahead of the second.
+#
+# Measured over 30 days at ad grain, Rs 1.28 crore of revenue is
+# carried on both sides under two DIFFERENT ads, so the overlap is not
+# a rounding detail. It is why a row's two numbers must never be added
+# together, and why a column may safely be totalled down the page.
+#
+# The earlier kept / handed_off / captured order counts were dropped
+# 2026-10-12: the same hand-off they described is legible in the
+# revenue pair, and three partitioning counts beside two overlapping
+# sums invited reading the row as an arithmetic whole.
+#: What a journey's two ends are keyed on.
+#:
+#: Source grain answers "which channel introduces buyers". Ad grain
+#: answers the sharper question -- which CREATIVE introduces them --
+#: and the two disagree far more than the channel view suggests:
+#: measured over 30 days, 17.6% of orders change source between the
+#: first and last click, but 46% change AD (8,097 of the 17,628 orders
+#: carrying an ad at both ends). Most hand-offs happen inside one
+#: channel, between its own creatives, and the source view hides every
+#: one of them.
+_FIRST_CLICK_GRAINS = {
+    "source": ("COALESCE(NULLIF(btrim(first_source), ''), '(none)')",
+               "COALESCE(NULLIF(btrim(last_source), ''), '(none)')"),
+    "ad":      ("first_ad_id",      "last_ad_id"),
+    "adset":   ("first_adset_id",   "last_adset_id"),
+}
+
+#: Campaign grain is deliberately absent.
+#:
+#: GA4's first_campaign_id carries a per-session suffix --
+#: "120233707955260431_v2_s02" and "..._v2_s03" are the same campaign
+#: seen in two sessions -- so first and last can never be equal, and
+#: every campaign looked as though it handed off 100% of its orders:
+#: an artifact of the id format and not true.
+#:
+#: The sibling column first_campaign holds a bare numeric id that does
+#: match more often (8,569 against 6,762), but only 121 of its 478
+#: distinct values resolve against meta_campaigns, and none against
+#: meta_adsets or ad_lifecycle. Neither column is a campaign key this
+#: can stand behind, so the grain is left out rather than shipped
+#: looking authoritative.
+
+
+def _first_click_sql(grain: str) -> str:
+    """Both ends of each order, aggregated per entity at one grain.
+
+    Unions the two ENDS rather than joining an entity list back onto the
+    orders. "first_key = entity OR last_key = entity" cannot hash, so
+    the planner falls to a nested loop over every order per entity --
+    the first version of this timed out at 150s. Unioning costs one pass
+    over 2N rows and hash-aggregates.
+
+    At ad grain the label comes from ad_lifecycle where the id resolves,
+    and falls back to the raw id where it does not. Both happen: of
+    1,688 distinct first-click ad ids in a 30-day window only 877
+    resolve, because Meta ads resolve at 86% while kwikengage,
+    sagepilot-ai and google put their own tokens in the same field.
+    Those rows are kept and labelled by their channel rather than
+    dropped -- they are real orders, and silently losing a third of the
+    population would be worse than showing an unresolved id.
+
+    Spend follows the same rule and shows NULL where the entity is not
+    a Meta id: measured over 30 days only 1,277 of 2,320 ad-grain
+    entities carry spend, the rest being kwikengage, affiliate and
+    google tokens that Meta never billed. A dash there is honest; a
+    zero would claim the orders were free.
+    """
+    first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    # Source is never NULL after the COALESCE above; every id grain can
+    # be, when an order's journey never touched a paid click at that end.
+    not_null = "" if grain == "source" else (
+        f"     AND ({first_k} IS NOT NULL OR {last_k} IS NOT NULL)\n")
+    # Each id grain has its own name source. Falling back to the raw id
+    # rather than hiding the row: an unresolved id is still a real order
+    # the entity above it earned.
+    names = {
+        "ad":       ("ad_lifecycle",         "ad_id",       "ad_name"),
+        "adset":    ("public.meta_adsets",   "adset_id",    "adset_name"),
+    }
+    # Spend is the ENTITY's cost over the selected window, not an
+    # attribution-side figure: it is what Meta billed for this ad in
+    # these dates, full stop. So it is one number per row that sits
+    # beside both revenue columns rather than splitting between them.
+    #
+    # Pre-aggregated before the join. Joining insights_daily_by_* raw
+    # would fan every entity out by its number of active days and
+    # multiply the revenue sums above it.
+    #
+    # Source grain gets NULL, not 0. A source like 'kwikengage' or
+    # 'affiliate' has no Meta spend to report, and a zero there would
+    # read as "this channel cost nothing" rather than "not measured
+    # here".
+    spend_tables = {
+        "ad":    ("public.insights_daily_by_ad",    "ad_id"),
+        "adset": ("public.insights_daily_by_adset", "adset_id"),
+    }
+    if grain == "source":
+        spend_col, spend_join = "NULL::numeric", ""
+    else:
+        sp_tbl, sp_key = spend_tables[grain]
+        spend_col = "sp.spend"
+        spend_join = (
+            f"  LEFT JOIN (SELECT {sp_key} AS k, SUM(spend) AS spend"
+            f" FROM {sp_tbl}"
+            " WHERE day BETWEEN CAST(:from_date AS date)"
+            " AND CAST(:to_date AS date)"
+            f" GROUP BY {sp_key}) sp ON sp.k = e.entity"
+        )
+
+    if grain == "source":
+        label, join = "e.entity", ""
+    else:
+        tbl, key, col = names[grain]
+        label = f"COALESCE(NULLIF(btrim(n.{col}), ''), e.entity)"
+        join = f"  LEFT JOIN {tbl} n ON n.{key} = e.entity\n"
+    return f"""
+WITH j AS (
+  SELECT {first_k} AS first_k, {last_k} AS last_k,
+         COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS first_src,
+         COALESCE(NULLIF(btrim(last_source), ''),  '(none)') AS last_src,
+         revenue, days_to_convert, total_sessions
+    FROM public.ga4_order_attribution
+   WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+     AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+{not_null}), ends AS (
+  SELECT first_k AS entity, first_src AS channel, 'first'::text AS side,
+         revenue, days_to_convert, total_sessions
+    FROM j WHERE first_k IS NOT NULL
+  UNION ALL
+  SELECT last_k, last_src, 'last'::text,
+         revenue, days_to_convert, total_sessions
+    FROM j WHERE last_k IS NOT NULL
+), agg AS (
+  SELECT entity,
+         -- One entity can carry rows from two spellings of its channel
+         -- (META and Meta both appear). MIN keeps the pick stable
+         -- across rebuilds instead of leaving it to row order.
+         MIN(channel)                                                   AS channel,
+         -- FULL CREDIT ON BOTH ENDS, deliberately not a split. An order
+         -- worth Rs 100 that ad X opened and ad Y closed adds 100 to X's
+         -- first_click_revenue and 100 to Y's last_click_revenue. The two
+         -- columns are separate claims on the same money, so summing a
+         -- column down the page is valid and summing a ROW across is not.
+         COALESCE(SUM(revenue) FILTER (WHERE side = 'first'), 0)         AS first_click_revenue,
+         COALESCE(SUM(revenue) FILTER (WHERE side = 'last'),  0)         AS last_click_revenue,
+         -- Rounded to one place: the inputs are whole days and whole
+         -- sessions, so more precision would imply a resolution the
+         -- source does not have. Averaged over orders this entity
+         -- STARTED -- a journey's length belongs to whoever began it.
+         ROUND(AVG(days_to_convert) FILTER (WHERE side = 'first'), 1)    AS avg_days_to_convert,
+         ROUND(AVG(total_sessions)  FILTER (WHERE side = 'first'), 1)    AS avg_sessions
+    FROM ends
+   GROUP BY entity
+)
+SELECT e.entity AS source, {label} AS label, e.channel AS channel,
+       {spend_col} AS spend,
+       e.first_click_revenue, e.last_click_revenue,
+       e.avg_days_to_convert, e.avg_sessions
+  FROM agg e
+{join}{spend_join}"""
+
+
+class FirstClickRow(BaseModel):
+    """One entity, seen from both ends of the journey.
+
+    The revenue pair does NOT partition, by design. Each side carries
+    the order's FULL value: an order worth Rs 100 that ad X opened and
+    ad Y closed adds 100 to X's first_click_revenue and 100 to Y's
+    last_click_revenue. Where X and Y are the same ad, that one order
+    lands in both of ITS columns.
+
+    So the two columns are separate claims on the same money. Reading
+    down either column is valid -- first_click_revenue totals every
+    rupee the window's journeys were opened by. Adding a row's two
+    numbers together is not; it double-counts.
+    """
+    source: str
+    #: What to show. At source grain the key itself; at ad grain the
+    #: ad's name, falling back to the raw id when it does not resolve.
+    label: str
+    #: The channel this entity belongs to. At source grain it repeats
+    #: `source`; at ad grain it is what explains an unresolved id.
+    channel: str
+    #: Meta spend for this entity over the SELECTED window. None at
+    #: source grain, and None for an entity Meta never billed -- a dash
+    #: in the UI, deliberately not a zero.
+    spend: float | None
+    first_click_revenue: float
+    last_click_revenue: float
+    #: NULL when the source introduced nothing in the window -- it only
+    #: ever appears as a closer. Averaged over the orders it STARTED,
+    #: because a journey's length belongs to whoever began it.
+    avg_days_to_convert: float | None
+    avg_sessions: float | None
+
+
+class FirstClickResponse(BaseModel):
+    rows: list[FirstClickRow]
+    #: Rows in THIS page.
+    total: int
+    #: Entities matching the filters before the limit. Greater than
+    #: `total` means the page is truncated, which the UI must say out
+    #: loud -- a silently cut table reads as a complete one.
+    matched: int
+    #: Orders in the window whose first and last source disagree, and
+    #: the window's order count. The share of one in the other is the
+    #: single number that says how much last click is deciding.
+    orders_reattributed: int
+    orders_total: int
+
+
 class UtmOrderResponse(BaseModel):
     rows: list[UtmOrderRow]
     total: int
@@ -2341,6 +2576,77 @@ def _parse_text_filter(raw: str | None, key_prefix: str) -> tuple[list[str], dic
         clauses.append(f"(soa.{key_prefix} IS NULL OR soa.{key_prefix} NOT ILIKE :{key})")
         params[key] = f"%{val}%"
     return clauses, params
+
+
+_FIRST_CLICK_SORTS = {
+    "spend": "spend",
+    "first_click_revenue": "first_click_revenue",
+    "last_click_revenue": "last_click_revenue",
+    "avg_days_to_convert": "avg_days_to_convert",
+    "avg_sessions": "avg_sessions",
+}
+
+
+@router.get("/first-click", response_model=FirstClickResponse)
+@cached_analytics(ttl=900.0)
+async def get_first_click(
+    session: SessionDep,
+    from_date: date | None = Query(default=None, description="Start of the window (defaults to 30 days back)."),
+    to_date: date | None = Query(default=None, description="End of the window (defaults to today)."),
+    grain: str = Query(default="source", description="Key the journey's two ends on: " + ", ".join(_FIRST_CLICK_GRAINS)),
+    sort: str = Query(default="first_click_revenue", description="One of " + ", ".join(_FIRST_CLICK_SORTS)),
+    limit: int = Query(default=200, ge=1, le=5000,
+                      description="Rows per page. The ad grain has ~2,300 entities "
+                                  "in a 30-day window, so the old cap of 200 hid most "
+                                  "of them; `matched` reports how many exist."),
+) -> FirstClickResponse:
+    """Where attribution credit moves between the first and last click.
+
+    Windowed on the order's IST day, the same boundary every other
+    order-based figure in this API uses, so a row here counts the same
+    orders the last-click table counts.
+    """
+    if sort not in _FIRST_CLICK_SORTS:
+        raise HTTPException(400, f"sort must be one of {sorted(_FIRST_CLICK_SORTS)}")
+    if grain not in _FIRST_CLICK_GRAINS:
+        raise HTTPException(400, f"grain must be one of {sorted(_FIRST_CLICK_GRAINS)}")
+    to_d = to_date or date.today()
+    from_d = from_date or (to_d - timedelta(days=29))
+    params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
+
+    # COUNT(*) OVER () rather than a second round trip: the window runs
+    # over the already-aggregated rows, so the true entity count comes
+    # back with the page for free. Without it `total` could only ever
+    # report the page size, which is what hid 2,283 of 2,333 ads behind
+    # a limit of 50 and read as "these are all the ads there are".
+    rows_result = await session.execute(
+        text(f"SELECT *, COUNT(*) OVER ()::int AS _total FROM ({_first_click_sql(grain)}) t "
+             f"ORDER BY {_FIRST_CLICK_SORTS[sort]} DESC NULLS LAST LIMIT :limit"),
+        {**params, "limit": limit},
+    )
+    raw = [dict(r._mapping) for r in rows_result]
+    matched = raw[0]["_total"] if raw else 0
+    rows = [FirstClickRow(**{k: v for k, v in r.items() if k != "_total"}) for r in raw]
+
+    # One statement for both headline numbers: a second round trip to
+    # count the same rows twice over is what the landing-page endpoint
+    # was just corrected for.
+    head = (await session.execute(text("""
+        SELECT COUNT(*)::int AS orders_total,
+               COUNT(*) FILTER (WHERE COALESCE(NULLIF(btrim(first_source),''),'(none)')
+                             IS DISTINCT FROM
+                                COALESCE(NULLIF(btrim(last_source),''),'(none)'))::int
+                 AS orders_reattributed
+          FROM public.ga4_order_attribution
+         WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+           AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+    """), params)).one()
+
+    return FirstClickResponse(
+        rows=rows, total=len(rows), matched=matched,
+        orders_reattributed=head.orders_reattributed,
+        orders_total=head.orders_total,
+    )
 
 
 @router.get("/last-click-utm", response_model=UtmOrderResponse)
