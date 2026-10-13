@@ -123,10 +123,12 @@ INDEXES = [
 REFRESH = """
 WITH product_sku_map AS (
     -- A "price test" listing is a DUPLICATE of the same product at a
-    -- different price: same variant SKUs, same physical stock. Flagged,
-    -- not excluded -- excluding it threw away real inventory (SMCP read
-    -- 1,152 units instead of 8,641). variant_stock dedupes per variant
-    -- SKU with MAX, so counting both listings cannot double-count.
+    -- different price: same variant SKUs, but its own variant rows and
+    -- so its own inventory items. Flagged, not excluded -- excluding it
+    -- threw away real inventory for SKUs that live only on a duplicate
+    -- listing. variant_stock takes ONE quantity per variant SKU,
+    -- preferring the active listing, so counting both listings can
+    -- neither double-count nor inherit a stale duplicate's figure.
     --
     -- The rest stay hard filters: combo / set / "buy any 3" listings are
     -- BUNDLES of different products, so their inventory count is a
@@ -183,11 +185,49 @@ product_variants AS (
           ) ~ '^(SD|SM|SU)[A-Z]{1,4}$'
 ),
 variant_stock AS (
-    -- MAX per variant SKU, not SUM: the same variant appears under both
-    -- the normal and the price-test listing, pointing at ONE physical
-    -- stock figure.
+    -- One quantity per variant SKU, taken from an ACTIVE listing
+    -- whenever the SKU has one.
+    --
+    -- This used to be a plain MAX across every listing, on the premise
+    -- that duplicate listings of the same SKU "point at ONE physical
+    -- stock figure". They do not. Each listing is a separate product
+    -- with its own variant rows, so each carries its OWN inventory
+    -- item -- and an unpublished duplicate does not sell, so its
+    -- quantity freezes at whatever it held the day it was created
+    -- while the live listing's keeps falling.
+    --
+    -- Plain MAX therefore picked the stale number every time, because
+    -- stale means higher. Measured live 2026-10-13, SMCSS:
+    --
+    --     ACTIVE listing                            796 units
+    --     ShopifyQL ending_inventory_units (today)  806   <- agrees
+    --     DRAFT price-test duplicate              1,244   <- frozen
+    --     what CPIS displayed                     1,244
+    --
+    -- Per variant, SMCSSBL_L read 53 active / 67 draft and SMCSSGR_S
+    -- read 2 active / 4 draft. Catalogue-wide the old rule overstated
+    -- 26 of 100 master SKUs by 37,659 units (203,028 vs 165,369),
+    -- worst SDCP +11,425.
+    --
+    -- Validated against the deduped ShopifyQL daily grain across all
+    -- 5,176 variant SKUs: total absolute error falls from 38,681 units
+    -- to 4,086 (timing drift between the 03:13 UTC products snapshot
+    -- and the ShopifyQL day close, plus the 1,032 SKUs with no active
+    -- listing, where ShopifyQL has no row at all).
+    --
+    -- The fallback matters: 1,032 of the 5,176 SKUs sit only on draft
+    -- or archived listings. Those keep their own figure -- it is the
+    -- only one there is -- which is also why the dedupe still cannot
+    -- double-count across listings.
+    --
+    -- A zero on the active listing wins over a non-zero duplicate on
+    -- purpose. Zero sellable stock is the answer, not a reason to go
+    -- looking for a bigger number elsewhere.
     SELECT master_sku, variant_sku,
-           MAX(GREATEST(inv, 0))         AS units,
+           COALESCE(
+             MAX(GREATEST(inv, 0)) FILTER (WHERE is_active),
+             MAX(GREATEST(inv, 0))
+           )                             AS units,
            MAX(size)                     AS size,
            bool_or(is_active)            AS is_active
     FROM product_variants

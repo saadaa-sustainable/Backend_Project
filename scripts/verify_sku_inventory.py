@@ -12,10 +12,11 @@ It compares two numbers:
   CPIS TOTAL     what the CPIS query's Units in Stock column computes,
                  reproducing its exact pipeline: bundle productType
                  exclusions -> variant SKU -> master-SKU parse ->
-                 validate against ^(SD|SM|SU)[A-Z]{1,4}$ -> dedupe per
-                 variant SKU with MAX -> sum. Price-test listings ARE
-                 counted (same SKUs, same stock); the dedupe stops the
-                 overlap being counted twice.
+                 validate against ^(SD|SM|SU)[A-Z]{1,4}$ -> one
+                 quantity per variant SKU, from an ACTIVE listing when
+                 the SKU has one -> sum. Price-test and other duplicate
+                 listings ARE counted, but only as a fallback for SKUs
+                 that appear on no active listing.
 
 Any gap between them is itemised by CAUSE, with example SKUs, so the
 fix is obvious rather than guessed at. The causes it can find:
@@ -29,6 +30,15 @@ fix is obvious rather than guessed at. The causes it can find:
                          e.g. an underscore-less SMCPBLS parses to
                          SMCPB, so its units land on a row that isn't
                          this one
+  stale_duplicate_listing
+                         the SKU also sits on a draft or archived
+                         duplicate listing reporting MORE units than
+                         the live one. A duplicate has its own
+                         inventory items and does not sell, so its
+                         quantity is frozen at creation time. Counted
+                         as a loss against ground truth because ground
+                         truth takes the highest figure anywhere,
+                         which for these SKUs is the stale one.
   truncated_variants     the product was stored with
                          variants.pageInfo.hasNextPage = true, so the
                          bronze row itself is missing variants. Ingests
@@ -118,11 +128,22 @@ def audit(rows: list[dict], target: str) -> dict:
     """Classify every variant whose SKU belongs to `target`'s family.
 
     Family membership for GROUND TRUTH is deliberately a plain prefix
-    match on the raw SKU -- no parsing, no filtering. That is the only
-    way to see units the production pipeline drops, since anything the
-    pipeline can't parse is exactly what we're hunting for.
+    match on the raw SKU -- no parsing, no filtering, highest figure
+    anywhere. That is the only way to see units the production pipeline
+    drops, since anything the pipeline can't parse is exactly what
+    we're hunting for.
+
+    It is an upper bound, not a target. Since 2026-10-13 the pipeline
+    prefers the ACTIVE listing's quantity per variant SKU, so a SKU
+    carrying a stale draft duplicate SHOULD come out below ground
+    truth -- itemised under `stale_duplicate_listing`.
     """
-    counted: dict[str, int] = {}      # variant_sku -> units (deduped, as CPIS does)
+    # variant_sku -> highest units seen on an ACTIVE listing / on any
+    # listing. CPIS takes the first and falls back to the second, so
+    # both are needed to reproduce it and to explain the difference.
+    counted_active: dict[str, int] = {}
+    counted_any: dict[str, int] = {}
+    product_of: dict[str, dict] = {}
     losses: dict[str, list[dict]] = defaultdict(list)
     ground_truth: dict[str, int] = {}
     newest = None
@@ -133,6 +154,8 @@ def audit(rows: list[dict], target: str) -> dict:
             newest = extracted_at
         product_type = payload.get("productType") or ""
         title = payload.get("title") or "(untitled)"
+        status = (payload.get("status") or "").upper()
+        is_active = status == "ACTIVE"
         excluded_by = product_type_excluded(product_type)
         variants_conn = payload.get("variants") or {}
         truncated = bool((variants_conn.get("pageInfo") or {}).get("hasNextPage"))
@@ -148,7 +171,7 @@ def audit(rows: list[dict], target: str) -> dict:
             ground_truth[sku] = max(ground_truth.get(sku, 0), units)
 
             detail = {"sku": sku, "units": units, "product": title,
-                      "product_type": product_type}
+                      "product_type": product_type, "status": status or "UNKNOWN"}
             if truncated:
                 # Recorded as a warning even when the variant itself is
                 # counted -- the product is missing OTHER variants whose
@@ -164,8 +187,30 @@ def audit(rows: list[dict], target: str) -> dict:
             if master != target.upper():
                 losses["misfiled_other_master"].append({**detail, "filed_as": master})
                 continue
-            # CPIS dedupes per (master_sku, variant_sku) with MAX.
-            counted[sku] = max(counted.get(sku, 0), units)
+            # CPIS takes one quantity per (master_sku, variant_sku),
+            # from an active listing when the SKU has one.
+            counted_any[sku] = max(counted_any.get(sku, 0), units)
+            if is_active:
+                counted_active[sku] = max(counted_active.get(sku, 0), units)
+            if units >= counted_any[sku]:
+                product_of[sku] = detail
+
+    counted = {sku: counted_active.get(sku, units)
+               for sku, units in counted_any.items()}
+
+    # A duplicate listing reporting MORE than the live one is a frozen
+    # figure, and the gap it opens against ground truth is the point of
+    # this fix -- itemise it rather than leave it as an unexplained gap.
+    for sku, any_units in counted_any.items():
+        kept = counted[sku]
+        if any_units > kept:
+            detail = product_of.get(sku, {"sku": sku, "product": "", "product_type": ""})
+            losses["stale_duplicate_listing"].append({
+                **detail,
+                "units": any_units - kept,
+                "active_units": kept,
+                "duplicate_units": any_units,
+            })
 
     return {
         "master_sku": target.upper(),
@@ -193,6 +238,7 @@ def print_report(result: dict, expected: int | None) -> None:
         "excluded_product_type": "Excluded by productType filter",
         "unparseable_sku":       "SKU does not parse to a valid master SKU",
         "misfiled_other_master": "Parses to a DIFFERENT master (lands on another row)",
+        "stale_duplicate_listing": "Frozen quantity on a non-active duplicate listing (correctly ignored)",
         "truncated_variants":    "Product stored truncated (>25 variants, pre-fix ingest)",
     }
     for cause, items in result["losses"].items():
@@ -206,6 +252,9 @@ def print_report(result: dict, expected: int | None) -> None:
                 extra = f"  [productType {item['product_type']!r} matched {item['matched']!r}]"
             elif "filed_as" in item:
                 extra = f"  [filed as {item['filed_as']}]"
+            elif "duplicate_units" in item:
+                extra = (f"  [{item['active_units']:,} active"
+                         f" vs {item['duplicate_units']:,} on {item['status']}]")
             print(f"      {item['sku']:<18} {item['units']:>6,}  {item['product'][:40]}{extra}")
         if len(items) > 6:
             print(f"      ... and {len(items) - 6} more")
