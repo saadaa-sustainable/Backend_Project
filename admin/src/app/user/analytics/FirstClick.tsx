@@ -44,12 +44,11 @@ const GRAIN_OPTIONS: { value: string; label: string }[] = [
 ];
 
 const SORT_OPTIONS: { value: string; label: string }[] = [
-  { value: "handed_off", label: "Handed off" },
-  { value: "captured", label: "Captured" },
-  { value: "kept", label: "Kept" },
+  { value: "spend", label: "Spend" },  // hidden at source grain, see below
   { value: "first_click_revenue", label: "First-click revenue" },
   { value: "last_click_revenue", label: "Last-click revenue" },
   { value: "avg_days_to_convert", label: "Days to convert" },
+  { value: "avg_sessions", label: "Sessions" },
 ];
 
 function num(n: number | null | undefined, digits = 0) {
@@ -59,7 +58,12 @@ function num(n: number | null | undefined, digits = 0) {
 
 export function FirstClick() {
   const [grain, setGrain] = useState("ad");
-  const [sort, setSort] = useState("handed_off");
+  const [sort, setSort] = useState("first_click_revenue");
+  // Source grain has no spend, so a spend sort there would order every row
+  // by NULL and look like the control had broken. Fall back instead.
+  useEffect(() => {
+    if (grain === "source" && sort === "spend") setSort("first_click_revenue");
+  }, [grain, sort]);
   const [datePreset, setDatePreset] = useState<string>("last30");
   const [fromDate, setFromDate] = useState<string>(() => {
     const d = new Date(); d.setDate(d.getDate() - 29);
@@ -67,15 +71,21 @@ export function FirstClick() {
   });
   const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
 
+  // 200, not 50. At ad grain a 30-day window holds ~2,300 entities, and a
+  // silent top-50 made the table read as the complete list of ads when it
+  // was hiding 98% of them -- including every ad that only ever appears at
+  // ONE end of a journey, which is exactly what this section exists to show.
+  const [limit, setLimit] = useState(200);
   const [rows, setRows] = useState<FirstClickRow[]>([]);
+  const [matched, setMatched] = useState(0);
   const [reattributed, setReattributed] = useState(0);
   const [ordersTotal, setOrdersTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const filters = useMemo(
-    () => ({ grain, sort, from_date: fromDate, to_date: toDate, limit: 50 }),
-    [grain, sort, fromDate, toDate],
+    () => ({ grain, sort, from_date: fromDate, to_date: toDate, limit }),
+    [grain, sort, fromDate, toDate, limit],
   );
 
   useEffect(() => {
@@ -86,6 +96,7 @@ export function FirstClick() {
       .then((res) => {
         if (cancelled) return;
         setRows(res.rows);
+        setMatched(res.matched ?? res.rows.length);
         setReattributed(res.orders_reattributed);
         setOrdersTotal(res.orders_total);
       })
@@ -102,12 +113,12 @@ export function FirstClick() {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-text-secondary">
-        Both ends of each order&rsquo;s journey, from GA4. A source&rsquo;s work splits three ways:
-        orders it <strong>kept</strong> (introduced and closed), orders it <strong>handed off</strong>{" "}
-        (introduced, then someone else closed) and orders it <strong>captured</strong> (closed, but
-        someone else introduced). Last-click reporting counts the first two groups&rsquo; closers only, so a
-        source whose handed-off count far exceeds its captured count is doing work the Last Click UTM
-        section bills to another channel.
+        Both ends of each order&rsquo;s journey, from GA4, at <strong>full credit on each end</strong>.
+        An order worth &#8377;100 that one ad opened and another closed counts &#8377;100 under the
+        opener&rsquo;s first-click revenue <em>and</em> &#8377;100 under the closer&rsquo;s last-click
+        revenue &mdash; it is not split. Read a column down the page, never a row across. An ad whose
+        first-click revenue runs well ahead of its last-click revenue is doing work the Last Click UTM
+        section bills to someone else.
       </p>
 
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white shadow-sm p-3">
@@ -131,11 +142,25 @@ export function FirstClick() {
           onChange={(e) => setSort(e.target.value)}
           className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
         >
-          {SORT_OPTIONS.map((o) => (
+          {SORT_OPTIONS.filter((o) => !(grain === "source" && o.value === "spend")).map((o) => (
             <option key={o.value} value={o.value}>Sort: {o.label}</option>
           ))}
         </select>
+        <select
+          value={limit}
+          onChange={(e) => setLimit(Number(e.target.value))}
+          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
+        >
+          {[50, 200, 1000, 5000].map((n) => (
+            <option key={n} value={n}>Rows: {n === 5000 ? "All" : n}</option>
+          ))}
+        </select>
         <span className="ml-auto text-xs text-text-secondary">
+          {matched > rows.length && (
+            <span className="mr-2 rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800">
+              showing {rows.length.toLocaleString()} of {matched.toLocaleString()}
+            </span>
+          )}
           {ordersTotal.toLocaleString()} orders ·{" "}
           <strong className="text-text-primary">{reattributed.toLocaleString()}</strong> reattributed
           {" "}({pct.toFixed(1)}%)
@@ -170,13 +195,15 @@ export function FirstClick() {
                   </th>
                 )}
                 {([
-                  ["Kept", "Introduced here and closed here. Uncontested by any other source."],
-                  ["Handed off", "Introduced here, closed elsewhere. Last click never counts these."],
-                  ["Captured", "Closed here, introduced elsewhere. Last click counts all of these."],
-                  ["First-click revenue", "Value of every order this source introduced."],
-                  ["Last-click revenue", "Value of every order this source closed. Overlaps the column before it — an order kept counts in both."],
-                  ["Days to convert", "Average days from first session to order, over the orders this source started."],
-                  ["Sessions", "Average sessions before the order, over the orders this source started."],
+                  // Spend is dropped entirely at source grain rather than
+                  // rendered as a column of dashes: a "source" like META or
+                  // affiliate is not a billable entity, so there is no number
+                  // being withheld -- the question does not apply.
+                  ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report."] as const]),
+                  ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split."],
+                  ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across."],
+                  ["Days to convert", "Average days from first session to order, over the orders this one started."],
+                  ["Sessions", "Average sessions before the order, over the orders this one started."],
                 ] as const).map(([label, title]) => (
                   <th
                     key={label}
@@ -190,9 +217,11 @@ export function FirstClick() {
             </thead>
             <tbody>
               {rows.map((r) => {
-                // Doing more introducing than closing. The gap is the
-                // credit the last-click table moves to someone else.
-                const net = r.handed_off - r.captured;
+                // Opening more value than it closes. The gap is the credit
+                // the last-click table moves to someone else. Flagged on the
+                // first-click column, which is the one carrying the claim
+                // last click never makes.
+                const unbilled = r.first_click_revenue - r.last_click_revenue;
                 return (
                   <tr key={`${r.source}-${r.channel}`} className="border-b border-border-soft hover:bg-bg-surface">
                     <td
@@ -206,15 +235,19 @@ export function FirstClick() {
                         {r.channel}
                       </td>
                     )}
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.kept)}</td>
+                    {grain !== "source" && (
+                      <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
+                        {r.spend === null || r.spend === undefined
+                          ? <span className="text-text-tertiary" title="Meta never billed this id">—</span>
+                          : num(r.spend)}
+                      </td>
+                    )}
                     <td
-                      className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${net > 0 ? "font-semibold text-amber-700" : "text-text-primary"}`}
-                      title={net > 0 ? `${num(net)} more orders introduced than closed` : undefined}
+                      className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${unbilled > 0 ? "font-semibold text-amber-700" : "text-text-primary"}`}
+                      title={unbilled > 0 ? `₹${num(unbilled)} more opened than closed — credit last click gives to another ad` : undefined}
                     >
-                      {num(r.handed_off)}
+                      {num(r.first_click_revenue)}
                     </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.captured)}</td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.first_click_revenue)}</td>
                     <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.last_click_revenue)}</td>
                     <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_days_to_convert, 1)}</td>
                     <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_sessions, 1)}</td>

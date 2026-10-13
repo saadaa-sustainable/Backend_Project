@@ -1115,13 +1115,13 @@ export interface LandingPageResponse {
   total: number;
 }
 
-/** One source, seen from both ends of the order's journey.
+/** One entity, seen from both ends of the order's journey.
  *
- *  kept / handed_off / captured partition every order the source
- *  touched at either end — an order falls in exactly one of the three,
- *  so they can be summed. The two revenue figures cannot: an order the
- *  source both started and closed counts in both, which is the point of
- *  showing them side by side. */
+ *  Both revenue figures carry the order's FULL value — an order worth
+ *  ₹100 that ad X opened and ad Y closed adds 100 to X's
+ *  first_click_revenue and 100 to Y's last_click_revenue, with no
+ *  fractional split. So a column totals correctly down the page; a
+ *  row's two numbers must never be added across. */
 export interface FirstClickRow {
   source: string;
   /** What to show: the source name, or the ad/ad set name where the id
@@ -1129,13 +1129,13 @@ export interface FirstClickRow {
   label: string;
   /** The channel the entity belongs to — what explains an unresolved id. */
   channel: string;
-  /** Introduced here and closed here. Uncontested. */
-  kept: number;
-  /** Introduced here, closed elsewhere — what last click never counts. */
-  handed_off: number;
-  /** Closed here, introduced elsewhere — what last click counts in full. */
-  captured: number;
+  /** Meta spend for this entity over the selected window. Null at source
+   *  grain, and null for an entity Meta never billed — rendered as a dash,
+   *  deliberately not a zero. */
+  spend: number | null;
+  /** Full value of every order this entity OPENED. */
   first_click_revenue: number;
+  /** Full value of every order this entity CLOSED. Overlaps the above. */
   last_click_revenue: number;
   /** Null when the source only ever appears as a closer in this window. */
   avg_days_to_convert: number | null;
@@ -1144,7 +1144,11 @@ export interface FirstClickRow {
 
 export interface FirstClickResponse {
   rows: FirstClickRow[];
+  /** Rows in this page. */
   total: number;
+  /** Entities matching the filters before the limit. Greater than `total`
+   *  means the table is truncated and must say so. */
+  matched: number;
   orders_reattributed: number;
   orders_total: number;
 }
