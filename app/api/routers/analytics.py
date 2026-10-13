@@ -4464,7 +4464,15 @@ class CpisUtmRow(BaseModel):
     # vendors, numbers that never quite tied out.
     #
     # units_in_stock       SUM(GREATEST(inventoryQuantity, 0)) across the
-    #                      family's variants (negative = oversold, floored)
+    #                      family's variants (negative = oversold, floored),
+    #                      ONE quantity per variant SKU taken from the
+    #                      ACTIVE listing when the SKU has one. Each
+    #                      duplicate listing (price test, A/B) carries its
+    #                      own inventory items and never sells while
+    #                      unpublished, so its quantity freezes -- and the
+    #                      old plain MAX picked that frozen number on 26 of
+    #                      100 SKUs. See the variant_stock CTE in
+    #                      scripts/refresh_cpis_sku_context.py.
     # variant_in_stock_rate % of variants buyable right now, 0-100
     # size_in_stock_rate    % of DISTINCT sizes still available in ANY
     #                       color, 0-100 -- catches size-run gaps the

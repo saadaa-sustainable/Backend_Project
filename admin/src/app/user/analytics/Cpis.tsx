@@ -1019,9 +1019,14 @@ function CpisView() {
                     Previously Units came off the ShopifyQL daily grain
                     and the two rates off MapleMonk/BigQuery, so they
                     never quite tied out; now they share a grain.
-                    2026-09-03: dropped MM Stock, Sales 45d, Lead Time. */}
-                <th className="border-l border-border-soft px-3 py-3 text-right" title="Live Shopify inventory summed across every variant SKU of this master SKU, deduplicated so a SKU listed twice is counted once. Includes price-test listings (same SKUs, same physical stock); excludes combo/set bundles, whose counts are bundle counts rather than this SKU's units. Oversold variants (negative quantity) count as 0.">Units in Stock</th>
-                <th className="px-3 py-3 text-right" title="% of this SKU's variants holding stock right now — Shopify variants with inventoryQuantity > 0 / all variant SKUs. Counts price-test listings, which carry the same SKUs and the same physical stock.">Var In-Stock %</th>
+                    2026-09-03: dropped MM Stock, Sales 45d, Lead Time.
+                    2026-10-13: a SKU on several listings now takes the
+                    ACTIVE one's quantity. A duplicate listing has its
+                    own inventory items and does not sell, so its figure
+                    is frozen at creation — and it was winning the MAX
+                    on 26 of 100 SKUs (SMCSS read 1,244 for a real 796). */}
+                <th className="border-l border-border-soft px-3 py-3 text-right" title="Live Shopify inventory summed across every variant SKU of this master SKU, one quantity per SKU. Where a SKU sits on several listings (price tests, A/B duplicates) the ACTIVE listing's quantity is used — each listing carries its own inventory items, and an unpublished duplicate never sells, so its count is frozen at the day it was created. SKUs that exist only on a draft or archived listing keep that figure, as it is the only one there is. Excludes combo/set bundles, whose counts are bundle counts rather than this SKU's units. Oversold variants (negative quantity) count as 0.">Units in Stock</th>
+                <th className="px-3 py-3 text-right" title="% of this SKU's variants holding stock right now — Shopify variants with inventoryQuantity > 0 / all variant SKUs, on the same one-quantity-per-SKU rule as Units in Stock (ACTIVE listing preferred).">Var In-Stock %</th>
                 <th className="px-3 py-3 text-right" title="% of distinct sizes still available for this SKU in any color, from the _<size> suffix on the Shopify variant SKU. Catches size-run gaps that variant-level rate can hide.">Size In-Stock %</th>
                 <th className="px-3 py-3 text-right"
                     title="In-Process Days of Cover: stock already on purchase orders (MapleMonk total_inprogress — Shopify has no equivalent) divided by the trailing 30-day average daily units sold from Shopify. How long the incoming pipeline lasts at the current rate.">
