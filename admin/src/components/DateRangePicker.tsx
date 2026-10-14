@@ -341,6 +341,19 @@ export function DateRangePicker({
     return "Custom Range";
   }, [preset, value]);
 
+  /** The window the label actually resolved to.
+   *
+   *  This replaces the page-wide data-floor banner. "Lifetime" is
+   *  bounded at DATA_FLOOR and every preset is anchored on the newest
+   *  day the data covers rather than on the clock, so the label alone
+   *  never says which days are being counted -- and that was exactly
+   *  the misreading the banner existed to prevent. Stating it on the
+   *  control costs one line, at the point the choice is made. */
+  const resolvedCaption = useMemo(() => {
+    if (!value.from || !value.to) return "";
+    return `${fmtDisplay(value.from)} – ${fmtDisplay(value.to)}`;
+  }, [value]);
+
   return (
     <div className="relative" ref={box}>
       <button
@@ -349,8 +362,16 @@ export function DateRangePicker({
         style={{ borderColor: open ? ACCENT : CT.border, color: CT.ink }}
       >
         <span className="font-medium">{buttonLabel}</span>
-        <span style={{ color: CT.muted }}>▾</span>
+        <span style={{ color: CT.muted }} aria-hidden="true">▾</span>
       </button>
+      {resolvedCaption && preset !== "custom" && (
+        <div
+          className="mt-1 px-0.5 text-[11px] tabular-nums"
+          style={{ color: CT.muted }}
+        >
+          {resolvedCaption}
+        </div>
+      )}
 
       {open && (
         <div

@@ -2,8 +2,8 @@
 
 import { memo, useMemo, useState, useSyncExternalStore } from "react";
 import dynamic from "next/dynamic";
-import { DataFloorNotice } from "@/components/DataFloorNotice";
 import { AnalyticsSectionVisibility } from "@/lib/analyticsSectionVisibility";
+import { GROUPS, HELP_TAB, ALL_TABS, groupOf, type Tab, type GroupKey } from "./sectionGroups";
 
 function TabLoading() {
   return <div role="status" className="min-h-40 py-8 text-sm text-text-secondary">Loading analytics…</div>;
@@ -23,21 +23,11 @@ const Cpis = dynamic(() => import("./Cpis").then((m) => m.Cpis), { loading: TabL
 const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), { loading: TabLoading });
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
 const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
+const Help = dynamic(() => import("./Help").then((m) => m.Help), { loading: TabLoading });
 
-type Tab =
-  | "dashboard"
-  | "creative-testing"
-  | "ads-analyse"
-  | "last-click-utm"
-  | "first-click"
-  | "customer-journey"
-  | "landing-page"
-  | "cpis"
-  | "untested-assets"
-  | "instagram"
-  | "shopify-analytics"
-  | "shopify-explorer"
-  | "meta-explorer";
+// Tab and the five groups it hangs under now live in sectionGroups.ts,
+// because the nav, the deep-link handler and the Help section all need
+// the same list and it must not be restated in three places.
 
 // Two distinct sections, deliberately split (2026-08-29):
 //   * Creative Testing (CreativeTesting.tsx) -- focused view for
@@ -61,6 +51,7 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "shopify-analytics": { label: "Shopify Analytics", render: () => <ShopifyAnalytics /> },
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },
   "meta-explorer": { label: "Meta Explorer", render: () => <MetaExplorer /> },
+  help: { label: "Help", render: () => <Help /> },
 };
 
 // Switching sections must not rerender the retained tables and charts. Their
@@ -69,43 +60,9 @@ const SectionContent = memo(function SectionContent({ tab }: { tab: Tab }) {
   return TAB_META[tab].render();
 });
 
-const DEFAULT_TAB_ORDER: Tab[] = [
-  "dashboard",
-  "creative-testing",
-  "ads-analyse",
-  "last-click-utm",
-  "first-click",
-  "customer-journey",
-  "landing-page",
-  "cpis",
-  "untested-assets",
-  "instagram",
-  "shopify-analytics",
-  "shopify-explorer",
-  "meta-explorer",
-];
-
-const STORAGE_KEY = "analytics-tab-order";
-
-function loadTabOrder(): Tab[] {
-  if (typeof window === "undefined") return DEFAULT_TAB_ORDER;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_TAB_ORDER;
-    const parsed = JSON.parse(raw) as string[];
-    if (!Array.isArray(parsed)) return DEFAULT_TAB_ORDER;
-    // Filter out any tabs that no longer exist in the schema (e.g. the
-    // dropped "ads-analyse" tab -- merged into "creative-testing" on
-    // 2026-08-29) and append any tabs that were added since the saved
-    // order was written. Robust against schema evolution.
-    const known = new Set(DEFAULT_TAB_ORDER as readonly string[]);
-    const cleaned = parsed.filter((t): t is Tab => known.has(t));
-    const missing = DEFAULT_TAB_ORDER.filter((t) => !cleaned.includes(t));
-    return [...cleaned, ...missing];
-  } catch {
-    return DEFAULT_TAB_ORDER;
-  }
-}
+// Grouping replaced the saved per-user tab order. That order existed for
+// a drag-to-reorder affordance removed on 2026-09-01, and a flat order
+// cannot express a two-level nav; ALL_TABS is now the single list.
 
 function subscribeToHash(onChange: () => void) {
   window.addEventListener("hashchange", onChange);
@@ -114,7 +71,7 @@ function subscribeToHash(onChange: () => void) {
 
 function getCurrentTab(): Tab {
   const hash = window.location.hash.replace(/^#/, "");
-  return (DEFAULT_TAB_ORDER as readonly string[]).includes(hash) ? hash as Tab : "dashboard";
+  return (ALL_TABS as readonly string[]).includes(hash) ? hash as Tab : "dashboard";
 }
 
 function getServerTab(): null {
@@ -131,9 +88,18 @@ export function AnalyticsTabs() {
   // A server cannot see URL fragments. Wait for the browser snapshot so a
   // deep link never mounts Dashboard or issues its five unrelated requests.
   const tab = useSyncExternalStore(subscribeToHash, getCurrentTab, getServerTab);
-  const ready = tab !== null;
-  const tabOrder = useMemo(() => ready ? loadTabOrder() : DEFAULT_TAB_ORDER, [ready]);
   const [visited, setVisited] = useState<Tab[]>([]);
+  // The group whose siblings are listed. Follows the section you are in,
+  // but is its own state so opening a group to look around does not
+  // unload the section you are reading -- clicking "Attribution" while
+  // on CPIS should not throw CPIS's table away before you have chosen.
+  const [openGroup, setOpenGroup] = useState<GroupKey | null>(null);
+  const activeGroup = groupOf(tab ?? "dashboard");
+  const shownGroup = openGroup ?? activeGroup;
+  const siblings = useMemo(
+    () => GROUPS.find((g) => g.key === shownGroup)?.tabs ?? [],
+    [shownGroup],
+  );
   // Track newly selected tabs before committing their children, avoiding an
   // extra blank frame. This list is bounded by the known analytics sections.
   if (tab !== null && !visited.includes(tab)) {
@@ -147,39 +113,105 @@ export function AnalyticsTabs() {
           back/forward supported. Drag-to-reorder was removed on
           2026-09-01 since the dropdown attempt turned out to be for the
           CPIS-internal analytics view, not this level-1 nav. */}
-      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border-primary">
-        <div className="flex flex-wrap items-end gap-1">
-          <h1 className="mr-4 pb-3 text-[20px] font-semibold tracking-tight text-text-primary">
-            Analytics
-          </h1>
-          <nav className="flex flex-wrap items-end gap-1 pb-0" aria-label="Analytics sections">
-            {tabOrder.map((t) => {
-              const active = tab === t;
+      {/* Two levels, one rule. Thirteen section names did not fit on a
+          line -- measured 2026-10-14 at 1700px the strip wrapped and the
+          last tab fell to a second row, so which row a section sat on
+          depended on the window width. Five group names always fit; the
+          row beneath carries only the siblings of where you are.
+
+          "Rules, never boxes" (surface brief): the group strip sits on a
+          single full-width hairline, and the active group is marked by a
+          rule under the word, not a pill around it. */}
+      <div className="flex flex-col">
+        <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border-primary">
+          <div className="flex flex-wrap items-end gap-1">
+            <h1 className="mr-4 pb-3 text-[20px] font-semibold tracking-tight text-text-primary">
+              Analytics
+            </h1>
+            <nav className="flex flex-wrap items-end gap-1 pb-0" aria-label="Analytics groups">
+              {GROUPS.map((g) => {
+                const isActive = activeGroup === g.key;
+                const isShown = shownGroup === g.key;
+                return (
+                  <button
+                    key={g.key}
+                    type="button"
+                    aria-current={isActive ? "true" : undefined}
+                    onClick={() => {
+                      // One section in the group: no sibling row is worth
+                      // showing, so go straight there.
+                      if (g.tabs.length === 1) {
+                        setOpenGroup(null);
+                        selectTab(g.tabs[0]);
+                        return;
+                      }
+                      setOpenGroup(g.key);
+                    }}
+                    className={`relative px-3 pb-3 pt-1 text-[13px] font-medium transition-colors ${
+                      isActive || isShown
+                        ? "text-text-primary"
+                        : "text-text-secondary hover:text-text-primary"
+                    }`}
+                  >
+                    {g.label}
+                    {isActive && (
+                      <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-yellow" />
+                    )}
+                    {!isActive && isShown && (
+                      <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-border-mid" />
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+          <button
+            type="button"
+            aria-current={tab === HELP_TAB ? "true" : undefined}
+            onClick={() => { setOpenGroup(null); selectTab(HELP_TAB); }}
+            className={`relative px-3 pb-3 pt-1 text-[13px] font-medium transition-colors ${
+              tab === HELP_TAB ? "text-text-primary" : "text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            Help
+            {tab === HELP_TAB && (
+              <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-yellow" />
+            )}
+          </button>
+        </div>
+
+        {/* Siblings of the open group. Hidden for a group of one and for
+            Help, which has none. */}
+        {siblings.length > 1 && (
+          <nav className="flex flex-wrap items-center gap-x-5 gap-y-1 pt-2.5" aria-label="Sections">
+            {siblings.map((t) => {
+              const on = tab === t;
               return (
                 <button
                   key={t}
-                  onClick={() => selectTab(t)}
-                  className={`relative px-3 pb-3 pt-1 text-[13px] font-medium transition-colors ${
-                    active
-                      ? "text-text-primary"
+                  type="button"
+                  aria-current={on ? "page" : undefined}
+                  onClick={() => { setOpenGroup(null); selectTab(t); }}
+                  className={`text-[12.5px] transition-colors ${
+                    on
+                      ? "font-semibold text-text-primary underline decoration-accent-yellow decoration-2 underline-offset-[6px]"
                       : "text-text-secondary hover:text-text-primary"
                   }`}
                 >
                   {TAB_META[t].label}
-                  {active && (
-                    <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-yellow" />
-                  )}
                 </button>
               );
             })}
           </nav>
-        </div>
+        )}
       </div>
 
-      {/* One insertion point for every tab: the data floor applies to
-          all of them, and repeating the banner per section would let the
-          wording drift between them. Dismissible per browser. */}
-      <DataFloorNotice />
+      {/* The data-floor banner moved to Help ("Why every figure starts
+          01 Jan 2026"), and the fact itself moved to where it is acted
+          on: the date control now prints the window it resolved to, so
+          "Lifetime" states its own lower bound instead of a paragraph
+          above the page doing it. It cost ~70px of every section's first
+          screen to say something read once. */}
 
       {tab === null && <TabLoading />}
       {visited.map((section) => (
