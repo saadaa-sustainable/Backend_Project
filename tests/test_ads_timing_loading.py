@@ -153,7 +153,10 @@ async def test_lifetime_timing_serializes_unchanged_when_delivery_metrics_change
         results.append(empty)
     results.append(totals)
     session = SimpleNamespace(execute=AsyncMock(side_effect=results))
-    monkeypatch.setattr(analytics, "_daily_mirror_ready", AsyncMock(return_value=True))
+    # A date, not True: the helper now returns the mirror's last covered
+    # day, which is the boundary the windowed SQL is bound with.
+    monkeypatch.setattr(analytics, "_daily_mirror_bound",
+                        AsyncMock(return_value=date(2026, 10, 3)))
     monkeypatch.setattr(analytics, "get_efficiency_anchors", AsyncMock(return_value=EfficiencyAnchors(
         **dict.fromkeys(EfficiencyAnchors.__dataclass_fields__),
     )))

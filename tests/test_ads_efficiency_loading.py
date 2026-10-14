@@ -15,7 +15,7 @@ from app.services import ad_efficiency
 def clear_caches(monkeypatch):
     monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     caches = [fn.analytics_cache for fn in (
-        analytics.get_ads_analyse, analytics._daily_mirror_ready,
+        analytics.get_ads_analyse, analytics._daily_mirror_bound,
         ad_efficiency.get_efficiency_anchors, analytics._get_ads_analyse_summary,
     )]
     for cache in caches:

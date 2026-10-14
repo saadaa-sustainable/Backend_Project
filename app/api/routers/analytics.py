@@ -235,7 +235,11 @@ _ADS_ANALYSE_SELECT = (
 # public.ad_daily_external holds one row per (ad, day) from the same
 # provenance as the per-ad overlay. Everything the 'delivery' date mode
 # shows -- the table rows, the category tiles and the KPI strip -- is
-# summed from it, so the three cannot disagree.
+# summed from ONE expression, _DAILY_WINDOW_SOURCE, so the three cannot
+# disagree. The mirror covers it as far as the mirror reaches; past
+# that boundary it continues from this project's own
+# insights_daily_by_ad, because the mirror's source lags and a window
+# inside that lag otherwise matched no ad at all.
 #
 # Availability is checked once per request rather than assumed: an
 # install with no source configured has the table absent or empty, and
@@ -248,13 +252,67 @@ _AD_DAILY_EXTERNAL_EXISTS = (
 
 
 @cached_analytics(ttl=60.0, max_entries=1)
-async def _daily_mirror_ready(session: AsyncSession) -> bool:
-    """Probe through the existing async pool, without blocking the server."""
+async def _daily_mirror_bound(session: AsyncSession) -> date | None:
+    """Newest day the external daily mirror covers, or None when there is none.
+
+    Returns the boundary rather than a bare "is it there" flag, because
+    the mirror is only as current as the system it copies and that
+    system lags. Measured 2026-10-13 the mirror ended 2026-10-03 while
+    this project's own `insights_daily_by_ad` held every day through
+    2026-10-12 -- so every window that lay entirely inside those nine
+    days matched no ad at all and Ads Analyse rendered an empty table.
+    The date range looked broken; the data was there, in the other
+    table. See _DAILY_WINDOW_SOURCE for what is done with the boundary.
+
+    MAX(day) rides ix_ade_day and also answers the emptiness question --
+    an absent or empty mirror yields NULL, hence None.
+    """
     exists = (await session.execute(text(_AD_DAILY_EXTERNAL_EXISTS))).first()
     if exists is None:
-        return False
-    return (await session.execute(text("SELECT 1 FROM public.ad_daily_external LIMIT 1"))).first() is not None
+        return None
+    row = (await session.execute(text("SELECT MAX(day) FROM public.ad_daily_external"))).first()
+    return row[0] if row else None
 
+
+# The per-(ad, day) series every windowed figure is summed from: the
+# external mirror as far as it reaches, this project's own daily table
+# beyond it.
+#
+# The boundary is a single date, not a per-row preference, so no (ad,
+# day) pair can be counted twice and no figure inside the mirror's
+# coverage changes. It is bound as :mirror_max rather than computed in
+# SQL so both branches get a constant predicate and keep their indexes
+# -- on this instance a correlated bound turned the delivery scan from
+# an index range into a seq scan over 654k rows.
+#
+# Where the two overlap they agree: measured 2026-10-13 over
+# 2026-09-25..2026-10-03, spend was within 0.0% on the days the mirror
+# had finished loading (26-27 Sep) and the mirror was SHORT by 3-26% on
+# the days it had not. Our own figure was never the lower one, so the
+# fallback cannot understate a window.
+#
+# link_clicks: the mirror takes Meta's inline_link_clicks and falls back
+# to outbound_clicks (see sync_ad_metrics_external.DAILY_SELECT_SQL);
+# `clicks` is the local column holding the former.
+#
+# The Shopify pair stays NULL on the fallback branch, which is what the
+# mirror does for any window outside its rolling Shopify coverage: the
+# overlay fills both from _ATTRIBUTION_DAILY -- this project's own order
+# attribution -- on every window regardless. A 0 here would read as
+# "this ad sold nothing", a claim the daily series cannot make.
+_DAILY_WINDOW_SOURCE = (
+    "(SELECT ad_id, day, spend, impressions, reach, conv_value, purchases, "
+    "        link_clicks, ncp_count, ftewv_count, shopify_orders, shopify_sales "
+    "   FROM public.ad_daily_external "
+    "  WHERE day <= CAST(:mirror_max AS date) "
+    "  UNION ALL "
+    " SELECT ad_id, day, spend, impressions, reach, conv_value, purchases, "
+    "        COALESCE(outbound_clicks, clicks) AS link_clicks, "
+    "        ncp_count, ftewv_count, "
+    "        NULL::numeric AS shopify_orders, NULL::numeric AS shopify_sales "
+    "   FROM public.insights_daily_by_ad "
+    "  WHERE day > CAST(:mirror_max AS date))"
+)
 
 # Per-ad windowed sums for the table rows.
 _EXTERNAL_DAILY = (
@@ -262,7 +320,7 @@ _EXTERNAL_DAILY = (
     "       SUM(conv_value), SUM(purchases), SUM(link_clicks), "
     "       SUM(ncp_count), SUM(ftewv_count), "
     "       SUM(shopify_orders), SUM(shopify_sales) "
-    "FROM public.ad_daily_external "
+    f"FROM {_DAILY_WINDOW_SOURCE} d "
     "WHERE ad_id = ANY(:ad_ids) AND day BETWEEN :from_str AND :to_str "
     "GROUP BY ad_id"
 )
@@ -372,7 +430,7 @@ _DELIVERY_TOTALS_SQL = (
     "         SUM(d.shopify_orders) AS shopify_orders,"
     "         SUM(d.shopify_sales) AS shopify_sales,"
     "         BOOL_OR(d.impressions > 0) AS delivered"
-    "    FROM public.ad_daily_external d"
+    f"    FROM {_DAILY_WINDOW_SOURCE} d"
     "   WHERE d.day BETWEEN :from_date AND :to_date GROUP BY d.ad_id"
 )
 _DELIVERY_TOTALS_JOIN = f" LEFT JOIN ({_DELIVERY_TOTALS_SQL}) w ON w.ad_id = aps.ad_id"
@@ -383,7 +441,7 @@ _DELIVERY_TOTALS_JOIN = f" LEFT JOIN ({_DELIVERY_TOTALS_SQL}) w ON w.ad_id = aps
 # so a one-day window rendered ~14k rows of zeroes and the category
 # tiles counted every one of them.
 _DELIVERED_ADS_SQL = (
-    "SELECT DISTINCT d.ad_id FROM public.ad_daily_external d "
+    f"SELECT DISTINCT d.ad_id FROM {_DAILY_WINDOW_SOURCE} d "
     "WHERE d.day BETWEEN :from_date AND :to_date AND d.impressions > 0"
 )
 _DELIVERED_IN_WINDOW = (
@@ -1572,12 +1630,21 @@ async def get_ads_analyse(
     # the KPI strip describing one population: they all inherit
     # base_where.
     windowed_delivery = False
+    mirror_max: date | None = None
     if from_date and to_date and date_field == "delivery":
-        windowed_delivery = await _daily_mirror_ready(session)
+        # The boundary between the external mirror and this project's own
+        # daily table. Every windowed query below spans both -- see
+        # _DAILY_WINDOW_SOURCE -- so it has to be bound wherever one of
+        # them runs: here for the delivery predicate (which base_where
+        # carries into the rows, the tiles and the KPI strip) and again
+        # on the per-ad overlay further down.
+        mirror_max = await _daily_mirror_bound(session)
+        windowed_delivery = mirror_max is not None
         if windowed_delivery:
             base_where.append(_DELIVERED_IN_WINDOW)
             params["from_date"] = from_date
             params["to_date"] = to_date
+            params["mirror_max"] = mirror_max
 
     row_where = list(base_where)
     if category:
@@ -1694,6 +1761,7 @@ async def get_ads_analyse(
             "ad_ids": ad_ids,
             "from_str": from_date,
             "to_str": to_date,
+            "mirror_max": mirror_max,
         })).all()
         # Second opinion on the Shopify pair, from our own attribution.
         # See _ATTRIBUTION_DAILY: the mirror's Shopify columns can be
