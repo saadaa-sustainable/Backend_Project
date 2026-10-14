@@ -9,10 +9,13 @@ import pytest
 
 from app.api.routers import analytics
 from app.services import ad_efficiency
+from app.services.ad_customer_mix import query_ad_customer_mix
 
 
 @pytest.fixture(autouse=True)
 def clear_caches(monkeypatch):
+    # Transaction timeout/recovery is covered by test_ad_customer_mix.py.
+    monkeypatch.setattr(analytics, "read_ad_customer_mix", query_ad_customer_mix)
     monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     caches = [fn.analytics_cache for fn in (
         analytics.get_ads_analyse, analytics._daily_mirror_bound,

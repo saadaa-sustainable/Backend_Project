@@ -11,10 +11,12 @@ import pytest
 from sqlalchemy.dialects.postgresql import asyncpg
 
 from app.api.routers import analytics
+from app.services.ad_customer_mix import query_ad_customer_mix
 
 
 @pytest.fixture(autouse=True)
 def clear_analytics_caches(monkeypatch):
+    monkeypatch.setattr(analytics, "read_ad_customer_mix", query_ad_customer_mix)
     monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     caches = [
         getattr(analytics, name).analytics_cache
@@ -314,7 +316,8 @@ async def test_cpis_reconciliation_executes_exact_combined_sql_with_indexable_da
     # The breakdown and distinct-order count share one scan, while mixed
     # baskets are still counted once in the headline.
     assert sql.count("FROM shopify_orders so") == 1
-    assert "COUNT(DISTINCT so.order_id) FROM orders_in_window so" in sql
+    assert "SUM(orders_with_items)" in sql
+    assert "order_ad_days AS MATERIALIZED" in sql
     assert "orders_in_window AS MATERIALIZED" in sql
     # IST bounds, because Meta counts its spend days in the ad account's
     # timezone (Asia/Kolkata) and this joins order days to spend days.

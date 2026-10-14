@@ -8,6 +8,8 @@ individual tests never need to know which env vars ``Settings`` requires.
 from __future__ import annotations
 
 from collections.abc import Iterator
+import os
+import re
 
 import pytest
 
@@ -17,6 +19,11 @@ from app.core.security import MetaCredentials
 
 @pytest.fixture(autouse=True)
 def meta_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # Scripts imported during collection may load local .env accounts.
+    # Keep the test account universe independent of this machine's setup.
+    for key in list(os.environ):
+        if re.fullmatch(r"META_ACCOUNT_\d+_(ID|NAME)", key):
+            monkeypatch.delenv(key)
     monkeypatch.setenv("META_ACCESS_TOKEN", "test-token-123")
     monkeypatch.setenv("META_ACCOUNT_1_ID", "act_1234567890")
     monkeypatch.setenv("META_ACCOUNT_1_NAME", "Test Account One")

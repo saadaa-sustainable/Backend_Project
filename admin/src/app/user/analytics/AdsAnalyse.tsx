@@ -10,9 +10,11 @@
  *   2. Filter row: Account / Group By / Category / Ad Status / Date Field
  *      / Date Range — Date Range disabled in Phase 1 (needs /api/delivery
  *      equivalent).
- *   3. F1..F4 threshold input row — editable, client-side recategorises
- *      rows without a backend round-trip (matches CTD's aeCategorise).
- *   4. Inline text multi-filter (Add / Apply / Clear).
+ *   3. F1..F4 thresholds and the multi-filter rule builder — both now
+ *      behind "More filters" on the filter rule. The thresholds are
+ *      editable and recategorise client-side without a backend
+ *      round-trip (matches CTD's aeCategorise); the rule builder
+ *      compiles server-side on Apply.
  *   5. 7 category KPI tiles with click-to-filter and CTD's colour classes
  *      (cat-iw / cat-winner / cat-priority / cat-a1 / cat-a2 / cat-ra /
  *      cat-disc — see globals.css).
@@ -42,6 +44,7 @@ import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
 import { AdsLaunchDialog } from "./AdsLaunchDialog";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
+import { SectionHeader, FilterRule, FilterCell, FigureBand, VerdictBand, Segmented, filterControlClass, type Verdict } from "./SectionChrome";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
@@ -181,24 +184,22 @@ const AE = {
   ink: theme.textPrimary,
 };
 
-/** One labelled filter cell: uppercase caption above, control below,
- *  boxed. Matches the legacy layout, where every filter is its own card
- *  rather than a bare select floating in a strip. */
-function FilterCard({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div
-      className="rounded-lg border p-2.5"
-      style={{ backgroundColor: AE.cream, borderColor: AE.border }}
-    >
-      <div
-        className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
-        style={{ color: AE.muted }}
-      >
-        {label}
-      </div>
-      {children}
-    </div>
-  );
+/** One labelled filter cell.
+ *
+ *  Was a cream card with its own border, so eleven filters read as
+ *  eleven objects stacked on the page rather than one row of choices --
+ *  and at this width they wrapped into three rows of boxes that pushed
+ *  the table off the first screen. Now a label over an underlined
+ *  control, with the rule under the row as the only structure, which is
+ *  what the surface brief asks for: "filters sit on one rule above the
+ *  table as labelled cells, not floating selects".
+ *
+ *  Kept as a wrapper around the shared FilterCell rather than replaced
+ *  at every call site: there are eleven of them here and several more
+ *  in the rollup branch, and none of their state should move for a
+ *  visual change. */
+function FilterCard({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
+  return <FilterCell label={label} className={className}>{children}</FilterCell>;
 }
 
 function CardSelect({
@@ -214,8 +215,7 @@ function CardSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded-md border bg-white px-3 py-2 text-sm"
-      style={{ borderColor: AE.border, color: AE.ink }}
+      className={`w-full ${filterControlClass}`}
     >
       {children}
     </select>
@@ -243,8 +243,7 @@ function CardNumber({
         // the table instead of showing an invalid-input state.
         if (!Number.isNaN(n)) onChange(n);
       }}
-      className="w-full rounded-md border bg-white px-3 py-2 text-sm tabular-nums"
-      style={{ borderColor: AE.border, color: AE.ink }}
+      className={`w-full ${filterControlClass} tabular-nums`}
     />
   );
 }
@@ -381,7 +380,7 @@ function ReachCell({
     );
   }
   return (
-    <span className="num" title={`${what}.\nSnapshot: ${asOfFrom ? `${asOfFrom} \u2192 ${asOf ?? "unknown"}` : asOf ?? "unknown"}`}>
+    <span className="num" title={`${what}.\nSnapshot: ${asOfFrom ? `${asOfFrom} → ${asOf ?? "unknown"}` : asOf ?? "unknown"}`}>
       {fmt(value, { maximumFractionDigits: 0 })}
     </span>
   );
@@ -1656,6 +1655,7 @@ export function AdsAnalyse() {
   const [total, setTotal] = useState(0);
   const [categoryCountsFromApi, setCategoryCountsFromApi] = useState<Record<string, number>>({});
   const [totals, setTotals] = useState<AdsAnalyseTotals | null>(null);
+  const [customerMixUnavailable, setCustomerMixUnavailable] = useState(false);
   const [accountOptions, setAccountOptions] = useState<Set<string>>(new Set());
   const [statusOptions, setStatusOptions] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -1778,11 +1778,23 @@ export function AdsAnalyse() {
   const [freshnessReady, setFreshnessReady] = useState(false);
   useEffect(() => {
     let live = true;
+    let settled = false;
+    const finish = (day: string | null = null) => {
+      if (!live || settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      if (day) setDataThrough(day);
+      setFreshnessReady(true);
+    };
+    // Freshness is advisory: a stalled lookup must not consume the full
+    // 90-second API deadline before the actual ad request even starts.
+    // Use the existing clock fallback and ignore late freshness results so
+    // one page opening cannot issue a second expensive date-window query.
+    const timer = window.setTimeout(() => finish(), 3_000);
     fetchCpisDataFreshness()
-      .then((f) => { if (live && f.max_meta_day) setDataThrough(f.max_meta_day); })
-      .catch(() => { /* fall back to the clock; the picker still works */ })
-      .finally(() => { if (live) setFreshnessReady(true); });
-    return () => { live = false; };
+      .then((f) => finish(f.max_meta_day))
+      .catch(() => finish());
+    return () => { live = false; window.clearTimeout(timer); };
   }, []);
   // The window the page actually queries. Derived, not stored: once the
   // anchor arrives every preset re-resolves against the data instead of
@@ -1796,7 +1808,6 @@ export function AdsAnalyse() {
 
   // ── F1..F4 thresholds ────────────────────────────────────────
   const [thresholds, setThresholds] = useState<FThresholds>(DEFAULT_THRESHOLDS);
-  const [thresholdsOpen, setThresholdsOpen] = useState(false);
   const thresholdsChanged = useMemo(() => (
     thresholds.f1Imp !== DEFAULT_THRESHOLDS.f1Imp
     || thresholds.f2Roas !== DEFAULT_THRESHOLDS.f2Roas
@@ -1923,7 +1934,7 @@ export function AdsAnalyse() {
           setFilters: setRollupNumeric,
           fields: ROLLUP_NUMERIC_FIELDS as { key: string; label: string }[] | undefined,
           note: `Rules apply to the ${rollupRows.length.toLocaleString("en-IN")} rows `
-                + "fetched for this level \u2014 not to the whole table server-side.",
+                + "fetched for this level — not to the whole table server-side.",
         }
   ), [levelToggle, hiddenCols, numericFilters, rollupHidden, rollupNumeric, rollupRows.length]);
 
@@ -2036,6 +2047,7 @@ export function AdsAnalyse() {
       total: number;
       totals: AdsAnalyseTotals | null;
       category_counts: Record<string, number>;
+      customer_mix_unavailable?: boolean;
       ts: number;
     };
     if (typeof window !== "undefined") {
@@ -2051,6 +2063,7 @@ export function AdsAnalyse() {
             setTotal(c.total);
             setCategoryCountsFromApi(c.category_counts);
             setTotals(c.totals);
+            setCustomerMixUnavailable(c.customer_mix_unavailable ?? false);
             setPage(0);
             setLoading(false);
             return () => {
@@ -2075,6 +2088,7 @@ export function AdsAnalyse() {
         setTotal(res.total);
         setCategoryCountsFromApi(res.category_counts ?? {});
         setTotals(res.totals ?? null);
+        setCustomerMixUnavailable(res.customer_mix_unavailable ?? false);
         setAccountOptions((prev) => {
           const next = new Set(prev);
           res.rows.forEach((r) => r.account_name && next.add(r.account_name));
@@ -2095,6 +2109,7 @@ export function AdsAnalyse() {
                 total: res.total,
                 totals: res.totals ?? null,
                 category_counts: res.category_counts ?? {},
+                customer_mix_unavailable: res.customer_mix_unavailable ?? false,
                 ts: Date.now(),
               } satisfies Cached),
             );
@@ -2120,6 +2135,7 @@ export function AdsAnalyse() {
     try {
       const res = await fetchAdsAnalyse({ ...filters, limit: 500, offset: rows.length });
       setRows((prev) => [...prev, ...res.rows]);
+      setCustomerMixUnavailable((prev) => prev || !!res.customer_mix_unavailable);
     } catch (err) {
       setFailedLoadMore(true);
       setError(err instanceof ApiError ? err.message : "Could not load more rows.");
@@ -2194,6 +2210,75 @@ export function AdsAnalyse() {
     setDatePreset("lifetime");
   }
 
+  /* ── what "More filters" holds ──────────────────────────────────
+   *
+   * The rule builder and the F1-F4 thresholds were two full-width
+   * bands stacked between the filter rule and the verdict band: a
+   * bordered grey panel with a paragraph under it, then four boxed
+   * number inputs and a Defaults button. Together they pushed the
+   * verdict band and the table off the first screen on every visit,
+   * for two controls most visits never touch.
+   *
+   * They are the same KIND of thing as the cells on the rule -- they
+   * narrow or re-decide what the table shows -- so they go where the
+   * rule already keeps its less-used cells, behind "More filters".
+   * Nothing about either control changed: the rules still compile
+   * server-side on Apply, the thresholds still recategorise client-side
+   * on every keystroke. The toggle counts both, so a reader can see
+   * from the collapsed rule that something underneath is set.
+   */
+  const extraFilterCount =
+    levelToggle === "ad"
+      ? (multiFilter?.rules.length ?? 0) + (thresholdsChanged ? 1 : 0)
+      : 0;
+
+  const advancedFilters = (
+    <div className="flex w-full min-w-0 flex-col gap-4">
+      {/* The rule builder works over AD columns and the rollup endpoint
+          does not take it, so it is ad-level only -- which is why the
+          whole disclosure is ad-level only. */}
+      <MultiFilter applied={multiFilter} onApply={setMultiFilter} />
+
+      {/* F1-F4 thresholds. Labelled cells on the same rule grammar as
+          the filters above them, not five boxed inputs in a grid. */}
+      <div className="flex flex-wrap items-end gap-x-6 gap-y-3 border-t border-border-soft pt-3">
+        <FilterCard label="F1 — Impressions" className="w-[128px]">
+          <CardNumber
+            value={thresholds.f1Imp}
+            onChange={(n) => setThresholds({ ...thresholds, f1Imp: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F2 — ROAS" className="w-[88px]">
+          <CardNumber
+            value={thresholds.f2Roas}
+            step={0.1}
+            onChange={(n) => setThresholds({ ...thresholds, f2Roas: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F3 — Cost / NCP" className="w-[124px]">
+          <CardNumber
+            value={thresholds.f3CostPerNcp}
+            onChange={(n) => setThresholds({ ...thresholds, f3CostPerNcp: n })}
+          />
+        </FilterCard>
+        <FilterCard label="F4 — Cost / FTEWV" className="w-[132px]">
+          <CardNumber
+            value={thresholds.f4CostPerFtewv}
+            onChange={(n) => setThresholds({ ...thresholds, f4CostPerFtewv: n })}
+          />
+        </FilterCard>
+        <button
+          type="button"
+          onClick={() => setThresholds(DEFAULT_THRESHOLDS)}
+          disabled={!thresholdsChanged}
+          className="self-end pb-1 text-[12.5px] text-text-secondary underline underline-offset-2 transition-colors hover:text-text-primary disabled:no-underline disabled:opacity-40"
+        >
+          Reset to defaults
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex flex-col gap-3">
       {/* ═══════════════════════════════════════════════════════════
@@ -2205,12 +2290,12 @@ export function AdsAnalyse() {
           (2026-08-29 declutter) since users already know which tab
           they clicked. The row count on the right replaces it as a
           more useful piece of context. */}
-      <div className="flex items-baseline gap-3">
-        {/* Was "Creative Testing" -- a leftover from the CTD port that
-            became actively wrong once Creative Testing existed as its
-            own tab. */}
-        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Ads Analyse</h2>
-        <div className="inline-flex rounded-md border border-border-primary bg-white shadow-sm">
+      {/* Was "Creative Testing" -- a leftover from the CTD port that
+          became actively wrong once Creative Testing existed as its own
+          tab. The ? opens "Delivery date, ad created, first seen", which
+          is the thing people get wrong on this section. */}
+      <SectionHeader title="Ads Analyse" helpId="date-basis">
+        <div className="inline-flex">
           {(["ad", "adset", "campaign"] as const).map((lv) => (
             <button
               key={lv}
@@ -2221,7 +2306,7 @@ export function AdsAnalyse() {
                   : `${lv} rollup — Meta-deduplicated reach from ${lv}_insights`
               }
               className={
-                "px-3 py-1 text-xs first:rounded-l-md last:rounded-r-md " +
+                "px-3 py-1 text-xs " +
                 (levelToggle === lv
                   ? "bg-text-primary text-white"
                   : "text-text-primary hover:bg-bg-muted")
@@ -2240,7 +2325,7 @@ export function AdsAnalyse() {
               ? "loading…"
               : `${derived.filtered.length.toLocaleString()} of ${total.toLocaleString()} ads`}
         </span>
-      </div>
+      </SectionHeader>
 
 
       {/* Analytics, behind a button. The Ads-launched chart used to sit
@@ -2265,13 +2350,19 @@ export function AdsAnalyse() {
       </div>
 
       {/* ═══════════════════════════════════════════════════════════
-          Filter cards — ACCOUNT / GROUP BY / CATEGORY / AD STATUS /
-          DATE FIELD / DATE RANGE. Six labelled cards on one row, matching
-          the legacy Ads Analyse layout: uppercase label above, control
-          below, each in its own bordered card rather than a loose strip
-          of bare selects.
+          One rule of labelled cells — ACCOUNT / GROUP BY / CATEGORY /
+          AD STATUS / DATE FIELD / DATE RANGE, plus the rollup-only
+          cells further down.
+
+          Was a six-column grid of bordered cards, which at this width
+          wrapped into three rows of boxes and pushed the table past the
+          first screen. A flex row of underlined cells wraps to one more
+          line at worst and reads as a single sentence of choices.
          ═══════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+      <FilterRule
+        extraCount={extraFilterCount}
+        extra={levelToggle === "ad" ? advancedFilters : undefined}
+      >
         <FilterCard label="Account">
           <CardSelect value={account} onChange={setAccount}>
             <option value="">All Accounts</option>
@@ -2340,6 +2431,7 @@ export function AdsAnalyse() {
             // ~700px panel off its RIGHT edge pushed the preset rail off
             // the left of the viewport entirely -- the calendar showed
             // but Today / Last 7 Days / Lifetime were unreachable.
+            bare
             align="left"
             onApply={(r, pk) => {
               setFromDate(r.from);
@@ -2479,7 +2571,7 @@ export function AdsAnalyse() {
             </FilterCard>
           </>
         )}
-      </div>
+      </FilterRule>
 
       {/* ═══════════════════════════════════════════════════════════
           Ad Set / Campaign rollup. Replaces the ad table entirely when a
@@ -2606,38 +2698,44 @@ export function AdsAnalyse() {
               matching entity -- deriving them from the 500 loaded rows
               would describe a page while claiming to describe 3,008.
               Clicking filters the table server-side for the same reason. */}
-          {/* Four across, not six: the OK and UNRATED tiles were dropped. */}
-          <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            {DECISION_TILES.map((t) => {
-              const d = decisionCounts[t.key] ?? { count: 0, spend: 0 };
-              const on = decisionFilter === t.key;
-              return (
-                // The (i) is a SIBLING of the button, not a child: the
-                // tile is itself a button, and nesting one inside
-                // another is invalid HTML. As a sibling it also cannot
-                // bubble a click into the filter.
-                <div key={t.key} className="relative">
-                  <button
-                    onClick={() => setDecisionFilter(on ? "" : t.key)}
-                    className={
-                      "w-full rounded-lg border bg-white p-2.5 text-left shadow-sm transition " +
-                      (on ? "ring-2 ring-offset-1 " : "hover:bg-bg-muted ") +
-                      (d.count === 0 ? "opacity-50 " : "")
-                    }
-                    style={on ? { borderColor: t.color, boxShadow: `0 0 0 1px ${t.color}` } : undefined}
-                  >
-                    {/* pr-5 keeps the label clear of the dot above it. */}
-                    <div className="pr-5 text-[10px] font-semibold uppercase tracking-wide"
-                         style={{ color: t.color }}>{t.label}</div>
-                    <div className="num text-lg font-bold">{d.count.toLocaleString("en-IN")}</div>
-                    <div className="text-[10px] text-text-tertiary">₹{money(d.spend)}</div>
-                  </button>
-                  <span className="absolute right-2 top-2">
-                    <InfoDot basis={t.basis} />
-                  </span>
-                </div>
-              );
-            })}
+          {/* Four across, not six: the OK and UNRATED tiles were dropped.
+
+              Flat colour fields spanning the content width, carrying
+              counts -- the surface brief's verdict band, not four
+              rounded cards each with a border AND a shadow. Each field's
+              WIDTH is its share of the ads, so the band is itself the
+              distribution: one mark, one unit. Signal red lands on PAUSE
+              and nowhere else, which is the reservation the palette
+              rests on.
+
+              The (i) basis panels survive; they sit on the field rather
+              than floating over a card corner. */}
+          <div className="relative mb-3">
+            <VerdictBand
+              verdicts={DECISION_TILES.map((t): Verdict => {
+                const d = decisionCounts[t.key] ?? { count: 0, spend: 0 };
+                return {
+                  key: t.key,
+                  label: t.label,
+                  count: d.count,
+                  under: `₹${money(d.spend)}`,
+                  tone:
+                    t.key === "SCALE" ? "scale"
+                      : t.key === "PAUSE" ? "pause"
+                        : t.key === "MONITOR" ? "monitor" : "report",
+                  selected: decisionFilter === t.key,
+                  onSelect: () => setDecisionFilter(decisionFilter === t.key ? "" : t.key),
+                };
+              })}
+            />
+            <div className="mt-1.5 flex flex-wrap gap-x-6 gap-y-1">
+              {DECISION_TILES.map((t) => (
+                <span key={t.key} className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-tertiary">
+                  {t.label}
+                  <InfoDot basis={t.basis} />
+                </span>
+              ))}
+            </div>
           </div>
           <DecisionRules />
           {scalableFor && (
@@ -2720,70 +2818,23 @@ export function AdsAnalyse() {
         </div>
       )}
 
-      {/* The rule builder works over AD columns and the rollup endpoint
-          does not take it, so it is ad-level only. */}
-      {levelToggle === "ad" && (
-        <MultiFilter applied={multiFilter} onApply={setMultiFilter} />
-      )}
-
-      {/* Everything below is AD-GRAIN: the thresholds, the verdict
-          tiles, the launch chart and the main table all describe
-          individual ads. On the Ad set / Campaign levels they would be
+      {/* Everything below is AD-GRAIN: the verdict tiles, the launch
+          chart and the main table all describe individual ads. On the Ad set / Campaign levels they would be
           answering a different question than the table above them, so
           they are not rendered at all rather than left showing ad
           numbers under an ad-set heading. */}
       {levelToggle === "ad" && (
         <>
-      {/* F1–F4 thresholds, same card treatment. */}
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-5">
-        <FilterCard label="F1 — Impressions">
-          <CardNumber
-            value={thresholds.f1Imp}
-            onChange={(n) => setThresholds({ ...thresholds, f1Imp: n })}
-          />
-        </FilterCard>
-        <FilterCard label="F2 — ROAS">
-          <CardNumber
-            value={thresholds.f2Roas}
-            step={0.1}
-            onChange={(n) => setThresholds({ ...thresholds, f2Roas: n })}
-          />
-        </FilterCard>
-        <FilterCard label="F3 — Cost / NCP">
-          <CardNumber
-            value={thresholds.f3CostPerNcp}
-            onChange={(n) => setThresholds({ ...thresholds, f3CostPerNcp: n })}
-          />
-        </FilterCard>
-        <FilterCard label="F4 — Cost / FTEWV">
-          <CardNumber
-            value={thresholds.f4CostPerFtewv}
-            onChange={(n) => setThresholds({ ...thresholds, f4CostPerFtewv: n })}
-          />
-        </FilterCard>
-        <FilterCard label="Reset">
-          <button
-            onClick={() => setThresholds(DEFAULT_THRESHOLDS)}
-            disabled={!thresholdsChanged}
-            className="w-full rounded-md border bg-white px-3 py-2 text-sm disabled:opacity-40"
-            style={{ borderColor: AE.border }}
-          >
-            Defaults
-          </button>
-        </FilterCard>
-      </div>
-
       {/* ═══════════════════════════════════════════════════════════
           Row controls. The standalone "Search ad name" box was removed
           2026-09-16: Multi-Filter's Ad Name + "contains all of" does the
           same job and six other fields besides, so the two were just
           competing ways to type the same query.
-          Shop-orders toggle + collapsed thresholds button.
-          Thresholds were previously in a 5-input row above the KPI
-          tiles which visually competed with everything else -- moved
-          to a popover so the primary flow (KPIs → filters → table)
-          stays clean. A "modified" pill flags when the user has
-          diverged from CTD's defaults (2026-08-29 declutter pass).
+          Shop-orders toggle. The F1-F4 thresholds are no longer a
+          band of their own anywhere on this screen: they fold into
+          "More filters" on the filter rule, beside the rule builder,
+          with the toggle counting them when they differ from the
+          account's defaults.
          ═══════════════════════════════════════════════════════════ */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
         <label className="flex items-center gap-1.5 text-xs">
@@ -2817,11 +2868,11 @@ export function AdsAnalyse() {
             <option value="NONE">No budget set</option>
           </select>
         </label>
-        {/* The F1-F4 threshold popover was removed 2026-09-16: those
-            controls now sit in their own labelled cards above, matching
-            the legacy layout. Two editors bound to the same state would
-            only drift. `bufferDays` moved with them -- it is still used
-            by categorise() for the Result Awaited grace window. */}
+        {/* One editor for the thresholds, and it lives in the filter
+            rule's "More filters" disclosure. Two editors bound to the
+            same state would only drift. `bufferDays` sits with them --
+            still used by categorise() for the Result Awaited grace
+            window. */}
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={clearAllFilters}
@@ -2867,42 +2918,66 @@ export function AdsAnalyse() {
           the table's own columns and in Creative Testing's Overview. */}
 
       {/* ═══════════════════════════════════════════════════════════
-          7 KPI category tiles — click to filter
-          Rebuilt on top of KwikTile (2026-08-29) to match the
-          kwikengage Marketing Insights KPI-card aesthetic — icon
-          square, uppercase label, big monospaced count, spend sub-line.
+          The verdict band — seven categories, click to filter.
+
+          Was seven KwikTiles: an icon square in a tinted chip, an
+          uppercase label, a count and a spend line, each on its own
+          bordered card with a shadow. The surface brief rules that
+          arrangement out by name ("a row of rounded KPI cards floating
+          on a grey page above a boxed table") and asks for flat colour
+          fields carrying counts, spanning the content width.
+
+          Each field's WIDTH is now its share of the ads, so the band is
+          the distribution: Discarded at 4,162 of 7,333 takes more than
+          half the rule, and Incremental Winner at 46 is the sliver it
+          actually is. That is the one thing the seven equal cards could
+          never show.
+
+          Tone is by meaning, not by category: winners read as success,
+          Discarded as a fired rule, Result Awaited as pending, the
+          analysis buckets as neutral. The (i) basis panels survive
+          beneath, and both count sources are unchanged.
          ═══════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-        {CATEGORY_ORDER.map((cat) => {
-          // Counts come from the SERVER (`category_counts`), which covers
-          // every matching ad. derived.tileCounts only ever sees the rows
-          // currently paged in, so it showed "P2 analysis 3" against a
-          // real 1,768. The client figure is used only with custom
-          // thresholds, where the server's counts no longer apply.
-          const count = thresholdsChanged
-            ? derived.tileCounts[cat]
-            : (categoryCountsFromApi[cat] ?? 0);
-          // Spend stays page-scoped either way -- the totals payload is
-          // for the whole filter set, not per category -- so it is
-          // labelled as such rather than implying a full-dataset figure.
-          const spend = derived.withCat
-            .filter((rc) => rc.cat === cat)
-            .reduce((acc, rc) => acc + (rc.row.spend ?? 0), 0);
-          const selected = categoryFilter === cat;
-          return (
-            <KwikTile
-              key={cat}
-              icon={<span className="text-base">{CATEGORY_ICON[cat]}</span>}
-              iconColor={CATEGORY_ICON_COLOR[cat]}
-              label={cat}
-              value={count.toLocaleString()}
-              subLine={`₹${money(spend)}`}
-              info={categoryBasis(cat, thresholdsChanged)}
-              active={selected}
-              onClick={() => setCategoryFilter(selected ? "" : cat)}
-            />
-          );
-        })}
+      <div className="flex flex-col gap-1.5">
+        <VerdictBand
+          verdicts={CATEGORY_ORDER.map((cat): Verdict => {
+            // Counts come from the SERVER (`category_counts`), which covers
+            // every matching ad. derived.tileCounts only ever sees the rows
+            // currently paged in, so it showed "P2 analysis 3" against a
+            // real 1,768. The client figure is used only with custom
+            // thresholds, where the server's counts no longer apply.
+            const count = thresholdsChanged
+              ? derived.tileCounts[cat]
+              : (categoryCountsFromApi[cat] ?? 0);
+            // Spend stays page-scoped either way -- the totals payload is
+            // for the whole filter set, not per category -- so it is
+            // labelled as such rather than implying a full-dataset figure.
+            const spend = derived.withCat
+              .filter((rc) => rc.cat === cat)
+              .reduce((acc, rc) => acc + (rc.row.spend ?? 0), 0);
+            const selected = categoryFilter === cat;
+            return {
+              key: cat,
+              label: cat,
+              count,
+              under: `₹${money(spend)}`,
+              tone:
+                cat === "Incremental Winner" || cat === "Winner" ? "scale"
+                  : cat === "Discarded" ? "pause"
+                    : cat === "Result Awaited" ? "monitor" : "report",
+              selected,
+              onSelect: () => setCategoryFilter(selected ? "" : cat),
+            };
+          })}
+        />
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {CATEGORY_ORDER.map((cat) => (
+            <span key={cat} className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-tertiary">
+              {cat}
+              <InfoDot basis={categoryBasis(cat, thresholdsChanged)} />
+            </span>
+          ))}
+        </div>
       </div>
 
       {/* Ads launched per day, in the dialog the Analytics button opens.
@@ -2937,6 +3012,11 @@ export function AdsAnalyse() {
       </div>
 
       {/* Errors */}
+      {customerMixUnavailable && !loading && (
+        <p role="status" className="text-sm text-text-secondary">
+          New and repeat customer figures are temporarily unavailable. Other ad metrics are shown below.
+        </p>
+      )}
       {error && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">
           <span>{error}</span>

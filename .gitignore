@@ -81,3 +81,17 @@ secrets/
 *-key.json
 gcp-*.json
 application_default_credentials.json
+
+# Hand-exported sheets. The graphics mastersheet is private and answers
+# 401 to every public read path, so "Performance Ad Req" is dropped here
+# by hand. Internal creative planning, and this repo is public.
+data/sheets/*.csv
+
+# Local analysis and review evidence contains real business performance data.
+.impeccable/review/
+reports/
+docs/query-audit-*/
+# Standalone local prototype snapshots; the app uses its live API instead.
+admin/public/asset-analysis-data.json
+admin/public/asset-analysis-detail.json
+admin/public/asset-analysis.html

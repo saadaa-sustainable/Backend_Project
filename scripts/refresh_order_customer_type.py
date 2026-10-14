@@ -90,6 +90,18 @@ FROM (
 """
 
 
+#: The names the side table's indexes are built under, before the swap
+#: renames each to its canonical name. Dropped defensively first: a run
+#: that died between CREATE INDEX and the rename would otherwise leave
+#: one behind and the next run would collide on it.
+_NEW_INDEXES = (
+    "order_customer_type_new_pkey",
+    "ix_oct_customer_new",
+    "ix_oct_day_new",
+    "ix_oct_new_new",
+)
+
+
 def main() -> int:
     t0 = time.time()
     conn = psycopg2.connect(DSN)
@@ -99,18 +111,62 @@ def main() -> int:
             cur.execute("SET statement_timeout = '1800s'")
             cur.execute(DDL)
             cur.execute("DROP TABLE IF EXISTS public.order_customer_type_new")
+            # Columns only -- NOT `INCLUDING ALL`. See the same fix and
+            # the full explanation in refresh_insights_daily_by_entity.py:
+            # INCLUDING ALL cloned the indexes under server-generated
+            # `order_customer_type_new_*` names, the swap left those names
+            # live, the DDL's `CREATE INDEX IF NOT EXISTS ix_oct_*` then
+            # found nothing by its own name and built another copy, and
+            # the next clone copied both. This table had accumulated 72
+            # exact duplicates and 702 MB (of 114 MB of real data) by
+            # 2026-10-14.
             cur.execute("CREATE TABLE public.order_customer_type_new "
-                        "(LIKE public.order_customer_type INCLUDING ALL)")
+                        "(LIKE public.order_customer_type "
+                        " INCLUDING DEFAULTS INCLUDING STORAGE)")
             print("[pg] classifying orders ...", flush=True)
             cur.execute(REBUILD)
             print(f"[pg] inserted {cur.rowcount:,} rows", flush=True)
 
+            # Indexed after the insert, named here, renamed into place
+            # below -- so this script decides the index set, not the
+            # server's name generator.
+            for name in _NEW_INDEXES:
+                cur.execute(f"DROP INDEX IF EXISTS public.{name}")
+            cur.execute("ALTER TABLE public.order_customer_type_new "
+                        "ADD CONSTRAINT order_customer_type_new_pkey "
+                        "PRIMARY KEY (order_id)")
+            cur.execute("CREATE INDEX ix_oct_customer_new "
+                        "ON public.order_customer_type_new(customer_id)")
+            cur.execute("CREATE INDEX ix_oct_day_new "
+                        "ON public.order_customer_type_new(order_day)")
+            cur.execute("CREATE INDEX ix_oct_new_new "
+                        "ON public.order_customer_type_new(is_new_customer)")
+
             cur.execute("DROP TABLE IF EXISTS public.order_customer_type_old")
             cur.execute("ALTER TABLE public.order_customer_type "
                         "RENAME TO order_customer_type_old")
+            # A rename moves the table, never its indexes, so the live
+            # names have to be vacated before the new ones take them.
+            for live, parked in (
+                ("order_customer_type_pkey", "order_customer_type_old_pkey"),
+                ("ix_oct_customer", "ix_oct_customer_old"),
+                ("ix_oct_day", "ix_oct_day_old"),
+                ("ix_oct_new", "ix_oct_new_old"),
+            ):
+                cur.execute(f"ALTER INDEX IF EXISTS public.{live} RENAME TO {parked}")
             cur.execute("ALTER TABLE public.order_customer_type_new "
                         "RENAME TO order_customer_type")
+            for built, canonical in (
+                ("order_customer_type_new_pkey", "order_customer_type_pkey"),
+                ("ix_oct_customer_new", "ix_oct_customer"),
+                ("ix_oct_day_new", "ix_oct_day"),
+                ("ix_oct_new_new", "ix_oct_new"),
+            ):
+                cur.execute(f"ALTER INDEX public.{built} RENAME TO {canonical}")
             cur.execute("DROP TABLE IF EXISTS public.order_customer_type_old")
+            # Fresh table, no statistics -- the planner would read it as
+            # empty until autoanalyze happened to visit.
+            cur.execute("ANALYZE public.order_customer_type")
         conn.commit()
 
         with conn.cursor() as cur:

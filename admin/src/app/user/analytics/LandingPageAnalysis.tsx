@@ -13,6 +13,8 @@ import {
   fetchLandingPages,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { SectionHeader, FilterRule, FilterCell, FieldLabel, filterControlClass } from "./SectionChrome";
+import { MarkClose } from "./Pictograms";
 
 const PAGE_SIZE = 50;
 
@@ -69,7 +71,8 @@ type MetricColumn = {
   label: string;
   title: string;
   band: Band;
-  /** Opens a colour band -- draws the divider on this column's left edge. */
+  /** Opens a group -- draws the divider on this column's left edge and
+   *  starts a new span in the group header row above. */
   bandStart?: "ga4" | "delta" | "ratios";
   percent?: boolean;
   /** Percentage POINTS. A difference between two rates is not itself a
@@ -104,11 +107,11 @@ const METRIC_COLUMNS: MetricColumn[] = [
     title: "GA4 checkouts. Shopify's own count reads ~10x low because GoKwik owns the checkout." },
   { key: "ga4_purchases", label: "Purchases", band: "ga4",
     title: "GA4 ecommerce purchases. GA4 records about 76% of orders." },
-  { key: "sessions_delta", label: "\u0394 sessions", band: "delta", bandStart: "delta", signed: true,
+  { key: "sessions_delta", label: "Δ sessions", band: "delta", bandStart: "delta", signed: true,
     title: "GA4 sessions minus Shopify sessions. Negative is the usual direction: client-side tracking loses sessions that Shopify's server-side count keeps." },
-  { key: "sessions_delta_pct", label: "\u0394 sessions %", band: "delta", percent: true, signed: true,
+  { key: "sessions_delta_pct", label: "Δ sessions %", band: "delta", percent: true, signed: true,
     title: "The session gap as a share of Shopify's count. Comparable across pages in a way the raw difference is not." },
-  { key: "bounce_rate_delta", label: "\u0394 bounce rate", band: "delta", points: true, signed: true,
+  { key: "bounce_rate_delta", label: "Δ bounce rate", band: "delta", points: true, signed: true,
     title: "GA4 bounce rate minus Shopify's, in percentage points. Differenced before rounding, so it can end .01 away from subtracting the two displayed figures." },
   { key: "conversion_rate", label: "Conv. rate", band: "ga4", bandStart: "ratios", percent: true,
     title: "purchases / GA4 sessions. GA4 on both sides — mixing sources would give a number belonging to neither." },
@@ -126,38 +129,52 @@ const METRIC_COLUMNS: MetricColumn[] = [
 
 const COL_COUNT = METRIC_COLUMNS.length + 1;
 
-// Green for Shopify, blue for GA4, orange for the gap between them.
-//
-// Blue keeps the slot it already had, which is the twelve-column
-// majority of the table -- moving those would cost the most relearning
-// for the least reason. Green goes to Shopify, matching its own brand.
-//
-// Orange lands on the delta band because it is the "look here" colour:
-// those columns exist to surface disagreement. Green would have been
-// the wrong choice there -- on a signed column it reads as a verdict,
-// and a -29% session gap is a fact about tracking, not a good or bad
-// outcome. The tint is on the band, never on individual values, for the
-// same reason.
-const BAND_HEAD = {
-  shopify: "bg-green-100 text-green-900",
-  ga4: "bg-blue-100 text-blue-900",
-  delta: "bg-orange-100 text-orange-900",
-} as const;
-const BAND_CELL = {
-  shopify: "bg-green-50/70",
-  ga4: "bg-blue-50/60",
-  delta: "bg-orange-50/70",
-} as const;
-const BAND_EDGE_HEAD = {
-  ga4: " border-l border-l-blue-300",
-  delta: " border-l border-l-orange-400",
-  ratios: " border-l border-l-blue-400",
-} as const;
-const BAND_EDGE_CELL = {
-  ga4: " border-l border-l-blue-200",
-  delta: " border-l border-l-orange-300",
-  ratios: " border-l border-l-blue-300",
-} as const;
+/* ── which source a column came from, said rather than tinted ──────
+ *
+ * This was three fills -- green cells for Shopify, blue for GA4,
+ * orange for the gap -- plus a fourth left-border tint for the ratios,
+ * decoded by a legend of four swatches above the table. Eighteen
+ * columns of wash and a key to read it is the clutter the user named,
+ * and the hues were off-palette besides.
+ *
+ * The same fact, stated: a group header row that NAMES the source over
+ * its own columns, and one hairline where a group begins. Nothing is
+ * lost -- the legend's four entries are now four headings, each sitting
+ * directly above the columns it describes instead of a swatch the
+ * reader has to carry across the page.
+ */
+type GroupKey = "shopify" | "ga4" | "delta" | "ratios";
+
+const GROUP_LABEL: Record<GroupKey, string> = {
+  shopify: "Shopify",
+  ga4: "GA4 counts",
+  delta: "GA4 − Shopify",
+  ratios: "GA4 funnel ratios",
+};
+
+const GROUP_TITLE: Record<GroupKey, string> = {
+  shopify: "Shopify's own figures. Reliable at the top of the funnel; its checkout count is not, because GoKwik owns the checkout.",
+  ga4: "GA4's figures. The two sources count sessions and bounces differently, so these will not agree with Shopify's.",
+  delta: "GA4 minus Shopify, on the two things both of them measure.",
+  ratios: "Derived from the GA4 counts to their left — the same five numbers divided by each other. The funnel above is the quick read; these are the per-page detail.",
+};
+
+/** Column spans for the group header row, derived from the columns
+ *  themselves so adding a column cannot leave a hand-written colSpan
+ *  one short and shear the whole header. */
+const COLUMN_GROUPS: { key: GroupKey; span: number }[] = (() => {
+  const out: { key: GroupKey; span: number }[] = [];
+  METRIC_COLUMNS.forEach((c, i) => {
+    const opens: GroupKey | undefined = i === 0 ? "shopify" : c.bandStart;
+    if (opens) out.push({ key: opens, span: 0 });
+    out[out.length - 1].span += 1;
+  });
+  return out;
+})();
+
+/** Height of the group header row, in px. The column header row sticks
+ *  directly beneath it, so the two numbers have to agree. */
+const GROUP_ROW_H = 24;
 
 function formatNumber(n: number | null, opts: Intl.NumberFormatOptions = {}): string {
   if (n === null || n === undefined) return "—";
@@ -178,6 +195,111 @@ function formatMetric(v: number | null, c: MetricColumn): string {
   return c.percent ? `${body}%` : c.points ? `${body} pp` : body;
 }
 
+/* ── the funnel ────────────────────────────────────────────────────
+ *
+ * Sixteen ratio columns are the same five counts divided by each other.
+ * The columns stay -- per page, divided every way, is what the table is
+ * for -- but nobody reads sixteen percentages to find the worst step.
+ * One row of five figures, each bar shorter than the last, and the
+ * drop between every pair, answers that before the table is reached.
+ */
+const FUNNEL_STEPS: {
+  key: "ga4_sessions" | "ga4_pdp_views" | "ga4_add_to_carts" | "ga4_checkouts" | "ga4_purchases";
+  label: string;
+  bar: string;
+  title: string;
+}[] = [
+  { key: "ga4_sessions", label: "Sessions", bar: "bg-text-primary",
+    title: "GA4 sessions that landed on the pages in view." },
+  { key: "ga4_pdp_views", label: "PDP views", bar: "bg-text-secondary",
+    title: "GA4 view_item events — product detail page views." },
+  { key: "ga4_add_to_carts", label: "Add to cart", bar: "bg-text-tertiary",
+    title: "GA4 add_to_cart count." },
+  { key: "ga4_checkouts", label: "Checkout", bar: "bg-text-tertiary",
+    title: "GA4 checkouts. Shopify's own count reads ~10x low because GoKwik owns the checkout." },
+  { key: "ga4_purchases", label: "Purchases", bar: "bg-accent-yellow",
+    title: "GA4 ecommerce purchases. GA4 records about 76% of orders." },
+];
+
+/** Red where a step loses most of what reached it, amber where it loses
+ *  a lot, green where the loss is ordinary. Thresholds, not a gradient:
+ *  three bands are readable at 11px, a ramp is not. */
+function dropTone(dropPct: number): string {
+  if (dropPct >= 65) return "text-error-text";
+  if (dropPct >= 35) return "text-warning-text";
+  return "text-success-text";
+}
+
+function FunnelBand({ rows, total }: { rows: LandingPageRow[]; total: number }) {
+  const totals = useMemo(
+    () => FUNNEL_STEPS.map((s) => rows.reduce((n, r) => n + (r[s.key] ?? 0), 0)),
+    [rows],
+  );
+  const head = totals[0] ?? 0;
+
+  // A fourth root, not a linear scale. Purchases are ~2% of sessions,
+  // so proportional heights would draw the last bar at one pixel and
+  // the four steps between would be indistinguishable. The compressed
+  // scale keeps every step visible; the DROP figures beside them, not
+  // the bar lengths, are what the reader is meant to measure with.
+  const BAR_MAX = 58;
+  const barHeight = (v: number) => (head > 0 ? Math.max(Math.round(BAR_MAX * Math.pow(v / head, 0.25)), 7) : 7);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
+        <FieldLabel>Where the funnel leaks</FieldLabel>
+        <span className="text-[11.5px] text-text-tertiary tabular-nums">
+          GA4 · summed over the {rows.length.toLocaleString()} of {total.toLocaleString()} pages loaded
+        </span>
+      </div>
+      <div className="flex items-end overflow-x-auto pb-1">
+        {FUNNEL_STEPS.map((s, i) => {
+          const v = totals[i] ?? 0;
+          const prev = i > 0 ? totals[i - 1] ?? 0 : 0;
+          const drop = i > 0 && prev > 0 ? (1 - v / prev) * 100 : null;
+          return (
+            <React.Fragment key={s.key}>
+              {i > 0 && (
+                <div className="shrink-0 px-2.5 pb-5">
+                  {drop === null ? (
+                    <span className="text-[11.5px] text-text-tertiary">—</span>
+                  ) : (
+                    <span
+                      className={`text-[11.5px] tabular-nums ${dropTone(drop)}`}
+                      title={
+                        `${prev.toLocaleString("en-IN")} ${FUNNEL_STEPS[i - 1].label} to ${v.toLocaleString("en-IN")} ${s.label} — ` +
+                        (drop >= 0
+                          ? `${(prev - v).toLocaleString("en-IN")} lost at this step`
+                          : `${(v - prev).toLocaleString("en-IN")} MORE than the step before it. GA4 counts events, not people: one session can fire view_item many times, so this step can exceed the one above it.`)
+                      }
+                    >
+                      {/* A step can read ABOVE the one before it -- GA4
+                          counts view_item events, not sessions, so PDP
+                          views regularly exceed sessions. Signed both
+                          ways rather than always "−", which printed
+                          "−-23.6%" and asserted a fall that is a rise. */}
+                      {drop >= 0 ? "−" : "+"}
+                      {Math.abs(drop).toFixed(1)}%
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="flex min-w-[108px] flex-1 flex-col gap-1.5" title={s.title}>
+                <FieldLabel>{s.label}</FieldLabel>
+                <div className="text-[21px] font-medium leading-none tracking-[-0.02em] text-text-primary tabular-nums">
+                  {v.toLocaleString("en-IN")}
+                </div>
+                <div className={s.bar} style={{ height: barHeight(v) }} />
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AdBreakdownPanel({ path, onClose }: { path: string; onClose: () => void }) {
   const [rows, setRows] = useState<LandingPageAdRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -196,11 +318,16 @@ function AdBreakdownPanel({ path, onClose }: { path: string; onClose: () => void
   }, [path]);
 
   return (
-    <div className="rounded-lg border border-warning-border bg-warning-bg/40 p-3">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-text-primary">Ads linking to {path}</h3>
-        <button onClick={onClose} className="text-xs text-text-secondary hover:text-text-primary">
-          Close ✕
+    <div className="bg-bg-surface px-4 py-3">
+      <div className="flex items-center justify-between border-b border-border-primary pb-1.5">
+        <FieldLabel>Ads linking to {path}</FieldLabel>
+        <button
+          onClick={onClose}
+          title="Close this breakdown"
+          aria-label="Close this breakdown"
+          className="text-text-tertiary transition-colors hover:text-text-primary"
+        >
+          <MarkClose />
         </button>
       </div>
       {error && <p className="mt-2 text-xs text-error-text">{error}</p>}
@@ -211,21 +338,21 @@ function AdBreakdownPanel({ path, onClose }: { path: string; onClose: () => void
           No ads currently link to this page (or ad-creative link data hasn&apos;t been fetched yet).
         </p>
       ) : (
-        <div className="mt-2 overflow-x-auto">
+        <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead>
-              <tr className="border-b border-warning-border text-text-secondary">
-                <th className="px-3 py-2 text-left font-medium">Ad</th>
-                <th className="px-3 py-2 text-right font-medium">Spend</th>
-                <th className="px-3 py-2 text-right font-medium">Meta ROAS</th>
-                <th className="px-3 py-2 text-right font-medium">Shopify orders</th>
-                <th className="px-3 py-2 text-right font-medium">Shopify ROAS</th>
-                <th className="px-3 py-2 text-right font-medium">ROAS gap %</th>
+              <tr className="text-text-tertiary">
+                <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.08em]">Ad</th>
+                <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em]">Spend</th>
+                <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em]">Meta ROAS</th>
+                <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em]">Shopify orders</th>
+                <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em]">Shopify ROAS</th>
+                <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em]">ROAS gap %</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.ad_id} className="border-b border-warning-border/60">
+                <tr key={r.ad_id} className="border-t border-border-soft">
                   <td className="max-w-[220px] truncate px-3 py-1.5 text-text-primary" title={r.ad_name ?? ""}>
                     {r.ad_name ?? "—"}
                   </td>
@@ -323,86 +450,87 @@ export function LandingPageAnalysis() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <p className="text-sm text-text-secondary">
-        Shopify and GA4 side by side for the same page, over the dates you pick. Shopify supplies the top of the funnel, where it is reliable; GA4 supplies the tail, because Shopify&rsquo;s own checkout count reads about 10&times; low on this store &mdash; GoKwik owns the checkout and Shopify never sees the completion. The two count sessions differently, so their numbers will not agree, and every ratio is computed within one source rather than across them.
-      </p>
+    <div className="flex flex-col gap-5">
+      {/* Why GA4 and Shopify disagree, and which supplies which end of
+          the funnel, is the single most load-bearing fact on this page
+          -- and it is a fact about the data, not about today's numbers.
+          It moved to Help, behind the ? on the title. */}
+      <SectionHeader title="Landing Page Analysis" helpId="freshness" />
 
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white shadow-sm p-3">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search page path…"
-          className="w-64 rounded-md border border-border-primary bg-white px-3 py-1.5 text-sm text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
-        />
-        <DateRangePicker
-          value={{ from: fromDate, to: toDate }}
-          preset={datePreset}
-          align="left"
-          onApply={(r, pk) => {
-            setDatePreset(pk);
-            setFromDate(r.from);
-            setToDate(r.to);
-          }}
-        />
-        <select
-          value={pageType}
-          onChange={(e) => setPageType(e.target.value)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
-        >
-          {PAGE_TYPE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.value === "" ? o.label : `Section: ${o.label}`}
-            </option>
-          ))}
-        </select>
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as typeof sort)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
-        >
-          {SORT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              Sort: {o.label}
-            </option>
-          ))}
-        </select>
-        <span className="ml-auto text-xs text-text-secondary">
-          {total.toLocaleString()} {total === 1 ? "page" : "pages"}
-        </span>
-        <ExportButton
-          rows={rows as unknown as Record<string, unknown>[]}
-          filename="landing_page_analysis"
-          disabled={loading || !rows.length}
-        />
-      </div>
+      {/* One rule of labelled cells. Was four boxed controls and a
+          floating count, in three different shapes. */}
+      <FilterRule
+        actions={
+          <>
+            <span className="text-[11.5px] text-text-tertiary tabular-nums">
+              {total.toLocaleString()} {total === 1 ? "page" : "pages"}
+            </span>
+            <ExportButton
+              rows={rows as unknown as Record<string, unknown>[]}
+              filename="landing_page_analysis"
+              disabled={loading || !rows.length}
+            />
+          </>
+        }
+      >
+        <FilterCell label="Date range">
+          <DateRangePicker
+            value={{ from: fromDate, to: toDate }}
+            preset={datePreset}
+            bare
+            align="left"
+            onApply={(r, pk) => {
+              setDatePreset(pk);
+              setFromDate(r.from);
+              setToDate(r.to);
+            }}
+          />
+        </FilterCell>
 
-      {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
-      {/* A colour band is only worth having if it is decoded somewhere.
-          The whole point of the two tints is that a reader can tell at a
-          glance which source a number came from, which matters here
-          because the two disagree on the same page by design. */}
-      <div className="flex flex-wrap items-center gap-4 text-xs text-text-secondary">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm border border-green-300 bg-green-100" />
-          Shopify
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm border border-blue-300 bg-blue-100" />
-          GA4 counts
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm border border-orange-400 bg-orange-100" />
-          GA4 &minus; Shopify
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm border-l-2 border-blue-400 bg-blue-100" />
-          GA4 funnel ratios
-        </span>
-        <span className="text-text-tertiary">
-          The two sources count sessions and bounces differently, so their numbers will not agree.
-        </span>
-      </div>
+        <FilterCell label="Page path" className="w-56" htmlFor="lp-search">
+          <input
+            id="lp-search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search…"
+            className={filterControlClass}
+          />
+        </FilterCell>
+
+        <FilterCell label="Section" className="w-40" htmlFor="lp-page-type">
+          <select
+            id="lp-page-type"
+            value={pageType}
+            onChange={(e) => setPageType(e.target.value)}
+            className={filterControlClass}
+          >
+            {PAGE_TYPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </FilterCell>
+
+        <FilterCell label="Sort by" className="w-52" htmlFor="lp-sort">
+          <select
+            id="lp-sort"
+            value={sort}
+            onChange={(e) => setSort(e.target.value as typeof sort)}
+            className={filterControlClass}
+          >
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </FilterCell>
+      </FilterRule>
+
+      {error && <div className="bg-error-bg px-3 py-2 text-sm text-error-text">{error}</div>}
+
+      {!loading && rows.length > 0 && <FunnelBand rows={rows} total={total} />}
 
       {/* Full-bleed, escaping the page container's centred
           max-w-[1600px]. The arithmetic on the box below works ONLY
@@ -418,113 +546,152 @@ export function LandingPageAnalysis() {
           have nothing to stick within and would scroll away with the
           page.
 
+          Hairlines top and bottom and no shadow: on this surface
+          nothing carries both a border and a shadow, and the box was
+          carrying both.
+
           This sits ABOVE the conditional on purpose: a JSX comment
           cannot open a ternary branch -- the branch takes one
           expression, and a comment followed by an element is two. */}
       {loading ? (
         <p className="text-sm text-text-secondary">Loading…</p>
       ) : (
-        <div
-          className="max-h-[70vh] overflow-auto border-y border-border-primary bg-white shadow-sm"
-          style={{
-            width: `calc(100vw - ${SIDEBAR_WIDTH})`,
-            marginLeft: `calc((100% - 100vw + ${SIDEBAR_WIDTH}) / 2)`,
-          }}
-        >
-          {/* Columns size to their content (table-auto), NOT to an equal
-              share. Equal shares and single-line headers cannot both
-              hold: the widest label, "Checkout → Purchase", needs 180px,
-              and 15 columns at 180 plus the page column is 2960px --
-              wider than the display, so uniform widths would force the
-              table to scroll sideways forever. Sized to content the same
-              15 columns come to ~1870px, which fits. The columns differ
-              in width; every header stays on one line and nothing
-              scrolls. Equal padding and right-aligned figures carry the
-              orderly look that equal widths used to.
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
+            <FieldLabel>By landing page</FieldLabel>
+            <span className="text-[11.5px] text-text-tertiary">
+              The two sources count sessions and bounces differently, so their numbers will not agree.
+            </span>
+          </div>
+          <div
+            className="max-h-[70vh] overflow-auto border-y border-border-primary bg-bg-white"
+            style={{
+              width: `calc(100vw - ${SIDEBAR_WIDTH})`,
+              marginLeft: `calc((100% - 100vw + ${SIDEBAR_WIDTH}) / 2)`,
+            }}
+          >
+            {/* Columns size to their content (table-auto), NOT to an equal
+                share. Equal shares and single-line headers cannot both
+                hold: the widest label, "Checkout → Purchase", needs 180px,
+                and 15 columns at 180 plus the page column is 2960px --
+                wider than the display, so uniform widths would force the
+                table to scroll sideways forever. Sized to content the same
+                15 columns come to ~1870px, which fits. The columns differ
+                in width; every header stays on one line and nothing
+                scrolls. Equal padding and right-aligned figures carry the
+                orderly look that equal widths used to.
 
-              min-w-max is the floor, not a pixel figure: it is whatever
-              the content actually needs, so adding a column or renaming
-              a header cannot silently push the table past a hardcoded
-              number and start clipping labels. Below that width the box
-              scrolls sideways; w-full still lets it fill a wider one. */}
-          <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
-            <thead>
-              <tr className="border-b border-border-primary text-xs text-text-secondary">
-                <th className="sticky left-0 top-0 z-30 h-10 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-2 py-2 text-left align-middle text-[11px] font-medium">
-                  Page
-                </th>
-                {METRIC_COLUMNS.map((c) => (
-                  <th
-                    key={c.key}
-                    title={c.title}
-                    className={
-                      "sticky top-0 z-20 h-10 whitespace-nowrap border-b border-border-primary px-2 py-2 text-right align-middle text-[11px] font-medium leading-tight " +
-                      BAND_HEAD[c.band] +
-                      (c.bandStart ? BAND_EDGE_HEAD[c.bandStart] : "")
-                    }
-                  >
-                    {c.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <React.Fragment key={row.landing_page_path}>
-                  <tr
-                    onClick={() => setSelectedPath((prev) => (prev === row.landing_page_path ? null : row.landing_page_path))}
-                    className="cursor-pointer border-b border-border-soft hover:bg-bg-surface"
-                  >
-                    {/* Wide enough for the paths that matter: the longest
-                        among the 200 pages that carry real traffic is 62
-                        characters, and p90 across every page is 72. The cap
-                        still exists for the 128-character outliers -- one of
-                        those unbounded would push all 18 metric columns off
-                        screen to spare a page nobody opens. Those truncate,
-                        and the title attribute still carries the full path. */}
-                    <td className="sticky left-0 z-10 max-w-[440px] truncate border-r border-border-soft bg-white px-2 py-1.5 text-xs text-text-primary" title={row.landing_page_path}>
-                      {row.landing_page_path}
-                    </td>
-                    {METRIC_COLUMNS.map((c) => {
-                      const v = row[c.key];
-                      return (
-                        <td
-                          key={c.key}
-                          className={
-                            "border-b border-border-soft px-2 py-1.5 text-right font-mono text-[11px] text-text-primary " +
-                            BAND_CELL[c.band] +
-                            (c.bandStart ? BAND_EDGE_CELL[c.bandStart] : "")
-                          }
-                        >
-                          {formatMetric(v, c)}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                  {selectedPath === row.landing_page_path && (
-                    <tr key={`${row.landing_page_path}-panel`}>
-                      <td colSpan={COL_COUNT} className="px-4 py-3">
-                        <AdBreakdownPanel path={row.landing_page_path} onClose={() => setSelectedPath(null)} />
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-              {rows.length === 0 && (
+                min-w-max is the floor, not a pixel figure: it is whatever
+                the content actually needs, so adding a column or renaming
+                a header cannot silently push the table past a hardcoded
+                number and start clipping labels. Below that width the box
+                scrolls sideways; w-full still lets it fill a wider one. */}
+            <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
+              <thead>
                 <tr>
-                  <td colSpan={COL_COUNT} className="px-4 py-6 text-center text-text-secondary">
-                    No pages match these filters.
-                  </td>
+                  <th
+                    className="sticky left-0 top-0 z-40 border-r border-border-primary bg-bg-muted px-2 text-left"
+                    style={{ height: GROUP_ROW_H }}
+                  />
+                  {COLUMN_GROUPS.map((g, i) => (
+                    <th
+                      key={g.key}
+                      colSpan={g.span}
+                      title={GROUP_TITLE[g.key]}
+                      className={
+                        "sticky top-0 z-30 whitespace-nowrap bg-bg-muted px-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary" +
+                        (i > 0 ? " border-l border-border-primary" : "")
+                      }
+                      style={{ height: GROUP_ROW_H }}
+                    >
+                      {GROUP_LABEL[g.key]}
+                    </th>
+                  ))}
                 </tr>
-              )}
-            </tbody>
-          </table>
+                <tr>
+                  <th
+                    className="sticky left-0 z-40 h-9 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
+                    style={{ top: GROUP_ROW_H }}
+                  >
+                    Page
+                  </th>
+                  {METRIC_COLUMNS.map((c) => (
+                    <th
+                      key={c.key}
+                      title={c.title}
+                      className={
+                        "sticky z-30 h-9 whitespace-nowrap border-b border-border-primary bg-bg-muted px-2 py-2 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] leading-tight text-text-tertiary" +
+                        (c.bandStart ? " border-l border-border-primary" : "")
+                      }
+                      style={{ top: GROUP_ROW_H }}
+                    >
+                      {c.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <React.Fragment key={row.landing_page_path}>
+                    <tr
+                      onClick={() => setSelectedPath((prev) => (prev === row.landing_page_path ? null : row.landing_page_path))}
+                      className="cursor-pointer hover:bg-bg-surface"
+                    >
+                      {/* Wide enough for the paths that matter: the longest
+                          among the 200 pages that carry real traffic is 62
+                          characters, and p90 across every page is 72. The cap
+                          still exists for the 128-character outliers -- one of
+                          those unbounded would push all 18 metric columns off
+                          screen to spare a page nobody opens. Those truncate,
+                          and the title attribute still carries the full path. */}
+                      <td
+                        className={`sticky left-0 z-10 max-w-[440px] truncate border-b border-r border-border-soft px-2 py-1.5 text-xs text-text-primary ${
+                          selectedPath === row.landing_page_path ? "bg-bg-surface" : "bg-bg-white"
+                        }`}
+                        title={row.landing_page_path}
+                      >
+                        {row.landing_page_path}
+                      </td>
+                      {METRIC_COLUMNS.map((c) => {
+                        const v = row[c.key];
+                        return (
+                          <td
+                            key={c.key}
+                            className={
+                              "border-b border-border-soft px-2 py-1.5 text-right font-mono text-[11px] text-text-primary" +
+                              (c.bandStart ? " border-l border-l-border-primary" : "")
+                            }
+                          >
+                            {formatMetric(v, c)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    {selectedPath === row.landing_page_path && (
+                      <tr key={`${row.landing_page_path}-panel`}>
+                        <td colSpan={COL_COUNT} className="border-b border-border-primary p-0">
+                          <AdBreakdownPanel path={row.landing_page_path} onClose={() => setSelectedPath(null)} />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={COL_COUNT} className="px-4 py-6 text-center text-text-secondary">
+                      No pages match these filters.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
           {rows.length < total && (
-            <div className="border-t border-border-soft p-3 text-center">
+            <div className="flex justify-center">
               <button
                 onClick={loadMore}
                 disabled={loadingMore}
-                className="rounded-md bg-bg-muted px-4 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-bg-muted disabled:opacity-40"
+                className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary disabled:opacity-40"
               >
                 {loadingMore ? "Loading…" : `Load more (${rows.length} of ${total})`}
               </button>

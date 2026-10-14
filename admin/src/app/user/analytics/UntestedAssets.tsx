@@ -32,7 +32,17 @@ import {
   fetchUntestedAssets,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { getAssetPreview } from "@/lib/assetPreview";
 import { AssetAdsModal } from "./AssetAdsModal";
+import {
+  FieldLabel,
+  FigureBand,
+  FilterCell,
+  FilterRule,
+  SectionHeader,
+  Segmented,
+  filterControlClass,
+} from "./SectionChrome";
 
 type SkuFilter = "all" | "matched" | "unmatched";
 
@@ -49,6 +59,122 @@ function fmtInt(n: number | null | undefined) {
 function fmtDate(s: string | null) {
   if (!s) return "—";
   return s.slice(0, 10);
+}
+
+/** How long this asset has been sitting in the register unused.
+ *
+ *  Produced-date, not created-at: the question the backlog asks is how
+ *  long ago the work was finished, not when somebody typed the row in.
+ *  Null when the register carries no date, which is common enough on
+ *  the sheet-era rows that it needs its own answer on the card. */
+function daysWaiting(dateProduced: string | null): number | null {
+  if (!dateProduced) return null;
+  const d = new Date(dateProduced);
+  if (Number.isNaN(d.getTime())) return null;
+  const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
+  return days < 0 ? 0 : days;
+}
+
+/** The wait, coloured by how long it has been. Past 50 days is signal
+ *  red, which on this surface means a rule has fired; past 30 is the
+ *  warning field; under that it is just a number. */
+function waitTone(days: number | null): string {
+  if (days === null) return "text-text-tertiary";
+  if (days > 50) return "text-error-text";
+  if (days > 30) return "text-warning-text";
+  return "text-text-tertiary";
+}
+
+/**
+ * One untested asset as a portrait card.
+ *
+ * Preview, name, and how long it has been waiting -- the three things
+ * that decide whether to pick it up next. Everything the row carries
+ * (kind, sub-kind, both SKUs, source, matched ads) is on the card's own
+ * title and in full in the Table view.
+ *
+ * The frame is a link to the file when the register holds one, and the
+ * name opens the matched-ads dialog when there are any. Two targets,
+ * never nested: the card itself is not a button.
+ */
+function UntestedCard({
+  r,
+  onOpen,
+}: {
+  r: UntestedAssetRow;
+  onOpen: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const days = daysWaiting(r.date_produced);
+  const name = r.nomenclature || r.title || r.id;
+  const href = r.links?.[0]?.url ?? (r.link && r.link.trim() ? r.link.trim() : null);
+  // Drive holds most of these files, and Drive will render a thumbnail
+  // for a file id -- so the card can show the creative rather than the
+  // word "video". Same derivation Creative Testing's preview uses.
+  const preview = getAssetPreview({ preview_url: href, thumbnail_url: r.thumbnail });
+  const thumb = failed ? null : preview.thumbnail;
+  const title =
+    `${r.id}\n` +
+    `${r.kind ?? "—"}${r.sub_kind ? ` · ${r.sub_kind}` : ""}\n` +
+    `${r.nomenclature ?? "no nomenclature"}\n` +
+    (r.candidate_master_sku || r.matched_master_sku
+      ? `SKU: candidate ${r.candidate_master_sku ?? "—"} · matched ${r.matched_master_sku ?? "—"}\n`
+      : "") +
+    `Produced ${fmtDate(r.date_produced)} · ${r.matched_ads} matched ad${r.matched_ads === 1 ? "" : "s"}\n` +
+    `${r.source_system}`;
+  const frameInner = thumb ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={thumb}
+      alt=""
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      className="absolute inset-0 h-full w-full object-cover"
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    <span className="text-[11px] text-text-tertiary">{r.media}</span>
+  );
+  const frameClass =
+    "relative flex aspect-[3/4] w-full items-center justify-center overflow-hidden " +
+    "border-b border-border-primary bg-bg-muted";
+  return (
+    <article className="flex flex-col overflow-hidden border border-border-primary bg-bg-white" title={title}>
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open the file for ${r.id}`}
+          className={frameClass}
+        >
+          {frameInner}
+        </a>
+      ) : (
+        <div className={frameClass}>{frameInner}</div>
+      )}
+      <div className="px-2.5 py-2.5">
+        {r.matched_ads > 0 ? (
+          <button
+            type="button"
+            aria-haspopup="dialog"
+            aria-label={`View matched ads for asset ${r.id}`}
+            onClick={onOpen}
+            className="block w-full truncate text-left font-mono text-[11.5px] leading-[1.35] text-text-link underline decoration-dotted underline-offset-4 hover:decoration-solid"
+          >
+            {name}
+          </button>
+        ) : (
+          <span className="block truncate font-mono text-[11.5px] leading-[1.35] text-text-primary">
+            {name}
+          </span>
+        )}
+        <span className={`mt-1 block font-mono text-[11px] tabular-nums ${waitTone(days)}`}>
+          {days === null ? "no production date" : `${days.toLocaleString("en-IN")} days waiting`}
+        </span>
+      </div>
+    </article>
+  );
 }
 
 /** Rows mounted at once. The influencer backlog is 13,612 assets and
@@ -121,6 +247,9 @@ export function UntestedAssets() {
   // Testing status filters the loaded register locally. Cards continue
   // to summarize every asset in the selected source.
   const [matchState, setMatchState] = useState<"untested" | "matched" | "pending" | "all">("all");
+  // Cards or rows. Neither refetches and neither narrows: it is the
+  // same page of the same filtered rows, read two ways.
+  const [view, setView] = useState<"grid" | "table">("grid");
 
   function beginLoad() {
     setLoading(true);
@@ -224,7 +353,14 @@ export function UntestedAssets() {
     let pending = 0;
     let matchedAds = 0;
     let withSku = 0;
+    // The longest any untested asset in this population has been
+    // waiting. Null when none of them carries a production date.
+    let oldest: number | null = null;
     for (const row of rows) {
+      if (row.matched_ads === 0) {
+        const d = daysWaiting(row.date_produced);
+        if (d !== null && (oldest === null || d > oldest)) oldest = d;
+      }
       // Tested wins over Pending. 45 influencer posts match an ad but
       // carry no link: they demonstrably ran, so the missing link is a
       // register gap rather than an open testing question, and filing
@@ -237,7 +373,7 @@ export function UntestedAssets() {
       matchedAds += row.matched_ads;
       if (row.matched_master_sku) withSku += 1;
     }
-    return { total: rows.length, tested, notTested, pending, matchedAds, withSku };
+    return { total: rows.length, tested, notTested, pending, matchedAds, withSku, oldest };
   };
 
   // The card rows are per-SOURCE and deliberately do NOT follow the
@@ -251,6 +387,26 @@ export function UntestedAssets() {
   const histMetrics = useMemo(
     () => summarise((data?.rows ?? []).filter((r) => r.origin === "historical" && inScope(r))),
     [data, media]);
+
+  // SKUs with nothing in test: every asset this source holds for that
+  // prefix is still unmatched. Derived from the rows already loaded --
+  // no extra request, and the same scope the table counts.
+  const skusWithNothingInTest = useMemo(() => {
+    if (media === "influencer") return [] as { sku: string; waiting: number }[];
+    const by = new Map<string, { waiting: number; tested: number }>();
+    for (const r of scopeRows) {
+      const sku = r.matched_master_sku || r.candidate_master_sku;
+      if (!sku) continue;
+      const e = by.get(sku) ?? { waiting: 0, tested: 0 };
+      if (r.matched_ads > 0) e.tested += 1;
+      else e.waiting += 1;
+      by.set(sku, e);
+    }
+    return Array.from(by.entries())
+      .filter(([, e]) => e.tested === 0 && e.waiting > 0)
+      .map(([sku, e]) => ({ sku, waiting: e.waiting }))
+      .sort((a, b) => b.waiting - a.waiting);
+  }, [scopeRows, media]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
   // Clamp rather than reset to 0: narrowing a filter while deep in the
@@ -276,52 +432,44 @@ export function UntestedAssets() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Untested Assets</h2>
-        <p className="text-sm text-text-secondary">
-          Browse registered assets and filter by whether they have run in a Meta ad.
-          Click a tested asset to view its matched ads and their performance.
-        </p>
-      </div>
+      {/* The two-line "how to use this page" moved to Help. Clicking a
+          row to see its matched ads is discoverable by doing it; it did
+          not need announcing above every visit. */}
+      <SectionHeader title="Untested Assets" helpId="data-floor">
+        <div className="flex items-center gap-1.5">
+          <FieldLabel className="!inline">Media</FieldLabel>
+          <Segmented
+            options={MEDIA_TABS.map((t) => ({ value: t.value, label: t.label, title: t.desc }))}
+            value={media}
+            onChange={(v) => {
+              const next = v as UntestedMedia;
+              if (media === next) return;
+              // A different media tab is a different list -- start at
+              // the top. Done here rather than in an effect so it is
+              // one render, not two.
+              beginLoad();
+              setMedia(next);
+              setKindFilter("all");
+              // Pending only exists on influencer. Carrying it to
+              // another tab would show an empty table under a filter
+              // that tab does not offer.
+              if (next !== "influencer") setMatchState("all");
+              setOriginFilter("database");
+              setPage(0);
+            }}
+          />
+        </div>
+        <Segmented
+          options={[
+            { value: "grid", label: "Grid", title: "Every asset as a card: the file, its name, and how long it has waited." },
+            { value: "table", label: "Table", title: "The same assets as rows, with every register column." },
+          ]}
+          value={view}
+          onChange={(v) => setView(v as "grid" | "table")}
+        />
+      </SectionHeader>
 
-      {/* Media tab strip */}
-      <div className="flex flex-wrap items-end gap-1 border-b border-border-primary">
-        {MEDIA_TABS.map((t) => {
-          const active = media === t.value;
-          return (
-            <button
-              key={t.value}
-              aria-pressed={active}
-              onClick={() => {
-                if (media === t.value) return;
-                // A different media tab is a different list -- start at
-                // the top. Done here rather than in an effect so it is
-                // one render, not two.
-                beginLoad();
-                setMedia(t.value);
-                setKindFilter("all");
-                // Pending only exists on influencer. Carrying it to
-                // another tab would show an empty table under a filter
-                // that tab does not offer.
-                if (t.value !== "influencer") setMatchState("all");
-                setOriginFilter("database");
-                setPage(0);
-              }}
-              className={`relative px-3 pb-2 pt-1 text-[13px] font-medium transition-colors ${
-                active ? "text-text-primary" : "text-text-secondary hover:text-text-primary"
-              }`}
-              title={t.desc}
-            >
-              {t.label}
-              {active && (
-                <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-yellow" />
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* One row per source, both always visible.
+      {/* One band per source, both always visible.
           They answer different questions and used to share a single row
           that changed under the Source switch: DAM Project is the live
           backlog someone can action today, Historical is the sheet-era
@@ -329,10 +477,15 @@ export function UntestedAssets() {
           matcher relies on. Reading one set of numbers without knowing
           which of the two it described was the problem.
 
-          Graphic has no DAM Project rows at all, so that row reads zero
+          Graphic has no DAM Project rows at all, so that band reads zero
           there -- the honest answer, and it says where the graphics
-          actually live. */}
-      <KpiRow
+          actually live.
+
+          Ten bordered tiles became two bands of plain figures: the
+          hints they carried are on each figure's own title, which is
+          where this surface keeps a definition that is not worth a
+          standing line. */}
+      <SourceBand
         title={ORIGIN_LABELS[media].database}
         m={damMetrics}
         showSkuColumns={showSkuColumns}
@@ -340,7 +493,7 @@ export function UntestedAssets() {
         ready={!!data}
         showPending={media === "influencer"}
       />
-      <KpiRow
+      <SourceBand
         title={ORIGIN_LABELS[media].historical}
         m={histMetrics}
         showSkuColumns={showSkuColumns}
@@ -349,139 +502,125 @@ export function UntestedAssets() {
         showPending={media === "influencer"}
       />
 
-      {/* Testing status narrows the selected source without changing it. */}
-      <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
-        <label className="text-xs font-medium text-text-secondary">Show:</label>
-        <div className="flex overflow-hidden rounded border border-border-primary">
-          {([
-            ["all", ORIGIN_LABELS[media].all, "Every asset this media type holds, matched or not."],
-            ["matched", "Tested", "The asset id appears in an ad name."],
-            ["untested", "Not Tested",
-              media === "influencer"
-                ? "Post link present, but the id matches no ad."
-                : "Assets with no matched ads."],
-            // Only influencer counts link-less rows, so only influencer
-            // can filter to them.
-            ...(media === "influencer"
-              ? [["pending", "Pending", "No post link yet — nothing to test until one is added."] as const]
-              : []),
-          ] as const).map(([v, label, hint]) => (
-            <button
-              key={v}
-              title={hint}
-              aria-pressed={matchState === v}
-              onClick={() => {
-                if (matchState === v) return;
-                setMatchState(v);
+      {/* Three bordered trays of controls became one rule of labelled
+          cells. Every control is the same one it was, with the same
+          handler and the same tooltip. */}
+      <FilterRule
+        actions={
+          <>
+            <span className="text-[11.5px] text-text-tertiary tabular-nums">
+              {filteredRows.length.toLocaleString("en-IN")} {populationLabel} asset
+              {filteredRows.length === 1 ? "" : "s"}
+            </span>
+            <ExportButton
+              rows={filteredRows as unknown as Record<string, unknown>[]}
+              filename={`untested_${media}`}
+              disabled={loading || !filteredRows.length}
+            />
+          </>
+        }
+      >
+        {/* Testing status narrows the selected source without changing it. */}
+        <FilterCell label="Show">
+          <Segmented
+            options={[
+              { value: "all", label: ORIGIN_LABELS[media].all, title: "Every asset this media type holds, matched or not." },
+              { value: "matched", label: "Tested", title: "The asset id appears in an ad name." },
+              {
+                value: "untested",
+                label: "Not Tested",
+                title:
+                  media === "influencer"
+                    ? "Post link present, but the id matches no ad."
+                    : "Assets with no matched ads.",
+              },
+              // Only influencer counts link-less rows, so only influencer
+              // can filter to them.
+              ...(media === "influencer"
+                ? [{ value: "pending", label: "Pending", title: "No post link yet — nothing to test until one is added." }]
+                : []),
+            ]}
+            value={matchState}
+            onChange={(v) => {
+              if (matchState === v) return;
+              setMatchState(v as typeof matchState);
+              setPage(0);
+            }}
+          />
+        </FilterCell>
+
+        {/* Keep all sources selectable, including DAM Project (0), so an
+            empty source never silently broadens into historical assets. */}
+        {data && (
+          <FilterCell label="Source">
+            <Segmented
+              options={[
+                {
+                  value: "all",
+                  label: `All (${data.total_rows.toLocaleString("en-IN")})`,
+                  title: "Every listed asset in this media type, whichever register recorded it.",
+                },
+                {
+                  value: "database",
+                  label: `${ORIGIN_LABELS[media].database} (${data.from_database.toLocaleString("en-IN")})`,
+                  title: ORIGIN_LABELS[media].databaseHint,
+                },
+                {
+                  value: "historical",
+                  label: `${ORIGIN_LABELS[media].historical} (${data.from_historical.toLocaleString("en-IN")})`,
+                  title: ORIGIN_LABELS[media].historicalHint,
+                },
+              ]}
+              value={originFilter}
+              onChange={(v) => {
+                setOriginFilter(v as typeof originFilter);
                 setPage(0);
               }}
-              className={
-                // accent-yellow is this theme's real accent token (it is
-                // blue, #1D4E89 -- the name is a leftover). `accent-primary`
-                // does not exist, so it rendered white-on-transparent and
-                // the selected option was invisible.
-                "px-3 py-1 text-xs font-medium transition-colors " +
-                (matchState === v
-                  ? "bg-accent-yellow text-white"
-                  : "bg-bg-white text-text-secondary hover:text-text-primary hover:bg-bg-muted")
-              }
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Keep all sources selectable, including DAM Project (0), so an
-          empty source never silently broadens into historical assets. */}
-      {data && (
-        <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
-          <label className="text-xs font-medium text-text-secondary">Source:</label>
-          <div className="flex overflow-hidden rounded border border-border-primary">
-            {([
-              ["all", `All (${data.total_rows.toLocaleString("en-IN")})`,
-               "Every listed asset in this media type, whichever register recorded it."],
-              ["database",
-               `${ORIGIN_LABELS[media].database} (${data.from_database.toLocaleString("en-IN")})`,
-               ORIGIN_LABELS[media].databaseHint],
-              ["historical",
-               `${ORIGIN_LABELS[media].historical} (${data.from_historical.toLocaleString("en-IN")})`,
-               ORIGIN_LABELS[media].historicalHint],
-            ] as const).map(([v, label, hint]) => (
-              <button
-                key={v}
-                title={hint}
-                aria-pressed={originFilter === v}
-                onClick={() => {
-                  setOriginFilter(v);
-                  setPage(0);
-                }}
-                className={
-                  "px-3 py-1 text-xs font-medium transition-colors " +
-                  (originFilter === v
-                    ? "bg-accent-yellow text-white"
-                    : "bg-bg-white text-text-secondary hover:text-text-primary hover:bg-bg-muted")
-                }
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Filter row */}
-      <div className="flex flex-wrap items-center gap-3 rounded-md border border-border-primary bg-bg-surface px-3 py-2">
-        {showSkuColumns && (
-          <>
-            <label className="text-xs font-medium text-text-secondary">SKU match:</label>
-            <div className="flex overflow-hidden rounded border border-border-primary">
-              {(["all", "matched", "unmatched"] as SkuFilter[]).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setSkuFilter(v)}
-                  className={`px-3 py-1 text-xs font-medium transition-colors ${
-                    skuFilter === v
-                      ? "bg-accent-yellow text-black"
-                      : "bg-bg-white text-text-secondary hover:text-text-primary"
-                  }`}
-                >
-                  {v === "all" ? "All" : v === "matched" ? "Matched" : "Unmatched"}
-                </button>
-              ))}
-            </div>
-          </>
+            />
+          </FilterCell>
         )}
 
-        <label className={`text-xs font-medium text-text-secondary ${showSkuColumns ? "ml-2" : ""}`}>
-          {kindColLabel}:
-        </label>
-        <select
-          value={kindFilter}
-          onChange={(e) => setKindFilter(e.target.value)}
-          className="rounded border border-border-primary bg-bg-white px-2 py-1 text-xs text-text-primary"
-        >
-          <option value="all">All</option>
-          {kinds.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
+        {showSkuColumns && (
+          <FilterCell label="SKU match">
+            <Segmented
+              options={[
+                { value: "all", label: "All" },
+                { value: "matched", label: "Matched", title: "Assets whose SKU prefix exists in the catalog." },
+                { value: "unmatched", label: "Unmatched", title: "Assets whose SKU prefix matches no catalog SKU." },
+              ]}
+              value={skuFilter}
+              onChange={(v) => setSkuFilter(v as SkuFilter)}
+            />
+          </FilterCell>
+        )}
 
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search id / title / nomenclature / SKU…"
-          className="ml-auto w-64 rounded border border-border-primary bg-bg-white px-2 py-1 text-xs text-text-primary placeholder:text-text-tertiary"
-        />
-        <ExportButton
-          rows={filteredRows as unknown as Record<string, unknown>[]}
-          filename={`untested_${media}`}
-          disabled={loading || !filteredRows.length}
-        />
-      </div>
+        <FilterCell label={kindColLabel} className="w-44" htmlFor="ua-kind">
+          <select
+            id="ua-kind"
+            value={kindFilter}
+            onChange={(e) => setKindFilter(e.target.value)}
+            className={filterControlClass}
+          >
+            <option value="all">All</option>
+            {kinds.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </FilterCell>
+
+        <FilterCell label="Search" className="w-56" htmlFor="ua-search">
+          <input
+            id="ua-search"
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="id / title / nomenclature / SKU…"
+            className={filterControlClass}
+          />
+        </FilterCell>
+      </FilterRule>
 
       {error && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-md border border-border-primary bg-error-bg px-3 py-2 text-sm text-error-text">
@@ -500,11 +639,42 @@ export function UntestedAssets() {
         </div>
       )}
 
+      {/* The grid. Six portrait cards a row, because a creative is a
+          picture before it is a row of fields: what the file looks like
+          and how long it has been sitting there is the whole decision.
+          The Table switch above still carries every column. */}
+      {view === "grid" &&
+        (loading ? (
+          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            {Array.from({ length: 12 }).map((_, i) => (
+              <div key={`uk-${i}`} className="border border-border-primary bg-bg-white" style={{ opacity: 1 - i * 0.05 }}>
+                <div className="aspect-[3/4] w-full animate-pulse bg-bg-muted" />
+                <div className="px-2.5 py-2.5">
+                  <div className="h-3 w-3/4 animate-pulse bg-bg-muted" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : !error && filteredRows.length === 0 ? (
+          <p className="border-b border-border-primary py-8 text-center text-[13px] text-text-tertiary">
+            {originFilter === "database" && data?.from_database === 0
+              ? `No ${ORIGIN_LABELS[media].database} assets match this view. Select Historical or All to browse other sources.`
+              : `No ${populationLabel} ${media} assets match the current filters.`}
+          </p>
+        ) : (
+          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            {pageRows.map((r) => (
+              <UntestedCard key={`${r.media}:${r.id}`} r={r} onOpen={() => setOpenAsset(r)} />
+            ))}
+          </div>
+        ))}
+
       {/* Table. `min-w-full` not `w-full`, with nowrap cells: the table
           sizes to its content and the wrapper scrolls, instead of every
           column being squeezed to fit the viewport. Nomenclature strings
           here run past 60 characters and were wrapping to three lines. */}
-      <div className="overflow-x-auto rounded-lg border bg-white shadow-sm border-border-primary">
+      {view === "table" && (
+      <div className="overflow-x-auto border border-border-primary bg-bg-white">
         <table className="ct-asset-table min-w-full text-xs">
           <thead className="bg-bg-surface text-text-secondary">
             <tr>
@@ -658,6 +828,39 @@ export function UntestedAssets() {
           </tbody>
         </table>
       </div>
+      )}
+
+      {/* SKUs with nothing in test. Derived from the rows this source
+          already returned: a prefix every one of whose assets is still
+          unmatched. The pill says how many are waiting behind it. */}
+      {showSkuColumns && skusWithNothingInTest.length > 0 && (
+        <div className="flex flex-col gap-2 border-t border-border-primary pt-3">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <h3 className="m-0 text-[13px] font-semibold text-text-primary">SKUs with nothing in test</h3>
+            <span className="text-[11px] text-text-tertiary tabular-nums">
+              {skusWithNothingInTest.length.toLocaleString("en-IN")} SKUs · every asset the register
+              holds for them is still unmatched
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {skusWithNothingInTest.slice(0, 18).map((s) => (
+              <span
+                key={s.sku}
+                title={`${s.sku} — ${s.waiting.toLocaleString("en-IN")} asset(s) waiting, none of them in an ad`}
+                className="flex items-center gap-2 border border-border-primary px-2 py-1 font-mono text-[11.5px]"
+              >
+                <span className="font-semibold text-text-primary">{s.sku}</span>
+                <span className="tabular-nums text-text-tertiary">0 in test · {s.waiting} waiting</span>
+              </span>
+            ))}
+            {skusWithNothingInTest.length > 18 && (
+              <span className="px-2 py-1 font-mono text-[11.5px] text-text-tertiary">
+                + {skusWithNothingInTest.length - 18} more
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3 text-[11px] text-text-tertiary">
         <span>
@@ -709,18 +912,24 @@ export function UntestedAssets() {
 type RowMetrics = {
   total: number; tested: number; notTested: number; pending: number;
   matchedAds: number; withSku: number;
+  /** Longest wait among this source's untested assets, in days. */
+  oldest: number | null;
 };
 
-/** One labelled row of KPI cards for a single source.
+/** One band of figures for a single source.
+ *
+ *  Was five bordered tiles. The numbers are the same, and so are their
+ *  definitions -- each figure carries its hint on the value's title,
+ *  and Tested keeps its share of the source as a basis line.
  *
  *  Influencer reads differently from the other two. There a post with
  *  no link is the dominant state rather than an edge case -- 12,314 of
- *  14,709 -- so it gets its own card, Pending, and the row drops the
- *  SKU card, which only ever said "No SKU mapping" because SIF-…
+ *  14,709 -- so it gets its own figure, Pending, and the band drops the
+ *  SKU figure, which only ever said "No SKU mapping" because SIF-…
  *  nomenclature carries no product code.
  *
  *      Total = Tested + Not Tested + Pending, always. */
-function KpiRow({ title, m, showSkuColumns, loading, ready, showPending }: {
+function SourceBand({ title, m, showSkuColumns, loading, ready, showPending }: {
   title: string;
   m: RowMetrics;
   showSkuColumns: boolean;
@@ -728,73 +937,70 @@ function KpiRow({ title, m, showSkuColumns, loading, ready, showPending }: {
   ready: boolean;
   showPending?: boolean;
 }) {
-  const v = (n: number) => (ready ? fmtInt(n) : "\u2014");
+  const v = (n: number) => (ready ? fmtInt(n) : "—");
+  const fig = (value: string, hint: string) => <span title={hint}>{value}</span>;
+  const figures = [
+    {
+      label: "Total assets",
+      // Counts assets the register holds a LINK for, because that is
+      // the only set anyone can act on -- an asset with no file cannot
+      // be put in an ad.
+      value: fig(v(m.total), showPending ? "Every post in this source" : "Assets with a link"),
+    },
+    {
+      label: "Tested",
+      value: fig(v(m.tested), "The asset id appears in an ad name"),
+      basis: ready && m.total ? `${Math.round((m.tested / m.total) * 100)}% of this source` : undefined,
+    },
+    {
+      label: "Not tested",
+      value: fig(
+        v(m.notTested),
+        loading
+          ? "Loading…"
+          : showPending
+            ? "Post link present, but the id matches no ad"
+            : "Assets with no matched ads",
+      ),
+    },
+    ...(showPending
+      ? [{
+          label: "Pending",
+          value: fig(v(m.pending), "No post link yet — nothing to test until one is added"),
+        }]
+      : []),
+    { label: "Matched ads", value: fig(v(m.matchedAds), "Ads matched to these assets") },
+    ...(showPending
+      ? []
+      : [
+          showSkuColumns
+            ? {
+                label: "SKU matched",
+                value: fig(
+                  ready ? `${fmtInt(m.withSku)} / ${fmtInt(m.total)}` : "—",
+                  "Assets with a catalog SKU",
+                ),
+              }
+            : {
+                label: "SKU matched",
+                value: fig(
+                  "No SKU mapping",
+                  "Influencer nomenclature (SIF-…) doesn't carry a product SKU code",
+                ),
+              },
+        ]),
+    {
+      label: "Oldest waiting",
+      value: fig(
+        m.oldest === null ? "—" : `${m.oldest.toLocaleString("en-IN")} d`,
+        "Longest any untested asset in this source has waited since its production date",
+      ),
+    },
+  ];
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
-        {title}
-      </div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        {/* Counts assets the register holds a LINK for, because that is
-            the only set anyone can act on -- an asset with no file
-            cannot be put in an ad. One number: the register's own row
-            count is deliberately not shown beside it, because two
-            totals on one card got the bigger one read as the backlog. */}
-        <KpiTile
-          label="Total Assets"
-          value={v(m.total)}
-          hint={showPending ? "Every post in this source" : "Assets with a link"}
-        />
-        <KpiTile
-          label="Tested"
-          value={v(m.tested)}
-          hint={ready && m.total
-            ? `${Math.round((m.tested / m.total) * 100)}% \u2014 the asset id appears in an ad name`
-            : "The asset id appears in an ad name"}
-        />
-        <KpiTile
-          label="Not Tested"
-          value={v(m.notTested)}
-          hint={loading
-            ? "Loading\u2026"
-            : showPending
-              ? "Post link present, but the id matches no ad"
-              : "Assets with no matched ads"}
-        />
-        {showPending && (
-          <KpiTile
-            label="Pending"
-            value={v(m.pending)}
-            hint="No post link yet \u2014 nothing to test until one is added"
-          />
-        )}
-        <KpiTile label="Matched Ads" value={v(m.matchedAds)} hint="Ads matched to these assets" />
-        {showPending ? null : showSkuColumns ? (
-          <KpiTile
-            label="SKU Matched"
-            value={ready ? `${fmtInt(m.withSku)} / ${fmtInt(m.total)}` : "\u2014"}
-            hint="Assets with a catalog SKU"
-          />
-        ) : (
-          <KpiTile
-            label="SKU Matched"
-            value="No SKU mapping"
-            hint="Influencer nomenclature (SIF-\u2026) doesn't carry a product SKU code"
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function KpiTile({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <div role="group" aria-label={label} className="rounded-md border border-border-primary bg-bg-white px-4 py-3">
-      <div className="text-xs font-medium uppercase tracking-wide text-text-secondary">
-        {label}
-      </div>
-      <div className="mt-1 text-2xl font-semibold text-text-primary">{value}</div>
-      {hint && <div className="mt-0.5 text-[11px] text-text-tertiary">{hint}</div>}
+      <FieldLabel>{title}</FieldLabel>
+      <FigureBand figures={figures} />
     </div>
   );
 }

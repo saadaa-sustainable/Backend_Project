@@ -42,7 +42,7 @@ export interface DateRange {
   to: string;
 }
 
-type PresetKey =
+export type PresetKey =
   | "today" | "yesterday" | "last7" | "last30" | "thisMonth"
   | "lastMonth" | "last90" | "lifetime" | "custom";
 
@@ -232,6 +232,7 @@ export function DateRangePicker({
   align = "right",
   accent,
   anchor,
+  bare = false,
 }: {
   value: DateRange;
   preset: string;
@@ -249,6 +250,11 @@ export function DateRangePicker({
    *  A section with its own palette passes it so the picker does not
    *  arrive in a colour nothing around it uses. */
   accent?: { solid: string; soft: string };
+  /** Inside a filter pill, which already carries the border. Drops the
+   *  trigger's own box and sets the resolved window inline instead of
+   *  stacked, so the pill stays one line high like every other control
+   *  on the bar. */
+  bare?: boolean;
 }) {
   const ACCENT = accent?.solid ?? CT.gold;
   const ACCENT_SOFT = accent?.soft ?? CT.goldSoft;
@@ -341,16 +347,46 @@ export function DateRangePicker({
     return "Custom Range";
   }, [preset, value]);
 
+  /** The window the label actually resolved to.
+   *
+   *  This replaces the page-wide data-floor banner. "Lifetime" is
+   *  bounded at DATA_FLOOR and every preset is anchored on the newest
+   *  day the data covers rather than on the clock, so the label alone
+   *  never says which days are being counted -- and that was exactly
+   *  the misreading the banner existed to prevent. Stating it on the
+   *  control costs one line, at the point the choice is made. */
+  const resolvedCaption = useMemo(() => {
+    if (!value.from || !value.to) return "";
+    return `${fmtDisplay(value.from)} – ${fmtDisplay(value.to)}`;
+  }, [value]);
+
   return (
     <div className="relative" ref={box}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 rounded-md border bg-white px-3 py-2 text-sm"
-        style={{ borderColor: open ? ACCENT : CT.border, color: CT.ink }}
+        className={
+          bare
+            ? "flex items-center gap-1.5 whitespace-nowrap text-[13px]"
+            : "flex w-full items-center justify-between gap-2 rounded-md border bg-white px-3 py-2 text-sm"
+        }
+        style={bare ? { color: CT.ink } : { borderColor: open ? ACCENT : CT.border, color: CT.ink }}
       >
         <span className="font-medium">{buttonLabel}</span>
-        <span style={{ color: CT.muted }}>▾</span>
+        {resolvedCaption && preset !== "custom" && bare && (
+          <span className="text-[11.5px] tabular-nums" style={{ color: CT.muted }}>
+            {resolvedCaption}
+          </span>
+        )}
+        <span style={{ color: CT.muted }} aria-hidden="true">▾</span>
       </button>
+      {resolvedCaption && preset !== "custom" && !bare && (
+        <div
+          className="mt-1 px-0.5 text-[11px] tabular-nums"
+          style={{ color: CT.muted }}
+        >
+          {resolvedCaption}
+        </div>
+      )}
 
       {open && (
         <div

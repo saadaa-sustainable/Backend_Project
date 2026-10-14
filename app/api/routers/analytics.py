@@ -26,12 +26,15 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import SessionDep
+from app.services.ad_customer_mix import read_ad_customer_mix
 from app.services.ad_efficiency import calculate_efficiency_scores, get_efficiency_anchors
 from app.services.analytics_cache import cached_analytics
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
+from app.services.gold.cpis import match_ads_to_sku
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
 
@@ -372,22 +375,7 @@ _ATTRIBUTION_DAILY = (
 # unique to a person) and adds up across ads; repeat_customers is
 # DISTINCT people and does not, because one person can buy from two ads
 # in one window.
-_CUSTOMER_MIX_DAILY = (
-    "SELECT a.matched_ad_id, "
-    "       COUNT(*) FILTER (WHERE oct.is_new_customer), "
-    "       COUNT(DISTINCT oct.customer_id) "
-    "         FILTER (WHERE NOT oct.is_new_customer), "
-    "       COALESCE(SUM(oct.total_price) "
-    "         FILTER (WHERE oct.is_new_customer), 0), "
-    "       COALESCE(SUM(oct.total_price) "
-    "         FILTER (WHERE NOT oct.is_new_customer), 0) "
-    "FROM public.shopify_order_attribution a "
-    "JOIN public.order_customer_type oct ON oct.order_id = a.order_id "
-    "WHERE a.matched_ad_id = ANY(:ad_ids) "
-    "  AND oct.order_day >= CAST(:from_str AS date) "
-    "  AND oct.order_day <= CAST(:to_str AS date) "
-    "GROUP BY a.matched_ad_id"
-)
+# The bounded read and page-scoped SQL live in services/ad_customer_mix.py.
 
 # Fallback daily grain for an install with no source configured: this
 # project's own bronze insights. Carries spend / impressions / reach and
@@ -1152,7 +1140,7 @@ class AdsAnalyseRow(BaseModel):
     shopify_orders: float | None
     shopify_revenue: float | None
     #: New vs repeat customers, and the sales from each. See
-    #: _CUSTOMER_MIX_DAILY -- repeat_customers is distinct people and
+    #: services/ad_customer_mix.py -- repeat_customers is distinct people and
     #: must not be summed across rows.
     new_customers: int | None = None
     repeat_customers: int | None = None
@@ -1361,6 +1349,7 @@ class AdsAnalyseTotals(BaseModel):
 class AdsAnalyseResponse(BaseModel):
     rows: list[AdsAnalyseRow]
     total: int
+    customer_mix_unavailable: bool = False
     #: Per-category ad counts under the SAME filters as `rows` (except
     #: `category` itself is dropped, so the client can render the
     #: category tiles alongside a category-filtered table without those
@@ -1668,23 +1657,16 @@ async def get_ads_analyse(
     #
     # Bounded by the picked dates when there are any, lifetime otherwise
     # -- the same rule the row's other Shopify columns follow.
-    mix_map: dict[str, tuple[int, int, float, float]] = {}
-    if rows:
-        _mix_sql = _CUSTOMER_MIX_DAILY
-        _mix_params: dict[str, object] = {"ad_ids": [r.ad_id for r in rows]}
-        if from_date and to_date:
-            _mix_params |= {"from_str": from_date, "to_str": to_date}
-        else:
-            _mix_sql = _mix_sql.replace(
-                "  AND oct.order_day >= CAST(:from_str AS date) "
-                "  AND oct.order_day <= CAST(:to_str AS date) ", "")
-        mix_map = {
-            aid: (int(nc or 0), int(rc or 0), float(ns or 0), float(rs or 0))
-            for aid, nc, rc, ns, rs in
-            (await session.execute(text(_mix_sql), _mix_params)).all()
-        }
+    mix_map = await read_ad_customer_mix(
+        session, [r.ad_id for r in rows], from_date, to_date,
+    )
     for _r in rows:
-        _nc, _rc, _ns, _rs = mix_map.get(_r.ad_id, (0, 0, 0.0, 0.0))
+        # Unavailable is not zero sales. Keep the main page usable without
+        # inventing customer figures when the optional breakdown times out.
+        _nc, _rc, _ns, _rs = (
+            mix_map.get(_r.ad_id, (0, 0, 0.0, 0.0))
+            if mix_map is not None else (None, None, None, None)
+        )
         _r.new_customers = _nc
         _r.repeat_customers = _rc
         _r.new_customer_sales = _ns
@@ -2070,6 +2052,7 @@ async def get_ads_analyse(
 
     resp = AdsAnalyseResponse(
         rows=rows, total=total, category_counts=category_counts, totals=totals,
+        customer_mix_unavailable=mix_map is None,
     )
     return resp
 
@@ -4806,12 +4789,19 @@ orders_in_window AS MATERIALIZED (
 """
 
 _CPIS_BREAKDOWN_CTES = """
-cited AS (
-    SELECT DISTINCT ad_id, d FROM orders_in_window
+order_ad_days AS MATERIALIZED (
+    -- shopify_orders has one row per order_id. Group once before checking
+    -- ad coverage, then reuse the groups for counts and spend reconciliation.
+    SELECT ad_id, d, COUNT(*) FILTER (WHERE has_items) AS orders_with_items
+    FROM orders_in_window
+    GROUP BY ad_id, d
 ),
-attributable AS (
-    SELECT DISTINCT o.ad_id, o.d FROM orders_in_window o
-     WHERE o.has_items
+cited AS (
+    SELECT ad_id, d FROM order_ad_days
+),
+attributable AS MATERIALIZED (
+    SELECT o.ad_id, o.d, o.orders_with_items FROM order_ad_days o
+     WHERE o.orders_with_items > 0
        AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = o.ad_id)
 ),
 converted_ads AS (SELECT DISTINCT ad_id FROM attributable),
@@ -4885,10 +4875,8 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         # 14.7% (22,162 against 19,317 real orders over 30 days). The
         # per-SKU column itself is right -- "orders containing this SKU"
         # -- it just does not add up across SKUs.
-        "(SELECT COUNT(DISTINCT so.order_id) FROM orders_in_window so "
-        " WHERE so.has_items "
-        "   AND EXISTS (SELECT 1 FROM ad_lifecycle al "
-        "               WHERE al.ad_id = so.ad_id)) AS attributed_orders_distinct, "
+        "(SELECT COALESCE(SUM(orders_with_items), 0) "
+        " FROM attributable) AS attributed_orders_distinct, "
         f"({attributed}) AS attributed_spend FROM breakdown b"
     )
 
@@ -7171,6 +7159,180 @@ class KpisResponse(BaseModel):
     spend_data_from: str | None = None
 
 
+class DashboardSessionsResponse(BaseModel):
+    total_sessions: int | None
+    session_data_from: date | None
+    session_data_to: date | None
+    available_days: int
+
+
+class DashboardSessionTrendPoint(BaseModel):
+    day: date
+    sessions: int | None
+    ad_spend: float | None
+    attributed_revenue: float
+    attributed_orders: int
+    cost_per_session: float | None
+    revenue_per_session: float | None
+    # Fraction, like the existing frontend KPI: 0.05 means 5%.
+    conversion_rate: float | None
+
+
+class DashboardSessionTrendResponse(BaseModel):
+    points: list[DashboardSessionTrendPoint]
+    spend_data_from: date | None
+    spend_data_to: date | None
+
+
+@router.get("/dashboard/session-trend", response_model=DashboardSessionTrendResponse)
+@cached_analytics(ttl=300.0)
+async def get_dashboard_session_trend(
+    session: SessionDep,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+) -> DashboardSessionTrendResponse:
+    """Daily ratios on the same source definitions as the session cards.
+
+    Aggregate each source before joining days, avoiding multiplication of
+    spend by orders/sessions. Lifetime follows available session history;
+    a lifetime ad snapshot cannot be divided into a historical daily line.
+    """
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(status_code=422, detail="Provide both date_from and date_to")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from must not be after date_to")
+    if date_from and date_to and (date_to - date_from).days > 10000:
+        raise HTTPException(status_code=422, detail="Select a date range of at most 10,001 days")
+    try:
+        rows = (await session.execute(text("""
+            WITH bounds AS (
+                SELECT COALESCE(CAST(:df AS date), MIN(day)) AS lo,
+                       COALESCE(CAST(:dt AS date), MAX(day)) AS hi
+                FROM public.shopify_sessions_daily
+            ), session_days AS (
+                SELECT s.day, s.sessions FROM public.shopify_sessions_daily s, bounds b
+                WHERE s.day BETWEEN b.lo AND b.hi
+            ), ad_days AS (
+                SELECT d.day, SUM(d.spend) AS spend
+                FROM insights_daily_by_ad d, bounds b
+                WHERE d.day BETWEEN b.lo AND b.hi GROUP BY d.day
+            ), order_days AS (
+                SELECT CAST(o.created_at AS date) AS day,
+                       SUM(o.total_price) AS revenue, COUNT(*) AS orders
+                FROM shopify_order_attribution o, bounds b
+                WHERE o.created_at >= b.lo AND o.created_at < (b.hi + 1)
+                GROUP BY CAST(o.created_at AS date)
+            ), days AS (
+                SELECT day FROM session_days UNION SELECT day FROM ad_days
+                UNION SELECT day FROM order_days
+            ), spend_bounds AS (
+                SELECT MIN(day) AS first_day, MAX(day) AS last_day FROM insights_daily_by_ad
+            )
+            SELECT d.day, s.sessions, a.spend, o.revenue, o.orders,
+                   sb.first_day, sb.last_day
+            FROM days d
+            LEFT JOIN session_days s ON s.day = d.day
+            LEFT JOIN ad_days a ON a.day = d.day
+            LEFT JOIN order_days o ON o.day = d.day
+            CROSS JOIN spend_bounds sb
+            ORDER BY d.day
+        """), {"df": date_from, "dt": date_to})).all()
+    except DBAPIError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        if sqlstate == "42P01":
+            raise HTTPException(status_code=503, detail="Daily session trend sources are not ready.") from exc
+        raise
+
+    if not rows:
+        return DashboardSessionTrendResponse(points=[], spend_data_from=None, spend_data_to=None)
+    spend_from, spend_to = rows[0][5], rows[0][6]
+    by_day = {r[0]: r for r in rows}
+    start, end = date_from or rows[0][0], date_to or rows[-1][0]
+    points = []
+    for offset in range((end - start).days + 1):
+        day = start + timedelta(days=offset)
+        row = by_day.get(day)
+        sessions = int(row[1]) if row and row[1] is not None else None
+        # A missing ad/day inside source coverage means no spend. Outside
+        # that coverage it is unknown, and must be a gap rather than zero.
+        spend = float((row[2] if row else 0) or 0) if spend_from and spend_from <= day <= spend_to else None
+        revenue = float((row[3] if row else 0) or 0)
+        orders = int((row[4] if row else 0) or 0)
+        denominator = sessions if sessions and sessions > 0 else None
+        points.append(DashboardSessionTrendPoint(
+            day=day, sessions=sessions, ad_spend=spend,
+            attributed_revenue=revenue, attributed_orders=orders,
+            cost_per_session=spend / denominator if denominator and spend is not None else None,
+            revenue_per_session=revenue / denominator if denominator else None,
+            conversion_rate=orders / denominator if denominator else None,
+        ))
+    return DashboardSessionTrendResponse(points=points, spend_data_from=spend_from, spend_data_to=spend_to)
+
+
+@cached_analytics(ttl=60.0)
+async def _get_dashboard_order_groups(
+    session: AsyncSession, date_from: date | None, date_to: date | None,
+) -> list[tuple[Any, ...]]:
+    """Share one order scan across the KPI and channel widgets for a range."""
+    where, params = "", {}
+    if date_from and date_to:
+        # Keep the existing database-timezone calendar days, including the
+        # full end day, without casting every row's indexed timestamp.
+        where = ("WHERE created_at >= CAST(:df AS date) "
+                 "AND created_at < (CAST(:dt AS date) + 1) ")
+        params = {"df": date_from, "dt": date_to}
+    result = await session.execute(text(
+        "SELECT utm_source, "
+        "       (lower(COALESCE(utm_content, '')) IN "
+        "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
+        "       SUM(total_price), COUNT(*) FROM shopify_order_attribution "
+        + where + "GROUP BY utm_source, 2"
+    ), params)
+    return [tuple(row) for row in result.all()]
+
+
+@router.get("/dashboard/sessions", response_model=DashboardSessionsResponse)
+@cached_analytics(ttl=300.0)
+async def get_dashboard_sessions(
+    session: SessionDep,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+) -> DashboardSessionsResponse:
+    """All Shopify sessions, independently cached from the headline KPIs.
+
+    The silver refresh pre-aggregates all traffic into one row per day.
+    Read that small snapshot instead of scanning millions of session rows on
+    each cache miss. NULL distinguishes missing data from a recorded zero.
+    """
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(status_code=422, detail="Provide both date_from and date_to")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from must not be after date_to")
+    where = "WHERE day IS NOT NULL AND sessions IS NOT NULL"
+    params: dict[str, object] = {}
+    if date_from and date_to:
+        where += " AND day BETWEEN :date_from AND :date_to"
+        params = {"date_from": date_from, "date_to": date_to}
+    try:
+        row = (await session.execute(text(
+            "SELECT SUM(sessions), MIN(day), MAX(day), COUNT(*) "
+            f"FROM public.shopify_sessions_daily {where}"
+        ), params)).one()
+    except DBAPIError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        if sqlstate == "42P01":
+            # Do not fall back to the expensive raw scan or cache false zeros.
+            raise HTTPException(
+                status_code=503,
+                detail="Session summary is not ready. Run scripts/refresh_dashboard_sessions.py once.",
+            ) from exc
+        raise
+    return DashboardSessionsResponse(
+        total_sessions=int(row[0]) if row[0] is not None else None,
+        session_data_from=row[1], session_data_to=row[2], available_days=int(row[3]),
+    )
+
+
 # ------------------------------------------------------------------
 # Dashboard tab -- per-widget endpoints. The old monolithic
 # /overview-summary ran 5 queries serially and took ~65s, dominated
@@ -7208,7 +7370,7 @@ async def get_dashboard_kpis(
     headline spend by ~72%, so it is left alone; a windowed request reports
     spend_data_from when it reaches past the floor.
     """
-    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    df, dt = _dashboard_date_bounds(date_from, date_to)
 
     if not (df and dt):
         totals = (await session.execute(text(
@@ -7224,21 +7386,17 @@ async def get_dashboard_kpis(
         )
 
     ads = (await session.execute(text(
-        "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0) "
+        "SELECT COALESCE(SUM(spend),0), COALESCE(SUM(impressions),0), "
+        "(SELECT MIN(day) FROM insights_daily_by_ad) "
         "FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt"
     ), {"df": df, "dt": dt})).one()
-    shop = (await session.execute(text(
-        "SELECT COALESCE(SUM(total_price),0), COUNT(*) "
-        "FROM shopify_order_attribution WHERE created_at::date BETWEEN :df AND :dt"
-    ), {"df": df, "dt": dt})).one()
-    floor = (await session.execute(text(
-        "SELECT MIN(day) FROM insights_daily_by_ad"
-    ))).scalar()
+    shop = await _get_dashboard_order_groups(session, df, dt)
+    floor = ads[2]
     return KpisResponse(
         total_spend=float(ads[0]),
         total_impressions=float(ads[1]),
-        total_shopify_revenue=float(shop[0]),
-        total_shopify_orders=int(shop[1]),
+        total_shopify_revenue=float(sum(row[2] or 0 for row in shop)),
+        total_shopify_orders=sum(row[3] for row in shop),
         spend_data_from=floor.isoformat() if floor and df < floor else None,
     )
 
@@ -7252,7 +7410,7 @@ async def get_dashboard_category_breakdown(
 ) -> list[BreakdownItem]:
     # Windowed: daily spend joined to the gold table purely for `category`,
     # which only exists at ad grain. Same floor caveat as /dashboard/kpis.
-    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    df, dt = _dashboard_date_bounds(date_from, date_to)
     if df and dt:
         rows = (await session.execute(text(
             "SELECT COALESCE(s.category,'Uncategorized'), SUM(d.spend) "
@@ -7269,27 +7427,8 @@ async def get_dashboard_category_breakdown(
     return [BreakdownItem(label=r[0], value=float(r[1] or 0)) for r in rows]
 
 
-# Date filtering across these tiles is deliberately PARTIAL, because the five
-# sources do not share a grain:
-#
-#   ad_performance_summary        one row per ad, LIFETIME aggregate. Its only
-#                                 timestamp is gold_refreshed_at (when the row
-#                                 was computed), so kpis + category cannot be
-#                                 windowed without re-deriving them from daily
-#                                 ad data. They stay lifetime.
-#   shopify_order_attribution     has created_at -> genuinely filterable.
-#   shopify_landing_page_analysis has day -> filterable. The no-range path
-#                                 still reads landing_page_analysis_30d, a
-#                                 FIXED 30-day rollup that ignores any range.
-#   cpis_by_sku                   pre-aggregated per window_key ('1d'/'7d'/
-#                                 '30d'), so a range SNAPS to the nearest
-#                                 bucket rather than being honoured exactly.
-#
-# The UI labels each tile with the window that was actually applied, so a
-# single picker never implies one global range it cannot deliver. The cache
-# key already includes these params (see cached_analytics), so switching
-# range cannot serve another range's rows.
-
+# Dashboard ranges use inclusive calendar dates across every widget. Lifetime
+# ad totals retain the gold history; selected dates read daily metrics.
 def _parse_day(value: str | None, field: str) -> date | None:
     """ISO string -> date, or a 400. Never hand asyncpg the raw string.
 
@@ -7308,15 +7447,13 @@ def _parse_day(value: str | None, field: str) -> date | None:
         raise HTTPException(status_code=400, detail=f"{field} must be YYYY-MM-DD, got {value!r}")
 
 
-def _cpis_window_for(date_from: str | None, date_to: str | None) -> str:
-    """Snap a requested range to the nearest precomputed cpis window_key."""
-    if not (date_from and date_to):
-        return "7d"
-    try:
-        span = (date.fromisoformat(date_to) - date.fromisoformat(date_from)).days + 1
-    except ValueError:
-        return "7d"
-    return min((("1d", 1), ("7d", 7), ("30d", 30)), key=lambda w: abs(w[1] - span))[0]
+def _dashboard_date_bounds(date_from: str | None, date_to: str | None) -> tuple[date | None, date | None]:
+    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    if (df is None) != (dt is None):
+        raise HTTPException(status_code=422, detail="Provide both date_from and date_to")
+    if df and dt and df > dt:
+        raise HTTPException(status_code=422, detail="date_from must not be after date_to")
+    return df, dt
 
 
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
@@ -7330,23 +7467,10 @@ async def get_dashboard_channel_breakdown(
     # THEN apply _classify_channel in Python. The branching logic
     # stays in Python (per project convention) but the row shuffle
     # doesn't. This alone drops 27s -> <1s.
-    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
-    where, params = "", {}
-    if df and dt:
-        # created_at is a timestamp; ::date keeps `to` inclusive of that day.
-        # Binds are real date objects -- see _parse_day for why a str 500s.
-        where = "WHERE created_at::date BETWEEN :df AND :dt "
-        params = {"df": df, "dt": dt}
-    rows = (await session.execute(text(
-        "SELECT utm_source, "
-        "       (lower(COALESCE(utm_content, '')) IN "
-        "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
-        "       SUM(total_price) FROM shopify_order_attribution "
-        + where +
-        "GROUP BY utm_source, 2"
-    ), params)).all()
+    df, dt = _dashboard_date_bounds(date_from, date_to)
+    rows = await _get_dashboard_order_groups(session, df, dt)
     channel_totals: dict[str, float] = {}
-    for utm_source, organic_ig, total_price in rows:
+    for utm_source, organic_ig, total_price, _orders in rows:
         ch = _classify_channel(utm_source, "link_in_bio" if organic_ig else None)
         channel_totals[ch] = channel_totals.get(ch, 0.0) + float(total_price or 0)
     return [BreakdownItem(label=k, value=v) for k, v in channel_totals.items()]
@@ -7359,25 +7483,21 @@ async def get_dashboard_top_landing_pages(
     date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
     date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
 ) -> list[TopLandingPage]:
-    df, dt = _parse_day(date_from, "date_from"), _parse_day(date_to, "date_to")
+    df, dt = _dashboard_date_bounds(date_from, date_to)
+    # Use the same day-grain source for both selected dates and lifetime.
+    # The old no-range path silently returned a fixed 30-day snapshot.
+    where = "WHERE landing_page_path IS NOT NULL"
+    params: dict[str, object] = {}
     if df and dt:
-        # Day-grain table, so the requested range is honoured exactly.
-        # ad_spend is not carried at day grain here; the tile shows sessions,
-        # and 0.0 keeps the response model stable.
-        rows = (await session.execute(text(
-            "SELECT landing_page_path, SUM(sessions) AS sessions "
-            "FROM shopify_landing_page_analysis "
-            "WHERE day BETWEEN :df AND :dt "
-            "  AND landing_page_path IS NOT NULL "
-            "GROUP BY landing_page_path ORDER BY sessions DESC LIMIT 5"
-        ), {"df": df, "dt": dt})).all()
-        return [TopLandingPage(landing_page_path=r[0], sessions=int(r[1] or 0), ad_spend=0.0)
-                for r in rows]
+        where += " AND day BETWEEN :df AND :dt"
+        params = {"df": df, "dt": dt}
     rows = (await session.execute(text(
-        "SELECT landing_page_path, sessions, ad_spend "
-        "FROM landing_page_analysis_30d ORDER BY sessions DESC LIMIT 5"
-    ))).all()
-    return [TopLandingPage(landing_page_path=r[0], sessions=int(r[1] or 0), ad_spend=float(r[2] or 0)) for r in rows]
+        "SELECT landing_page_path, SUM(sessions) AS sessions "
+        "FROM shopify_landing_page_analysis " + where +
+        " GROUP BY landing_page_path ORDER BY sessions DESC, landing_page_path LIMIT 5"
+    ), params)).all()
+    return [TopLandingPage(landing_page_path=r[0], sessions=int(r[1] or 0), ad_spend=0.0)
+            for r in rows]
 
 
 @router.get("/dashboard/top-cpis-skus", response_model=list[TopCpisSku])
@@ -7387,18 +7507,42 @@ async def get_dashboard_top_cpis_skus(
     date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
     date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
 ) -> list[TopCpisSku]:
-    # Snaps to a precomputed bucket -- see the note above. A 14-day request
-    # resolves to '7d', NOT to a 14-day aggregate.
-    window = _cpis_window_for(date_from, date_to)
-    rows = (await session.execute(text(
-        "SELECT master_sku, ad_spend, cost_per_ncp FROM cpis_by_sku "
-        "WHERE window_key = :w AND matched_ad_count > 0 "
-        "ORDER BY ad_spend DESC LIMIT 5"
-    ), {"w": window})).all()
-    return [
-        TopCpisSku(master_sku=r[0], ad_spend=float(r[1] or 0), cost_per_ncp=float(r[2]) if r[2] is not None else None)
-        for r in rows
-    ]
+    df, dt = _dashboard_date_bounds(date_from, date_to)
+    if not (df and dt):
+        # These two columns are lifetime totals in every stored window.
+        rows = (await session.execute(text(
+            "SELECT master_sku, ad_spend, cost_per_ncp FROM cpis_by_sku "
+            "WHERE window_key = '7d' AND matched_ad_count > 0 "
+            "ORDER BY ad_spend DESC, master_sku LIMIT 5"
+        ))).all()
+        return [TopCpisSku(master_sku=r[0], ad_spend=float(r[1] or 0),
+                           cost_per_ncp=float(r[2]) if r[2] is not None else None) for r in rows]
+
+    # Aggregate once per ad before name matching, so each SKU does not
+    # rescan the daily table. Reuse the gold layer's exact matching rules.
+    rows = (await session.execute(text("""
+        SELECT a.ad_id, a.ad_name, d.spend, d.ncp_count
+        FROM (
+            SELECT ad_id, SUM(spend) AS spend, SUM(ncp_count) AS ncp_count
+            FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt
+            GROUP BY ad_id
+        ) d
+        JOIN ad_lifecycle a ON a.ad_id = d.ad_id
+        WHERE a.ad_name IS NOT NULL
+    """), {"df": df, "dt": dt})).all()
+    skus = (await session.execute(text("SELECT DISTINCT master_sku FROM cpis_by_sku"))).all()
+    names = {r[0]: r[1] for r in rows}
+    metrics = {r[0]: (r[2] or 0, r[3] or 0) for r in rows}
+    result = []
+    for (sku,) in skus:
+        matched = match_ads_to_sku(sku, names)
+        if not matched:
+            continue
+        spend = sum(metrics[ad_id][0] for ad_id in matched)
+        ncp = sum(metrics[ad_id][1] for ad_id in matched)
+        result.append(TopCpisSku(master_sku=sku, ad_spend=float(spend),
+                                 cost_per_ncp=float(spend / ncp) if ncp > 0 else None))
+    return sorted(result, key=lambda row: (-row.ad_spend, row.master_sku))[:5]
 
 
 @router.get("/overview-summary", response_model=OverviewSummaryResponse, deprecated=True)
@@ -7514,7 +7658,7 @@ _CT_WINDOW_METRICS = (
     "         sum(i.add_to_cart)       AS atc_count,"
     "         sum(i.checkout_initiate) AS ci_count"
     "    FROM public.insights_daily_by_ad i"
-    "    JOIN scoped_ads scope ON scope.ad_id = i.ad_id"
+    "    JOIN scoped_ad_ids scope ON scope.ad_id = i.ad_id"
     "   WHERE i.day BETWEEN :from_date AND :to_date"
     "   GROUP BY i.ad_id"
 )
@@ -7527,7 +7671,7 @@ _CT_WINDOW_SHOPIFY = (
     "         COUNT(*)                        AS shopify_orders,"
     "         COALESCE(SUM(a.total_price), 0) AS shopify_revenue"
     "    FROM public.shopify_order_attribution a"
-    "    JOIN scoped_ads scope ON scope.ad_id = a.matched_ad_id"
+    "    JOIN scoped_ad_ids scope ON scope.ad_id = a.matched_ad_id"
     "   WHERE a.matched_ad_id IS NOT NULL"
     "     AND a.created_at >= CAST(:from_date AS date)"
     "     AND a.created_at < (CAST(:to_date AS date) + 1)"
@@ -7542,11 +7686,28 @@ _CT_AGG = (
     # Decide which assets are in the window before reading their metrics.
     # Keep ALL ads of each qualifying asset: its original/iteration dates,
     # lifetime counters and latest verdict still use exactly the old scope.
-    "WITH mapped AS MATERIALIZED (SELECT * FROM public.ad_asset_map m), "
-    "in_scope AS (SELECT asset_id, media FROM mapped "
+    # in_scope reads ad_asset_map DIRECTLY, not through a materialized
+    # copy of it.
+    #
+    # There used to be a `mapped AS MATERIALIZED (SELECT * FROM
+    # ad_asset_map)` CTE here that in_scope and scoped_ads both read.
+    # MATERIALIZED is an optimisation fence: it spools the ENTIRE table,
+    # every column and every row, before the date filter is applied --
+    # so ix_ad_asset_map_created (which exists precisely for this
+    # predicate) could never be used, and the spool exceeded work_mem
+    # (3.5 MB on this instance) and went to disk. The whole table was
+    # then spooled a SECOND time for scoped_ads.
+    #
+    # Reading the table twice through its own indexes is cheaper than
+    # spooling it twice to disk: the date range picks up the index, and
+    # the join back picks up ix_ad_asset_map_asset. scoped_ads stays
+    # MATERIALIZED because the aggregate below does read it repeatedly,
+    # and by then it holds only the window's ads rather than all of them.
+    "WITH in_scope AS (SELECT asset_id, media FROM public.ad_asset_map "
     " WHERE ad_created_date BETWEEN :from_date AND :to_date GROUP BY asset_id, media), "
-    "scoped_ads AS MATERIALIZED (SELECT m.* FROM mapped m JOIN in_scope s "
+    "scoped_ads AS MATERIALIZED (SELECT m.* FROM public.ad_asset_map m JOIN in_scope s "
     " ON s.asset_id = m.asset_id AND s.media IS NOT DISTINCT FROM m.media), "
+    "scoped_ad_ids AS MATERIALIZED (SELECT DISTINCT ad_id FROM scoped_ads), "
     "asset_dates AS (" + _CT_ASSET_DATES + "), "
     "win AS (" + _CT_WINDOW_METRICS + "), "
     "winshop AS (" + _CT_WINDOW_SHOPIFY + "), "
@@ -8618,7 +8779,7 @@ def _rolling_lc_sql(level: str) -> str:
     campaigns -- so LC Revenue and Shop. Revenue cannot disagree about
     which orders belong to the entity."""
     parts = [
-        f"SUM(total_price) FILTER (WHERE created_at::date > CAST(:last_date AS date) - {p}) AS d{p}_lc_revenue"
+        f"SUM(total_price) FILTER (WHERE created_at >= CAST(:last_date AS date) - {p - 1}) AS d{p}_lc_revenue"
         for p in _ROLLING_PERIODS
     ]
     if level == "campaign":
@@ -8633,12 +8794,13 @@ def _rolling_lc_sql(level: str) -> str:
         key = "a.utm_term"
         parts = [x.replace("total_price", "a.total_price")
                   .replace("created_at", "a.created_at") for x in parts]
+    timestamp_column = "created_at" if level == "campaign" else "a.created_at"
     return (
         f"SELECT {key} AS entity_id, " + ", ".join(parts) + f" {src} "
-        f"  AND created_at::date > CAST(:last_date AS date) - {max(_ROLLING_PERIODS)} "
-        f"  AND created_at::date <= CAST(:last_date AS date) "
+        f"  AND {timestamp_column} >= CAST(:last_date AS date) - {max(_ROLLING_PERIODS) - 1} "
+        f"  AND {timestamp_column} < CAST(:last_date AS date) + 1 "
         f"GROUP BY {key}"
-    ).replace("  AND created_at::date", "  AND a.created_at::date" if level != "campaign" else "  AND created_at::date")
+    )
 
 
 #: De-duplicated reach for a window, from public.ad_reach_cumulative.
@@ -10150,3 +10312,458 @@ async def get_shopify_analytics(
         channels=channels,
         excluded_channels=excluded,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Asset Analysis — two results per asset
+#
+# An asset runs as a SERIES of ads. ad_asset_map already carries
+# asset_id, ad_created_date and category per ad, so the whole section is
+# one pass over it:
+#
+#     current result = the category of the newest iteration
+#     first win      = the FIRST iteration that reached Winner or
+#                      Incremental Winner, if any
+#
+# Both matter, and today only the first is visible anywhere. Measured
+# 2026-10-14 over 3,450 assets: 2,149 ran more than one iteration, 869
+# fell from their best, and 301 reached winner grade and then fell --
+# SIF-2441-P1 won at iteration 4 of 6 and reads "Discarded" on every
+# other screen in this product. That is the asset the buyer most wants
+# back, and nothing surfaces it.
+#
+# LANES follow from the two results, and the winner lanes take
+# precedence over the current result: a win is kept however the asset is
+# doing now. A win at iteration 1 is a first-time winner; a win later is
+# a retest that worked, which is a different and more interesting fact.
+# ─────────────────────────────────────────────────────────────────────
+
+#: Best to worst. "First win" is any iteration at rank <= 2.
+#:
+#: Takes the column explicitly: ad_performance_summary carries its own
+#: `category`, so an unqualified one is ambiguous the moment this is
+#: used in a query that joins it.
+def _asset_rank(col: str) -> str:
+    return f"""
+  CASE {col}
+    WHEN 'Incremental Winner' THEN 1
+    WHEN 'Winner'             THEN 2
+    WHEN 'P0 analysis'        THEN 3
+    WHEN 'P1 analysis'        THEN 4
+    WHEN 'P2 analysis'        THEN 5
+    WHEN 'Result Awaited'     THEN 6
+    WHEN 'Discarded'          THEN 7
+    ELSE 8 END
+"""
+
+
+_ASSET_RANK = _asset_rank("category")
+
+ASSET_LANES = [
+    "Incremental Winners", "First Time Ad Winners", "Retesting Winners",
+    "P0 analysis", "P1 analysis", "P2 analysis", "Result Awaited", "Discarded", "Unrated",
+]
+
+#: Everything downstream reads from this. Kept as one CTE chain rather
+#: than a view so the window filter can be pushed in before the
+#: row_number()s are computed -- iteration numbers must be relative to
+#: the ads in scope, not to all time.
+_ASSET_ROLLUP = f"""
+WITH it AS (
+  SELECT m.asset_id, m.ad_id, m.ad_name, m.media, m.account_name,
+         m.ad_created_date, m.category, {_ASSET_RANK} AS rk,
+         COALESCE(m.spend, 0) AS spend, COALESCE(m.impressions, 0) AS impressions,
+         COALESCE(m.conv_value, 0) AS conv_value, COALESCE(m.ncp_count, 0) AS ncp,
+         COALESCE(m.ftewv_count, 0) AS ftewv, COALESCE(m.purchases, 0) AS purchases,
+         row_number() OVER (PARTITION BY m.asset_id
+                            ORDER BY m.ad_created_date ASC NULLS LAST, m.ad_id) AS iter_no,
+         row_number() OVER (PARTITION BY m.asset_id
+                            ORDER BY m.ad_created_date DESC NULLS LAST, m.ad_id) AS newest,
+         count(*) OVER (PARTITION BY m.asset_id) AS iterations
+    FROM public.ad_asset_map m
+   WHERE m.asset_id IS NOT NULL
+     AND (CAST(:from_date AS date) IS NULL OR m.ad_created_date >= CAST(:from_date AS date))
+     AND (CAST(:to_date   AS date) IS NULL OR m.ad_created_date <= CAST(:to_date   AS date))
+),
+wins AS (
+  SELECT asset_id,
+         min(iter_no)         AS first_win_iter,
+         min(ad_created_date)  AS first_win_date
+    FROM it WHERE rk <= 2 GROUP BY asset_id
+),
+roll AS (
+  SELECT i.asset_id,
+         max(i.iterations)                               AS iterations,
+         max(i.media)                                    AS media,
+         max(i.account_name)                             AS account_name,
+         max(CASE WHEN i.newest = 1 THEN i.category END) AS current_result,
+         max(CASE WHEN i.newest = 1 THEN i.ad_name END)  AS latest_ad_name,
+         min(i.ad_created_date)                          AS first_tested,
+         max(i.ad_created_date)                          AS last_tested,
+         count(*)                                        AS ads,
+         sum(i.spend)       AS spend,
+         sum(i.impressions) AS impressions,
+         sum(i.conv_value)  AS conv_value,
+         sum(i.ncp)         AS ncp,
+         sum(i.ftewv)       AS ftewv,
+         sum(i.purchases)   AS purchases
+    FROM it i GROUP BY i.asset_id
+),
+prev AS (
+  -- The SAME preview source Creative Testing reads (_CT_ASSET_DATES):
+  -- link_to_asset for video, link_1..creative for graphics, post_link
+  -- for influencer. Reused rather than re-derived so a card here and a
+  -- card there never disagree about what an asset looks like.
+  SELECT asset_id, max(preview_url) AS preview_url, max(thumbnail_url) AS thumbnail_url
+    FROM ({_CT_ASSET_DATES}) p GROUP BY asset_id
+),
+laned AS (
+  SELECT r.*, w.first_win_iter, w.first_win_date,
+         pv.preview_url, pv.thumbnail_url,
+         CASE
+           WHEN r.current_result = 'Incremental Winner' THEN 'Incremental Winners'
+           WHEN w.first_win_iter = 1                    THEN 'First Time Ad Winners'
+           WHEN w.first_win_iter IS NOT NULL            THEN 'Retesting Winners'
+           ELSE COALESCE(r.current_result, 'Unrated')
+         END AS lane
+    FROM roll r
+    LEFT JOIN wins w  ON w.asset_id  = r.asset_id
+    LEFT JOIN prev pv ON pv.asset_id = r.asset_id
+)
+"""
+
+#: The filters every query below shares. `lane` is deliberately NOT here:
+#: the lane counts must keep their true sizes while one lane is open,
+#: exactly as creative-testing's category_counts do.
+#
+#: Every text parameter is CAST explicitly. asyncpg infers a parameter's
+#: type from its use, and `:search IS NULL OR col ILIKE :search` gives it
+#: nothing to infer from when the value is NULL -- it raises
+#: AmbiguousParameterError rather than guessing. The dates already cast
+#: for the same reason.
+_ASSET_WHERE = """
+  (CAST(:media AS text) IS NULL OR media = CAST(:media AS text))
+  AND (CAST(:status AS text) IS NOT NULL OR CAST(:account_name AS text) IS NULL
+       OR account_name = CAST(:account_name AS text))
+  -- Qualify the asset on whether ANY mapped ad is currently ACTIVE;
+  -- retain all its iterations and lifetime values in the rollup either
+  -- way, including paused ads. Applied before pagination and identically
+  -- to the KPI/lane counts.
+  --
+  -- 'inactive' is the exact COMPLEMENT of 'active', not a list of paused
+  -- states, which is what keeps the two filters summing to the whole.
+  -- Measured 2026-10-14 across mapped ads: CAMPAIGN_PAUSED 3,403,
+  -- PAUSED 2,573, ADSET_PAUSED 2,256, WITH_ISSUES 312, ARCHIVED 64, and
+  -- 2,330 with no status at all against 874 ACTIVE. Enumerating the
+  -- paused states would silently drop those 2,330 and every state Meta
+  -- adds later; "has no active ad" cannot.
+  AND (CAST(:status AS text) IS NULL
+       OR (CAST(:status AS text) = 'active') = EXISTS (
+       SELECT 1 FROM public.ad_asset_map active_map
+       JOIN public.ad_lifecycle active_ad ON active_ad.ad_id = active_map.ad_id
+       WHERE active_map.asset_id = laned.asset_id
+         AND active_ad.ad_effective_status = 'ACTIVE'
+         AND (CAST(:account_name AS text) IS NULL
+              OR active_map.account_name = CAST(:account_name AS text))))
+  AND (CAST(:search AS text) IS NULL
+       OR asset_id ILIKE CAST(:search AS text)
+       OR latest_ad_name ILIKE CAST(:search AS text))
+  AND (CAST(:only AS text) IS NULL
+       OR (CAST(:only AS text) = 'ever_won' AND first_win_iter IS NOT NULL)
+       OR (CAST(:only AS text) = 'never'    AND first_win_iter IS NULL)
+       OR (CAST(:only AS text) = 'won_fell' AND first_win_iter IS NOT NULL
+           AND current_result NOT IN ('Winner', 'Incremental Winner')))
+"""
+
+
+class AssetAnalysisRow(BaseModel):
+    asset_id: str
+    media: str | None
+    account_name: str | None
+    lane: str
+    #: What the asset's newest iteration earned.
+    current_result: str | None
+    #: The first iteration that reached winner grade, and when. None when
+    #: the asset has never won -- which is most of them.
+    first_win_iter: int | None
+    first_win_date: date | None
+    iterations: int
+    ads: int
+    latest_ad_name: str | None
+    first_tested: date | None
+    last_tested: date | None
+    spend: float
+    impressions: float
+    conv_value: float
+    ncp: float
+    ftewv: float
+    purchases: float
+    roas: float | None
+    cost_per_ncp: float | None
+    #: Same preview source Creative Testing uses, so a card is a card.
+    preview_url: str | None
+    thumbnail_url: str | None
+
+
+class AssetAnalysisTotals(BaseModel):
+    assets: int
+    ever_won: int
+    #: Assets that reached winner grade and have since fallen out of it.
+    #: The number this section exists to surface.
+    won_then_fell: int
+    spend: float
+    conv_value: float
+    ncp: float
+    roas: float | None
+    median_iterations: int
+
+
+class AssetResultCount(BaseModel):
+    count: int
+    spend: float
+
+
+class AssetAnalysisResponse(BaseModel):
+    rows: list[AssetAnalysisRow]
+    total: int
+    totals: AssetAnalysisTotals
+    #: Assets by their CURRENT result, with the spend behind each. This
+    #: is the verdict strip, and it is a different cut from `lane_counts`:
+    #: the lanes fold every winner into First Time / Retesting, so a
+    #: winner never appears under its own verdict there. Both are wanted
+    #: -- the lanes say what to work on, the verdicts say where the money
+    #: currently sits.
+    result_counts: dict[str, AssetResultCount]
+    #: Per-lane counts under the same filters as `rows` minus `lane`
+    #: itself, so every lane keeps its true size while one is open.
+    lane_counts: dict[str, int]
+    accounts: list[str]
+
+
+class AssetIteration(BaseModel):
+    iter_no: int
+    ad_id: str
+    ad_name: str | None
+    campaign_name: str | None
+    account_name: str | None = None
+    adset_name: str | None = None
+    ad_effective_status: str | None
+    ad_created_date: date | None
+    category: str | None
+    #: True where this iteration is itself a winner-grade result.
+    won: bool
+    spend: float
+    impressions: float
+    conv_value: float
+    ncp: float
+    roas: float | None
+    purchases: float | None = None
+    ftewv: float | None = None
+    link_clicks: float | None = None
+    shopify_orders: float | None = None
+    shopify_revenue: float | None = None
+    shopify_roas: float | None = None
+    gold_refreshed_at: datetime | None = None
+    match_source: str | None = None
+    name_conflict: bool | None = None
+
+
+class AssetIterationsResponse(BaseModel):
+    asset_id: str
+    iterations: list[AssetIteration]
+
+
+def _asset_params(
+    media: str | None, account_name: str | None, search: str | None,
+    only: str | None, from_date: date | None, to_date: date | None,
+    status: str | None = None,
+) -> dict[str, object]:
+    return {
+        "media": media,
+        "account_name": account_name,
+        "search": f"%{search}%" if search else None,
+        "only": only,
+        "from_date": from_date,
+        "to_date": to_date,
+        "status": status,
+    }
+
+
+@router.get("/asset-analysis", response_model=AssetAnalysisResponse)
+@cached_analytics(ttl=300.0)
+async def get_asset_analysis(
+    session: SessionDep,
+    from_date: date | None = Query(default=None, description="Only iterations created on or after this date."),
+    to_date: date | None = Query(default=None, description="Only iterations created on or before this date."),
+    lane: str | None = Query(default=None, description="One of ASSET_LANES. Does not affect `lane_counts`."),
+    media: Literal["video", "graphic", "influencer"] | None = Query(default=None),
+    account_name: str | None = Query(default=None),
+    status: Literal["active", "inactive"] | None = Query(
+        default=None,
+        description="active: assets with any currently active mapped ad, "
+                    "including older and zero-spend ads. inactive: the exact "
+                    "complement -- assets whose every mapped ad is paused, "
+                    "campaign-paused, adset-paused, archived, with issues, or "
+                    "carries no status at all. The two partition the set.",
+    ),
+    search: str | None = Query(default=None, description="Substring of asset_id or the latest ad name."),
+    only: Literal["ever_won", "won_fell", "never"] | None = Query(
+        default=None,
+        description="ever_won: reached winner grade at some iteration. "
+                    "won_fell: reached it and has since fallen out -- the "
+                    "assets whose current result hides a win. never: the rest.",
+    ),
+    sort: Literal["spend", "roas", "iterations", "last_tested", "ncp"] = Query(default="spend"),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> AssetAnalysisResponse:
+    params = _asset_params(media, account_name, search, only, from_date, to_date, status)
+    sort_sql = {
+        "spend": "spend DESC NULLS LAST",
+        "roas": "(conv_value / NULLIF(spend, 0)) DESC NULLS LAST",
+        "ncp": "ncp DESC NULLS LAST",
+        "iterations": "iterations DESC",
+        "last_tested": "last_tested DESC NULLS LAST",
+    }[sort]
+
+    rows_sql = f"""
+      {_ASSET_ROLLUP}
+      SELECT * FROM laned
+       WHERE {_ASSET_WHERE} AND (CAST(:lane AS text) IS NULL OR lane = CAST(:lane AS text))
+       ORDER BY {sort_sql}, asset_id
+       LIMIT :limit OFFSET :offset
+    """
+    res = await session.execute(text(rows_sql), {**params, "lane": lane, "limit": limit, "offset": offset})
+    rows: list[AssetAnalysisRow] = []
+    for r in res.mappings():
+        spend = float(r["spend"] or 0)
+        ncp = float(r["ncp"] or 0)
+        conv = float(r["conv_value"] or 0)
+        rows.append(AssetAnalysisRow(
+            asset_id=r["asset_id"], media=r["media"], account_name=r["account_name"],
+            lane=r["lane"], current_result=r["current_result"],
+            first_win_iter=r["first_win_iter"], first_win_date=r["first_win_date"],
+            iterations=int(r["iterations"] or 0), ads=int(r["ads"] or 0),
+            latest_ad_name=r["latest_ad_name"],
+            first_tested=r["first_tested"], last_tested=r["last_tested"],
+            spend=spend, impressions=float(r["impressions"] or 0), conv_value=conv,
+            ncp=ncp, ftewv=float(r["ftewv"] or 0), purchases=float(r["purchases"] or 0),
+            roas=(conv / spend) if spend else None,
+            cost_per_ncp=(spend / ncp) if ncp else None,
+            preview_url=r["preview_url"], thumbnail_url=r["thumbnail_url"],
+        ))
+
+    # Counts and totals ignore `lane`, so the lanes keep their real sizes
+    # while one of them is selected.
+    agg_sql = f"""
+      {_ASSET_ROLLUP}
+      SELECT lane, count(*) AS n,
+             sum(spend) AS spend, sum(conv_value) AS conv_value, sum(ncp) AS ncp,
+             count(*) FILTER (WHERE first_win_iter IS NOT NULL) AS ever_won,
+             count(*) FILTER (WHERE first_win_iter IS NOT NULL
+                              AND current_result NOT IN ('Winner','Incremental Winner')) AS won_fell,
+             percentile_disc(0.5) WITHIN GROUP (ORDER BY iterations) AS med_iter
+        FROM laned WHERE {_ASSET_WHERE}
+       GROUP BY GROUPING SETS ((lane), ())
+    """
+    agg = (await session.execute(text(agg_sql), params)).mappings().all()
+
+    # Same filters, grouped by the asset's current result rather than by
+    # lane. Ignores `lane` for the same reason the lane counts do.
+    res_sql = f"""
+      {_ASSET_ROLLUP}
+      SELECT current_result, count(*) AS n, sum(spend) AS spend
+        FROM laned WHERE {_ASSET_WHERE}
+       GROUP BY current_result
+    """
+    result_counts = {
+        r["current_result"]: AssetResultCount(
+            count=int(r["n"] or 0), spend=float(r["spend"] or 0))
+        for r in (await session.execute(text(res_sql), params)).mappings()
+        if r["current_result"]
+    }
+    lane_counts = {ln: 0 for ln in ASSET_LANES}
+    total = ever_won = won_fell = 0
+    spend_t = conv_t = ncp_t = 0.0
+    median_iterations = 0
+    for a in agg:
+        if a["lane"] is None:
+            # Median of all matching assets, not a median of lane medians.
+            median_iterations = int(a["med_iter"] or 0)
+            continue
+        lane_counts[a["lane"]] = int(a["n"] or 0)
+        total += int(a["n"] or 0)
+        ever_won += int(a["ever_won"] or 0)
+        won_fell += int(a["won_fell"] or 0)
+        spend_t += float(a["spend"] or 0)
+        conv_t += float(a["conv_value"] or 0)
+        ncp_t += float(a["ncp"] or 0)
+
+    accounts = [
+        r[0] for r in (await session.execute(text(
+            "SELECT DISTINCT account_name FROM public.ad_asset_map "
+            "WHERE account_name IS NOT NULL ORDER BY 1"))).all()
+    ]
+
+    return AssetAnalysisResponse(
+        rows=rows,
+        total=lane_counts.get(lane, 0) if lane else total,
+        totals=AssetAnalysisTotals(
+            assets=total, ever_won=ever_won, won_then_fell=won_fell,
+            spend=spend_t, conv_value=conv_t, ncp=ncp_t,
+            roas=(conv_t / spend_t) if spend_t else None,
+            median_iterations=median_iterations,
+        ),
+        lane_counts=lane_counts,
+        result_counts=result_counts,
+        accounts=accounts,
+    )
+
+
+@router.get("/asset-analysis/{asset_id}/iterations", response_model=AssetIterationsResponse)
+@cached_analytics(ttl=300.0)
+async def get_asset_iterations(
+    session: SessionDep,
+    asset_id: str,
+) -> AssetIterationsResponse:
+    """Every ad this asset has run, in order, with the result it earned.
+
+    Deliberately NOT windowed: the point of opening an asset is to see
+    where it won and what happened after, and a window that cuts off
+    iteration 4 hides exactly that.
+    """
+    sql = f"""
+      SELECT m.ad_id, m.ad_name, COALESCE(al.campaign_name, aps.campaign_name) AS campaign_name,
+             al.ad_effective_status, m.account_name, COALESCE(al.adset_name, aps.adset_name) AS adset_name,
+             m.ad_created_date, m.category, {_asset_rank("m.category")} AS rk,
+             COALESCE(m.spend, 0) AS spend, COALESCE(m.impressions, 0) AS impressions,
+             COALESCE(m.conv_value, 0) AS conv_value, COALESCE(m.ncp_count, 0) AS ncp,
+             m.purchases, m.ftewv_count AS ftewv, m.link_clicks, m.match_source, m.name_conflict,
+             aps.shopify_orders, aps.shopify_revenue, aps.shopify_roas, aps.gold_refreshed_at,
+             row_number() OVER (ORDER BY m.ad_created_date ASC NULLS LAST, m.ad_id) AS iter_no
+        FROM public.ad_asset_map m
+        LEFT JOIN public.ad_lifecycle al ON al.ad_id = m.ad_id
+        LEFT JOIN public.ad_performance_summary aps ON aps.ad_id = m.ad_id
+       WHERE m.asset_id = :asset_id
+       ORDER BY iter_no
+    """
+    res = await session.execute(text(sql), {"asset_id": asset_id})
+    out: list[AssetIteration] = []
+    for r in res.mappings():
+        spend = float(r["spend"] or 0)
+        conv = float(r["conv_value"] or 0)
+        out.append(AssetIteration(
+            iter_no=int(r["iter_no"]), ad_id=r["ad_id"], ad_name=r["ad_name"],
+            campaign_name=r["campaign_name"], ad_effective_status=r["ad_effective_status"],
+            account_name=r["account_name"], adset_name=r["adset_name"],
+            ad_created_date=r["ad_created_date"], category=r["category"],
+            won=int(r["rk"] or 9) <= 2,
+            spend=spend, impressions=float(r["impressions"] or 0), conv_value=conv,
+            ncp=float(r["ncp"] or 0),
+            roas=(conv / spend) if spend else None,
+            purchases=r["purchases"], ftewv=r["ftewv"], link_clicks=r["link_clicks"],
+            shopify_orders=r["shopify_orders"], shopify_revenue=r["shopify_revenue"],
+            shopify_roas=r["shopify_roas"], gold_refreshed_at=r["gold_refreshed_at"],
+            match_source=r["match_source"], name_conflict=r["name_conflict"],
+        ))
+    return AssetIterationsResponse(asset_id=asset_id, iterations=out)

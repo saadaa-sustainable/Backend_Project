@@ -187,16 +187,47 @@ def refresh(cur, level: str) -> int:
     # EXCLUSIVE for the whole transaction and blocks every reader --
     # that took the Creative Testing section down for two minutes once.
     cur.execute(f"DROP TABLE IF EXISTS public.{table}_new")
-    cur.execute(f"CREATE TABLE public.{table}_new (LIKE public.{table} INCLUDING ALL)")
+    # Columns only -- NOT `INCLUDING ALL`.
+    #
+    # INCLUDING ALL copied the indexes as well, under the names the
+    # server generates from the table it was cloning INTO: this table
+    # ended up carrying `{table}_new_pkey` and `{table}_new_day_idx`,
+    # and the swap below renames the table but not its indexes, so those
+    # `_new` names became the live ones. The next night `ddl()` ran
+    # `CREATE INDEX IF NOT EXISTS ix_{table}_day`, found nothing by that
+    # name, and built a SECOND index over the same column -- then
+    # INCLUDING ALL copied both, and the night after that copied four.
+    # One extra generation per run, 37 exact duplicates on each of the
+    # two insights tables and 72 on order_customer_type by 2026-10-14,
+    # 642 MB of indexes that served 0 scans between them. On 256 MB of
+    # shared_buffers that is what dropped the cache hit ratio to 75%.
+    #
+    # So: name every index explicitly here, and rename each one into its
+    # canonical name as part of the swap. The set is then fixed by this
+    # code rather than grown by the server.
+    cur.execute(f"CREATE TABLE public.{table}_new "
+                f"(LIKE public.{table} INCLUDING DEFAULTS INCLUDING STORAGE)")
     cur.execute(rebuild_sql(table, id_col, absent))
     n = cur.rowcount
+    # Indexed AFTER the insert: the bulk load pays no index maintenance,
+    # and the two indexes are built once over the finished table.
+    cur.execute(f"DROP INDEX IF EXISTS public.ix_{table}_new_day")
+    cur.execute(f"ALTER TABLE public.{table}_new "
+                f"ADD CONSTRAINT {table}_new_pkey PRIMARY KEY ({id_col}, day)")
+    cur.execute(f"CREATE INDEX ix_{table}_new_day ON public.{table}_new(day)")
     # Old index names have to move aside first: renaming a table does
     # NOT rename its indexes, and the PK name collides otherwise.
     cur.execute(f"ALTER TABLE public.{table} RENAME TO {table}_old")
     cur.execute(f"ALTER INDEX IF EXISTS {table}_pkey RENAME TO {table}_old_pkey")
     cur.execute(f"ALTER INDEX IF EXISTS ix_{table}_day RENAME TO ix_{table}_old_day")
     cur.execute(f"ALTER TABLE public.{table}_new RENAME TO {table}")
+    cur.execute(f"ALTER INDEX {table}_new_pkey RENAME TO {table}_pkey")
+    cur.execute(f"ALTER INDEX ix_{table}_new_day RENAME TO ix_{table}_day")
     cur.execute(f"DROP TABLE IF EXISTS public.{table}_old")
+    # Fresh table, no statistics: without this the planner reads it as
+    # empty until autoanalyze happens to visit, which is how
+    # insights_daily_by_ad came to be 11 days stale.
+    cur.execute(f"ANALYZE public.{table}")
     print(f"    {n:,} rows in {time.monotonic() - t0:.1f}s", flush=True)
     return n
 

@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging.setup import get_logger
+from app.services.dashboard_sessions import refresh_dashboard_sessions
 
 logger = get_logger(__name__)
 
@@ -634,7 +635,30 @@ _INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_shopify_orders_created_at ON shopify_orders (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_shopify_orders_utm_campaign ON shopify_orders (utm_campaign)",
     "CREATE INDEX IF NOT EXISTS ix_shopify_customers_email ON shopify_customers (email)",
-    "CREATE INDEX IF NOT EXISTS ix_shopify_sessions_day ON shopify_sessions (day)",
+    # COVERING, not a bare (day) index.
+    #
+    # /dashboard/sessions is `SUM(sessions), MIN(day), MAX(day),
+    # COUNT(DISTINCT day) ... WHERE day BETWEEN :a AND :b`. A bare (day)
+    # index finds the rows but the sum still has to visit the heap, and
+    # the heap is 724 MB over 2.0M rows -- so the planner costed the
+    # random fetches above a sequential scan and read the whole table
+    # every time. Measured 2026-10-14: 254 sequential scans against 64
+    # index scans lifetime, and two concurrent calls sitting on
+    # IO/DataFileRead for 96s and 99s. That is what made the Dashboard
+    # tab slow, and it is the widget the other five wait behind.
+    #
+    # INCLUDE (sessions) puts the summed column in the index leaf, so
+    # the whole query is answered from ~60 MB of index with no heap
+    # access at all.
+    "CREATE INDEX IF NOT EXISTS ix_shopify_sessions_day_sessions "
+    "    ON shopify_sessions (day) INCLUDE (sessions)",
+    # Superseded by the covering index above, which answers everything
+    # the bare one did (same leading column, same order). Dropped rather
+    # than kept beside it: a redundant index is write cost on every
+    # flatten and cache pressure on a 256 MB shared_buffers for nothing
+    # -- see the 146 duplicate indexes that cost this database 642 MB
+    # and its cache hit ratio, dropped the same day.
+    "DROP INDEX IF EXISTS ix_shopify_sessions_day",
     "CREATE INDEX IF NOT EXISTS ix_shopify_sessions_utm_campaign ON shopify_sessions (utm_campaign)",
     "CREATE INDEX IF NOT EXISTS ix_shopify_sessions_landing_page_path ON shopify_sessions (landing_page_path)",
     "CREATE INDEX IF NOT EXISTS ix_shopify_fulfillments_order_id ON shopify_fulfillments (order_id)",
@@ -849,9 +873,16 @@ async def refresh_shopify_tables(session: AsyncSession, *, force: bool = False) 
                 await session.execute(text(tuning))
             await session.execute(text(entry.truncate_sql))
             await session.execute(text(entry.insert_sql))
+            if entry.table == "shopify_sessions":
+                await refresh_dashboard_sessions(session)
             await session.commit()
             rebuilt.append(entry.table)
         else:
+            if entry.table == "shopify_sessions":
+                # Bootstrap existing installations even when bronze has not
+                # changed. Later unchanged runs do not rescan session rows.
+                if await refresh_dashboard_sessions(session, only_if_missing=True):
+                    await session.commit()
             skipped.append(entry.table)
 
         result = await session.execute(text(f"SELECT COUNT(*) FROM {entry.table}"))

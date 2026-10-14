@@ -118,6 +118,20 @@ Optional, and cheaper than the two above:
                                database password. Used as a FALLBACK when
                                CREATORHUB_DB_URL is absent.
     ITERATED_SHEET_ID          1sv8zcIT5gDE2e7zIC_ajsXW30VwOdn_9h8-SAJHKRg4
+    GRAPHICS_SHEET_GID         724418182 -- the asset_id mapping tab. Was 0,
+                               which is the gid of a tab that no longer
+                               exists, so it 401'd like a permission error
+                               and read as one for weeks.
+
+                               NOTE: as of 2026-10-14 the whole graphics
+                               mastersheet (1qlz0u88...) is still private,
+                               so EVERY gid on it 401s. graphics_historic
+                               works only because it lives in a DIFFERENT
+                               spreadsheet (17SAZ-...) that IS link-shared.
+                               Share 1qlz0u88... as Viewer, or set
+                               GOOGLE_CREDS_JSON, and this source starts
+                               flowing with no further change.
+
     GRAPHICS_SHEET_GID         optional; enables the CSV fallback for the
                                live graphics tab when there is no service
                                account.
@@ -270,7 +284,13 @@ GRAPHICS_HEADER_MAP = {
     "cac": "cac",
     "links 1": "link_1",
     "links 2": "link_2",
+    # The Performance Ad Req tab spells the third one "Link 3", singular,
+    # while the historic tab spells it "Links 3". Both map to link_3;
+    # listing only one silently dropped every third link on whichever tab
+    # disagreed, which looks like an asset having two links rather than
+    # like a mapping error.
     "links 3": "link_3",
+    "link 3": "link_3",
 }
 
 
@@ -654,6 +674,22 @@ def _graphics_values_via_api(sheet_id: str, tab: str) -> list[list[str]]:
     )
 
 
+def _graphics_values_via_file(path: str) -> list[list[str]]:
+    """Read a tab from a CSV saved off the sheet by hand.
+
+    The escape hatch for when the mastersheet is neither link-viewable
+    nor reachable by a service account -- which is where this project sat
+    for weeks, with the graphics register frozen while the file itself
+    was one File > Download away.
+
+    Same shape as the other two readers: a 2-D cell array, header first.
+    utf-8-sig because Sheets writes a BOM, which would otherwise ride
+    along on the first header and stop it matching the map.
+    """
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        return [row for row in csv.reader(fh)]
+
+
 def _graphics_values_via_csv(sheet_id: str, gid: str) -> list[list[str]]:
     """Read one tab through the sheet's CSV export.
 
@@ -830,6 +866,48 @@ def _graphics_rows(tab: str, gid: str | None = None,
     401), while the fuller register lives in a link-viewable file. Each
     source therefore names its own sheet rather than assuming one id.
     """
+    # A hand-saved CSV wins over both network paths: it is only ever set
+    # deliberately, and when it is set the sheet is usually unreachable.
+    #
+    # THIS IS THE STANDING ARRANGEMENT FOR "Performance Ad Req", not a
+    # workaround to undo later. That mastersheet is private and answers
+    # 401 to every public read path, so it is exported by hand and
+    # dropped in data/sheets/. The OTHER graphics tab, "Graphics" in
+    # GRAPHICS_HISTORIC_SHEET_ID, is a different and link-viewable file;
+    # it keeps refreshing itself on the nightly with no manual step.
+    # Keyed on the tab, and GRAPHICS_SHEET_FILE applies ONLY to the tab
+    # GRAPHICS_SHEET_TAB names.
+    #
+    # It was a blanket fallback for one run on 2026-10-14 and immediately
+    # did harm: graphics_historic reads a DIFFERENT, link-viewable
+    # spreadsheet, and the catch-all made it read the hand-saved
+    # Performance Ad Req export instead -- dropping it from 1,695
+    # requisitions to 980 while reporting success. A manual file must
+    # never silently stand in for a source that can fetch itself.
+    slug = re.sub(r"[^A-Z0-9]+", "_", tab.upper()).strip("_")
+    local = os.environ.get(f"GRAPHICS_FILE_{slug}")
+    if not local and tab == os.environ.get("GRAPHICS_SHEET_TAB"):
+        local = os.environ.get("GRAPHICS_SHEET_FILE")
+    if local and os.path.exists(local):
+        # Say how old it is. A hand-dropped file cannot refresh itself,
+        # and a stale one is indistinguishable from a fresh one in the
+        # row counts -- which is exactly how a register goes quietly out
+        # of date for a month.
+        age_days = (time.time() - os.path.getmtime(local)) / 86_400
+        note = f"saved {age_days:.0f} days ago" if age_days >= 1 else "saved today"
+        warn = "  <-- STALE, re-export it" if age_days >= 14 else ""
+        print(f"    [Graphics] reading {tab!r} from a hand-saved export "
+              f"({note}){warn}", flush=True)
+        print(f"               {local}", flush=True)
+        return _graphics_map_rows(_graphics_values_via_file(local), tab)
+
+    if local and not os.path.exists(local):
+        raise SystemExit(
+            f"GRAPHICS_SHEET_FILE points at {local}, which does not exist.\n"
+            "        Export the tab from the mastersheet (File > Download >\n"
+            "        Comma-separated values) and save it there. The other\n"
+            "        graphics tab refreshes itself and is unaffected.")
+
     sheet_id = sheet_id or os.environ.get("GRAPHICS_SHEET_ID")
     if not sheet_id:
         raise SystemExit("GRAPHICS_SHEET_ID is not set.")
@@ -872,17 +950,33 @@ def main() -> int:
 
     def _run(name: str, fn) -> None:
         """Run one source inside a SAVEPOINT so a failure rolls back only
-        that source's writes, never the batch's."""
+        that source's writes, never the batch's.
+
+        Catches Exception, not just SystemExit. A source that is merely
+        UNCONFIGURED raises SystemExit, which this always tolerated -- but
+        one whose credentials have been REVOKED raises from the HTTP
+        layer instead, and that propagated straight out of the batch.
+
+        Measured 2026-10-14: creatorhub's historic_posts began answering
+        401, which is the second of six sources, so `--source all` died
+        before reaching the four that still work. The step printed
+        "[OK] asset sources mirrored" and exited 1, and the register sat
+        frozen at 2026-09-17 for 27 nights while the nightly reported a
+        failure nobody could read.
+
+        KeyboardInterrupt and SystemExit from a deliberate abort still
+        propagate: BaseException is not caught."""
         if name not in want:
             return
         cur.execute(f"SAVEPOINT src_{name}")
         try:
             summary.append((name, fn()))
-        except SystemExit as exc:
+        except (SystemExit, Exception) as exc:
             if not tolerate_failures:
                 raise
             cur.execute(f"ROLLBACK TO SAVEPOINT src_{name}")
-            skipped.append((name, str(exc).strip().splitlines()[0]))
+            why = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+            skipped.append((name, f"{type(exc).__name__}: {why}"))
         else:
             cur.execute(f"RELEASE SAVEPOINT src_{name}")
 
@@ -1019,7 +1113,13 @@ def main() -> int:
         for name, why in skipped:
             print(f"      {name:<18} {why}")
     # Non-zero when NOTHING mirrored: a run that skipped every source is
-    # a failed run, and the nightly pipeline should see it as one.
+    # a failed run, and the nightly pipeline should see it as one. A run
+    # that mirrored some and skipped others is a SUCCESS with a warning
+    # -- failing it would have the pipeline treat four fresh registers as
+    # no registers, which is how this went unnoticed for 27 nights.
+    if skipped and summary:
+        print(f"\n[WARN] {len(skipped)} of {len(skipped) + len(summary)} sources "
+              f"could not be read; the rest mirrored.", flush=True)
     return 0 if summary else 1
 
 

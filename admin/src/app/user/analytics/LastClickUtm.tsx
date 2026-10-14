@@ -45,6 +45,7 @@ import { NameMissPanel } from "./NameMissPanel";
 import { StatTile } from "./StatTile";
 import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
+import { RankedList, FieldLabel, SectionHeader } from "./SectionChrome";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -160,7 +161,7 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     // would have changed what every existing step number means.
     step: "STEP 2B",
     title: "EDIT NAME MATCHES",
-    hint: "utm_content matched a name the ad USED to have. utm_content is frozen at click time, so an ad renamed since the click still carries its old name in the order while Meta carries only the new one. Resolved from ad_edit_log, scoped to the adset in utm_term, and only ever tried after the current name has already failed \u2014 a historical name can never outrank a live one.",
+    hint: "utm_content matched a name the ad USED to have. utm_content is frozen at click time, so an ad renamed since the click still carries its old name in the order while Meta carries only the new one. Resolved from ad_edit_log, scoped to the adset in utm_term, and only ever tried after the current name has already failed — a historical name can never outrank a live one.",
   },
   ad_name_match: {
     step: "STEP 3",
@@ -185,7 +186,7 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     hint: "The campaign is known but no ad could be resolved.",
   },
   unmatched: {
-    step: "\u2014",
+    step: "—",
     title: "UNMATCHED",
     hint: "No step resolved. Scope to Meta or Google to read this as a real miss rate -- across all orders it is mostly organic traffic that never carried a click id.",
   },
@@ -702,12 +703,16 @@ export function LastClickUtm() {
       {/* ═══════════════════════════════════════════════════════════════
           Header row — title + date range + toggles + export
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div>
-          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Last Click UTM analysis</h2>
-          <p className="text-xs text-text-secondary">step-wise UTM matches from shopify_order_attribution ({total.toLocaleString()} orders in range)</p>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+      {/* Where the matches come from (shopify_order_attribution, step by
+          step) is a Help question -- article "adset-matched" explains
+          the one step people actually act on. How many orders are in
+          range is not: it is the denominator of everything below, so it
+          stays, as a figure rather than a parenthesis. */}
+      <SectionHeader title="Last Click UTM" helpId="adset-matched">
+        <span className="text-[12px] text-text-tertiary tabular-nums">
+          {total.toLocaleString()} orders in range
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
           <select
             value={preset}
             onChange={(e) => applyPreset(e.target.value)}
@@ -733,11 +738,19 @@ export function LastClickUtm() {
             onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }}
             className="rounded-md border border-border-primary px-2 py-1 text-sm"
           />
+          {/* Two exports sat here, both labelled "Export CSV", and they
+              are not the same file: this one writes all twenty columns
+              including contact_email and customer_id, the shared one
+              writes the visible columns. Relabelled rather than
+              dropped -- the full dump is the one people reconcile
+              against, and it is the one carrying PII, so it should say
+              so before it is clicked. */}
           <button
             onClick={exportCsv}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
+            title="Every column, including contact email and customer ID"
+            className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary"
           >
-            Export CSV
+            Export all columns
           </button>
           <ExportButton
             rows={sorted as unknown as Record<string, unknown>[]}
@@ -746,56 +759,63 @@ export function LastClickUtm() {
             disabled={loading || !sorted.length}
           />
         </div>
-      </div>
+      </SectionHeader>
 
       {/* ═══════════════════════════════════════════════════════════════
-          Channel KPI tiles -- one accented card per channel: share
-          badge, order count, attributed sales. Ten tiles on a 5-column
-          grid (2 rows) rather than one unreadable row of ten.
+          Orders by channel, ranked.
 
-          Every number here is the SERVER's windowed aggregate over the
-          whole period -- the tile query ignores every filter except the
-          date range on purpose, so the tiles keep meaning "everything in
-          this period" while the table below narrows. They are never
-          computed from the rows paged in.
+          Was ten accented cards on a 5-column grid: Total plus nine
+          channels, each with its own hue along its top edge. The hues
+          carried nothing -- pink for Organic IG, teal for Loyalty -- and
+          the grid spent the whole first screen before the stepwise
+          cascade, let alone the table. Five of the ten together came to
+          3.3% of orders and took the same space as Meta's 50%.
 
-          First click selects the channel and opens its utm_source
-          breakdown; clicking the selected tile again toggles that
-          breakdown shut.
+          Ranked, with one monochrome bar: rank answers "which channel",
+          length answers "by how much", and a share under 3% is visibly
+          a sliver instead of a card. Every number is unchanged -- the
+          SERVER's windowed aggregate over the whole period, which is why
+          these keep meaning "everything in this period" while the table
+          below narrows.
+
+          Click still selects the channel and opens its utm_source
+          breakdown; clicking the selected row again toggles it shut.
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
-        <StatTile
-          label="Total Orders"
-          color={CHANNEL_COLOR.Total}
-          value={totalOrders.toLocaleString("en-IN")}
-          sub={fmtRs(totalSales)}
-          badge={totalOrders > 0 ? "100.0%" : undefined}
-          selected={channel === ""}
-          onClick={() => { setChannel(""); setDrillOpen(false); }}
-        />
-        {CHANNEL_ORDER.map((ch) => {
-          const sum = channelCounts?.[ch] ?? { count: 0, sales: 0 };
-          const selected = channel === ch;
-          return (
-            <StatTile
-              key={ch}
-              label={ch}
-              color={CHANNEL_COLOR[ch]}
-              value={sum.count.toLocaleString("en-IN")}
-              sub={fmtRs(sum.sales)}
-              badge={`${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`}
-              selected={selected}
-              onClick={() => {
-                if (selected) {
+      <div className="flex flex-col gap-2">
+        <div className="flex items-baseline justify-between border-b border-border-primary pb-1.5">
+          <FieldLabel>Orders by channel</FieldLabel>
+          <button
+            type="button"
+            onClick={() => { setChannel(""); setDrillOpen(false); }}
+            className={`text-[12px] tabular-nums transition-colors ${
+              channel === "" ? "font-semibold text-text-primary" : "text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            all channels · {totalOrders.toLocaleString("en-IN")} orders · {fmtRs(totalSales)}
+          </button>
+        </div>
+        <RankedList
+          labelWidth={150}
+          rows={[...CHANNEL_ORDER]
+            .map((ch) => ({ ch, sum: channelCounts?.[ch] ?? { count: 0, sales: 0 } }))
+            .sort((a, b) => b.sum.count - a.sum.count)
+            .map(({ ch, sum }) => ({
+              key: ch,
+              label: ch,
+              value: sum.count.toLocaleString("en-IN"),
+              share: `${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`,
+              fraction: totalOrders > 0 ? sum.count / totalOrders : 0,
+              selected: channel === ch,
+              onSelect: () => {
+                if (channel === ch) {
                   setDrillOpen((d) => !d);
                 } else {
                   setChannel(ch);
                   setDrillOpen(true);
                 }
-              }}
-            />
-          );
-        })}
+              },
+            }))}
+        />
       </div>
 
       {/* Channel drill-down -- compact, capped height so it doesn't
@@ -868,11 +888,17 @@ export function LastClickUtm() {
                   `_attribute_order`), so within a scope they sum to
                   100%.
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
-        <div className="mb-2.5 flex flex-wrap items-end gap-3">
+      {/* No container. The cascade was the last thing in this section
+          still sitting in a white card with a border AND a shadow,
+          which the surface brief forbids outright -- and with the
+          name-miss worklist beside it now flat, the card was the only
+          box left on the screen. A label on a rule does the same job:
+          it says where the block starts. */}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-end gap-3 border-b border-border-primary pb-1.5">
           <div className="min-w-[220px]">
-            <h3 className="text-sm font-semibold">Stepwise matching</h3>
-            <p className="text-[11px] text-text-tertiary">
+            <FieldLabel>Stepwise matching</FieldLabel>
+            <p className="mt-1 text-[11px] text-text-tertiary">
               {scopeOrders.toLocaleString()} {stepScope === "All" ? "orders" : `${stepScope} orders`} in
               range · <strong className="text-text-secondary">{matchRate.toFixed(1)}%</strong> resolved to
               a campaign or better · {fmtRs(scopeSales)}
@@ -901,9 +927,9 @@ export function LastClickUtm() {
               }}
               disabled={loading}
               title="Re-read the cascade from shopify_order_attribution"
-              className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted disabled:opacity-40"
+              className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary disabled:opacity-40"
             >
-              {loading ? "Refreshing\u2026" : "\u21bb Refresh"}
+              {loading ? "Refreshing…" : "\u21bb Refresh"}
             </button>
           </div>
         </div>
@@ -916,44 +942,70 @@ export function LastClickUtm() {
             Meta ad universe only (shopify_ad_attribution builds
             AdUniverse from ad_lifecycle's Meta ads). */}
         {scopeOrders > 0 && matchedOrders === 0 && (
-          <div className="mb-2 rounded-md border border-warning-mid/40 bg-warning-bg px-2.5 py-1.5 text-[11px] text-warning-text">
+          <div className="bg-warning-bg px-2.5 py-1.5 text-[11px] text-warning-text">
             No {stepScope} order resolves to an ad. The cascade only indexes the <b>Meta</b> ad
             universe, so {stepScope} traffic has nothing to match against and lands at{" "}
             <b>Unmatched</b> by construction — not because the match failed.
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {/* A cascade, drawn as one. Six colour-topped cards of equal
+            size said nothing about the shape of the thing they describe:
+            step 1 resolves 86.6% of orders and step 5 resolves 0.0%, and
+            both cards were the same width in the same two-row grid.
+
+            Each bar's length is its share of the scope, so the funnel
+            narrows on screen the way it narrows in fact, and Unmatched
+            sits at the end carrying the one figure anyone acts on. Click
+            still filters the table to that step; the counts, the
+            percentages and the #/% toggle are untouched. */}
+        <div className="flex flex-col">
           {STEP_TILES.map((t) => {
             const sum = stepSummary[t] ?? { count: 0, sales: 0 };
             const pct = scopeOrders > 0 ? (sum.count / scopeOrders) * 100 : 0;
             const meta = TIER_STEP[t];
             const selected = tier === t;
+            const unmatched = t === "unmatched";
             return (
-              <StatTile
+              <button
                 key={t}
-                eyebrow={meta.step}
-                label={meta.title}
-                color={TIER_COLOR[t]}
-                value={stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
-                sub={`${stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} \u00b7 ${fmtRs(sum.sales)}`}
+                type="button"
                 title={meta.hint}
-                dim={sum.count === 0}
-                selected={selected}
+                aria-pressed={selected}
                 onClick={() => {
                   if (selected) {
                     setTier("");
                     return;
                   }
                   setTier(t);
-                  // Keep the table honest about what the tile counted:
-                  // a Meta-scoped step tile means Meta rows at that step.
+                  // Keep the table honest about what the step counted:
+                  // a Meta-scoped step means Meta rows at that step.
                   if (stepScope !== "All") {
                     setChannel(stepScope as UtmChannel);
                     setDrillOpen(false);
                   }
                 }}
-              />
+                className={`flex items-center gap-3 border-t border-border-soft py-2 text-left first:border-t-0 ${
+                  selected ? "bg-bg-surface" : "hover:bg-bg-surface"
+                } ${sum.count === 0 ? "opacity-50" : ""}`}
+              >
+                <span className="w-[34px] shrink-0 text-[10px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">
+                  {meta.step}
+                </span>
+                <span className="w-[168px] shrink-0 truncate text-[13px] text-text-primary">{meta.title}</span>
+                <span className="h-2 min-w-[40px] flex-1 bg-bg-muted">
+                  <span
+                    className={`block h-full ${unmatched ? "bg-error-mid" : "bg-text-primary"}`}
+                    style={{ width: `${Math.max(Math.min(pct, 100), 0)}%` }}
+                  />
+                </span>
+                <span className="w-[84px] shrink-0 text-right text-[13px] text-text-primary tabular-nums">
+                  {stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
+                </span>
+                <span className="w-[136px] shrink-0 text-right text-[12px] text-text-tertiary tabular-nums">
+                  {stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} · {fmtRs(sum.sales)}
+                </span>
+              </button>
             );
           })}
         </div>

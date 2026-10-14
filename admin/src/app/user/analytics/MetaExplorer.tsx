@@ -6,6 +6,7 @@ import { MetricDimensionExplorer } from "./MetricDimensionExplorer";
 export function MetaExplorer() {
   return (
     <MetricDimensionExplorer
+      title="Meta Explorer"
       intro={
         "Pick a Meta dataset (ad / adset / campaign), then any of its ~95 non-JSON dimensions and metrics — " +
         "the full Insights registry, not a curated subset. Attribution-setting fields (attribution_setting, " +
