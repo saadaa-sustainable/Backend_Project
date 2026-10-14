@@ -13,6 +13,7 @@ import {
   fetchLandingPages,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { SectionHeader } from "./SectionChrome";
 
 const PAGE_SIZE = 50;
 
@@ -324,11 +325,13 @@ export function LandingPageAnalysis() {
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-text-secondary">
-        Shopify and GA4 side by side for the same page, over the dates you pick. Shopify supplies the top of the funnel, where it is reliable; GA4 supplies the tail, because Shopify&rsquo;s own checkout count reads about 10&times; low on this store &mdash; GoKwik owns the checkout and Shopify never sees the completion. The two count sessions differently, so their numbers will not agree, and every ratio is computed within one source rather than across them.
-      </p>
+      {/* Why GA4 and Shopify disagree, and which supplies which end of
+          the funnel, is the single most load-bearing fact on this page
+          -- and it is a fact about the data, not about today's numbers.
+          It moved to Help, behind the ? on the title. */}
+      <SectionHeader title="Landing Page Analysis" helpId="freshness" />
 
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white shadow-sm p-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border-primary pb-3">
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}

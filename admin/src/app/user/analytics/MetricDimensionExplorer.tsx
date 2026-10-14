@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api";
 import { BarChart } from "./charts/BarChart";
 import { LineChart } from "./charts/LineChart";
 import { BubbleChart } from "./charts/BubbleChart";
+import { SectionHeader } from "./SectionChrome";
 
 export interface ExplorerField {
   key: string;
@@ -29,6 +30,8 @@ export interface ExplorerQueryResponse {
 }
 
 interface Props {
+  /** Section name on the rule. */
+  title: string;
   intro: string;
   fetchSchema: () => Promise<ExplorerSchemaResponse>;
   runQuery: (params: {
@@ -62,7 +65,7 @@ function asNumber(v: string | number | null): number {
 
 type ViewMode = "table" | "bar" | "line" | "bubble";
 
-export function MetricDimensionExplorer({ intro, fetchSchema, runQuery }: Props) {
+export function MetricDimensionExplorer({ title, intro, fetchSchema, runQuery }: Props) {
   const [schema, setSchema] = useState<ExplorerSchemaResponse | null>(null);
   const [schemaError, setSchemaError] = useState<string | null>(null);
 
@@ -192,7 +195,13 @@ export function MetricDimensionExplorer({ intro, fetchSchema, runQuery }: Props)
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-text-secondary">{intro}</p>
+      {/* `intro` described what the picker does and which tables it
+          reads -- a paragraph above a control that demonstrates itself.
+          The caller still passes it; it is now the ?'s tooltip rather
+          than standing text, so nothing is lost and nothing is repeated
+          on every visit. */}
+      <SectionHeader title={title} helpId="data-floor" />
+      <span className="sr-only">{intro}</span>
 
       {/* Dataset picker */}
       <div className="flex flex-wrap gap-1.5">

@@ -29,6 +29,7 @@ import {
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
 import { instagramAvatarUrl, instagramThumbUrl } from "@/lib/api";
+import { SectionHeader } from "./SectionChrome";
 
 const PAGE_SIZE = 60;
 
@@ -148,14 +149,10 @@ export function Instagram() {
   return (
     <div className="flex flex-col gap-4">
       {/* Header + freshness banner */}
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <div>
-          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Instagram content</h2>
-          <p className="text-xs text-text-secondary">
-            Per-post Silver read over <code className="rounded bg-bg-muted px-1 py-0.5 text-[10px]">insta_data</code> —
-            engagement counts, insights reach/views, media metadata.
-          </p>
-        </div>
+      {/* Which table this reads is a Help question. How STALE it is is
+          not -- that changes whether you trust the numbers, so the
+          freshness badge stays on the title. */}
+      <SectionHeader title="Instagram" helpId="freshness">
         {staleness !== null && (
           <span
             className={
@@ -170,7 +167,7 @@ export function Instagram() {
             {staleness > 3 && " · consider re-flattening"}
           </span>
         )}
-      </div>
+      </SectionHeader>
 
       {/* Profile strip */}
       {summary && summary.profiles.length > 0 && (

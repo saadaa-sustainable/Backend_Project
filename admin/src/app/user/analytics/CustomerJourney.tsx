@@ -8,6 +8,7 @@ import {
   fetchCustomerJourney,
   fetchCustomerJourneyDetail,
 } from "@/lib/api";
+import { SectionHeader } from "./SectionChrome";
 
 const PAGE_SIZE = 50;
 
@@ -168,11 +169,7 @@ export function CustomerJourney() {
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-text-secondary">
-        Ad → order → customer, in one row: which ad (if any) last-click-matched this order, and who the customer
-        is — their RFM group, lifetime orders, and lifetime spend. Click a row for that customer&apos;s full order
-        history and every ad that has touched them.
-      </p>
+      <SectionHeader title="Customer Journey" helpId="first-vs-last" />
 
       {/* RFM tiles */}
       <div className="flex flex-wrap gap-3">

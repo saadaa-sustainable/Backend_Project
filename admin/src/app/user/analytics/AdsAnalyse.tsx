@@ -42,6 +42,7 @@ import { KwikTile } from "./KwikTile";
 import { AdsLaunchChart } from "./AdsLaunchChart";
 import { AdsLaunchDialog } from "./AdsLaunchDialog";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
+import { SectionHeader, FilterRule, FilterCell, FigureBand, VerdictBand, Segmented, filterControlClass, type Verdict } from "./SectionChrome";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
 import { ExportButton } from "@/components/ExportButton";
@@ -181,24 +182,22 @@ const AE = {
   ink: theme.textPrimary,
 };
 
-/** One labelled filter cell: uppercase caption above, control below,
- *  boxed. Matches the legacy layout, where every filter is its own card
- *  rather than a bare select floating in a strip. */
-function FilterCard({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div
-      className="rounded-lg border p-2.5"
-      style={{ backgroundColor: AE.cream, borderColor: AE.border }}
-    >
-      <div
-        className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider"
-        style={{ color: AE.muted }}
-      >
-        {label}
-      </div>
-      {children}
-    </div>
-  );
+/** One labelled filter cell.
+ *
+ *  Was a cream card with its own border, so eleven filters read as
+ *  eleven objects stacked on the page rather than one row of choices --
+ *  and at this width they wrapped into three rows of boxes that pushed
+ *  the table off the first screen. Now a label over an underlined
+ *  control, with the rule under the row as the only structure, which is
+ *  what the surface brief asks for: "filters sit on one rule above the
+ *  table as labelled cells, not floating selects".
+ *
+ *  Kept as a wrapper around the shared FilterCell rather than replaced
+ *  at every call site: there are eleven of them here and several more
+ *  in the rollup branch, and none of their state should move for a
+ *  visual change. */
+function FilterCard({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
+  return <FilterCell label={label} className={className}>{children}</FilterCell>;
 }
 
 function CardSelect({
@@ -214,8 +213,7 @@ function CardSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded-md border bg-white px-3 py-2 text-sm"
-      style={{ borderColor: AE.border, color: AE.ink }}
+      className={`w-full ${filterControlClass}`}
     >
       {children}
     </select>
@@ -381,7 +379,7 @@ function ReachCell({
     );
   }
   return (
-    <span className="num" title={`${what}.\nSnapshot: ${asOfFrom ? `${asOfFrom} \u2192 ${asOf ?? "unknown"}` : asOf ?? "unknown"}`}>
+    <span className="num" title={`${what}.\nSnapshot: ${asOfFrom ? `${asOfFrom} → ${asOf ?? "unknown"}` : asOf ?? "unknown"}`}>
       {fmt(value, { maximumFractionDigits: 0 })}
     </span>
   );
@@ -1923,7 +1921,7 @@ export function AdsAnalyse() {
           setFilters: setRollupNumeric,
           fields: ROLLUP_NUMERIC_FIELDS as { key: string; label: string }[] | undefined,
           note: `Rules apply to the ${rollupRows.length.toLocaleString("en-IN")} rows `
-                + "fetched for this level \u2014 not to the whole table server-side.",
+                + "fetched for this level — not to the whole table server-side.",
         }
   ), [levelToggle, hiddenCols, numericFilters, rollupHidden, rollupNumeric, rollupRows.length]);
 
@@ -2205,12 +2203,12 @@ export function AdsAnalyse() {
           (2026-08-29 declutter) since users already know which tab
           they clicked. The row count on the right replaces it as a
           more useful piece of context. */}
-      <div className="flex items-baseline gap-3">
-        {/* Was "Creative Testing" -- a leftover from the CTD port that
-            became actively wrong once Creative Testing existed as its
-            own tab. */}
-        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Ads Analyse</h2>
-        <div className="inline-flex rounded-md border border-border-primary bg-white shadow-sm">
+      {/* Was "Creative Testing" -- a leftover from the CTD port that
+          became actively wrong once Creative Testing existed as its own
+          tab. The ? opens "Delivery date, ad created, first seen", which
+          is the thing people get wrong on this section. */}
+      <SectionHeader title="Ads Analyse" helpId="date-basis">
+        <div className="inline-flex">
           {(["ad", "adset", "campaign"] as const).map((lv) => (
             <button
               key={lv}
@@ -2221,7 +2219,7 @@ export function AdsAnalyse() {
                   : `${lv} rollup — Meta-deduplicated reach from ${lv}_insights`
               }
               className={
-                "px-3 py-1 text-xs first:rounded-l-md last:rounded-r-md " +
+                "px-3 py-1 text-xs " +
                 (levelToggle === lv
                   ? "bg-text-primary text-white"
                   : "text-text-primary hover:bg-bg-muted")
@@ -2240,7 +2238,7 @@ export function AdsAnalyse() {
               ? "loading…"
               : `${derived.filtered.length.toLocaleString()} of ${total.toLocaleString()} ads`}
         </span>
-      </div>
+      </SectionHeader>
 
 
       {/* Analytics, behind a button. The Ads-launched chart used to sit
@@ -2265,13 +2263,16 @@ export function AdsAnalyse() {
       </div>
 
       {/* ═══════════════════════════════════════════════════════════
-          Filter cards — ACCOUNT / GROUP BY / CATEGORY / AD STATUS /
-          DATE FIELD / DATE RANGE. Six labelled cards on one row, matching
-          the legacy Ads Analyse layout: uppercase label above, control
-          below, each in its own bordered card rather than a loose strip
-          of bare selects.
+          One rule of labelled cells — ACCOUNT / GROUP BY / CATEGORY /
+          AD STATUS / DATE FIELD / DATE RANGE, plus the rollup-only
+          cells further down.
+
+          Was a six-column grid of bordered cards, which at this width
+          wrapped into three rows of boxes and pushed the table past the
+          first screen. A flex row of underlined cells wraps to one more
+          line at worst and reads as a single sentence of choices.
          ═══════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+      <div className="flex flex-wrap items-end gap-x-6 gap-y-3 border-b border-border-primary pb-3">
         <FilterCard label="Account">
           <CardSelect value={account} onChange={setAccount}>
             <option value="">All Accounts</option>
@@ -2606,38 +2607,44 @@ export function AdsAnalyse() {
               matching entity -- deriving them from the 500 loaded rows
               would describe a page while claiming to describe 3,008.
               Clicking filters the table server-side for the same reason. */}
-          {/* Four across, not six: the OK and UNRATED tiles were dropped. */}
-          <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            {DECISION_TILES.map((t) => {
-              const d = decisionCounts[t.key] ?? { count: 0, spend: 0 };
-              const on = decisionFilter === t.key;
-              return (
-                // The (i) is a SIBLING of the button, not a child: the
-                // tile is itself a button, and nesting one inside
-                // another is invalid HTML. As a sibling it also cannot
-                // bubble a click into the filter.
-                <div key={t.key} className="relative">
-                  <button
-                    onClick={() => setDecisionFilter(on ? "" : t.key)}
-                    className={
-                      "w-full rounded-lg border bg-white p-2.5 text-left shadow-sm transition " +
-                      (on ? "ring-2 ring-offset-1 " : "hover:bg-bg-muted ") +
-                      (d.count === 0 ? "opacity-50 " : "")
-                    }
-                    style={on ? { borderColor: t.color, boxShadow: `0 0 0 1px ${t.color}` } : undefined}
-                  >
-                    {/* pr-5 keeps the label clear of the dot above it. */}
-                    <div className="pr-5 text-[10px] font-semibold uppercase tracking-wide"
-                         style={{ color: t.color }}>{t.label}</div>
-                    <div className="num text-lg font-bold">{d.count.toLocaleString("en-IN")}</div>
-                    <div className="text-[10px] text-text-tertiary">₹{money(d.spend)}</div>
-                  </button>
-                  <span className="absolute right-2 top-2">
-                    <InfoDot basis={t.basis} />
-                  </span>
-                </div>
-              );
-            })}
+          {/* Four across, not six: the OK and UNRATED tiles were dropped.
+
+              Flat colour fields spanning the content width, carrying
+              counts -- the surface brief's verdict band, not four
+              rounded cards each with a border AND a shadow. Each field's
+              WIDTH is its share of the ads, so the band is itself the
+              distribution: one mark, one unit. Signal red lands on PAUSE
+              and nowhere else, which is the reservation the palette
+              rests on.
+
+              The (i) basis panels survive; they sit on the field rather
+              than floating over a card corner. */}
+          <div className="relative mb-3">
+            <VerdictBand
+              verdicts={DECISION_TILES.map((t): Verdict => {
+                const d = decisionCounts[t.key] ?? { count: 0, spend: 0 };
+                return {
+                  key: t.key,
+                  label: t.label,
+                  count: d.count,
+                  under: `₹${money(d.spend)}`,
+                  tone:
+                    t.key === "SCALE" ? "scale"
+                      : t.key === "PAUSE" ? "pause"
+                        : t.key === "MONITOR" ? "monitor" : "report",
+                  selected: decisionFilter === t.key,
+                  onSelect: () => setDecisionFilter(decisionFilter === t.key ? "" : t.key),
+                };
+              })}
+            />
+            <div className="mt-1.5 flex flex-wrap gap-x-6 gap-y-1">
+              {DECISION_TILES.map((t) => (
+                <span key={t.key} className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-tertiary">
+                  {t.label}
+                  <InfoDot basis={t.basis} />
+                </span>
+              ))}
+            </div>
           </div>
           <DecisionRules />
           {scalableFor && (
@@ -2867,42 +2874,66 @@ export function AdsAnalyse() {
           the table's own columns and in Creative Testing's Overview. */}
 
       {/* ═══════════════════════════════════════════════════════════
-          7 KPI category tiles — click to filter
-          Rebuilt on top of KwikTile (2026-08-29) to match the
-          kwikengage Marketing Insights KPI-card aesthetic — icon
-          square, uppercase label, big monospaced count, spend sub-line.
+          The verdict band — seven categories, click to filter.
+
+          Was seven KwikTiles: an icon square in a tinted chip, an
+          uppercase label, a count and a spend line, each on its own
+          bordered card with a shadow. The surface brief rules that
+          arrangement out by name ("a row of rounded KPI cards floating
+          on a grey page above a boxed table") and asks for flat colour
+          fields carrying counts, spanning the content width.
+
+          Each field's WIDTH is now its share of the ads, so the band is
+          the distribution: Discarded at 4,162 of 7,333 takes more than
+          half the rule, and Incremental Winner at 46 is the sliver it
+          actually is. That is the one thing the seven equal cards could
+          never show.
+
+          Tone is by meaning, not by category: winners read as success,
+          Discarded as a fired rule, Result Awaited as pending, the
+          analysis buckets as neutral. The (i) basis panels survive
+          beneath, and both count sources are unchanged.
          ═══════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
-        {CATEGORY_ORDER.map((cat) => {
-          // Counts come from the SERVER (`category_counts`), which covers
-          // every matching ad. derived.tileCounts only ever sees the rows
-          // currently paged in, so it showed "P2 analysis 3" against a
-          // real 1,768. The client figure is used only with custom
-          // thresholds, where the server's counts no longer apply.
-          const count = thresholdsChanged
-            ? derived.tileCounts[cat]
-            : (categoryCountsFromApi[cat] ?? 0);
-          // Spend stays page-scoped either way -- the totals payload is
-          // for the whole filter set, not per category -- so it is
-          // labelled as such rather than implying a full-dataset figure.
-          const spend = derived.withCat
-            .filter((rc) => rc.cat === cat)
-            .reduce((acc, rc) => acc + (rc.row.spend ?? 0), 0);
-          const selected = categoryFilter === cat;
-          return (
-            <KwikTile
-              key={cat}
-              icon={<span className="text-base">{CATEGORY_ICON[cat]}</span>}
-              iconColor={CATEGORY_ICON_COLOR[cat]}
-              label={cat}
-              value={count.toLocaleString()}
-              subLine={`₹${money(spend)}`}
-              info={categoryBasis(cat, thresholdsChanged)}
-              active={selected}
-              onClick={() => setCategoryFilter(selected ? "" : cat)}
-            />
-          );
-        })}
+      <div className="flex flex-col gap-1.5">
+        <VerdictBand
+          verdicts={CATEGORY_ORDER.map((cat): Verdict => {
+            // Counts come from the SERVER (`category_counts`), which covers
+            // every matching ad. derived.tileCounts only ever sees the rows
+            // currently paged in, so it showed "P2 analysis 3" against a
+            // real 1,768. The client figure is used only with custom
+            // thresholds, where the server's counts no longer apply.
+            const count = thresholdsChanged
+              ? derived.tileCounts[cat]
+              : (categoryCountsFromApi[cat] ?? 0);
+            // Spend stays page-scoped either way -- the totals payload is
+            // for the whole filter set, not per category -- so it is
+            // labelled as such rather than implying a full-dataset figure.
+            const spend = derived.withCat
+              .filter((rc) => rc.cat === cat)
+              .reduce((acc, rc) => acc + (rc.row.spend ?? 0), 0);
+            const selected = categoryFilter === cat;
+            return {
+              key: cat,
+              label: cat,
+              count,
+              under: `₹${money(spend)}`,
+              tone:
+                cat === "Incremental Winner" || cat === "Winner" ? "scale"
+                  : cat === "Discarded" ? "pause"
+                    : cat === "Result Awaited" ? "monitor" : "report",
+              selected,
+              onSelect: () => setCategoryFilter(selected ? "" : cat),
+            };
+          })}
+        />
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {CATEGORY_ORDER.map((cat) => (
+            <span key={cat} className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-text-tertiary">
+              {cat}
+              <InfoDot basis={categoryBasis(cat, thresholdsChanged)} />
+            </span>
+          ))}
+        </div>
       </div>
 
       {/* Ads launched per day, in the dialog the Analytics button opens.

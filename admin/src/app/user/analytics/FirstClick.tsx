@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from "react";
 import { DateRangePicker } from "@/components/DateRangePicker";
 import { ApiError, FirstClickRow, fetchFirstClick } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
+import { SectionHeader } from "./SectionChrome";
 
 /** What the journey's two ends are keyed on.
  *
@@ -112,16 +113,13 @@ export function FirstClick() {
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-sm text-text-secondary">
-        Both ends of each order&rsquo;s journey, from GA4, at <strong>full credit on each end</strong>.
-        An order worth &#8377;100 that one ad opened and another closed counts &#8377;100 under the
-        opener&rsquo;s first-click revenue <em>and</em> &#8377;100 under the closer&rsquo;s last-click
-        revenue &mdash; it is not split. Read a column down the page, never a row across. An ad whose
-        first-click revenue runs well ahead of its last-click revenue is doing work the Last Click UTM
-        section bills to someone else.
-      </p>
+      {/* "Full credit on each end, never split -- read a column, not a
+          row" is the rule this whole section rests on. It is in Help as
+          "first-vs-last", behind the ? -- a rule you learn once, not a
+          paragraph above the controls every day. */}
+      <SectionHeader title="First Click" helpId="first-vs-last" />
 
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white shadow-sm p-3">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border-primary pb-3">
         <DateRangePicker
           value={{ from: fromDate, to: toDate }}
           preset={datePreset}

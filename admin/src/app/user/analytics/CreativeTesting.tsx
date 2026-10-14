@@ -55,6 +55,7 @@ import { theme } from "@/lib/theme";
 import { IconGraphic, IconInfluencer, IconVideo } from "./Icons";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
+import { SectionHeader } from "./SectionChrome";
 
 /** CTD's cream/gold palette. Scoped here rather than pushed into the
  *  app's design tokens, which are blue-based for every other tab. */
@@ -143,7 +144,7 @@ function MarkCell({ mark, note }: { mark: Mark; note?: string }) {
       ? { bg: "#E7EDE2", fg: "#2F6B3A", border: "#E7EDE2", glyph: "\u2713" }
       : mark === "either"
         ? { bg: "#F4EBD8", fg: "#8E6608", border: theme.warningBg, glyph: "~" }
-        : { bg: "transparent", fg: "#716D64", border: "transparent", glyph: "\u2014" };
+        : { bg: "transparent", fg: "#716D64", border: "transparent", glyph: "—" };
   return (
     <div className="flex flex-col items-center gap-0.5">
       <span
@@ -860,27 +861,21 @@ export function CreativeTesting() {
   return (
     <div className="space-y-3" style={{ backgroundColor: CT.cream }}>
       {/* ── page header ───────────────────────────────────────── */}
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Creative Testing</h2>
-          <p className="text-xs" style={{ color: CT.muted }}>
-            uniquely tested assets · powered by ad_asset_map (asset grain, not ad grain)
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+      {/* The standing subtitle ("uniquely tested assets · powered by
+          ad_asset_map") said where the data comes from, which is a Help
+          question, not a thing to re-read daily. The ? leads there. */}
+      <SectionHeader title="Creative Testing" helpId="verdicts">
           <button
             onClick={() => setDefsOpen(true)}
-            className="rounded-md border bg-white px-3 py-2 text-sm"
-            style={{ borderColor: CT.border, color: CT.ink }}
+            className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary"
           >
-            ⓘ Definitions
+            Definitions
           </button>
           <ExportButton
             rows={allRows as unknown as Record<string, unknown>[]}
             filename={`creative-testing-${fromDate}-to-${toDate}`}
           />
-        </div>
-      </div>
+      </SectionHeader>
 
       {/* ── filters ───────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
@@ -1034,7 +1029,7 @@ export function CreativeTesting() {
           {(
             [
               ["historical_discarded", "Historical Discarded", histCount,
-               `Retested, and across ALL its ads it has still never reached ${IMPRESSION_FLOOR.toLocaleString("en-IN")} impressions in its lifetime \u2014 not just in this window. Put back in the air again and again and never cleared the bare minimum.`],
+               `Retested, and across ALL its ads it has still never reached ${IMPRESSION_FLOOR.toLocaleString("en-IN")} impressions in its lifetime — not just in this window. Put back in the air again and again and never cleared the bare minimum.`],
               // Labelled "Retested", not "Refresh Discarded". These
               // creatives were NOT discarded -- they cleared the
               // impression floor, which is what makes their numbers

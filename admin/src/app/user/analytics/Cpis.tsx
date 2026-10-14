@@ -20,6 +20,8 @@ import { SpendVsOrdersChart } from "./charts/SpendVsOrdersChart";
 import { KwikTile } from "./KwikTile";
 import { TableSkeleton } from "./TableSkeleton";
 import { DateRangePicker } from "@/components/DateRangePicker";
+import { SectionHeader, FilterRule, FilterCell, FieldLabel, Segmented, FigureBand, filterControlClass } from "./SectionChrome";
+import { MarkChevron } from "./Pictograms";
 import { ExportButton } from "@/components/ExportButton";
 
 // Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
@@ -527,167 +529,161 @@ function CpisView() {
 
   return (
     <>
-      <p className="text-sm text-text-secondary">
-        Cost per master SKU (women=SD, men=SM, unisex=SU prefix), with ads matched by <strong>SKU code appearing in ad_name</strong>
-        (word-boundary regex on <code className="font-mono text-xs">ad_lifecycle.ad_name</code>). Product identity, price,
-        variants, and inventory come from the live Shopify catalog. UTM-based per-order attribution is reserved for the
-        per-color-variant drill-down (coming soon) and is intentionally not shown here.
-      </p>
-
-      {/* Filter bar, ABOVE the KPI strip. It used to sit inside the
-          Analytics table section, which put the controls BELOW the
-          numbers they govern -- collapse that section and the date
-          range driving every KPI went with it. It governs the whole
-          page, so it leads the page. */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-3">
-        {/* The shared DateRangePicker, the same control Ads Analyse
-            uses, so one vocabulary of presets covers both sections.
-            Replaces a preset <select> plus two bare date inputs.
-
-            The three presets that have a pre-computed rollup set
-            `window_` and CLEAR the dates: those read cpis_by_sku_utm,
-            which sums spend over the WHOLE period, as the CPIS spec
-            asks. Every other preset hands over explicit dates and goes
-            through cpis_by_sku_daily, which matches spend to orders day
-            by day -- the one deviation from the spec still on the page,
-            and now confined to the presets that have no alternative. */}
-        <DateRangePicker
-          value={{ from: fromDate, to: toDate }}
-          preset={datePreset}
-          anchor={freshness?.max_daily_day ?? freshness?.max_meta_day ?? null}
-          align="left"
-          onApply={(r, pk) => {
-            datesTouchedRef.current = true;
-            setDatePreset(pk);
-            const rollup: Record<string, CpisUtmWindow> = {
-              last7: "7d", last30: "30d", last90: "90d",
-            };
-            if (rollup[pk]) {
-              setWindow_(rollup[pk]);
-              setFromDate("");
-              setToDate("");
-            } else {
-              setFromDate(r.from);
-              setToDate(r.to);
-            }
-          }}
-        />
-        {fromDate && toDate && (
-          <span
-            className="rounded-full bg-info-bg px-2 py-0.5 text-[10px] font-semibold text-info-text"
-            title="Daily-sum path (cpis_by_sku_daily) for this exact date range"
-          >
-            windowed
-          </span>
-        )}
-        {freshness && (
-          <span
-            className="rounded-full bg-success-bg px-2 py-0.5 text-[10px] font-semibold text-success-text"
-            title={
-              `Meta insights through ${freshness.max_meta_day ?? "-"}` +
-              ` · Shopify orders through ${freshness.max_orders_day ?? "-"}` +
-              ` · cpis_by_sku_daily through ${freshness.max_daily_day ?? "-"}`
-            }
-          >
-            Data through {freshness.max_daily_day ?? freshness.max_meta_day ?? "?"}
-          </span>
-        )}
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search master SKU…"
-          className="w-48 rounded-md border border-border-primary bg-white px-3 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent-yellow focus:outline-none"
-        />
-        <label
-          className="flex items-center gap-1.5 text-[13px] text-text-primary"
-          title="Off by default: every SKU you actually sell is listed, and one no ad drove simply shows zero spend and zero attributed orders. Tick this to narrow to SKUs with at least one attributed order in the window."
-        >
-          <input type="checkbox" checked={onlyMatched} onChange={(e) => setOnlyMatched(e.target.checked)} />
-          Only SKUs with attributed orders
-        </label>
-        <label
-          className="flex items-center gap-1.5 text-[13px] text-text-primary"
-          title="Archived SKUs: zero stock, no active listing, and nothing sold in the last 30 days. Around 11 of the 97 master SKUs. Hidden by default because they are dead rows, not gaps."
-        >
-          <input type="checkbox" checked={includeArchived} onChange={(e) => setIncludeArchived(e.target.checked)} />
-          Include archived
-        </label>
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as CpisUtmSort)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-[13px] text-text-primary focus:border-accent-yellow focus:outline-none"
-        >
-          {UTM_SORT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              Sort: {o.label}
-            </option>
-          ))}
-        </select>
-        {/* Attribution-mode toggle. Both columns come from the same
-            response -- the toggle just swaps which set of 4 cells the
-            Last-Click group renders. No refetch. See refresh_cpis_utm.py. */}
-        <div className="flex overflow-hidden rounded-md border border-border-primary">
-          {(["equal", "value_weighted"] as const).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setAttributionMode(mode)}
-              title={
-                mode === "equal"
-                  ? "Ad spend split equally across all orders the ad drove, then within each order by line-item revenue"
-                  : "Ad spend split proportional to each order's total value — larger baskets absorb more spend"
-              }
-              className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
-                attributionMode === mode
-                  ? "bg-text-primary text-white"
-                  : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
-              }`}
-            >
-              {mode === "equal" ? "Equal / order" : "Value-weighted"}
-            </button>
-          ))}
+      {/* The paragraph that stood here -- the SKU-prefix key, the
+          word-boundary regex, the note about UTM attribution being
+          reserved for the colour drill-down -- moved to Help, article
+          "cpis-match", reachable from the ? on this title. It was four
+          lines of standing text above the controls, read once. */}
+      <SectionHeader title="CPIS" helpId="cpis-match">
+        {/* Attribution mode and spend source are not filters: neither
+            refetches, both swap which cells the response's own columns
+            render into. They belong beside the title, with the view. */}
+        <div className="flex items-center gap-1.5">
+          <FieldLabel className="!inline">Spend</FieldLabel>
+          <Segmented
+            options={[
+              { value: "ad_name", label: "Ads that name it",
+                title: "Money spent on ads that have this product's code in their name.\n\n"
+                  + "We look at the ad's name, not at what it sold. So an ad that sold this "
+                  + "product without naming it counts as nothing here, and an ad naming two "
+                  + "products is counted in full for both.\n\n"
+                  + "Because of that, DO NOT ADD THESE UP — the total would be more than "
+                  + "you actually spent. Use this to look at one product's own ads." },
+              { value: "utm_id", label: "Its share of spend",
+                title: "This product's slice of the money behind the orders it sold in.\n\n"
+                  + "Say an ad cost ₹1,000 and led to 10 orders. That is ₹100 per "
+                  + "order. If one of those orders came to ₹600 and this product was "
+                  + "₹300 of it — half — then this product takes ₹50.\n\n"
+                  + "Every rupee is counted once, so these DO ADD UP to your real Meta spend. "
+                  + "Use this to decide how to split the budget." },
+            ]}
+            value={spendMatchMode}
+            onChange={(v) => setSpendMatchMode(v as typeof spendMatchMode)}
+          />
         </div>
-        {/* Spend-source toggle (2026-09-02). Swaps the "Spend" + "NCP" +
-            "ROAS" columns between name-matched (strict, ad_name regex)
-            and utm-matched (broad, ad_id from Shopify order utm_content).
-            Both values come from the same response -- no refetch. */}
-        <div className="flex overflow-hidden rounded-md border border-border-primary">
-          {(["ad_name", "utm_id"] as const).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setSpendMatchMode(mode)}
-              title={
-                mode === "ad_name"
-                  ? "Money spent on ads that have this product's code in their name.\n\n"
-                    + "We look at the ad's name, not at what it sold. So an ad that sold this "
-                    + "product without naming it counts as nothing here, and an ad naming two "
-                    + "products is counted in full for both.\n\n"
-                    + "Because of that, DO NOT ADD THESE UP \u2014 the total would be more than "
-                    + "you actually spent. Use this to look at one product's own ads."
-                  : "This product's slice of the money behind the orders it sold in.\n\n"
-                    + "Say an ad cost \u20b91,000 and led to 10 orders. That is \u20b9100 per "
-                    + "order. If one of those orders came to \u20b9600 and this product was "
-                    + "\u20b9300 of it \u2014 half \u2014 then this product takes \u20b950.\n\n"
-                    + "Every rupee is counted once, so these DO ADD UP to your real Meta spend. "
-                    + "Use this to decide how to split the budget."
-              }
-              className={`px-3 py-1.5 text-[12px] font-medium transition-colors ${
-                spendMatchMode === mode
-                  ? "bg-text-primary text-white"
-                  : "bg-white text-text-secondary hover:bg-bg-surface hover:text-text-primary"
-              }`}
-            >
-              {mode === "ad_name" ? "Ads that name it" : "Its share of spend"}
-            </button>
-          ))}
+        <div className="flex items-center gap-1.5">
+          <FieldLabel className="!inline">Split</FieldLabel>
+          <Segmented
+            options={[
+              { value: "equal", label: "Equal / order",
+                title: "Ad spend split equally across all orders the ad drove, then within each order by line-item revenue" },
+              { value: "value_weighted", label: "Value-weighted",
+                title: "Ad spend split proportional to each order's total value — larger baskets absorb more spend" },
+            ]}
+            value={attributionMode}
+            onChange={(v) => setAttributionMode(v as typeof attributionMode)}
+          />
         </div>
-        <span className="ml-auto text-[11px] text-text-secondary">{total.toLocaleString()} SKUs</span>
-        <ExportButton
-          rows={rows as unknown as Record<string, unknown>[]}
-          filename="cpis"
-          window={fromDate && toDate ? `${fromDate}_${toDate}` : window_}
-          disabled={loading || showingPreviousResults || search !== debouncedSearch || !hasCurrentRange || !rows.length}
-        />
-      </div>
+      </SectionHeader>
+
+      {/* One rule of labelled cells. Was a bordered box of eleven
+          controls in four shapes -- a picker, two badges, a text input,
+          two checkboxes, a select and two segmented pairs -- which
+          wrapped to two rows at this width. The two segmented pairs
+          moved to the title (they reframe, they do not filter), the two
+          badges became the date cell's own caption and basis line, and
+          the checkboxes moved behind More filters, which is where
+          options that are off by default belong. */}
+      <FilterRule
+        extraCount={(onlyMatched ? 1 : 0) + (includeArchived ? 1 : 0)}
+        extra={
+          <>
+            <label
+              className="flex items-center gap-2 text-[13px] text-text-primary"
+              title="Off by default: every SKU you actually sell is listed, and one no ad drove simply shows zero spend and zero attributed orders. Tick this to narrow to SKUs with at least one attributed order in the window."
+            >
+              <input type="checkbox" checked={onlyMatched} onChange={(e) => setOnlyMatched(e.target.checked)} />
+              Only SKUs with attributed orders
+            </label>
+            <label
+              className="flex items-center gap-2 text-[13px] text-text-primary"
+              title="Archived SKUs: zero stock, no active listing, and nothing sold in the last 30 days. Around 11 of the 97 master SKUs. Hidden by default because they are dead rows, not gaps."
+            >
+              <input type="checkbox" checked={includeArchived} onChange={(e) => setIncludeArchived(e.target.checked)} />
+              Include archived
+            </label>
+          </>
+        }
+        actions={
+          <>
+            <span className="text-[11.5px] text-text-tertiary tabular-nums">{total.toLocaleString()} SKUs</span>
+            <ExportButton
+              rows={rows as unknown as Record<string, unknown>[]}
+              filename="cpis"
+              window={fromDate && toDate ? `${fromDate}_${toDate}` : window_}
+              disabled={loading || showingPreviousResults || search !== debouncedSearch || !hasCurrentRange || !rows.length}
+            />
+          </>
+        }
+      >
+        <FilterCell label="Date range">
+          {/* The three presets that have a pre-computed rollup set
+              `window_` and CLEAR the dates: those read cpis_by_sku_utm,
+              which sums spend over the WHOLE period, as the CPIS spec
+              asks. Every other preset hands over explicit dates and goes
+              through cpis_by_sku_daily, which matches spend to orders day
+              by day -- the one deviation from the spec still on the page,
+              and now confined to the presets that have no alternative. */}
+          <DateRangePicker
+            value={{ from: fromDate, to: toDate }}
+            preset={datePreset}
+            anchor={freshness?.max_daily_day ?? freshness?.max_meta_day ?? null}
+            align="left"
+            onApply={(r, pk) => {
+              datesTouchedRef.current = true;
+              setDatePreset(pk);
+              const rollup: Record<string, CpisUtmWindow> = {
+                last7: "7d", last30: "30d", last90: "90d",
+              };
+              if (rollup[pk]) {
+                setWindow_(rollup[pk]);
+                setFromDate("");
+                setToDate("");
+              } else {
+                setFromDate(r.from);
+                setToDate(r.to);
+              }
+            }}
+          />
+          {/* The two badges that floated beside the picker say things
+              about the window, so they are the window's own caption. */}
+          {freshness && (
+            <span className="mt-1 text-[11px] text-text-tertiary tabular-nums"
+              title={
+                `Meta insights through ${freshness.max_meta_day ?? "-"}` +
+                ` · Shopify orders through ${freshness.max_orders_day ?? "-"}` +
+                ` · cpis_by_sku_daily through ${freshness.max_daily_day ?? "-"}`
+              }
+            >
+              data through {freshness.max_daily_day ?? freshness.max_meta_day ?? "?"}
+              {fromDate && toDate ? " · day-by-day" : ""}
+            </span>
+          )}
+        </FilterCell>
+
+        <FilterCell label="Master SKU" className="w-48" htmlFor="cpis-sku-search">
+          <input
+            id="cpis-sku-search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search…"
+            className={filterControlClass}
+          />
+        </FilterCell>
+
+        <FilterCell label="Sort by" className="w-52" htmlFor="cpis-sort">
+          <select
+            id="cpis-sort"
+            value={sort}
+            onChange={(e) => setSort(e.target.value as CpisUtmSort)}
+            className={filterControlClass}
+          >
+            {UTM_SORT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </FilterCell>
+      </FilterRule>
 
       {/* Collapsible KPI strip. */}
       <CollapsibleSection
@@ -907,7 +903,7 @@ function CpisView() {
                   <th
                     className="px-3 py-3 text-right"
                     title={"Money spent on ads with this product's code in their name, over the "
-                      + "dates you picked. Do not add this column up \u2014 an ad naming two "
+                      + "dates you picked. Do not add this column up — an ad naming two "
                       + "products is counted for both."}
                   >
                     Spend (named ads)
@@ -954,10 +950,10 @@ function CpisView() {
                   </span>
                 </th>
                 <th className="px-3 py-3 text-right" title="Orders whose last-click UTM content maps to an ad and contain this SKU.">Orders</th>
-                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of those orders, counted once per order. Equals LC Revenue + Halo Rev exactly \u2014 this SKU's lines plus everything else in the same baskets.">Order Value</th>
+                <th className="px-3 py-3 text-right" title="Order-level sales: the FULL value of those orders, counted once per order. Equals LC Revenue + Halo Rev exactly — this SKU's lines plus everything else in the same baskets.">Order Value</th>
                 <th className="px-3 py-3 text-right" title="Total units in those orders, every SKU counted. The unit-count twin of Order Sales, and equal to LC Units + Halo Units.">Total Items</th>
-                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in \u2014 Order Sales \u00f7 LC Orders.">Avg Order Value</th>
-                <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Orders. What one ORDER cost to win. Runs above Cost/Unit by the Qty/Order factor.">
+                <th className="px-3 py-3 text-right" title="Average value of the FULL orders this SKU appeared in — Order Sales ÷ LC Orders.">Avg Order Value</th>
+                <th className="px-3 py-3 text-right" title="Ad spend ÷ LC Orders. What one ORDER cost to win. Runs above Cost/Unit by the Qty/Order factor.">
                   Cost / Order
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
@@ -965,30 +961,30 @@ function CpisView() {
                 </th>
                 <th className="border-l border-border-soft px-3 py-3 text-right" title="Units of THIS SKU sold in those orders. An order holding 3 counts as 3.">Units Sold</th>
                 <th className="px-3 py-3 text-right" title="Sales value of THIS SKU's units only. The rest of the basket is Halo Rev.">Product Sales</th>
-                <th className="px-3 py-3 text-right" title="Average selling price net \u2014 LC Revenue \u00f7 LC Units.">Avg Price</th>
+                <th className="px-3 py-3 text-right" title="Average selling price net — LC Revenue ÷ LC Units.">Avg Price</th>
                 <th className="px-3 py-3 text-right" title="Average units of THIS SKU per order. What separates Cost/Order from Cost/Unit.">Units / Order</th>
-                <th className="px-3 py-3 text-right" title="Ad spend \u00f7 LC Units \u2014 what one UNIT cost to sell. Compare against ASP Net and Break-even CPIS.">
+                <th className="px-3 py-3 text-right" title="Ad spend ÷ LC Units — what one UNIT cost to sell. Compare against ASP Net and Break-even CPIS.">
                   Cost / Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend \u00f7 this SKU's sales, as a percentage. The inverse of LC ROAS. Profitable while under the break-even ACoS (unit profit \u00f7 price).">
+                <th className="px-3 py-3 text-right" title="ACoS: allocated ad spend ÷ this SKU's sales, as a percentage. The inverse of LC ROAS. Profitable while under the break-even ACoS (unit profit ÷ price).">
                   Ad Cost %
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="LC Revenue \u00f7 allocated ad spend.">
+                <th className="px-3 py-3 text-right" title="LC Revenue ÷ allocated ad spend.">
                   Return on Spend
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
                   </span>
                 </th>
-                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising \u2014 the most ad spend a unit can carry before it loses money. A property of the product, so it does not change with the attribution mode.">
+                <th className="px-3 py-3 text-right" title="Break-even CPIS: what one unit earns after every cost EXCEPT advertising — the most ad spend a unit can carry before it loses money. A property of the product, so it does not change with the attribution mode.">
                   Break-even Cost
                 </th>
-                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS \u2212 LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money.">
+                <th className="px-3 py-3 text-right" title="Headroom = Break-even CPIS − LC Cost/Unit. Profit left on each unit after paying for the ad that sold it. NEGATIVE means every unit sold loses money.">
                   Profit / Unit
                   <span className="ml-1 text-[10px] text-text-tertiary">
                     ({attributionMode === "equal" ? "eq" : "vw"})
@@ -1454,20 +1450,27 @@ function CollapsibleSection({
   onToggle: () => void;
   children: React.ReactNode;
 }) {
+  /* Rules, never boxes. This was a rounded card carrying both a border
+     and a shadow, which the surface brief rules out, and nesting the
+     table inside it put a second frame around something already framed
+     by the page. The fold survives -- it is useful -- as a rule with the
+     title sitting on it and a drawn chevron, not a typed one. */
   return (
-    <div className="rounded-lg border border-border-primary bg-white shadow-sm">
+    <div className="flex flex-col">
       <button
         onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-bg-surface"
+        className="group flex w-full items-center justify-between gap-3 border-b border-border-primary py-2 text-left"
         aria-expanded={open}
       >
-        <div className="flex flex-col">
+        <div className="flex items-baseline gap-3">
           <span className="text-[13px] font-semibold text-text-primary">{title}</span>
-          {subtitle && <span className="text-[11px] text-text-secondary">{subtitle}</span>}
+          {subtitle && <span className="text-[11.5px] text-text-tertiary">{subtitle}</span>}
         </div>
-        <span className={`text-[13px] text-text-secondary transition-transform ${open ? "rotate-180" : ""}`}>▼</span>
+        <span className={`text-text-tertiary transition-transform group-hover:text-text-primary ${open ? "" : "-rotate-90"}`}>
+          <MarkChevron />
+        </span>
       </button>
-      {open && <div className="border-t border-border-soft p-3">{children}</div>}
+      {open && <div className="pt-3">{children}</div>}
     </div>
   );
 }
@@ -1843,58 +1846,51 @@ function CpisKpiStrip({
     return lines.join("\n");
   })();
 
+  /* Five emoji in rounded colour chips, each on its own bordered card.
+     The chips carried no information -- purple for orders, teal for
+     stock -- and the brief reserves colour for data and for a fired
+     rule. The figures themselves are unchanged, basis lines included;
+     only the boxes and the emoji are gone. "Drawn pictograms, never
+     glyphs or emoji" is the brief's wording. */
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-      <KwikTile
-        icon={<span>✦</span>}
-        iconColor="purple"
-        label={isFractional ? "Attributed orders" : "Name matches"}
-        value={fmtNumCompact(totalCount)}
-        subLine={isFractional ? "orders driven (LC UTM)" : "ads × SKU pairs"}
-      />
-      <KwikTile
-        icon={<span>₹</span>}
-        iconColor="amber"
-        label={isFractional ? "Total ad spend" : "Named-ad spend"}
-        value={fmtINRCompact(totalSpend)}
-        subLine={
-          isFractional
-            ? attributedSpend !== null && attrRate !== null
-              ? `${fmtINRCompact(attributedSpend)} tied to an order (${attrRate.toFixed(0)}%)`
-                + (dayMatched ? " \u00b7 same-day matching" : "")
-              : windowLabel
-            : `${rows.length} loaded rows \u2014 does not add up`
-        }
-        info={isFractional ? untetheredInfo : undefined}
-      />
-      <KwikTile
-        icon={<span>🛒</span>}
-        iconColor="emerald"
-        label="NCP"
-        value={fmtNumCompact(totalNcp)}
-        subLine={windowLabel}
-      />
-      <KwikTile
-        icon={<span>💸</span>}
-        iconColor={blendedCostPerNcp !== null && blendedCostPerNcp <= 500 ? "emerald" : "rose"}
-        label="Cost / NCP (blended)"
-        value={blendedCostPerNcp !== null ? fmtINRCompact(blendedCostPerNcp) : "—"}
-        subLine={windowLabel}
-      />
-      <KwikTile
-        icon={<span>📦</span>}
-        iconColor="teal"
-        label="Units in stock"
-        value={fmtNumCompact(totalStock)}
-        /* Stock is only ever as fresh as the last Shopify products
-           ingest (daily cron). Showing the as-of stamp stops a stale
-           ingest from reading as a real stock movement. */
-        subLine={
-          inventoryAsOf
+    <FigureBand
+      figures={[
+        {
+          label: isFractional ? "Attributed orders" : "Name matches",
+          value: fmtNumCompact(totalCount),
+          basis: isFractional ? "orders driven (LC UTM)" : "ads × SKU pairs",
+        },
+        {
+          label: isFractional ? "Total ad spend" : "Named-ad spend",
+          value: fmtINRCompact(totalSpend),
+          basis: (
+            <span title={isFractional ? untetheredInfo : undefined}>
+              {isFractional
+                ? attributedSpend !== null && attrRate !== null
+                  ? `${fmtINRCompact(attributedSpend)} tied to an order (${attrRate.toFixed(0)}%)`
+                    + (dayMatched ? " · same-day matching" : "")
+                  : windowLabel
+                : `${rows.length} loaded rows — does not add up`}
+            </span>
+          ),
+        },
+        { label: "NCP", value: fmtNumCompact(totalNcp), basis: windowLabel },
+        {
+          label: "Cost / NCP (blended)",
+          value: blendedCostPerNcp !== null ? fmtINRCompact(blendedCostPerNcp) : "—",
+          basis: windowLabel,
+        },
+        {
+          label: "Units in stock",
+          value: fmtNumCompact(totalStock),
+          /* Stock is only ever as fresh as the last Shopify products
+             ingest (daily cron). Showing the as-of stamp stops a stale
+             ingest from reading as a real stock movement. */
+          basis: inventoryAsOf
             ? `${totalAvailable}/${totalVariants} variants · as of ${inventoryAsOf}`
-            : `${totalAvailable}/${totalVariants} variants available`
-        }
-      />
-    </div>
+            : `${totalAvailable}/${totalVariants} variants available`,
+        },
+      ]}
+    />
   );
 }

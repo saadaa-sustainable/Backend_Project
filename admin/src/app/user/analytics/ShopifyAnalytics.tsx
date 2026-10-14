@@ -51,6 +51,7 @@ import {
   fetchShopifyAnalytics,
 } from "@/lib/api";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
+import { SectionHeader, FigureBand } from "./SectionChrome";
 import { StatTile } from "./StatTile";
 import { BarChart } from "./charts/BarChart";
 import { ExportButton } from "@/components/ExportButton";
@@ -147,17 +148,12 @@ export function ShopifyAnalytics() {
   return (
     <div className="flex flex-col gap-3">
       {/* header */}
-      <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Shopify Analytics</h2>
-          <p className="text-xs text-text-secondary">
-            Customer acquisition by day, from the mirrored ShopifyQL <code>sales</code> dataset
-            {data && data.excluded_channels.length > 0 && (
-              <> · excluding <b>{data.excluded_channels.join(", ")}</b></>
-            )}
-          </p>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+      {/* Where the dataset comes from is a Help question. What is
+          EXCLUDED is not -- it changes the numbers on screen, so it
+          stays, as a caption on the figures rather than a sentence
+          under the title. */}
+      <SectionHeader title="Shopify Analytics" helpId="freshness">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-xs" title="Return Prime rows are refunds; including them makes a day read negative.">
             <input
               type="checkbox"
@@ -192,7 +188,7 @@ export function ShopifyAnalytics() {
             disabled={loading || !data?.rows.length}
           />
         </div>
-      </div>
+      </SectionHeader>
 
       {error && (
         <div className="rounded-md border border-error-mid bg-error-bg p-2 text-sm text-error-text">{error}</div>
@@ -230,82 +226,52 @@ export function ShopifyAnalytics() {
                 style={{ backgroundColor: theme.warningBg, borderColor: theme.warningMid,
                          color: theme.warningText }}
               >
-                <b>Partial window.</b> {notes.join(" \u00b7 ")}. Every per-day figure below is
+                <b>Partial window.</b> {notes.join(" · ")}. Every per-day figure below is
                 Shopify&rsquo;s own; only the Customers and Returning customers totals are
                 computed here, and they understate the window by roughly the shortfall.
               </div>
             );
           })()}
-          {/* KPI tiles -- each carries its change vs the same window 364
-              days back, which is what PERCENT_CHANGE + COMPARE TO does
-              in the original report. */}
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            <StatTile
-              label="Total sales" color={theme.successMid}
-              value={rs(t.total_sales)}
-              sub={<Delta now={t.total_sales} before={p.total_sales} />}
-              title="Sum of total_sales. Excludes tax and shipping, which is why it is below the order table's total_price."
-            />
-            <StatTile
-              label="Orders" color={theme.infoMid}
-              value={num(t.orders)}
-              sub={<Delta now={t.orders} before={p.orders} />}
-            />
-            <StatTile
-              label="Customers" color={theme.accentIndigo}
-              value={num(t.customers)}
-              sub={
-                (t.customers_coverage_pct ?? 100) < COVERAGE_OK ? (
-                  <span style={{ color: theme.warningText }}>
-                    {pct(t.customers_coverage_pct, 0)} of orders known
-                  </span>
-                ) : (
-                  <Delta now={t.customers} before={p.customers} />
-                )
-              }
-              title="Distinct buyers over the whole window -- a repeat shopper counts once, so this is NOT the sum of the daily figures (which would give ~38,200 for a window holding ~36,100). The per-day figures in the table are Shopify's own; this total is de-duplicated across the window from our order mirror."
-            />
-            <StatTile
-              label="Avg order value" color={theme.accentPurple}
-              value={rs(t.average_order_value)}
-              sub={<Delta now={t.average_order_value} before={p.average_order_value} />}
-              title="Shopify's own average_order_value: the mean of the per-ORDER values, not total sales / orders. The two differ because some rows carry sales without carrying an order. The window figure weights each day's mean by the orders behind it."
-            />
-            <StatTile
-              label="Net items sold" color={theme.warningMid}
-              value={num(t.units)}
-              sub={`${dec(t.units_per_order)} per order \u00b7 ${num(t.units_gross)} gross`}
-              title="net_items_sold -- NET of returns, as the report asks for. The gross figure beside it is quantity_ordered, which is what the ad-side metrics divide by."
-            />
-          </div>
+          {/* Nine figures over two bands. Each carries its change vs the
+              same window 364 days back, which is what PERCENT_CHANGE +
+              COMPARE TO does in the original report.
+
+              Was nine bordered tiles, each with a coloured rule along
+              its edge -- green for sales, indigo for customers, pink for
+              returning rate. Those hues were decoration: the palette
+              reserves colour for data and for a fired rule, and a tile's
+              edge is neither. The titles survive as hover basis, which
+              is where they already were. */}
+          <FigureBand
+            figures={[
+              { label: "Total sales", value: <span title="Sum of total_sales. Excludes tax and shipping, which is why it is below the order table's total_price.">{rs(t.total_sales)}</span>,
+                basis: <Delta now={t.total_sales} before={p.total_sales} /> },
+              { label: "Orders", value: num(t.orders),
+                basis: <Delta now={t.orders} before={p.orders} /> },
+              { label: "Customers", value: <span title="Distinct buyers over the whole window -- a repeat shopper counts once, so this is NOT the sum of the daily figures (which would give ~38,200 for a window holding ~36,100). The per-day figures in the table are Shopify's own; this total is de-duplicated across the window from our order mirror.">{num(t.customers)}</span>,
+                basis: (t.customers_coverage_pct ?? 100) < COVERAGE_OK
+                  ? <span style={{ color: theme.warningText }}>{pct(t.customers_coverage_pct, 0)} of orders known</span>
+                  : <Delta now={t.customers} before={p.customers} /> },
+              { label: "Avg order value", value: <span title="Shopify's own average_order_value: the mean of the per-ORDER values, not total sales / orders. The two differ because some rows carry sales without carrying an order. The window figure weights each day's mean by the orders behind it.">{rs(t.average_order_value)}</span>,
+                basis: <Delta now={t.average_order_value} before={p.average_order_value} /> },
+              { label: "Net items sold", value: <span title="net_items_sold -- NET of returns, as the report asks for. The gross figure beside it is quantity_ordered, which is what the ad-side metrics divide by.">{num(t.units)}</span>,
+                basis: `${dec(t.units_per_order)} per order · ${num(t.units_gross)} gross` },
+            ]}
+          />
 
           {/* acquisition split */}
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <StatTile
-              label="New customers" color={theme.successMid}
-              value={num(t.new_customers)}
-              sub={rs(t.total_sales_first_time)}
-              title="First-time buyers, and the revenue from them. Safe to sum across days: a shopper is new exactly once, ever, so no day can double-count them."
-            />
-            <StatTile
-              label="Returning customers" color={theme.infoMid}
-              value={num(t.returning_customers)}
-              sub={rs(t.total_sales_returning)}
-              title="Distinct returning buyers, and the revenue from them. Like Customers, this total is de-duplicated across the window rather than summed from the days."
-            />
-            <StatTile
-              label="Returning rate" color={theme.accentPink}
-              value={pct(t.returning_customer_rate)}
-              sub={<Delta now={t.returning_customer_rate} before={p.returning_customer_rate} />}
-              title="Shopify's definition: returning customers / all customers. A share of BUYERS, not of orders."
-            />
-            <StatTile
-              label="Discounts" color={theme.errorMid}
-              value={rs(Math.abs(t.discounts))}
-              sub={`gross ${rs(t.gross_sales)}`}
-              title="Discounts are stored negative; shown as a positive cost here."
-            />
-          </div>
+          <FigureBand
+            figures={[
+              { label: "New customers", value: <span title="First-time buyers, and the revenue from them. Safe to sum across days: a shopper is new exactly once, ever, so no day can double-count them.">{num(t.new_customers)}</span>,
+                basis: rs(t.total_sales_first_time) },
+              { label: "Returning customers", value: <span title="Distinct returning buyers, and the revenue from them. Like Customers, this total is de-duplicated across the window rather than summed from the days.">{num(t.returning_customers)}</span>,
+                basis: rs(t.total_sales_returning) },
+              { label: "Returning rate", value: <span title="Shopify's definition: returning customers / all customers. A share of BUYERS, not of orders.">{pct(t.returning_customer_rate)}</span>,
+                basis: <Delta now={t.returning_customer_rate} before={p.returning_customer_rate} /> },
+              { label: "Discounts", value: <span title="Discounts are stored negative; shown as a positive cost here.">{rs(Math.abs(t.discounts))}</span>,
+                basis: `gross ${rs(t.gross_sales)}` },
+            ]}
+          />
 
           {/* trend */}
           <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">

@@ -33,6 +33,7 @@ import {
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
 import { AssetAdsModal } from "./AssetAdsModal";
+import { SectionHeader } from "./SectionChrome";
 
 type SkuFilter = "all" | "matched" | "unmatched";
 
@@ -276,13 +277,10 @@ export function UntestedAssets() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Untested Assets</h2>
-        <p className="text-sm text-text-secondary">
-          Browse registered assets and filter by whether they have run in a Meta ad.
-          Click a tested asset to view its matched ads and their performance.
-        </p>
-      </div>
+      {/* The two-line "how to use this page" moved to Help. Clicking a
+          row to see its matched ads is discoverable by doing it; it did
+          not need announcing above every visit. */}
+      <SectionHeader title="Untested Assets" helpId="data-floor" />
 
       {/* Media tab strip */}
       <div className="flex flex-wrap items-end gap-1 border-b border-border-primary">
@@ -728,7 +726,7 @@ function KpiRow({ title, m, showSkuColumns, loading, ready, showPending }: {
   ready: boolean;
   showPending?: boolean;
 }) {
-  const v = (n: number) => (ready ? fmtInt(n) : "\u2014");
+  const v = (n: number) => (ready ? fmtInt(n) : "—");
   return (
     <div className="flex flex-col gap-2">
       <div className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
@@ -749,14 +747,14 @@ function KpiRow({ title, m, showSkuColumns, loading, ready, showPending }: {
           label="Tested"
           value={v(m.tested)}
           hint={ready && m.total
-            ? `${Math.round((m.tested / m.total) * 100)}% \u2014 the asset id appears in an ad name`
+            ? `${Math.round((m.tested / m.total) * 100)}% — the asset id appears in an ad name`
             : "The asset id appears in an ad name"}
         />
         <KpiTile
           label="Not Tested"
           value={v(m.notTested)}
           hint={loading
-            ? "Loading\u2026"
+            ? "Loading…"
             : showPending
               ? "Post link present, but the id matches no ad"
               : "Assets with no matched ads"}
@@ -765,21 +763,21 @@ function KpiRow({ title, m, showSkuColumns, loading, ready, showPending }: {
           <KpiTile
             label="Pending"
             value={v(m.pending)}
-            hint="No post link yet \u2014 nothing to test until one is added"
+            hint="No post link yet — nothing to test until one is added"
           />
         )}
         <KpiTile label="Matched Ads" value={v(m.matchedAds)} hint="Ads matched to these assets" />
         {showPending ? null : showSkuColumns ? (
           <KpiTile
             label="SKU Matched"
-            value={ready ? `${fmtInt(m.withSku)} / ${fmtInt(m.total)}` : "\u2014"}
+            value={ready ? `${fmtInt(m.withSku)} / ${fmtInt(m.total)}` : "—"}
             hint="Assets with a catalog SKU"
           />
         ) : (
           <KpiTile
             label="SKU Matched"
             value="No SKU mapping"
-            hint="Influencer nomenclature (SIF-\u2026) doesn't carry a product SKU code"
+            hint="Influencer nomenclature (SIF-…) doesn't carry a product SKU code"
           />
         )}
       </div>

@@ -45,6 +45,7 @@ import { NameMissPanel } from "./NameMissPanel";
 import { StatTile } from "./StatTile";
 import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
+import { RankedList, FieldLabel, SectionHeader } from "./SectionChrome";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -160,7 +161,7 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     // would have changed what every existing step number means.
     step: "STEP 2B",
     title: "EDIT NAME MATCHES",
-    hint: "utm_content matched a name the ad USED to have. utm_content is frozen at click time, so an ad renamed since the click still carries its old name in the order while Meta carries only the new one. Resolved from ad_edit_log, scoped to the adset in utm_term, and only ever tried after the current name has already failed \u2014 a historical name can never outrank a live one.",
+    hint: "utm_content matched a name the ad USED to have. utm_content is frozen at click time, so an ad renamed since the click still carries its old name in the order while Meta carries only the new one. Resolved from ad_edit_log, scoped to the adset in utm_term, and only ever tried after the current name has already failed — a historical name can never outrank a live one.",
   },
   ad_name_match: {
     step: "STEP 3",
@@ -185,7 +186,7 @@ const TIER_STEP: Record<TierKey, { step: string; title: string; hint: string }> 
     hint: "The campaign is known but no ad could be resolved.",
   },
   unmatched: {
-    step: "\u2014",
+    step: "—",
     title: "UNMATCHED",
     hint: "No step resolved. Scope to Meta or Google to read this as a real miss rate -- across all orders it is mostly organic traffic that never carried a click id.",
   },
@@ -702,12 +703,16 @@ export function LastClickUtm() {
       {/* ═══════════════════════════════════════════════════════════════
           Header row — title + date range + toggles + export
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div>
-          <h2 className="text-[18px] font-semibold tracking-[-0.02em] text-text-primary">Last Click UTM analysis</h2>
-          <p className="text-xs text-text-secondary">step-wise UTM matches from shopify_order_attribution ({total.toLocaleString()} orders in range)</p>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+      {/* Where the matches come from (shopify_order_attribution, step by
+          step) is a Help question -- article "adset-matched" explains
+          the one step people actually act on. How many orders are in
+          range is not: it is the denominator of everything below, so it
+          stays, as a figure rather than a parenthesis. */}
+      <SectionHeader title="Last Click UTM" helpId="adset-matched">
+        <span className="text-[12px] text-text-tertiary tabular-nums">
+          {total.toLocaleString()} orders in range
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
           <select
             value={preset}
             onChange={(e) => applyPreset(e.target.value)}
@@ -733,11 +738,19 @@ export function LastClickUtm() {
             onChange={(e) => { setToDate(e.target.value); setPreset("custom"); }}
             className="rounded-md border border-border-primary px-2 py-1 text-sm"
           />
+          {/* Two exports sat here, both labelled "Export CSV", and they
+              are not the same file: this one writes all twenty columns
+              including contact_email and customer_id, the shared one
+              writes the visible columns. Relabelled rather than
+              dropped -- the full dump is the one people reconcile
+              against, and it is the one carrying PII, so it should say
+              so before it is clicked. */}
           <button
             onClick={exportCsv}
-            className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs hover:bg-bg-muted"
+            title="Every column, including contact email and customer ID"
+            className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary"
           >
-            Export CSV
+            Export all columns
           </button>
           <ExportButton
             rows={sorted as unknown as Record<string, unknown>[]}
@@ -746,56 +759,63 @@ export function LastClickUtm() {
             disabled={loading || !sorted.length}
           />
         </div>
-      </div>
+      </SectionHeader>
 
       {/* ═══════════════════════════════════════════════════════════════
-          Channel KPI tiles -- one accented card per channel: share
-          badge, order count, attributed sales. Ten tiles on a 5-column
-          grid (2 rows) rather than one unreadable row of ten.
+          Orders by channel, ranked.
 
-          Every number here is the SERVER's windowed aggregate over the
-          whole period -- the tile query ignores every filter except the
-          date range on purpose, so the tiles keep meaning "everything in
-          this period" while the table below narrows. They are never
-          computed from the rows paged in.
+          Was ten accented cards on a 5-column grid: Total plus nine
+          channels, each with its own hue along its top edge. The hues
+          carried nothing -- pink for Organic IG, teal for Loyalty -- and
+          the grid spent the whole first screen before the stepwise
+          cascade, let alone the table. Five of the ten together came to
+          3.3% of orders and took the same space as Meta's 50%.
 
-          First click selects the channel and opens its utm_source
-          breakdown; clicking the selected tile again toggles that
-          breakdown shut.
+          Ranked, with one monochrome bar: rank answers "which channel",
+          length answers "by how much", and a share under 3% is visibly
+          a sliver instead of a card. Every number is unchanged -- the
+          SERVER's windowed aggregate over the whole period, which is why
+          these keep meaning "everything in this period" while the table
+          below narrows.
+
+          Click still selects the channel and opens its utm_source
+          breakdown; clicking the selected row again toggles it shut.
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
-        <StatTile
-          label="Total Orders"
-          color={CHANNEL_COLOR.Total}
-          value={totalOrders.toLocaleString("en-IN")}
-          sub={fmtRs(totalSales)}
-          badge={totalOrders > 0 ? "100.0%" : undefined}
-          selected={channel === ""}
-          onClick={() => { setChannel(""); setDrillOpen(false); }}
-        />
-        {CHANNEL_ORDER.map((ch) => {
-          const sum = channelCounts?.[ch] ?? { count: 0, sales: 0 };
-          const selected = channel === ch;
-          return (
-            <StatTile
-              key={ch}
-              label={ch}
-              color={CHANNEL_COLOR[ch]}
-              value={sum.count.toLocaleString("en-IN")}
-              sub={fmtRs(sum.sales)}
-              badge={`${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`}
-              selected={selected}
-              onClick={() => {
-                if (selected) {
+      <div className="flex flex-col gap-2">
+        <div className="flex items-baseline justify-between border-b border-border-primary pb-1.5">
+          <FieldLabel>Orders by channel</FieldLabel>
+          <button
+            type="button"
+            onClick={() => { setChannel(""); setDrillOpen(false); }}
+            className={`text-[12px] tabular-nums transition-colors ${
+              channel === "" ? "font-semibold text-text-primary" : "text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            all channels · {totalOrders.toLocaleString("en-IN")} orders · {fmtRs(totalSales)}
+          </button>
+        </div>
+        <RankedList
+          labelWidth={150}
+          rows={[...CHANNEL_ORDER]
+            .map((ch) => ({ ch, sum: channelCounts?.[ch] ?? { count: 0, sales: 0 } }))
+            .sort((a, b) => b.sum.count - a.sum.count)
+            .map(({ ch, sum }) => ({
+              key: ch,
+              label: ch,
+              value: sum.count.toLocaleString("en-IN"),
+              share: `${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`,
+              fraction: totalOrders > 0 ? sum.count / totalOrders : 0,
+              selected: channel === ch,
+              onSelect: () => {
+                if (channel === ch) {
                   setDrillOpen((d) => !d);
                 } else {
                   setChannel(ch);
                   setDrillOpen(true);
                 }
-              }}
-            />
-          );
-        })}
+              },
+            }))}
+        />
       </div>
 
       {/* Channel drill-down -- compact, capped height so it doesn't
@@ -903,7 +923,7 @@ export function LastClickUtm() {
               title="Re-read the cascade from shopify_order_attribution"
               className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted disabled:opacity-40"
             >
-              {loading ? "Refreshing\u2026" : "\u21bb Refresh"}
+              {loading ? "Refreshing…" : "\u21bb Refresh"}
             </button>
           </div>
         </div>
@@ -936,7 +956,7 @@ export function LastClickUtm() {
                 label={meta.title}
                 color={TIER_COLOR[t]}
                 value={stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
-                sub={`${stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} \u00b7 ${fmtRs(sum.sales)}`}
+                sub={`${stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} · ${fmtRs(sum.sales)}`}
                 title={meta.hint}
                 dim={sum.count === 0}
                 selected={selected}

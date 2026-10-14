@@ -16,6 +16,7 @@ import { useCachedFetch } from "@/lib/useCachedFetch";
 import { DraggableGrid, GridItem } from "./DraggableGrid";
 import { BarChart } from "./charts/BarChart";
 import { DateRangePicker } from "@/components/DateRangePicker";
+import { SectionHeader } from "./SectionChrome";
 
 const STORAGE_KEY = "analytics-dashboard-widget-order";
 const RANGE_KEY = "analytics-dashboard-date-range";
@@ -322,25 +323,25 @@ export function Dashboard() {
       {error && (
         <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>
       )}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-text-secondary">
-          Drag any tile to rearrange — your layout is remembered on this device.
-        </p>
+      {/* Two standing paragraphs stood here: "drag any tile to
+          rearrange" and "each tile shows the period it actually
+          covers". The first describes an affordance you find by
+          dragging; the second is answered by the badge each tile already
+          carries. Both moved to Help.
+
+          The spend data-floor note is NOT one of them -- it changes what
+          a number means, and only appears when it applies, so it stays. */}
+      <SectionHeader title="Dashboard" helpId="data-floor">
         <DateRangePicker
           value={{ from: from ?? "", to: to ?? "" }}
           preset={preset}
           align="right"
           onApply={handleApplyRange}
         />
-      </div>
-      {/* Every tile carries its own window badge, because they still do not
-          all resolve the same way -- Top SKUs snaps to a precomputed bucket,
-          and spend has a data floor. Saying so here beats leaving it to be
-          discovered by comparing tiles. */}
-      <p className="text-xs text-text-secondary">
-        Each tile shows the period it actually covers.
-        {spendFloorNote && <> {spendFloorNote}</>}
-      </p>
+      </SectionHeader>
+      {spendFloorNote && (
+        <p className="text-xs text-text-tertiary">{spendFloorNote}</p>
+      )}
       <DraggableGrid items={items} order={order} onReorder={handleReorder} />
     </div>
   );
