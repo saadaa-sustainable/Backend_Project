@@ -84,8 +84,50 @@ and the time is roughly linear in row count.
 
 Two ceilings still apply: Apps Script caps one execution at **6
 minutes** on a consumer account and **30 minutes** on Workspace, and a
-spreadsheet holds 10M cells. If `Daily 90d` starts timing out, set
-`enabled: false` for it rather than letting it fail nightly.
+spreadsheet holds 10M cells.
+
+## Why `Daily 90d` syncs on its own trigger
+
+All four views used to sync in one execution. Measured 2026-10-13:
+
+| view | rows | pages at `PAGE=1000` |
+|---|---|---|
+| `meta_direct_active_30d` | 1,569 | 2 |
+| `meta_direct_active_90d` | 1,583 | 2 |
+| `meta_direct_daily_30d` | 26,113 | 27 |
+| `meta_direct_daily_90d` | **65,810** | **66** |
+| one execution | 95,075 | **96 sequential requests** |
+
+`PAGE` cannot be raised to cut that down. Supabase pins PostgREST's
+`db-max-rows` at 1000, so `limit=20000` still returns 1,000 rows --
+verified live against this project.
+
+`daily_90d` was last in `VIEWS` and is two thirds of the work, so it
+ran on whatever time the other three left it. And because it is ordered
+by `date` ASCENDING, running out of time means keeping the OLDEST rows:
+the tab filled from 2026-07-15 forward and never reached the current
+day, which is how the failure was reported -- "not fetching up to
+12 Oct". The write path was already fixed by then; the budget was not.
+
+So it has its own trigger and its own execution:
+
+| function | trigger | views | status tab |
+|---|---|---|---|
+| `syncMetaDirect` | 07:00 | the three small ones | `Status` |
+| `syncDaily90` | 08:00 | `meta_direct_daily_90d` | `Status 90d` |
+| `syncMetaDirectAll` | none | all four | `Status` |
+
+`setupNightlyTrigger()` creates both and clears any it already made.
+Each entry point writes its own status tab -- sharing one meant the
+second run of the night cleared the first run's report.
+
+`syncMetaDirectAll` is there for Workspace accounts, where 30 minutes
+is enough for all four in one go.
+
+If `Daily 90d` still runs out of time on a consumer account, change its
+`order` to `date.desc,ad_id`. A truncated run then keeps the most
+recent days instead of the oldest -- at the cost of the tab reading
+newest-first, which is why it is not the default.
 
 100k raw rows is also awkward to actually read. A pivot over
 `Daily 30d` plus `Active 90d` usually answers the same questions more

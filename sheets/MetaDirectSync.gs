@@ -2,17 +2,26 @@
  * Pulls the meta_direct_* snapshots from Supabase into this sheet and
  * keeps them current on a nightly trigger.
  *
- * SETUP (once)
+ * SETUP (once, and ONCE PER SHEET -- none of it carries over)
  *   1. Extensions > Apps Script, paste this file.
- *   2. Project Settings > Script Properties, add:
+ *   2. Services > + > Google Sheets API, v4, identifier `Sheets`.
+ *      Without it every run dies on `ReferenceError: Sheets is not
+ *      defined` at the first write. `Sheets` is the advanced service,
+ *      not a built-in, and it is enabled per SCRIPT PROJECT -- so a new
+ *      sheet starts without it however many sheets already have it.
+ *      Equivalently, paste appsscript.json from this directory, which
+ *      declares the service, the scopes and the Supabase host in one
+ *      go; changing the scopes invalidates the existing grant, so
+ *      re-authorise afterwards.
+ *   3. Project Settings > Script Properties, add:
  *        SUPABASE_URL  https://gtcdyfmlvglzpiwzklhx.supabase.co
  *        SUPABASE_KEY  <the service_role key from Supabase >
  *                      Settings > API > service_role>
  *      Script Properties, NOT a constant in the code: anyone with edit
  *      access to the sheet can read the code, and the service_role key
  *      bypasses row-level security on the whole project.
- *   3. Project Settings > set the timezone to Asia/Kolkata.
- *   4. Run setupNightlyTrigger() once, and authorise when prompted.
+ *   4. Project Settings > set the timezone to Asia/Kolkata.
+ *   5. Run setupNightlyTrigger() once, and authorise when prompted.
  *
  * WHY service_role AND NOT anon
  *   anon was deliberately revoked on these views. That key ships in
@@ -39,11 +48,37 @@
 // spreadsheet holds 10M cells -- all four tabs come to about 5.2M. If
 // this run starts timing out, set enabled:false here rather than
 // letting it fail every night.
+// ownRun: this view is synced by its OWN trigger, in its OWN execution,
+// instead of sharing the 6-minute budget with the other three.
+//
+// Measured 2026-10-13, actual row counts:
+//
+//     meta_direct_active_30d     1,569 rows =  2 pages
+//     meta_direct_active_90d     1,583 rows =  2 pages
+//     meta_direct_daily_30d     26,113 rows = 27 pages
+//     meta_direct_daily_90d     65,810 rows = 66 pages
+//     ----------------------------------------------------
+//     one execution            95,075 rows = 96 sequential requests
+//
+// PAGE cannot be raised to cut that down: Supabase pins PostgREST's
+// db-max-rows at 1000, so limit=20000 still returns 1000 rows --
+// verified live against this project.
+//
+// daily_90d was LAST in this list and is two thirds of the work, so it
+// ran on whatever time the other three left it and was cut off partway.
+// And because it is ordered by date ASCENDING, being cut off means
+// keeping the OLDEST rows: the tab filled from 2026-07-15 forward and
+// never reached the current day, which is exactly how the failure was
+// reported -- "not fetching up to 12 Oct".
+//
+// Its own execution gets its own 6-minute budget (30 on Workspace),
+// which 66 pages fits inside comfortably; sharing one did not.
 var VIEWS = [
   { view: 'meta_direct_active_30d', tab: 'Active 30d', order: 'ad_id',      enabled: true  },
   { view: 'meta_direct_active_90d', tab: 'Active 90d', order: 'ad_id',      enabled: true  },
   { view: 'meta_direct_daily_30d',  tab: 'Daily 30d',  order: 'date,ad_id', enabled: true  },
-  { view: 'meta_direct_daily_90d',  tab: 'Daily 90d',  order: 'date,ad_id', enabled: true  }
+  { view: 'meta_direct_daily_90d',  tab: 'Daily 90d',  order: 'date,ad_id', enabled: true,
+    ownRun: true }
 ];
 
 var PAGE = 1000;          // PostgREST's own maximum per request
@@ -178,9 +213,32 @@ function _syncView(cfg, spec) {
 
 /** The entry point. This is what the nightly trigger calls. */
 function syncMetaDirect() {
-  // One run at a time. The 07:00 trigger and a manual run overlapping
-  // means two executions writing the same document, which the
-  // Spreadsheet service reports as a timeout rather than as contention.
+  _run(function (s) { return !s.ownRun; }, 'Status');
+}
+
+/**
+ * The 90-day daily view, on its own. Its own trigger calls this, so it
+ * gets a whole execution budget rather than the remainder of one --
+ * see the ownRun note on VIEWS for why that was the difference between
+ * reaching the current day and stopping in July.
+ */
+function syncDaily90() {
+  _run(function (s) { return !!s.ownRun; }, 'Status 90d');
+}
+
+/** Everything, in one execution. Only worth it on Workspace, where the
+ *  cap is 30 minutes rather than 6. */
+function syncMetaDirectAll() {
+  _run(function () { return true; }, 'Status');
+}
+
+function _run(pick, statusTab) {
+  // One run at a time. Two executions writing the same document is
+  // contention the Spreadsheet service reports as a timeout. The lock
+  // is shared across both entry points on purpose -- the two triggers
+  // are scheduled apart, but a manual run must not land on top of
+  // either.
+  //
   // Returning rather than waiting: the other run is doing this work
   // already, so a second one has nothing to add.
   var lock = LockService.getScriptLock();
@@ -189,13 +247,13 @@ function syncMetaDirect() {
     return;
   }
   try {
-    _syncMetaDirect();
+    _syncMetaDirect(pick, statusTab);
   } finally {
     lock.releaseLock();
   }
 }
 
-function _syncMetaDirect() {
+function _syncMetaDirect(pick, statusTab) {
   var cfg = _cfg();
   var started = new Date();
   var log = [];
@@ -211,7 +269,7 @@ function _syncMetaDirect() {
     log.push(['meta_direct_data_through', 'FAILED', String(e).slice(0, 200)]);
   }
 
-  VIEWS.forEach(function (spec) {
+  VIEWS.filter(pick).forEach(function (spec) {
     if (!spec.enabled) { log.push([spec.view, 'skipped', 'disabled in VIEWS']); return; }
     try {
       var n = _syncView(cfg, spec);
@@ -236,15 +294,19 @@ function _syncMetaDirect() {
   // the status tab must not turn a good run into a red one -- that is
   // what made the timeout look like the sync had failed outright.
   try {
-    _writeStatus(started, through, log);
+    _writeStatus(started, through, log, statusTab);
   } catch (e) {
     Logger.log('Status tab not written: ' + e);
   }
 }
 
-function _writeStatus(started, through, log) {
+function _writeStatus(started, through, log, statusTab) {
+  // Each entry point writes its OWN status tab. Sharing one meant the
+  // second run of the night cleared the first run's report, so a tab
+  // that had synced fine looked like it had never run.
+  var name = statusTab || 'Status';
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sh = ss.getSheetByName('Status') || ss.insertSheet('Status');
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
   sh.clear();
   var tz = Session.getScriptTimeZone();
   var rows = [
@@ -271,18 +333,27 @@ function _writeStatus(started, through, log) {
  * longer, move this later rather than letting the sheet pull a
  * half-refreshed snapshot.
  *
+ * TWO triggers now: 07:00 for the three small views, 08:00 for the
+ * 90-day daily view on its own. See the ownRun note on VIEWS.
+ *
  * Safe to run more than once -- it clears its own triggers first.
  */
+var HANDLERS = ['syncMetaDirect', 'syncDaily90', 'syncMetaDirectAll'];
+
 function setupNightlyTrigger() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'syncMetaDirect') ScriptApp.deleteTrigger(t);
-  });
+  removeNightlyTrigger();
+  // Two triggers, an hour apart. Apps Script time-based triggers fire
+  // within the hour you name, not on the minute, so the gap has to be
+  // wide enough that the second cannot start while the first is still
+  // going -- the shared lock would make it skip rather than queue.
   ScriptApp.newTrigger('syncMetaDirect').timeBased().atHour(7).everyDays(1).create();
-  Logger.log('Nightly trigger set for 07:00 ' + Session.getScriptTimeZone());
+  ScriptApp.newTrigger('syncDaily90').timeBased().atHour(8).everyDays(1).create();
+  Logger.log('Triggers set: syncMetaDirect 07:00, syncDaily90 08:00 ' +
+             Session.getScriptTimeZone());
 }
 
 function removeNightlyTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'syncMetaDirect') ScriptApp.deleteTrigger(t);
+    if (HANDLERS.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
   });
 }
