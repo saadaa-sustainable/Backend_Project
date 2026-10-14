@@ -1622,6 +1622,12 @@ const COLUMNS: ColDef[] = [
 
 const ALL_KEYS = COLUMNS.map((c) => c.key);
 const DEFAULT_VISIBLE_KEYS = new Set(COLUMNS.filter((c) => c.defaultVisible).map((c) => c.key));
+/** Group order for the ad-level column list. Named here rather than
+ *  inline in the picker because the Inspector's Metrics tab renders the
+ *  same list and the two drifting apart is exactly how that tab ended up
+ *  a placeholder. */
+const COLUMN_GROUPS = ["Identity", "Timeline", "Category", "Delivery", "Reach",
+                       "Efficiency", "Meta metrics", "Shopify", "Links"] as const;
 const HIDDEN_STORAGE_KEY = "aeHiddenCols_v1";
 /** Columns that shipped hidden-by-default and have since been promoted.
  *  Only consulted when migrating the legacy bare-array storage format,
@@ -1670,7 +1676,6 @@ export function AdsAnalyse() {
   const [rollupHidden, setRollupHidden] = useState<Set<string>>(new Set(ROLLUP_DEFAULT_HIDDEN));
   const [showRollupCols, setShowRollupCols] = useState(false);
   const [chartOpen, setChartOpen] = useState(false);
-  const [showRollupRules, setShowRollupRules] = useState(false);
   const rollupCols = ROLLUP_COLUMNS.filter((c) => !rollupHidden.has(c.key));
   // Ad Sets / Campaigns read adset_insights / campaign_insights via the
   // rollup endpoint. Reach there is Meta's own per-entity figure -- it
@@ -1874,6 +1879,53 @@ export function AdsAnalyse() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<"metrics" | "filters">("metrics");
   const [numericFilters, setNumericFilters] = useState<NumericFilter[]>([]);
+
+  // Escape closes the drawer. It did not, and the overlay swallows every
+  // click behind it, so a drawer opened by accident left the page
+  // looking frozen until you found the small ✕ -- the same reflex the
+  // date picker already honours.
+  useEffect(() => {
+    if (!inspectorOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); setInspectorOpen(false); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [inspectorOpen]);
+
+  // What the Inspector edits depends on the level: Ads, Ad Sets and
+  // Campaigns are three different tables with three different column
+  // sets and their own numeric rules. The drawer used to be wired to the
+  // ad level alone and rendered only inside that branch, so at the other
+  // two the button did not exist at all.
+  const inspector = useMemo(() => (
+    levelToggle === "ad"
+      ? {
+          columns: COLUMNS as { key: string; header: string; group?: string }[],
+          groups: COLUMN_GROUPS as readonly string[],
+          hidden: hiddenCols,
+          setHidden: setHiddenCols,
+          allKeys: ALL_KEYS,
+          defaultHidden: new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k))),
+          filters: numericFilters,
+          setFilters: setNumericFilters,
+          fields: undefined as { key: string; label: string }[] | undefined,
+          note: null as string | null,
+        }
+      : {
+          columns: ROLLUP_COLUMNS as { key: string; header: string; group?: string }[],
+          groups: ROLLUP_GROUPS as readonly string[],
+          hidden: rollupHidden,
+          setHidden: setRollupHidden,
+          allKeys: ROLLUP_COLUMNS.map((c) => c.key),
+          defaultHidden: new Set(ROLLUP_DEFAULT_HIDDEN),
+          filters: rollupNumeric,
+          setFilters: setRollupNumeric,
+          fields: ROLLUP_NUMERIC_FIELDS as { key: string; label: string }[] | undefined,
+          note: `Rules apply to the ${rollupRows.length.toLocaleString("en-IN")} rows `
+                + "fetched for this level \u2014 not to the whole table server-side.",
+        }
+  ), [levelToggle, hiddenCols, numericFilters, rollupHidden, rollupNumeric, rollupRows.length]);
 
   // ── sort ────────────────────────────────────────────────────
   const [sortKey, setSortKey] = useState<string>("spend");
@@ -2480,11 +2532,22 @@ export function AdsAnalyse() {
                 Reset to default
               </button>
             )}
+            {/* Was "⚖ Metric rules", a third door into a room the ad
+                level reaches through ⚙ Inspector. Same panel, same
+                state -- now behind the same button it has at ad level,
+                so the control does not rename itself when you switch
+                level. */}
             <button
-              onClick={() => setShowRollupRules((v) => !v)}
+              onClick={() => setInspectorOpen((v) => !v)}
               className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+              title="Inspector: Metrics + numeric Filters"
             >
-              ⚖ Metric rules{rollupNumeric.length ? ` (${rollupNumeric.length})` : ""}
+              ⚙ Inspector
+              {rollupNumeric.length > 0 && (
+                <span className="ml-1 rounded bg-warning-bg px-1 text-warning-text">
+                  {rollupNumeric.length}
+                </span>
+              )}
             </button>
             {rollupNumeric.length > 0 && (
               <span className="text-[11px] text-text-tertiary">
@@ -2493,20 +2556,6 @@ export function AdsAnalyse() {
               </span>
             )}
           </div>
-
-          {showRollupRules && (
-            <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
-              <div className="mb-2 text-[11px] text-text-tertiary">
-                Rules apply to the {rollupRows.length.toLocaleString("en-IN")} rows fetched for
-                this level — not to the whole table server-side.
-              </div>
-              <NumericFiltersPanel
-                filters={rollupNumeric}
-                onChange={setRollupNumeric}
-                fields={ROLLUP_NUMERIC_FIELDS}
-              />
-            </div>
-          )}
 
           {showRollupCols && (
             <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
@@ -2997,47 +3046,17 @@ export function AdsAnalyse() {
           <div className="mt-16 mr-4 w-96 max-h-[80vh] overflow-auto rounded-lg border border-border-primary bg-white p-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-sm font-semibold">Columns ({visibleCols.length}/{COLUMNS.length})</h3>
-              <div className="flex gap-1">
-                <button onClick={() => setHiddenCols(new Set())} className="rounded border px-2 py-0.5 text-xs hover:bg-bg-muted">All</button>
-                <button onClick={() => setHiddenCols(new Set(ALL_KEYS))} className="rounded border px-2 py-0.5 text-xs hover:bg-bg-muted">None</button>
-                <button
-                  onClick={() => setHiddenCols(new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k))))}
-                  className="rounded border px-2 py-0.5 text-xs hover:bg-bg-muted"
-                >
-                  Reset
-                </button>
-              </div>
             </div>
-            <input
-              value={colSearch}
-              onChange={(e) => setColSearch(e.target.value)}
-              placeholder="Search columns…"
-              className="mb-2 w-full rounded-md border border-border-primary px-2 py-1 text-sm"
+            <ColumnChecklist
+              columns={COLUMNS as { key: string; header: string; group?: string }[]}
+              groups={COLUMN_GROUPS as readonly string[]}
+              hidden={hiddenCols}
+              setHidden={setHiddenCols}
+              allKeys={ALL_KEYS}
+              defaultHidden={new Set(ALL_KEYS.filter((k) => !DEFAULT_VISIBLE_KEYS.has(k)))}
+              search={colSearch}
+              setSearch={setColSearch}
             />
-            {(["Identity", "Timeline", "Category", "Delivery", "Reach", "Efficiency", "Meta metrics", "Shopify", "Links"] as const).map((grp) => {
-              const cols = COLUMNS.filter((c) => c.group === grp && c.header.toLowerCase().includes(colSearch.toLowerCase()));
-              if (cols.length === 0) return null;
-              return (
-                <div key={grp} className="mb-2">
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary">{grp}</div>
-                  {cols.map((c) => (
-                    <label key={c.key} className="flex items-center gap-2 py-0.5 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={!hiddenCols.has(c.key)}
-                        onChange={(e) => {
-                          const next = new Set(hiddenCols);
-                          if (e.target.checked) next.delete(c.key);
-                          else next.add(c.key);
-                          setHiddenCols(next);
-                        }}
-                      />
-                      <span>{c.header}</span>
-                    </label>
-                  ))}
-                </div>
-              );
-            })}
           </div>
         </div>
       )}
@@ -3047,10 +3066,23 @@ export function AdsAnalyse() {
          ═══════════════════════════════════════════════════════════ */}
       {inspectorOpen && (
         <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={() => setInspectorOpen(false)}>
-          <div className="h-full w-[420px] overflow-auto border-l border-border-primary bg-white p-4 shadow-lg" onClick={(e) => e.stopPropagation()}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Inspector"
+            className="h-full w-[420px] overflow-auto border-l border-border-primary bg-white p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">Inspector</h3>
-              <button onClick={() => setInspectorOpen(false)} className="text-text-secondary hover:text-text-primary">
+              <h3 className="text-lg font-semibold">
+                Inspector
+                <span className="ml-2 text-xs font-normal text-text-tertiary">
+                  {levelToggle === "ad" ? "Ads" : levelToggle === "adset" ? "Ad Sets" : "Campaigns"}
+                </span>
+              </h3>
+              <button onClick={() => setInspectorOpen(false)}
+                aria-label="Close Inspector"
+                className="text-text-secondary hover:text-text-primary">
                 ✕
               </button>
             </div>
@@ -3064,17 +3096,34 @@ export function AdsAnalyse() {
                     (inspectorTab === tab ? "border-b-2 border-text-primary font-medium" : "text-text-secondary")
                   }
                 >
-                  {tab === "metrics" ? "Metrics" : `Filters (${numericFilters.length})`}
+                  {tab === "metrics"
+                    ? `Metrics (${inspector.columns.length - inspector.hidden.size}/${inspector.columns.length})`
+                    : `Filters (${inspector.filters.length})`}
                 </button>
               ))}
             </div>
             {inspectorTab === "metrics" ? (
-              <p className="text-xs text-text-secondary">
-                Metrics tab mirrors the ▤ Columns picker. Use the ▤ button in the toolbar to toggle columns —
-                this tab exists for parity with CTD&apos;s Inspector, both tabs share the same localStorage state.
-              </p>
+              <ColumnChecklist
+                columns={inspector.columns}
+                groups={inspector.groups}
+                hidden={inspector.hidden}
+                setHidden={inspector.setHidden}
+                allKeys={inspector.allKeys}
+                defaultHidden={inspector.defaultHidden}
+                search={colSearch}
+                setSearch={setColSearch}
+              />
             ) : (
-              <NumericFiltersPanel filters={numericFilters} onChange={setNumericFilters} />
+              <>
+                {inspector.note && (
+                  <div className="mb-2 text-[11px] text-text-tertiary">{inspector.note}</div>
+                )}
+                <NumericFiltersPanel
+                  filters={inspector.filters}
+                  onChange={inspector.setFilters}
+                  fields={inspector.fields}
+                />
+              </>
             )}
           </div>
         </div>
@@ -3141,6 +3190,72 @@ function applyOperator(v: number, op: NumericOp, target: number): boolean {
     case "eq": return v === target;
     case "ne": return v !== target;
   }
+}
+
+/** The column checklist, shared by the ▤ picker and the Inspector's
+ *  Metrics tab.
+ *
+ *  It exists because the Metrics tab used to be a paragraph reading
+ *  "use the ▤ button in the toolbar to toggle columns" -- and Metrics
+ *  is the tab the drawer OPENS on, so the common experience of pressing
+ *  ⚙ Inspector was a panel that did nothing. One component, one
+ *  `hidden` set: the two cannot disagree and neither can go stale. */
+function ColumnChecklist({
+  columns, groups, hidden, setHidden, allKeys, defaultHidden, search, setSearch,
+}: {
+  columns: { key: string; header: string; group?: string }[];
+  groups: readonly string[];
+  hidden: Set<string>;
+  setHidden: (next: Set<string>) => void;
+  allKeys: string[];
+  defaultHidden: Set<string>;
+  search: string;
+  setSearch: (v: string) => void;
+}) {
+  const q = search.toLowerCase();
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-end gap-1">
+        <button onClick={() => setHidden(new Set())}
+          className="rounded border px-2 py-0.5 text-xs hover:bg-bg-muted">All</button>
+        <button onClick={() => setHidden(new Set(allKeys))}
+          className="rounded border px-2 py-0.5 text-xs hover:bg-bg-muted">None</button>
+        <button onClick={() => setHidden(new Set(defaultHidden))}
+          className="rounded border px-2 py-0.5 text-xs hover:bg-bg-muted">Reset</button>
+      </div>
+      <input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Search columns…"
+        className="mb-2 w-full rounded-md border border-border-primary px-2 py-1 text-sm"
+      />
+      {groups.map((grp) => {
+        const cols = columns.filter(
+          (c) => c.group === grp && c.header.toLowerCase().includes(q));
+        if (cols.length === 0) return null;
+        return (
+          <div key={grp} className="mb-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary">{grp}</div>
+            {cols.map((c) => (
+              <label key={c.key} className="flex items-center gap-2 py-0.5 text-xs">
+                <input
+                  type="checkbox"
+                  checked={!hidden.has(c.key)}
+                  onChange={(e) => {
+                    const next = new Set(hidden);
+                    if (e.target.checked) next.delete(c.key);
+                    else next.add(c.key);
+                    setHidden(next);
+                  }}
+                />
+                <span>{c.header}</span>
+              </label>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function NumericFiltersPanel({
