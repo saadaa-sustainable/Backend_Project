@@ -888,11 +888,17 @@ export function LastClickUtm() {
                   `_attribute_order`), so within a scope they sum to
                   100%.
          ═══════════════════════════════════════════════════════════════ */}
-      <div className="rounded-lg border border-border-primary bg-white p-3 shadow-sm">
-        <div className="mb-2.5 flex flex-wrap items-end gap-3">
+      {/* No container. The cascade was the last thing in this section
+          still sitting in a white card with a border AND a shadow,
+          which the surface brief forbids outright -- and with the
+          name-miss worklist beside it now flat, the card was the only
+          box left on the screen. A label on a rule does the same job:
+          it says where the block starts. */}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-end gap-3 border-b border-border-primary pb-1.5">
           <div className="min-w-[220px]">
-            <h3 className="text-sm font-semibold">Stepwise matching</h3>
-            <p className="text-[11px] text-text-tertiary">
+            <FieldLabel>Stepwise matching</FieldLabel>
+            <p className="mt-1 text-[11px] text-text-tertiary">
               {scopeOrders.toLocaleString()} {stepScope === "All" ? "orders" : `${stepScope} orders`} in
               range · <strong className="text-text-secondary">{matchRate.toFixed(1)}%</strong> resolved to
               a campaign or better · {fmtRs(scopeSales)}
@@ -921,7 +927,7 @@ export function LastClickUtm() {
               }}
               disabled={loading}
               title="Re-read the cascade from shopify_order_attribution"
-              className="rounded-md border border-border-primary bg-white px-2.5 py-1 text-xs hover:bg-bg-muted disabled:opacity-40"
+              className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary disabled:opacity-40"
             >
               {loading ? "Refreshing…" : "\u21bb Refresh"}
             </button>
@@ -936,7 +942,7 @@ export function LastClickUtm() {
             Meta ad universe only (shopify_ad_attribution builds
             AdUniverse from ad_lifecycle's Meta ads). */}
         {scopeOrders > 0 && matchedOrders === 0 && (
-          <div className="mb-2 rounded-md border border-warning-mid/40 bg-warning-bg px-2.5 py-1.5 text-[11px] text-warning-text">
+          <div className="bg-warning-bg px-2.5 py-1.5 text-[11px] text-warning-text">
             No {stepScope} order resolves to an ad. The cascade only indexes the <b>Meta</b> ad
             universe, so {stepScope} traffic has nothing to match against and lands at{" "}
             <b>Unmatched</b> by construction — not because the match failed.

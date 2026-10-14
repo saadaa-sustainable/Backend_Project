@@ -195,6 +195,60 @@ export const HELP_ARTICLES: Article[] = [
     ),
   },
   {
+    id: "multi-filter",
+    topic: "definitions",
+    sections: ["ads-analyse"],
+    question: "How multi-filter rules combine",
+    body: (
+      <>
+        <P>
+          The builder lives behind <strong>More filters</strong> on the filter rule. Each rule is a
+          field, an operator and a value; one connector governs the whole set, because mixed
+          connectors need precedence rules and &ldquo;a AND b OR c&rdquo; silently means different
+          things to different people.
+        </P>
+        <P>
+          <strong>AND</strong> keeps ads matching every rule. <strong>OR</strong> keeps ads matching
+          at least one. <strong>Exclude matches</strong> flips whichever of the two is set: AND plus
+          exclude keeps everything except ads matching every rule, OR plus exclude keeps ads matching
+          none of them.
+        </P>
+        <P>
+          Keyword operators &mdash; <Code>contains all of</Code>, <Code>contains any of</Code>,{" "}
+          <Code>contains none of</Code> &mdash; split the value on spaces. To look for several
+          different ads in one go, <strong>contains any of</strong> on a single rule is usually
+          simpler than several OR-ed rules.
+        </P>
+        <P>
+          Rules are evaluated server-side across every matching ad, not just the rows in view, and
+          nothing is sent until <strong>Apply</strong>.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "thresholds",
+    topic: "definitions",
+    sections: ["ads-analyse"],
+    question: "Changing the F1–F4 thresholds",
+    body: (
+      <>
+        <P>
+          The four thresholds sit behind <strong>More filters</strong> beside the rule builder. They
+          are the account&apos;s defaults until you type over them: F1 an impression floor, F2 a ROAS
+          floor, F3 a ceiling on cost per NCP, F4 a ceiling on cost per first-time engaged website
+          visitor.
+        </P>
+        <P>
+          At the defaults the server&apos;s stored category is authoritative and the counts describe
+          every matching ad. The moment you change a threshold the verdict is recomputed here, over
+          the rows loaded so far &mdash; so the counts describe what is on screen, and scrolling for
+          more raises them. <strong>Reset to defaults</strong> hands the question back to the server.
+        </P>
+      </>
+    ),
+  },
+  {
     id: "adset-matched",
     topic: "attribution",
     sections: ["last-click-utm"],

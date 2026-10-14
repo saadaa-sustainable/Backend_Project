@@ -21,12 +21,18 @@
  * two revenue columns do NOT: an order the source both started and
  * closed appears under both, which is why they sit side by side rather
  * than being summed into a total.
+ *
+ * Which is also why the section now LEADS with the gap rather than the
+ * two columns: a table of two revenue figures invites exactly the
+ * subtraction-by-eye that the overlap makes unsafe. One diverging bar
+ * per row, centred on zero, does the subtraction once and shows its
+ * direction.
  */
 import { useEffect, useMemo, useState } from "react";
 import { DateRangePicker } from "@/components/DateRangePicker";
 import { ApiError, FirstClickRow, fetchFirstClick } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
-import { SectionHeader } from "./SectionChrome";
+import { SectionHeader, FilterRule, FilterCell, FieldLabel, FigureBand, filterControlClass } from "./SectionChrome";
 
 /** What the journey's two ends are keyed on.
  *
@@ -52,9 +58,19 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: "avg_sessions", label: "Sessions" },
 ];
 
+/** How many rows the diverging chart draws. The whole table sits
+ *  beneath it, so this is a lead, not a cap: twelve is as many bars as
+ *  stay legible at one glance, and they are the twelve whose two ends
+ *  disagree most — which is the only question the chart is asked. */
+const DIVERGING_ROWS = 12;
+
 function num(n: number | null | undefined, digits = 0) {
   if (n === null || n === undefined) return "—";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+function rupees(n: number) {
+  return `₹${Math.round(n).toLocaleString("en-IN")}`;
 }
 
 export function FirstClick() {
@@ -110,154 +126,306 @@ export function FirstClick() {
   }, [filters]);
 
   const pct = ordersTotal ? (reattributed * 100) / ordersTotal : 0;
+  const grainNoun = grain === "ad" ? "Ad" : grain === "adset" ? "Ad set" : "Source";
+
+  const totals = useMemo(() => {
+    let first = 0;
+    let last = 0;
+    for (const r of rows) {
+      first += r.first_click_revenue;
+      last += r.last_click_revenue;
+    }
+    return { first, last };
+  }, [rows]);
+
+  /** The gap, biggest first, both directions. Sorted on the ABSOLUTE
+   *  difference so a source that last click over-credits is as visible
+   *  as one it under-credits -- the section is about disagreement, and
+   *  a signed sort would bury one half of it at the bottom. */
+  const diverging = useMemo(() => {
+    const scored = rows
+      .map((r) => ({ row: r, delta: r.first_click_revenue - r.last_click_revenue }))
+      .filter((d) => d.delta !== 0)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+      .slice(0, DIVERGING_ROWS);
+    const maxAbs = scored.reduce((m, d) => Math.max(m, Math.abs(d.delta)), 0);
+    return { scored, maxAbs };
+  }, [rows]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       {/* "Full credit on each end, never split -- read a column, not a
           row" is the rule this whole section rests on. It is in Help as
           "first-vs-last", behind the ? -- a rule you learn once, not a
           paragraph above the controls every day. */}
       <SectionHeader title="First Click" helpId="first-vs-last" />
 
-      <div className="flex flex-wrap items-center gap-2 border-b border-border-primary pb-3">
-        <DateRangePicker
-          value={{ from: fromDate, to: toDate }}
-          preset={datePreset}
-          align="left"
-          onApply={(r, pk) => { setDatePreset(pk); setFromDate(r.from); setToDate(r.to); }}
-        />
-        <select
-          value={grain}
-          onChange={(e) => setGrain(e.target.value)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
-        >
-          {GRAIN_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>By: {o.label}</option>
-          ))}
-        </select>
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value)}
-          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
-        >
-          {SORT_OPTIONS.filter((o) => !(grain === "source" && o.value === "spend")).map((o) => (
-            <option key={o.value} value={o.value}>Sort: {o.label}</option>
-          ))}
-        </select>
-        <select
-          value={limit}
-          onChange={(e) => setLimit(Number(e.target.value))}
-          className="rounded-md border border-border-primary bg-white px-2 py-1.5 text-sm text-text-primary focus:border-accent-yellow focus:outline-none"
-        >
-          {[50, 200, 1000, 5000].map((n) => (
-            <option key={n} value={n}>Rows: {n === 5000 ? "All" : n}</option>
-          ))}
-        </select>
-        <span className="ml-auto text-xs text-text-secondary">
-          {matched > rows.length && (
-            <span className="mr-2 rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-800">
-              showing {rows.length.toLocaleString()} of {matched.toLocaleString()}
+      <FilterRule
+        actions={
+          <>
+            {matched > rows.length && (
+              <span
+                className="bg-warning-bg px-1.5 py-0.5 text-[11.5px] font-medium text-warning-text tabular-nums"
+                title="The row cap is below the number of entities matched in this window. Raise Rows to see the rest."
+              >
+                showing {rows.length.toLocaleString()} of {matched.toLocaleString()}
+              </span>
+            )}
+            <span className="text-[11.5px] text-text-tertiary tabular-nums">
+              {ordersTotal.toLocaleString()} orders ·{" "}
+              <strong className="font-medium text-text-primary">{reattributed.toLocaleString()}</strong> reattributed
+              {" "}({pct.toFixed(1)}%)
             </span>
-          )}
-          {ordersTotal.toLocaleString()} orders ·{" "}
-          <strong className="text-text-primary">{reattributed.toLocaleString()}</strong> reattributed
-          {" "}({pct.toFixed(1)}%)
-        </span>
-        <ExportButton
-          rows={rows as unknown as Record<string, unknown>[]}
-          filename="first_vs_last_click"
-          disabled={loading || !rows.length}
-        />
-      </div>
+            <ExportButton
+              rows={rows as unknown as Record<string, unknown>[]}
+              filename="first_vs_last_click"
+              disabled={loading || !rows.length}
+            />
+          </>
+        }
+      >
+        <FilterCell label="Date range">
+          <DateRangePicker
+            value={{ from: fromDate, to: toDate }}
+            preset={datePreset}
+            bare
+            align="left"
+            onApply={(r, pk) => { setDatePreset(pk); setFromDate(r.from); setToDate(r.to); }}
+          />
+        </FilterCell>
 
-      {error && <div className="rounded-md border border-error-mid bg-error-bg p-3 text-sm text-error-text">{error}</div>}
+        <FilterCell label="Grain" className="w-32" htmlFor="fc-grain">
+          <select
+            id="fc-grain"
+            value={grain}
+            onChange={(e) => setGrain(e.target.value)}
+            className={filterControlClass}
+          >
+            {GRAIN_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </FilterCell>
+
+        <FilterCell label="Sort by" className="w-48" htmlFor="fc-sort">
+          <select
+            id="fc-sort"
+            value={sort}
+            onChange={(e) => setSort(e.target.value)}
+            className={filterControlClass}
+          >
+            {SORT_OPTIONS.filter((o) => !(grain === "source" && o.value === "spend")).map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </FilterCell>
+
+        <FilterCell label="Rows" className="w-24" htmlFor="fc-limit">
+          <select
+            id="fc-limit"
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+            className={filterControlClass}
+          >
+            {[50, 200, 1000, 5000].map((n) => (
+              <option key={n} value={n}>{n === 5000 ? "All" : n}</option>
+            ))}
+          </select>
+        </FilterCell>
+      </FilterRule>
+
+      {error && <div className="bg-error-bg px-3 py-2 text-sm text-error-text">{error}</div>}
 
       {loading ? (
         <p className="text-sm text-text-secondary">Loading…</p>
       ) : rows.length === 0 ? (
         <p className="text-sm text-text-secondary">No attributed orders in this window.</p>
       ) : (
-        <div className="max-h-[70vh] overflow-auto rounded-lg border border-border-primary bg-white shadow-sm">
-          <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
-            <thead>
-              <tr>
-                <th className="sticky left-0 top-0 z-30 h-10 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[11px] font-medium">
-                  {grain === "ad" ? "Ad" : grain === "adset" ? "Ad set" : "Source"}
-                </th>
-                {grain !== "source" && (
-                  <th
-                    title="The channel this belongs to. Also what explains a row showing a raw id: only Meta ad ids resolve to names, while kwikengage, sagepilot-ai and google put their own tokens in the same GA4 field."
-                    className="sticky top-0 z-20 h-10 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[11px] font-medium"
-                  >
-                    Channel
-                  </th>
-                )}
-                {([
-                  // Spend is dropped entirely at source grain rather than
-                  // rendered as a column of dashes: a "source" like META or
-                  // affiliate is not a billable entity, so there is no number
-                  // being withheld -- the question does not apply.
-                  ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report."] as const]),
-                  ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split."],
-                  ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across."],
-                  ["Days to convert", "Average days from first session to order, over the orders this one started."],
-                  ["Sessions", "Average sessions before the order, over the orders this one started."],
-                ] as const).map(([label, title]) => (
-                  <th
-                    key={label}
-                    title={title}
-                    className="sticky top-0 z-20 h-10 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-right align-middle text-[11px] font-medium"
-                  >
-                    {label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => {
-                // Opening more value than it closes. The gap is the credit
-                // the last-click table moves to someone else. Flagged on the
-                // first-click column, which is the one carrying the claim
-                // last click never makes.
-                const unbilled = r.first_click_revenue - r.last_click_revenue;
-                return (
-                  <tr key={`${r.source}-${r.channel}`} className="border-b border-border-soft hover:bg-bg-surface">
-                    <td
-                      className="sticky left-0 z-10 max-w-[300px] truncate border-r border-border-soft bg-white px-3 py-1.5 text-xs text-text-primary"
-                      title={r.label === r.source ? r.source : `${r.label}  ·  ${r.source}`}
+        <>
+          <FigureBand
+            figures={[
+              {
+                label: "First-click revenue",
+                value: rupees(totals.first),
+                basis: `full value of every order opened by the ${rows.length.toLocaleString()} ${grainNoun.toLowerCase()}s shown`,
+              },
+              {
+                label: "Last-click revenue",
+                value: rupees(totals.last),
+                basis: "overlaps the figure beside it — do not add the two",
+              },
+              {
+                label: "Orders",
+                value: ordersTotal.toLocaleString(),
+                basis: "GA4-attributed orders in this window",
+              },
+              {
+                label: "Reattributed",
+                value: reattributed.toLocaleString(),
+                basis: `${pct.toFixed(1)}% of orders change hands between the first and last click`,
+              },
+            ]}
+          />
+
+          {/* ═══════════════════════════════════════════════════════════
+              Where the two disagree.
+
+              The point of the section, drawn once. Two revenue columns
+              side by side ask the reader to subtract eighteen pairs of
+              seven-digit numbers by eye, and the subtraction is the only
+              thing either column is here for. A bar right of the zero
+              line is credit first click claims and last click gives to
+              somebody else; a bar left of it is credit last click takes
+              from an opener elsewhere.
+
+              Neutral ink on both sides, deliberately: a hand-off is not
+              a failure, it is where the two models part, and colouring
+              one direction red would make a fact look like a verdict.
+             ═══════════════════════════════════════════════════════════ */}
+          {diverging.scored.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
+                <FieldLabel>Where the two disagree</FieldLabel>
+                <span className="text-[11.5px] text-text-tertiary">
+                  first-click minus last-click revenue, by {grainNoun.toLowerCase()} · widest {diverging.scored.length} of{" "}
+                  {rows.length.toLocaleString()}
+                </span>
+              </div>
+              {/* Capped, not full-bleed. The zero line is the thing
+                  being read against, and at 1600px a full-width axis
+                  pushed it 600px from the labels with nothing in
+                  between -- the bars stopped reading as one scale. */}
+              <div className="flex max-w-[1100px] flex-col">
+                {diverging.scored.map(({ row: r, delta }) => {
+                  const width = diverging.maxAbs > 0 ? (Math.abs(delta) / diverging.maxAbs) * 100 : 0;
+                  const right = delta > 0;
+                  return (
+                    <div
+                      key={`${r.source}-${r.channel}`}
+                      className="flex items-center gap-3 border-t border-border-soft py-1.5 first:border-t-0"
+                      title={`${r.label}  ·  opened ₹${num(r.first_click_revenue)}, closed ₹${num(r.last_click_revenue)}`}
                     >
-                      {r.label}
-                    </td>
+                      <div className="w-[230px] shrink-0 truncate text-[13px] text-text-primary">{r.label}</div>
+                      <div className="flex min-w-[120px] flex-1 items-center">
+                        <div className="flex w-1/2 justify-end">
+                          {!right && <div className="h-2 bg-text-tertiary" style={{ width: `${width}%` }} />}
+                        </div>
+                        <div className="h-4 w-px shrink-0 bg-border-primary" />
+                        <div className="w-1/2">
+                          {right && <div className="h-2 bg-text-primary" style={{ width: `${width}%` }} />}
+                        </div>
+                      </div>
+                      <div
+                        className={`w-[140px] shrink-0 text-right text-[13px] tabular-nums ${
+                          right ? "text-text-primary" : "text-text-secondary"
+                        }`}
+                      >
+                        {right ? "+" : "−"}₹{num(Math.abs(delta))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex max-w-[1100px] justify-between border-t border-border-soft pt-1.5 text-[11px] text-text-tertiary">
+                <span>last click credits more</span>
+                <span>first click credits more</span>
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
+              <FieldLabel>By {grainNoun.toLowerCase()}</FieldLabel>
+              <span className="text-[11.5px] text-text-tertiary tabular-nums">
+                {rows.length.toLocaleString()} rows
+              </span>
+            </div>
+            {/* Hairlines and a sticky first column, no container: the
+                box this replaces carried a rounded border AND a shadow,
+                which is the one combination this surface does not use. */}
+            <div className="max-h-[70vh] overflow-auto border-b border-border-primary">
+              <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
+                <thead>
+                  <tr>
+                    <th className="sticky left-0 top-0 z-30 h-9 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
+                      {grainNoun}
+                    </th>
                     {grain !== "source" && (
-                      <td className="border-b border-border-soft px-3 py-1.5 text-xs text-text-secondary">
-                        {r.channel}
-                      </td>
+                      <th
+                        title="The channel this belongs to. Also what explains a row showing a raw id: only Meta ad ids resolve to names, while kwikengage, sagepilot-ai and google put their own tokens in the same GA4 field."
+                        className="sticky top-0 z-20 h-9 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
+                      >
+                        Channel
+                      </th>
                     )}
-                    {grain !== "source" && (
-                      <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
-                        {r.spend === null || r.spend === undefined
-                          ? <span className="text-text-tertiary" title="Meta never billed this id">—</span>
-                          : num(r.spend)}
-                      </td>
-                    )}
-                    <td
-                      className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${unbilled > 0 ? "font-semibold text-amber-700" : "text-text-primary"}`}
-                      title={unbilled > 0 ? `₹${num(unbilled)} more opened than closed — credit last click gives to another ad` : undefined}
-                    >
-                      {num(r.first_click_revenue)}
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.last_click_revenue)}</td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_days_to_convert, 1)}</td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_sessions, 1)}</td>
+                    {([
+                      // Spend is dropped entirely at source grain rather than
+                      // rendered as a column of dashes: a "source" like META or
+                      // affiliate is not a billable entity, so there is no number
+                      // being withheld -- the question does not apply.
+                      ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report."] as const]),
+                      ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split."],
+                      ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across."],
+                      ["Days to convert", "Average days from first session to order, over the orders this one started."],
+                      ["Sessions", "Average sessions before the order, over the orders this one started."],
+                    ] as const).map(([label, title]) => (
+                      <th
+                        key={label}
+                        title={title}
+                        className="sticky top-0 z-20 h-9 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
+                      >
+                        {label}
+                      </th>
+                    ))}
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    // Opening more value than it closes. The gap is the credit
+                    // the last-click table moves to someone else. Flagged on the
+                    // first-click column, which is the one carrying the claim
+                    // last click never makes.
+                    const unbilled = r.first_click_revenue - r.last_click_revenue;
+                    return (
+                      <tr key={`${r.source}-${r.channel}`} className="hover:bg-bg-surface">
+                        <td
+                          className="sticky left-0 z-10 max-w-[300px] truncate border-b border-r border-border-soft bg-bg-white px-3 py-1.5 text-xs text-text-primary"
+                          title={r.label === r.source ? r.source : `${r.label}  ·  ${r.source}`}
+                        >
+                          {r.label}
+                        </td>
+                        {grain !== "source" && (
+                          <td className="border-b border-border-soft px-3 py-1.5 text-xs text-text-secondary">
+                            {r.channel}
+                          </td>
+                        )}
+                        {grain !== "source" && (
+                          <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
+                            {r.spend === null || r.spend === undefined
+                              ? <span className="text-text-tertiary" title="Meta never billed this id">—</span>
+                              : num(r.spend)}
+                          </td>
+                        )}
+                        <td
+                          className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${unbilled > 0 ? "font-semibold text-warning-text" : "text-text-primary"}`}
+                          title={unbilled > 0 ? `₹${num(unbilled)} more opened than closed — credit last click gives to another ad` : undefined}
+                        >
+                          {num(r.first_click_revenue)}
+                        </td>
+                        <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.last_click_revenue)}</td>
+                        <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_days_to_convert, 1)}</td>
+                        <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_sessions, 1)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
       )}
 
-      <p className="text-xs text-text-tertiary">
+      <p className="text-[11.5px] text-text-tertiary">
         GA4 sees about 76% of orders, so these counts are a subset of Shopify&rsquo;s. Use them to compare
         sources against each other, not as an order total. Windowed on the order&rsquo;s IST day, the same
         boundary the Shopify columns elsewhere use.

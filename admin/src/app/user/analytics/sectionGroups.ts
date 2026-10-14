@@ -17,6 +17,7 @@
 export type Tab =
   | "dashboard"
   | "creative-testing"
+  | "asset-analysis"
   | "ads-analyse"
   | "last-click-utm"
   | "first-click"
@@ -40,7 +41,7 @@ export interface Group {
 
 export const GROUPS: Group[] = [
   { key: "overview", label: "Overview", tabs: ["dashboard"] },
-  { key: "creative", label: "Creative", tabs: ["creative-testing", "untested-assets", "instagram"] },
+  { key: "creative", label: "Creative", tabs: ["creative-testing", "asset-analysis", "untested-assets", "instagram"] },
   { key: "attribution", label: "Attribution", tabs: ["last-click-utm", "first-click", "customer-journey", "landing-page"] },
   { key: "product", label: "Product", tabs: ["ads-analyse", "cpis"] },
   { key: "explore", label: "Explore", tabs: ["shopify-analytics", "shopify-explorer", "meta-explorer"] },

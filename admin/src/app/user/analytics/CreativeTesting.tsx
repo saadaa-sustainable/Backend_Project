@@ -55,7 +55,15 @@ import { theme } from "@/lib/theme";
 import { IconGraphic, IconInfluencer, IconVideo } from "./Icons";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
-import { SectionHeader } from "./SectionChrome";
+import {
+  FieldLabel,
+  FilterCell,
+  FilterRule,
+  SectionHeader,
+  Segmented,
+  filterControlClass,
+} from "./SectionChrome";
+import { getAssetPreview } from "@/lib/assetPreview";
 
 /** CTD's cream/gold palette. Scoped here rather than pushed into the
  *  app's design tokens, which are blue-based for every other tab. */
@@ -223,6 +231,20 @@ const CAT_ACCENT: Record<CategoryKey, string> = {
   "P2 analysis": "#8E6608",
   "Result Awaited": "#8E6608",
   Discarded: "#9E0C24",
+};
+
+/** The verdict as a CHIP -- flat colour field, no border, on the
+ *  surface's own tokens. The accent hexes above stay where they are:
+ *  they drive the funnel bars and the matrix, which are data fills.
+ *  A chip is chrome, and chrome uses the tokens. */
+const CAT_CHIP: Record<CategoryKey, string> = {
+  "Incremental Winner": "bg-success-bg text-success-text",
+  Winner: "bg-success-bg text-success-text",
+  "P0 analysis": "bg-bg-muted text-text-secondary",
+  "P1 analysis": "bg-bg-muted text-text-secondary",
+  "P2 analysis": "bg-bg-muted text-text-secondary",
+  "Result Awaited": "bg-warning-bg text-warning-text",
+  Discarded: "bg-error-bg text-error-text",
 };
 
 /** Funnel column groups, matching CTD's two-row header. */
@@ -737,6 +759,116 @@ function pct(num: number, den: number): string {
   return ((num / den) * 100).toFixed(2) + "%";
 }
 
+/* ── the asset card ──────────────────────────────────────────────── */
+
+/** One figure on an asset card. Label above, figure below, no box. */
+function CardFigure({ label, value, tone }: { label: string; value: string; tone?: "bad" }) {
+  return (
+    <div className="min-w-0">
+      <span className="block text-[9.5px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">
+        {label}
+      </span>
+      <span
+        className={`block truncate font-mono text-[13.5px] tabular-nums ${
+          tone === "bad" ? "text-error-text" : "text-text-primary"
+        }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The asset, as a card: preview, id, verdict, four figures.
+ *
+ * Four, not fourteen. The table behind the Table switch still carries
+ * every column — this is the view you scan, and a scan that has to read
+ * fourteen numbers per asset is a table with worse alignment. Spend
+ * says how much was risked, ROAS and Cost/NCP say what came back, NCP
+ * says on how many new customers. Everything else is one click away.
+ *
+ * A card is the one place on this surface that keeps its edge: a media
+ * tile with no border bleeds into the next one.
+ */
+function AssetCard({ r, onOpen }: { r: CreativeTestingRow; onOpen: () => void }) {
+  const preview = getAssetPreview(r);
+  const [failed, setFailed] = useState(false);
+  const thumb = failed ? null : preview.thumbnail;
+  const cat = (r.category ?? "Discarded") as CategoryKey;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={
+        `${r.asset_id} · ${cat}\n` +
+        `${r.media ?? "unknown media"} · ${r.kind === "new" ? "New" : `Iteration ×${r.iteration_count}`}` +
+        ` · ${r.ads} ad${r.ads === 1 ? "" : "s"} (${r.copy_ads} copies)\n` +
+        `Launched in window ${r.launched_in_window ?? "—"} · first ad ever ${r.first_ad_date ?? "—"}\n` +
+        `${r.account_name ?? "no account"}\n` +
+        `Impressions ${num(r.impressions)} · FTEWV ${num(r.ftewv_count)} · ₹/FTEWV ${fmtMoney(r.cost_per_ftewv)}\n` +
+        `Open the ads behind this asset`
+      }
+      className="flex flex-col overflow-hidden border border-border-primary bg-bg-white text-left transition-colors hover:border-text-primary"
+    >
+      <div className="relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden border-b border-border-primary bg-bg-muted">
+        {thumb ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={thumb}
+            alt=""
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <span className="text-[11px] text-text-tertiary">{r.media ?? "no preview"}</span>
+        )}
+      </div>
+      <div className="flex flex-col gap-2.5 px-3 py-3">
+        <div className="flex items-start justify-between gap-2">
+          <span className="min-w-0 break-all font-mono text-[12px] leading-[1.35] text-text-primary">
+            {r.asset_id}
+            {r.name_conflict && (
+              <span
+                className="ml-1 bg-warning-bg px-1 text-[10px] text-warning-text"
+                title="An ad naming this asset also names another one."
+              >
+                ⚠
+              </span>
+            )}
+          </span>
+          <span
+            title={cat}
+            className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.05em] ${CAT_CHIP[cat]}`}
+          >
+            {FUNNEL_SHORT[cat]}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+          <CardFigure label="Spend" value={fmtMoney(r.spend)} />
+          <CardFigure
+            label="ROAS"
+            value={fmtNum(r.roas)}
+            tone={r.roas !== null && r.roas !== undefined && r.roas < 1 ? "bad" : undefined}
+          />
+          <CardFigure label="NCP" value={num(r.ncp_count)} />
+          <CardFigure
+            label="Cost / NCP"
+            value={fmtMoney(r.cost_per_ncp)}
+            tone={
+              r.cost_per_ncp !== null && r.cost_per_ncp !== undefined && r.cost_per_ncp > 525
+                ? "bad"
+                : undefined
+            }
+          />
+        </div>
+      </div>
+    </button>
+  );
+}
+
 export function CreativeTesting() {
   const [allRows, setAllRows] = useState<CreativeTestingRow[]>([]);
   const [totals, setTotals] = useState<CreativeTestingTotals | null>(null);
@@ -747,6 +879,10 @@ export function CreativeTesting() {
   const [error, setError] = useState<string | null>(null);
   const [defsOpen, setDefsOpen] = useState(false);
   const [openAsset, setOpenAsset] = useState<string | null>(null);
+  // Which shape the same rows are read in. Not a filter: it refetches
+  // nothing and narrows nothing, so it sits on the title with the other
+  // view switches.
+  const [view, setView] = useState<"grid" | "table">("grid");
 
   const [preset, setPreset] = useState("last30");
   // resolvePreset, not a local helper: the picker owns its preset keys
@@ -858,6 +994,182 @@ export function CreativeTesting() {
   // extracting reach and clicks from Bronze.
   const imp = totals?.impressions || 0;
 
+  // The table, built here so the view switch can put it in the same
+  // slot the card grid occupies rather than four screens below it.
+  const tableBlock = (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => setShowCols((v) => !v)}
+          className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+        >
+          ▤ Columns ({visibleCols.length}/{ASSET_COLUMNS.length})
+        </button>
+        {hiddenCols.size !== DEFAULT_HIDDEN.size && (
+          <button
+            onClick={() => setHiddenCols(new Set(DEFAULT_HIDDEN))}
+            className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
+          >
+            Reset to default
+          </button>
+        )}
+        <span className="text-[11px]" style={{ color: CT.muted }}>
+          <span className="opacity-50">∞</span> marks a lifetime metric the date filter cannot scope
+        </span>
+      </div>
+
+      {showCols && (
+        <div className="rounded-lg border bg-white p-3 shadow-sm" style={{ borderColor: CT.border }}>
+          <div className="mb-2 flex items-center gap-2">
+            <input
+              value={colSearch}
+              onChange={(e) => setColSearch(e.target.value)}
+              placeholder="Find a column…"
+              className="w-56 rounded-md border border-border-primary px-2 py-1 text-xs"
+            />
+            <button
+              onClick={() => setHiddenCols(new Set())}
+              className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
+            >
+              Show all
+            </button>
+            <button
+              onClick={() => setHiddenCols(new Set(ASSET_COLUMNS.map((c) => c.key)))}
+              className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
+            >
+              Hide all
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3 lg:grid-cols-4">
+            {ASSET_COL_GROUPS.map((grp) => {
+              const cols = ASSET_COLUMNS.filter(
+                (c) => c.group === grp &&
+                  c.header.toLowerCase().includes(colSearch.toLowerCase()),
+              );
+              if (!cols.length) return null;
+              return (
+                <div key={grp}>
+                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide"
+                       style={{ color: CT.muted }}>
+                    {grp}
+                  </div>
+                  {cols.map((c) => (
+                    <label key={c.key} className="flex items-center gap-1.5 py-0.5 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={!hiddenCols.has(c.key)}
+                        onChange={() =>
+                          setHiddenCols((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(c.key)) next.delete(c.key);
+                            else next.add(c.key);
+                            return next;
+                          })
+                        }
+                      />
+                      <span>{c.header}</span>
+                      {c.lifetime && <span className="opacity-40" title="Lifetime, not windowed">∞</span>}
+                    </label>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── asset table ───────────────────────────────────────── */}
+      <p className="text-xs" style={{ color: CT.muted }}>
+        Ad preview and website links show the ad that spent most in the selected dates. Open a row to see links for every iteration.
+      </p>
+      <div
+        className="overflow-x-auto border bg-white"
+        style={{ borderColor: CT.border }}
+      >
+        <table className="ct-asset-table min-w-full text-sm">
+          <thead
+            className="text-left text-[10px] font-semibold uppercase tracking-wider"
+            style={{ backgroundColor: CT.cream, color: CT.muted }}
+          >
+            <tr>
+              {visibleCols.map((c) => (
+                <th
+                  key={c.key}
+                  className={"px-3 py-2 whitespace-nowrap " + (c.align === "right" ? "text-right" : "")}
+                  title={c.lifetime
+                    ? "LIFETIME — the date filter cannot scope this metric; no daily source carries it."
+                    : c.title}
+                >
+                  {c.header}
+                  {c.lifetime && <span className="ml-1 opacity-50" title="Lifetime, not windowed">∞</span>}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {/* Skeleton rows, not a single "Loading…" line. A 30-day
+                window takes seconds to come back, and a one-line message
+                made the table look EMPTY rather than busy -- the shape of
+                what is coming is the useful signal. */}
+            {loading &&
+              Array.from({ length: 8 }).map((_, i) => (
+                <tr key={`sk-${i}`} className="border-t" style={{ borderColor: CT.border }}>
+                  {visibleCols.map((c) => (
+                    <td key={c.key} className="px-3 py-2">
+                      <div
+                        className="h-3 animate-pulse rounded bg-bg-muted"
+                        style={{
+                          // Vary the width so it reads as content rather
+                          // than a progress bar, and keep it stable per
+                          // cell so it does not jitter between frames.
+                          width: c.align === "right" ? "3.5rem" : "70%",
+                          opacity: 1 - i * 0.07,
+                        }}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            {!loading && pageRows.length === 0 && (
+              <tr>
+                <td colSpan={visibleCols.length} className="px-3 py-6 text-center text-text-tertiary">
+                  No assets tested in this window.
+                </td>
+              </tr>
+            )}
+            {!loading &&
+              pageRows.map((r) => {
+                return (
+                  <tr
+                    key={r.asset_id}
+                    onClick={() => setOpenAsset(r.asset_id)}
+                    title={
+                      r.kind === "new"
+                        ? "Open this asset's ad"
+                        : `Open all ${r.ads} ads for this asset, by iteration`
+                    }
+                    className="cursor-pointer border-t transition-colors"
+                    style={{ borderColor: CT.border }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = theme.accentYellowBg)}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "")}
+                  >
+                    {visibleCols.map((c) => (
+                      <td
+                        key={c.key}
+                        className={"px-3 py-2 " + (c.align === "right" ? "text-right" : "")}
+                      >
+                        {c.render(r)}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+
   return (
     <div className="space-y-3" style={{ backgroundColor: CT.cream }}>
       {/* ── page header ───────────────────────────────────────── */}
@@ -865,6 +1177,14 @@ export function CreativeTesting() {
           ad_asset_map") said where the data comes from, which is a Help
           question, not a thing to re-read daily. The ? leads there. */}
       <SectionHeader title="Creative Testing" helpId="verdicts">
+          <Segmented
+            options={[
+              { value: "grid", label: "Grid", title: "Every asset as a card: preview, verdict, and the four figures that decide it." },
+              { value: "table", label: "Table", title: "The same assets as rows, with every column the inspector offers." },
+            ]}
+            value={view}
+            onChange={(v) => setView(v as "grid" | "table")}
+          />
           <button
             onClick={() => setDefsOpen(true)}
             className="text-[12.5px] text-text-secondary transition-colors hover:text-text-primary"
@@ -878,18 +1198,54 @@ export function CreativeTesting() {
       </SectionHeader>
 
       {/* ── filters ───────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-white p-2 shadow-sm">
+      {/* One rule of labelled cells, not a bordered tray of controls.
+          Media left this row for the Kind switch on the verdict rule,
+          where it reads as what it is: which kind of creative the cards
+          below are. */}
+      <FilterRule
+        // The rule builder is an advanced filter, so it lives behind the
+        // disclosure the rest of the surface uses for those -- with its
+        // active rule count on the toggle, so a set filter can never be
+        // invisible.
+        extraCount={multiFilter?.rules.length ?? 0}
+        extra={
+          <div className="w-full min-w-0">
+            <MultiFilter applied={multiFilter} onApply={setMultiFilter} fields={ASSET_FILTER_FIELDS} />
+          </div>
+        }
+        actions={
+          <>
+            {loading && (
+              <span
+                className="inline-flex items-center gap-1.5 text-[11.5px] text-text-tertiary"
+                role="status"
+                aria-live="polite"
+              >
+                <span
+                  className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent"
+                  aria-hidden="true"
+                />
+                Loading {fromDate} → {toDate}…
+              </span>
+            )}
+            <span className="text-[11.5px] text-text-tertiary tabular-nums">
+              {allRows.length.toLocaleString("en-IN")} asset{allRows.length === 1 ? "" : "s"}
+            </span>
+          </>
+        }
+      >
         {/* The same dual-month picker Ads Analyse uses, rather than a
             preset dropdown beside two bare date inputs. It carries its
             own presets and applies from/to in one commit, so changing a
             range is one fetch instead of one per input. */}
-        <div className="relative w-64">
+        <FilterCell label="Date range">
           <DateRangePicker
             value={{ from: fromDate, to: toDate }}
             preset={preset}
             // Opens leftwards: this trigger sits at the left edge of the
             // filter bar and the panel is ~500px wide, so hanging it off
             // the right edge put the first month off-screen.
+            bare
             align="left"
             // The section's own gold, not the app token -- which is named
             // accentYellow but is #1D4E89, a blue nothing else here uses.
@@ -904,68 +1260,59 @@ export function CreativeTesting() {
               setPage(0);
             }}
           />
-        </div>
-        <select
-          value={media}
-          onChange={(e) => setMedia(e.target.value as MediaKey | "")}
-          className="rounded-md border border-border-primary px-2 py-1 text-sm"
-        >
-          <option value="">All media</option>
-          <option value="video">Video</option>
-          <option value="graphic">Graphic</option>
-          <option value="influencer">Influencer</option>
-        </select>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search asset id…"
-          className="w-48 rounded-md border border-border-primary px-2 py-1 text-sm"
-        />
-        {/* Sits with the controls, so the feedback is where the change
-            was made. A 30-day window is a multi-second query and the
-            date picker gave no sign it had been heard. */}
-        {loading && (
-          <span
-            className="inline-flex items-center gap-1.5 text-xs"
-            style={{ color: CT.muted }}
-            role="status"
-            aria-live="polite"
-          >
-            <span
-              className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent"
-              aria-hidden="true"
-            />
-            Loading {fromDate} → {toDate}…
-          </span>
-        )}
-      </div>
+        </FilterCell>
 
-      {/* ── New / Retested tabs ───────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2">
+        <FilterCell label="Asset id" className="w-48" htmlFor="ct-asset-search">
+          <input
+            id="ct-asset-search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search…"
+            className={filterControlClass}
+          />
+        </FilterCell>
+      </FilterRule>
+
+      {/* ── which set of assets ───────────────────────────────── */}
+      {/* Four tiles and a second labelled row became one rule of pills.
+          They were always a single choice — which population the cards
+          below are drawn from — and printing each count at 18px made
+          four of them compete with the verdicts underneath, which are
+          the numbers this section is actually about. The definitions
+          they carried are unchanged: every pill keeps its InfoDot. */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-border-primary pb-2.5">
+        <FieldLabel className="!inline mr-1">Set</FieldLabel>
         {(
           [
-            ["all", "All tested", newCount + histCount + refreshCount, "Every asset with an ad launched in this window."],
-            ["new", "New creatives", newCount, "Asset was created inside this window — its first real test."],
-          ] as [KindTab, string, number, string][]
-        ).map(([key, label, count, hint]) => {
+            ["all", "All tested", newCount + histCount + refreshCount],
+            ["new", "New creatives", newCount],
+            ["historical_discarded", "Historical Discarded", histCount],
+            // Labelled "Retested", not "Refresh Discarded". These
+            // creatives were NOT discarded -- they cleared the
+            // impression floor, which is what makes their numbers
+            // worth reading in the first place. The key stays
+            // refresh_discarded because the API filters on it.
+            ["refresh_discarded", "Retested", refreshCount],
+          ] as [KindTab, string, number][]
+        ).map(([key, label, count]) => {
           const active = kindTab === key;
           return (
             <button
               key={key}
-              title={undefined}
+              aria-pressed={active}
               onClick={() => setKindTab(key)}
               className={
-                "rounded-lg border px-3 py-2 text-left transition-colors " +
+                "flex items-center gap-1.5 border px-2 py-1 text-[12.5px] transition-colors " +
                 (active
-                  ? "border-border-primary bg-success-bg text-success-text"
-                  : "border-border-primary bg-white hover:bg-bg-muted")
+                  ? "border-text-primary bg-bg-surface text-text-primary"
+                  : "border-border-primary text-text-secondary hover:bg-bg-surface")
               }
             >
-              <div className="flex items-center gap-0.5">
-                <span className="text-[11px] uppercase tracking-wide opacity-70">{label}</span>
-                <InfoDot id={key} />
-              </div>
-              <div className="text-lg font-semibold">{count.toLocaleString("en-IN")}</div>
+              <span>{label}</span>
+              <span className="font-medium tabular-nums text-text-primary">
+                {count.toLocaleString("en-IN")}
+              </span>
+              <InfoDot id={key} />
             </button>
           );
         })}
@@ -987,123 +1334,97 @@ export function CreativeTesting() {
             underneath is every untested asset regardless of age, which
             is much larger and is the queue the team works through. */}
         <div
-          className="rounded-lg border border-dashed border-border-primary bg-white px-3 py-2 text-left"
+          className="flex items-center gap-1.5 border border-dashed border-border-primary px-2 py-1 text-[12.5px] text-text-secondary"
           title={
             `${(unmatched.video ?? 0).toLocaleString("en-IN")} video,` +
             ` ${(unmatched.graphic ?? 0).toLocaleString("en-IN")} graphic,` +
-            ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer`
+            ` ${(unmatched.influencer ?? 0).toLocaleString("en-IN")} influencer` +
+            ` · ${unmatchedBacklog.toLocaleString("en-IN")} in backlog`
           }
         >
           {/* An InfoDot, like the two tiles beside it. This had a `title`
               only, so the definition appeared on hover and nowhere else
               -- unreachable by keyboard, invisible on touch, and gone the
               moment the pointer moved. */}
-          <div className="flex items-center gap-0.5">
-            <span className="text-[11px] uppercase tracking-wide opacity-70 text-text-secondary">
-              Not matched
-            </span>
-            <InfoDot id="not_matched" />
-          </div>
-          <div className="text-lg font-semibold text-text-secondary">
+          <span>Not matched</span>
+          <span className="font-medium tabular-nums text-text-primary">
             {unmatchedInWindow.toLocaleString("en-IN")}
-          </div>
-          <div className="text-[10px] text-text-tertiary">
-            {unmatchedBacklog.toLocaleString("en-IN")} in backlog
-          </div>
+          </span>
+          <span className="text-text-tertiary tabular-nums">
+            + {unmatchedBacklog.toLocaleString("en-IN")} backlog
+          </span>
+          <InfoDot id="not_matched" />
         </div>
-      </div>
 
-      {/* ── Retested creatives ────────────────────────────────── */}
-      <div>
-        <div className="mb-1 flex items-baseline gap-2">
-          <span className="text-[11px] uppercase tracking-wide text-text-tertiary">
-            Retested creatives
-          </span>
-          <span className="text-[11px] text-text-tertiary">
-            {(histCount + refreshCount).toLocaleString("en-IN")} assets · split on{" "}
-            <b>lifetime</b> impressions across every ad that ever carried the asset,
-            not on the selected dates
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {(
-            [
-              ["historical_discarded", "Historical Discarded", histCount,
-               `Retested, and across ALL its ads it has still never reached ${IMPRESSION_FLOOR.toLocaleString("en-IN")} impressions in its lifetime — not just in this window. Put back in the air again and again and never cleared the bare minimum.`],
-              // Labelled "Retested", not "Refresh Discarded". These
-              // creatives were NOT discarded -- they cleared the
-              // impression floor, which is what makes their numbers
-              // worth reading in the first place. The key stays
-              // refresh_discarded because the API filters on it.
-              ["refresh_discarded", "Retested", refreshCount,
-               `Retested and past the ${IMPRESSION_FLOOR.toLocaleString("en-IN")} lifetime impression mark across all its ads. It cleared the bare minimum, so its numbers are worth reading.`],
-            ] as [KindTab, string, number, string][]
-          ).map(([key, label, count, hint]) => {
-            const active = kindTab === key;
-            return (
-              <button
-                key={key}
-                title={undefined}
-                onClick={() => setKindTab(key)}
-                className={
-                  "rounded-lg border px-3 py-2 text-left transition-colors " +
-                  (active
-                    ? "border-border-primary bg-success-bg text-success-text"
-                    : "border-border-primary bg-white hover:bg-bg-muted")
-                }
-              >
-                <div className="flex items-center gap-0.5">
-                  <span className="text-[11px] uppercase tracking-wide opacity-70">{label}</span>
-                  <InfoDot id={key} />
-                </div>
-                <div className="text-lg font-semibold">{count.toLocaleString("en-IN")}</div>
-              </button>
-            );
-          })}
-        </div>
+        <span className="ml-auto max-w-[26rem] text-[11px] text-text-tertiary">
+          Historical Discarded and Retested split on <b>lifetime</b> impressions — the{" "}
+          {IMPRESSION_FLOOR.toLocaleString("en-IN")} floor, across every ad that ever carried
+          the asset, not the selected dates.
+        </span>
       </div>
 
       {/* ── verdict buckets ───────────────────────────────────── */}
-      <div>
-        <div className="mb-1 text-[11px] uppercase tracking-wide text-text-tertiary">
-          F1–F4 verdict buckets · click to filter
+      {/* Cards, not chips. An earlier pass made these a chip row with the
+          spend behind a tooltip, on the argument that a verdict is a
+          label rather than a quantity. That was wrong for this section:
+          the spend BEHIND each verdict is the decision — how much money
+          is sitting in Discarded, how little is behind the Winners — and
+          a figure you have to hover to read is a figure nobody reads.
+
+          Each card keeps its accent as a rule along the top, which is
+          the one place this surface still spends colour on a category,
+          because the seven verdicts are the section's own vocabulary. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <FieldLabel>Verdict · click a card to filter</FieldLabel>
+        <div className="flex items-center gap-1.5">
+          <FieldLabel className="!inline">Kind</FieldLabel>
+          <Segmented
+            options={[
+              { value: "", label: "All", title: "Every medium" },
+              { value: "video", label: "Video" },
+              { value: "graphic", label: "Graphic" },
+              { value: "influencer", label: "Influencer" },
+            ]}
+            value={media}
+            onChange={(v) => setMedia(v as "" | MediaKey)}
+          />
         </div>
-        <div className="flex flex-wrap gap-2">
-          {CATEGORY_ORDER.map((c) => {
-            const n = categoryCounts[c] ?? 0;
-            const active = category === c;
-            return (
-              <button
-                key={c}
-                onClick={() => setCategory(active ? "" : c)}
-                className="min-w-[150px] flex-1 overflow-hidden rounded-lg border bg-white text-left shadow-sm transition-transform hover:-translate-y-0.5"
-                style={{
-                  borderColor: active ? CAT_ACCENT[c] : CT.border,
-                  boxShadow: active ? `0 0 0 2px ${CAT_ACCENT[c]}33` : undefined,
-                }}
-              >
-                <div style={{ height: 3, backgroundColor: CAT_ACCENT[c] }} />
-                <div className="p-3">
-                  <div
-                    className="text-[10px] font-semibold uppercase tracking-wider"
-                    style={{ color: CT.muted }}
-                  >
-                    {c}
-                  </div>
-                  <div className="text-2xl font-bold" style={{ color: CT.ink }}>
-                    {n.toLocaleString("en-IN")}
-                  </div>
-                  <div className="text-[11px]" style={{ color: CT.muted }}>
-                    Spend{" "}
-                    <span style={{ color: CAT_ACCENT[c] }}>
-                      {fmtMoney(derived.spendByCat[c] ?? 0)}
-                    </span>
-                  </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+        {CATEGORY_ORDER.map((c) => {
+          const n = categoryCounts[c] ?? 0;
+          const active = category === c;
+          return (
+            <button
+              key={c}
+              onClick={() => setCategory(active ? "" : c)}
+              aria-pressed={active}
+              title={`${c} · ${n.toLocaleString("en-IN")} assets · spend ${fmtMoney(derived.spendByCat[c] ?? 0)}${active ? " · click to clear" : " · click to filter"}`}
+              className={
+                "overflow-hidden border text-left transition-colors " +
+                (active
+                  ? "border-text-primary bg-bg-surface"
+                  : "border-border-primary bg-bg-white hover:bg-bg-surface")
+              }
+            >
+              <div style={{ height: 3, backgroundColor: CAT_ACCENT[c] }} />
+              <div className="px-3 py-2.5">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">
+                  {c}
                 </div>
-              </button>
-            );
-          })}
-        </div>
+                <div className="mt-1 text-[24px] font-medium leading-none tabular-nums text-text-primary">
+                  {n.toLocaleString("en-IN")}
+                </div>
+                <div className="mt-1.5 text-[11px] text-text-tertiary">
+                  Spend{" "}
+                  <span className="tabular-nums" style={{ color: CAT_ACCENT[c] }}>
+                    {fmtMoney(derived.spendByCat[c] ?? 0)}
+                  </span>
+                </div>
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       {/* Everything below is derived from the fetch, so while one is in
@@ -1386,203 +1707,6 @@ export function CreativeTesting() {
 
       </div>{/* end dim-while-loading */}
 
-      {/* ── inspector controls ────────────────────────────────── */}
-      <MultiFilter applied={multiFilter} onApply={setMultiFilter} fields={ASSET_FILTER_FIELDS} />
-
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          onClick={() => setShowCols((v) => !v)}
-          className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
-        >
-          ▤ Columns ({visibleCols.length}/{ASSET_COLUMNS.length})
-        </button>
-        {hiddenCols.size !== DEFAULT_HIDDEN.size && (
-          <button
-            onClick={() => setHiddenCols(new Set(DEFAULT_HIDDEN))}
-            className="rounded-md border border-border-primary bg-white px-2.5 py-1.5 text-xs hover:bg-bg-muted"
-          >
-            Reset to default
-          </button>
-        )}
-        <span className="text-[11px]" style={{ color: CT.muted }}>
-          <span className="opacity-50">∞</span> marks a lifetime metric the date filter cannot scope
-        </span>
-      </div>
-
-      {showCols && (
-        <div className="rounded-lg border bg-white p-3 shadow-sm" style={{ borderColor: CT.border }}>
-          <div className="mb-2 flex items-center gap-2">
-            <input
-              value={colSearch}
-              onChange={(e) => setColSearch(e.target.value)}
-              placeholder="Find a column…"
-              className="w-56 rounded-md border border-border-primary px-2 py-1 text-xs"
-            />
-            <button
-              onClick={() => setHiddenCols(new Set())}
-              className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
-            >
-              Show all
-            </button>
-            <button
-              onClick={() => setHiddenCols(new Set(ASSET_COLUMNS.map((c) => c.key)))}
-              className="rounded-md border border-border-primary px-2 py-1 text-xs hover:bg-bg-muted"
-            >
-              Hide all
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-3 lg:grid-cols-4">
-            {ASSET_COL_GROUPS.map((grp) => {
-              const cols = ASSET_COLUMNS.filter(
-                (c) => c.group === grp &&
-                  c.header.toLowerCase().includes(colSearch.toLowerCase()),
-              );
-              if (!cols.length) return null;
-              return (
-                <div key={grp}>
-                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide"
-                       style={{ color: CT.muted }}>
-                    {grp}
-                  </div>
-                  {cols.map((c) => (
-                    <label key={c.key} className="flex items-center gap-1.5 py-0.5 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={!hiddenCols.has(c.key)}
-                        onChange={() =>
-                          setHiddenCols((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(c.key)) next.delete(c.key);
-                            else next.add(c.key);
-                            return next;
-                          })
-                        }
-                      />
-                      <span>{c.header}</span>
-                      {c.lifetime && <span className="opacity-40" title="Lifetime, not windowed">∞</span>}
-                    </label>
-                  ))}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ── asset table ───────────────────────────────────────── */}
-      <p className="text-xs" style={{ color: CT.muted }}>
-        Ad preview and website links show the ad that spent most in the selected dates. Open a row to see links for every iteration.
-      </p>
-      <div
-        className="overflow-x-auto rounded-lg border bg-white shadow-sm"
-        style={{ borderColor: CT.border }}
-      >
-        <table className="ct-asset-table min-w-full text-sm">
-          <thead
-            className="text-left text-[10px] font-semibold uppercase tracking-wider"
-            style={{ backgroundColor: CT.cream, color: CT.muted }}
-          >
-            <tr>
-              {visibleCols.map((c) => (
-                <th
-                  key={c.key}
-                  className={"px-3 py-2 whitespace-nowrap " + (c.align === "right" ? "text-right" : "")}
-                  title={c.lifetime
-                    ? "LIFETIME — the date filter cannot scope this metric; no daily source carries it."
-                    : c.title}
-                >
-                  {c.header}
-                  {c.lifetime && <span className="ml-1 opacity-50" title="Lifetime, not windowed">∞</span>}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {/* Skeleton rows, not a single "Loading…" line. A 30-day
-                window takes seconds to come back, and a one-line message
-                made the table look EMPTY rather than busy -- the shape of
-                what is coming is the useful signal. */}
-            {loading &&
-              Array.from({ length: 8 }).map((_, i) => (
-                <tr key={`sk-${i}`} className="border-t" style={{ borderColor: CT.border }}>
-                  {visibleCols.map((c) => (
-                    <td key={c.key} className="px-3 py-2">
-                      <div
-                        className="h-3 animate-pulse rounded bg-bg-muted"
-                        style={{
-                          // Vary the width so it reads as content rather
-                          // than a progress bar, and keep it stable per
-                          // cell so it does not jitter between frames.
-                          width: c.align === "right" ? "3.5rem" : "70%",
-                          opacity: 1 - i * 0.07,
-                        }}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            {!loading && pageRows.length === 0 && (
-              <tr>
-                <td colSpan={visibleCols.length} className="px-3 py-6 text-center text-text-tertiary">
-                  No assets tested in this window.
-                </td>
-              </tr>
-            )}
-            {!loading &&
-              pageRows.map((r) => {
-                return (
-                  <tr
-                    key={r.asset_id}
-                    onClick={() => setOpenAsset(r.asset_id)}
-                    title={
-                      r.kind === "new"
-                        ? "Open this asset's ad"
-                        : `Open all ${r.ads} ads for this asset, by iteration`
-                    }
-                    className="cursor-pointer border-t transition-colors"
-                    style={{ borderColor: CT.border }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = theme.accentYellowBg)}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "")}
-                  >
-                    {visibleCols.map((c) => (
-                      <td
-                        key={c.key}
-                        className={"px-3 py-2 " + (c.align === "right" ? "text-right" : "")}
-                      >
-                        {c.render(r)}
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="flex items-center justify-between text-xs" style={{ color: CT.muted }}>
-        <span>
-          click a row to see the ad(s) behind it ·{" "}
-          {allRows.length.toLocaleString("en-IN")} asset{allRows.length === 1 ? "" : "s"} · showing{" "}
-          {pageRows.length ? page * PAGE_SIZE + 1 : 0}–{page * PAGE_SIZE + pageRows.length}
-        </span>
-        <div className="flex gap-2">
-          <button
-            disabled={page === 0}
-            onClick={() => setPage((p) => Math.max(0, p - 1))}
-            className="rounded-md border border-border-primary px-2 py-1 disabled:opacity-40"
-          >
-            Prev
-          </button>
-          <button
-            disabled={(page + 1) * PAGE_SIZE >= allRows.length}
-            onClick={() => setPage((p) => p + 1)}
-            className="rounded-md border border-border-primary px-2 py-1 disabled:opacity-40"
-          >
-            Next
-          </button>
-        </div>
-      </div>
-
       {openAsset && (
         <AssetAdsModal assetId={openAsset} onClose={() => setOpenAsset(null)} />
       )}
@@ -1774,6 +1898,68 @@ export function CreativeTesting() {
           </div>
         </div>
       )}
+
+
+      {/* ── the assets ────────────────────────────────────────── */}
+      {/* The point of the section, so it comes before the analysis
+          rather than after four screens of it. Grid or table is the
+          switch on the title; both read the same page of the same
+          rows. */}
+      {view === "grid" ? (
+        loading ? (
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div
+                key={`ck-${i}`}
+                className="border border-border-primary bg-bg-white"
+                style={{ opacity: 1 - i * 0.07 }}
+              >
+                <div className="aspect-[4/3] w-full animate-pulse bg-bg-muted" />
+                <div className="flex flex-col gap-2 p-3">
+                  <div className="h-3 w-2/3 animate-pulse bg-bg-muted" />
+                  <div className="h-8 w-full animate-pulse bg-bg-muted" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : pageRows.length === 0 ? (
+          <p className="border-b border-border-primary py-8 text-center text-[13px] text-text-tertiary">
+            No assets tested in this window.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
+            {pageRows.map((r) => (
+              <AssetCard key={r.asset_id} r={r} onOpen={() => setOpenAsset(r.asset_id)} />
+            ))}
+          </div>
+        )
+      ) : (
+        tableBlock
+      )}
+
+      <div className="flex items-center justify-between border-b border-border-primary pb-2.5 text-[11.5px] text-text-tertiary">
+        <span>
+          {view === "grid" ? "click a card" : "click a row"} to see the ad(s) behind it ·{" "}
+          {allRows.length.toLocaleString("en-IN")} asset{allRows.length === 1 ? "" : "s"} · showing{" "}
+          {pageRows.length ? page * PAGE_SIZE + 1 : 0}–{page * PAGE_SIZE + pageRows.length}
+        </span>
+        <div className="flex gap-3">
+          <button
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            className="text-text-secondary transition-colors hover:text-text-primary disabled:opacity-40"
+          >
+            Prev
+          </button>
+          <button
+            disabled={(page + 1) * PAGE_SIZE >= allRows.length}
+            onClick={() => setPage((p) => p + 1)}
+            className="text-text-secondary transition-colors hover:text-text-primary disabled:opacity-40"
+          >
+            Next
+          </button>
+        </div>
+      </div>
 
     </div>
   );

@@ -98,7 +98,6 @@ const JOIN_HINT: Record<MultiFilterJoin, string> = {
 /** App tokens. This started on the legacy dashboard's cream/gold, which
  *  made Ads Analyse the only tab not matching the rest of the panel. */
 const AE = {
-  cream: theme.bgMuted,
   border: theme.borderPrimary,
   muted: theme.textTertiary,
   ink: theme.textPrimary,
@@ -141,7 +140,7 @@ export function MultiFilter({
   }
 
   return (
-    <div className="rounded-lg border p-3" style={{ backgroundColor: AE.cream, borderColor: AE.border }}>
+    <div className="min-w-0">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-3">
           <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: AE.muted }}>
@@ -268,11 +267,22 @@ export function MultiFilter({
         </button>
       </div>
 
-      <p className="mt-2 text-[11px]" style={{ color: AE.muted }}>
-        {JOIN_HINT[join]}. Keyword operators split the value on spaces — to look for
-        several different ads in one go, <b>contains any of</b> on a single rule is usually
-        simpler than several OR-ed rules. Rules are evaluated server-side across every
-        matching ad, not just the rows in view.
+      {/* What stays in place is the one fact the control cannot do
+          without: what the join currently set actually does. The rest
+          of this paragraph -- how keyword operators split a value, why
+          "contains any of" beats several OR-ed rules, that rules are
+          evaluated server-side over every matching ad -- is read once
+          and scrolled past every day after, so it moved to Help, under
+          "How multi-filter rules combine". */}
+      <p className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]" style={{ color: AE.muted }}>
+        <span>{JOIN_HINT[join]}.</span>
+        <a
+          href="#help"
+          title="How multi-filter rules combine"
+          className="underline underline-offset-2 hover:text-text-primary"
+        >
+          How the operators work
+        </a>
       </p>
     </div>
   );

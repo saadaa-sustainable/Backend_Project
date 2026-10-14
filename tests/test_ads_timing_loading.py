@@ -11,10 +11,12 @@ from sqlalchemy.dialects.postgresql import asyncpg
 
 from app.api.routers import analytics
 from app.services.ad_efficiency import EfficiencyAnchors
+from app.services.ad_customer_mix import query_ad_customer_mix
 
 
 @pytest.fixture(autouse=True)
 def clear_cache(monkeypatch):
+    monkeypatch.setattr(analytics, "read_ad_customer_mix", query_ad_customer_mix)
     monkeypatch.setattr(analytics, "_reach_snapshots_ready", AsyncMock(return_value=False))
     analytics.get_ads_analyse.analytics_cache.entries.clear()
     analytics._get_ads_analyse_summary.analytics_cache.entries.clear()

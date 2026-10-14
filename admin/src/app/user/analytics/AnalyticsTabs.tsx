@@ -24,6 +24,7 @@ const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), 
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
 const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
 const Help = dynamic(() => import("./Help").then((m) => m.Help), { loading: TabLoading });
+const AssetAnalysis = dynamic(() => import("./AssetAnalysis").then((m) => m.AssetAnalysis), { loading: TabLoading });
 
 // Tab and the five groups it hangs under now live in sectionGroups.ts,
 // because the nav, the deep-link handler and the Help section all need
@@ -39,6 +40,7 @@ const Help = dynamic(() => import("./Help").then((m) => m.Help), { loading: TabL
 const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = {
   dashboard: { label: "Dashboard", render: () => <Dashboard /> },
   "creative-testing": { label: "Creative Testing", render: () => <CreativeTesting /> },
+  "asset-analysis": { label: "Asset Analysis", render: () => <AssetAnalysis /> },
   "ads-analyse": { label: "Ads Analyse", render: () => <AdsAnalyse /> },
   "last-click-utm": { label: "Last Click UTM", render: () => <LastClickUtm /> },
   // Beside Last Click, deliberately: the pair is the comparison.
@@ -165,45 +167,52 @@ export function AnalyticsTabs() {
               })}
             </nav>
           </div>
-          <button
-            type="button"
-            aria-current={tab === HELP_TAB ? "true" : undefined}
-            onClick={() => { setOpenGroup(null); selectTab(HELP_TAB); }}
-            className={`relative px-3 pb-3 pt-1 text-[13px] font-medium transition-colors ${
-              tab === HELP_TAB ? "text-text-primary" : "text-text-secondary hover:text-text-primary"
-            }`}
-          >
-            Help
-            {tab === HELP_TAB && (
-              <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-accent-yellow" />
+          <div className="flex flex-wrap items-center gap-3 pb-2">
+            {/* The approved design puts the siblings on the SAME rule as the
+                groups, right-aligned, as pills with the current one filled.
+                An earlier pass had them as underlined text on a second row,
+                which read as a second navigation rather than as the choice
+                within the one you are already in. */}
+            {siblings.length > 1 && (
+              <nav className="flex flex-wrap items-center gap-1.5" aria-label="Sections">
+                {siblings.map((t) => {
+                  const on = tab === t;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      aria-current={on ? "page" : undefined}
+                      onClick={() => { setOpenGroup(null); selectTab(t); }}
+                      className={`rounded-md border px-3 py-1.5 text-[12.5px] transition-colors ${
+                        on
+                          ? "border-text-primary bg-text-primary font-medium text-bg-white"
+                          : "border-border-primary bg-bg-white text-text-secondary hover:text-text-primary"
+                      }`}
+                    >
+                      {TAB_META[t].label}
+                    </button>
+                  );
+                })}
+              </nav>
             )}
-          </button>
+            <button
+              type="button"
+              aria-current={tab === HELP_TAB ? "true" : undefined}
+              onClick={() => { setOpenGroup(null); selectTab(HELP_TAB); }}
+              className={`relative px-2 pb-1 pt-1 text-[13px] font-medium transition-colors ${
+                tab === HELP_TAB ? "text-text-primary" : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              Help
+              {tab === HELP_TAB && (
+                <span className="absolute inset-x-1 -bottom-[9px] h-[2px] rounded-full bg-accent-yellow" />
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Siblings of the open group. Hidden for a group of one and for
             Help, which has none. */}
-        {siblings.length > 1 && (
-          <nav className="flex flex-wrap items-center gap-x-5 gap-y-1 pt-2.5" aria-label="Sections">
-            {siblings.map((t) => {
-              const on = tab === t;
-              return (
-                <button
-                  key={t}
-                  type="button"
-                  aria-current={on ? "page" : undefined}
-                  onClick={() => { setOpenGroup(null); selectTab(t); }}
-                  className={`text-[12.5px] transition-colors ${
-                    on
-                      ? "font-semibold text-text-primary underline decoration-accent-yellow decoration-2 underline-offset-[6px]"
-                      : "text-text-secondary hover:text-text-primary"
-                  }`}
-                >
-                  {TAB_META[t].label}
-                </button>
-              );
-            })}
-          </nav>
-        )}
       </div>
 
       {/* The data-floor banner moved to Help ("Why every figure starts

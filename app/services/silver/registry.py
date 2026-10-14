@@ -74,7 +74,7 @@ FLATTEN_REGISTRY: dict[str, FlattenJob] = {
         label="Shopify orders / customers / sessions",
         source_table="raw_dump_shopify",
         target_tables=(
-            "shopify_orders", "shopify_customers", "shopify_sessions", "shopify_fulfillments",
+            "shopify_orders", "shopify_customers", "shopify_sessions", "shopify_sessions_daily", "shopify_fulfillments",
             "shopify_customer_analytics", "shopify_sales", "shopify_discounts", "shopify_inventory",
         ),
         refresh=refresh_shopify_tables,

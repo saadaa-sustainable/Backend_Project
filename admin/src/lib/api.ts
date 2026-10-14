@@ -819,6 +819,8 @@ export interface AdsAnalyseTotals {
 export interface AdsAnalyseResponse {
   rows: AdsAnalyseRow[];
   total: number;
+  /** The optional customer breakdown timed out; its fields remain null. */
+  customer_mix_unavailable?: boolean;
   /** Ad count per category under the current filters (except `category` itself).
    * Powers the KPI tiles that mirror CTD's Creative Testing view. */
   category_counts: Record<string, number>;
@@ -2133,6 +2135,31 @@ export interface DashboardKpis {
   spend_data_from?: string | null;
 }
 
+export interface DashboardSessions {
+  total_sessions: number | null;
+  session_data_from: string | null;
+  session_data_to: string | null;
+  available_days: number;
+}
+
+export interface DashboardSessionTrendPoint {
+  day: string;
+  sessions: number | null;
+  ad_spend: number | null;
+  attributed_revenue: number;
+  attributed_orders: number;
+  cost_per_session: number | null;
+  revenue_per_session: number | null;
+  /** Fraction: 0.05 means 5%. */
+  conversion_rate: number | null;
+}
+
+export interface DashboardSessionTrend {
+  points: DashboardSessionTrendPoint[];
+  spend_data_from: string | null;
+  spend_data_to: string | null;
+}
+
 /** `?date_from=&date_to=` when both are given, else no query string —
  *  an empty range must hit the same URL the unfiltered tile caches under. */
 function dashboardRange(from?: string | null, to?: string | null): string {
@@ -2146,6 +2173,10 @@ function dashboardRange(from?: string | null, to?: string | null): string {
 // reaches back to 2025-12-29 — hence spend_data_from on the response.
 export const fetchDashboardKpis = (from?: string | null, to?: string | null) =>
   request<DashboardKpis>(`/admin/analytics/dashboard/kpis${dashboardRange(from, to)}`);
+export const fetchDashboardSessions = (from?: string | null, to?: string | null) =>
+  request<DashboardSessions>(`/admin/analytics/dashboard/sessions${dashboardRange(from, to)}`);
+export const fetchDashboardSessionTrend = (from?: string | null, to?: string | null) =>
+  request<DashboardSessionTrend>(`/admin/analytics/dashboard/session-trend${dashboardRange(from, to)}`);
 export const fetchDashboardCategoryBreakdown = (from?: string | null, to?: string | null) =>
   request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown${dashboardRange(from, to)}`);
 
@@ -2804,4 +2835,132 @@ export function fetchShopifyAnalytics(params: {
   return request<ShopifyAnalyticsResponse>(
     `/admin/analytics/shopify-analytics?${qs.toString()}`,
   );
+}
+
+// ── Asset Analysis ────────────────────────────────────────────────
+//
+// Two results per asset: what its newest iteration earned, and the
+// FIRST iteration that reached winner grade. Measured 2026-10-14, 300
+// of 3,536 assets reached winner grade and have since fallen out of it
+// -- on every other screen those read only as their current result.
+
+export const ASSET_LANES = [
+  "Incremental Winners",
+  "First Time Ad Winners",
+  "Retesting Winners",
+  "P0 analysis",
+  "P1 analysis",
+  "P2 analysis",
+  "Result Awaited",
+  "Discarded",
+  "Unrated",
+] as const;
+export type AssetLane = (typeof ASSET_LANES)[number];
+
+export interface AssetAnalysisRow {
+  asset_id: string;
+  media: string | null;
+  account_name: string | null;
+  lane: string;
+  current_result: string | null;
+  first_win_iter: number | null;
+  first_win_date: string | null;
+  iterations: number;
+  ads: number;
+  latest_ad_name: string | null;
+  first_tested: string | null;
+  last_tested: string | null;
+  spend: number;
+  impressions: number;
+  conv_value: number;
+  ncp: number;
+  ftewv: number;
+  purchases: number;
+  roas: number | null;
+  cost_per_ncp: number | null;
+  /** Same preview source Creative Testing reads, so a card is a card. */
+  preview_url: string | null;
+  thumbnail_url: string | null;
+}
+
+export interface AssetAnalysisResponse {
+  rows: AssetAnalysisRow[];
+  total: number;
+  totals: {
+    assets: number;
+    ever_won: number;
+    won_then_fell: number;
+    spend: number;
+    conv_value: number;
+    ncp: number;
+    roas: number | null;
+    median_iterations: number;
+  };
+  lane_counts: Record<string, number>;
+  /** Assets by CURRENT result, with the spend behind each. A different
+   *  cut from lane_counts, which folds every winner into First Time /
+   *  Retesting so a winner never appears under its own verdict. */
+  result_counts?: Record<string, { count: number; spend: number }>;
+  accounts: string[];
+}
+
+export interface AssetAnalysisParams {
+  from_date?: string;
+  to_date?: string;
+  lane?: string;
+  media?: string;
+  account_name?: string;
+  /** active, or its exact complement -- every mapped ad paused,
+   *  campaign-paused, adset-paused, archived, with issues, or carrying no
+   *  status at all. The two partition the set. */
+  status?: "active" | "inactive";
+  search?: string;
+  only?: "ever_won" | "won_fell" | "never";
+  sort?: "spend" | "roas" | "iterations" | "last_tested" | "ncp";
+  limit?: number;
+  offset?: number;
+}
+
+export function fetchAssetAnalysis(
+  params: AssetAnalysisParams = {},
+): Promise<AssetAnalysisResponse> {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+  });
+  const s = qs.toString();
+  return request<AssetAnalysisResponse>(`/admin/analytics/asset-analysis${s ? `?${s}` : ""}`);
+}
+
+export interface AssetIteration {
+  iter_no: number;
+  ad_id: string;
+  ad_name: string | null;
+  campaign_name: string | null;
+  account_name: string | null;
+  adset_name: string | null;
+  ad_effective_status: string | null;
+  ad_created_date: string | null;
+  category: string | null;
+  won: boolean;
+  spend: number;
+  impressions: number;
+  conv_value: number;
+  ncp: number;
+  roas: number | null;
+  purchases: number | null;
+  ftewv: number | null;
+  link_clicks: number | null;
+  shopify_orders: number | null;
+  shopify_revenue: number | null;
+  shopify_roas: number | null;
+  gold_refreshed_at: string | null;
+  match_source: string | null;
+  name_conflict: boolean | null;
+}
+
+export function fetchAssetIterations(
+  assetId: string,
+): Promise<{ asset_id: string; iterations: AssetIteration[] }> {
+  return request(`/admin/analytics/asset-analysis/${encodeURIComponent(assetId)}/iterations`);
 }

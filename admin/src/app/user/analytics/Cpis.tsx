@@ -628,6 +628,7 @@ function CpisView() {
             value={{ from: fromDate, to: toDate }}
             preset={datePreset}
             anchor={freshness?.max_daily_day ?? freshness?.max_meta_day ?? null}
+            bare
             align="left"
             onApply={(r, pk) => {
               datesTouchedRef.current = true;

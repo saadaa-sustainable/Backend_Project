@@ -134,17 +134,25 @@ export function FilterRule({
   actions?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  /* The approved design draws this as one bordered bar of rounded pill
+     controls, not as underlined cells on a hairline. An earlier pass
+     followed the surface brief's "rules, never boxes" and produced the
+     underlined version; the design the user signed off is the bar, and
+     it wins. The bar carries a border and NO shadow, so the one rule
+     the brief is unambiguous about still holds. */
   return (
-    <div className="flex flex-col border-b border-border-primary">
-      <div className="flex flex-wrap items-end gap-x-6 gap-y-3 pb-2.5">
+    <div className="flex flex-col">
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-bg-white px-3.5 py-2.5">
         {children}
         {extra && (
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
             aria-expanded={open}
-            className={`flex items-center gap-1.5 self-end pb-[3px] text-[12.5px] transition-colors ${
-              extraCount > 0 ? "font-medium text-accent-yellow" : "text-text-secondary hover:text-text-primary"
+            className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[13px] transition-colors ${
+              extraCount > 0
+                ? "border-accent-yellow bg-accent-yellow-bg font-medium text-accent-yellow"
+                : "border-border-primary bg-bg-white text-text-secondary hover:text-text-primary"
             }`}
           >
             More filters{extraCount > 0 ? ` · ${extraCount}` : ""}
@@ -153,10 +161,10 @@ export function FilterRule({
             </span>
           </button>
         )}
-        {actions && <div className="ml-auto flex flex-wrap items-center gap-3 self-end pb-[2px]">{actions}</div>}
+        {actions && <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
       {extra && open && (
-        <div className="flex flex-wrap items-end gap-x-6 gap-y-3 border-t border-border-soft py-2.5">{extra}</div>
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border-primary bg-bg-white px-3.5 py-2.5">{extra}</div>
       )}
     </div>
   );
@@ -185,9 +193,19 @@ export function FilterCell({
   className?: string;
   htmlFor?: string;
 }) {
+  /* A pill, with its label inline and quiet in front of the control --
+     "Media: all", "Account: all accounts". The approved design shows a
+     row of these rather than stacked caption-over-field cells, which is
+     what makes the bar read as one line of choices.
+
+     Still a DIV, not a LABEL: a label forwards its clicks to the control
+     it labels, which broke the date picker's trigger and made the
+     account select unreachable. The filter harness caught it. */
   return (
-    <div className={`flex min-w-0 flex-col gap-1 ${className}`}>
-      <label htmlFor={htmlFor} className="block text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
+    <div
+      className={`flex min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-border-primary bg-bg-white px-3 py-1.5 ${className}`}
+    >
+      <label htmlFor={htmlFor} className="shrink-0 text-[12px] text-text-tertiary">
         {label}
       </label>
       {children}
@@ -195,12 +213,13 @@ export function FilterCell({
   );
 }
 
-/** The control skin shared by every select and input in a filter cell:
- *  underlined, not boxed, so a row of them reads as one rule. */
+/** The control inside a filter pill. The pill carries the border, so the
+ *  control itself is bare -- otherwise every filter reads as a box
+ *  inside a box. */
 export const filterControlClass =
-  "min-w-0 border-0 border-b border-border-primary bg-transparent px-0 py-1 text-[13px] " +
-  "text-text-primary outline-none transition-colors focus:border-accent-yellow " +
-  "placeholder:text-text-tertiary";
+  "min-w-0 border-0 bg-transparent p-0 text-[13px] font-medium text-text-primary " +
+  "outline-none placeholder:font-normal placeholder:text-text-tertiary " +
+  "focus:outline-none";
 
 /* ── band 3: figures, no boxes ───────────────────────────────────── */
 
@@ -210,15 +229,40 @@ export interface Figure {
   value: React.ReactNode;
   /** One line under the figure: its basis, its period, its caveat. */
   basis?: React.ReactNode;
+  /** The definition, on hover. Keeps a sentence off the screen without
+   *  losing it -- the same bargain the `?` makes with Help. */
+  title?: string;
 }
 
-export function FigureBand({ figures, className = "" }: { figures: Figure[]; className?: string }) {
+/**
+ * `compact` is for a band that is subordinate to another band on the
+ * same screen -- the name-miss worklist under the cascade, say. Same
+ * grammar, one step down in the hierarchy, so the panel's figures do
+ * not shout over the section's own.
+ */
+export function FigureBand({
+  figures,
+  className = "",
+  compact = false,
+}: {
+  figures: Figure[];
+  className?: string;
+  compact?: boolean;
+}) {
   return (
-    <div className={`flex flex-wrap items-start gap-x-10 gap-y-5 border-b border-border-primary pb-4 ${className}`}>
+    <div
+      className={`flex flex-wrap items-start border-b border-border-primary ${
+        compact ? "gap-x-8 gap-y-4 pb-3" : "gap-x-10 gap-y-5 pb-4"
+      } ${className}`}
+    >
       {figures.map((f) => (
-        <div key={f.label} className="min-w-0">
+        <div key={f.label} className="min-w-0" title={f.title}>
           <FieldLabel>{f.label}</FieldLabel>
-          <div className="mt-1 text-[26px] font-medium leading-none tracking-[-0.02em] text-text-primary tabular-nums">
+          <div
+            className={`mt-1 font-medium leading-none tracking-[-0.02em] text-text-primary tabular-nums ${
+              compact ? "text-[20px]" : "text-[26px]"
+            }`}
+          >
             {f.value}
           </div>
           {f.basis && <div className="mt-1.5 text-[11.5px] text-text-tertiary">{f.basis}</div>}

@@ -8,7 +8,7 @@
  * typed as characters, which means every one of them rendered in
  * whatever the user's font stack happened to resolve -- different
  * weights, different baselines, different sizes between macOS and
- * Windows, and none of them matching Geist's stroke.
+ * Windows, and none of them matching the UI face's stroke.
  *
  * Isotype's grammar: flat fills, one weight, no outline-and-fill mix,
  * built from a small set of geometric primitives. These are drawn on a

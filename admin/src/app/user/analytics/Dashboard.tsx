@@ -1,62 +1,82 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   BreakdownItem,
   DashboardKpis,
+  DashboardSessions,
+  DashboardSessionTrend,
   TopCpisSku,
   TopLandingPage,
   fetchDashboardCategoryBreakdown,
   fetchDashboardChannelBreakdown,
   fetchDashboardKpis,
+  fetchDashboardSessions,
+  fetchDashboardSessionTrend,
   fetchDashboardTopCpisSkus,
   fetchDashboardTopLandingPages,
 } from "@/lib/api";
 import { useCachedFetch } from "@/lib/useCachedFetch";
 import { DraggableGrid, GridItem } from "./DraggableGrid";
 import { BarChart } from "./charts/BarChart";
-import { DateRangePicker } from "@/components/DateRangePicker";
+import { SessionTrendChart } from "./charts/SessionTrendChart";
+import { DateRangePicker, resolvePreset, type DateRange, type PresetKey } from "@/components/DateRangePicker";
 import { SectionHeader } from "./SectionChrome";
 
 const STORAGE_KEY = "analytics-dashboard-widget-order";
 const RANGE_KEY = "analytics-dashboard-date-range";
-const DEFAULT_ORDER = ["kpis", "category", "channel", "landing-pages", "cpis-skus"];
+const DEFAULT_ORDER = ["kpis", "session-performance", "category", "channel", "landing-pages", "cpis-skus"];
 
 function formatCurrency(n: number): string {
   return `₹${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 }
 
-// ── Per-tile time frame ──────────────────────────────────────────────
-// The five tiles do NOT share a window, and never did. Before this filter
-// existed the dashboard already mixed lifetime, a fixed 30-day rollup and a
-// fixed 7-day bucket with nothing on screen saying so. A single picker would
-// have made that worse by implying one global range, so every tile states
-// the window it actually used:
-//
-//   kpis, category   ad_performance_summary is a lifetime aggregate with no
-//                    date column -> always "Lifetime", filter does not apply.
-//   channel          shopify_order_attribution.created_at -> exact range.
-//   landing-pages    shopify_landing_page_analysis.day -> exact range, and
-//                    falls back to the fixed 30d rollup when no range is set.
-//   cpis-skus        cpis_by_sku is precomputed per window_key, so the range
-//                    SNAPS to 1d / 7d / 30d. A 14-day pick reads 7d.
-function cpisWindowFor(from: string, to: string): string {
-  const span =
-    Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1;
-  return [
-    ["1d", 1],
-    ["7d", 7],
-    ["30d", 30],
-  ].reduce((best, w) =>
-    Math.abs((w[1] as number) - span) < Math.abs((best[1] as number) - span) ? w : best,
-  )[0] as string;
+function formatPerSession(n: number | null): string {
+  return n === null || !Number.isFinite(n)
+    ? "—"
+    : `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatConversionRate(n: number | null): string {
+  return n === null || !Number.isFinite(n)
+    ? "—"
+    : n.toLocaleString("en-IN", { style: "percent", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+type DateSelection = { preset: PresetKey; range: DateRange | null };
+const ROLLING_PRESETS = new Set<PresetKey>([
+  "today", "yesterday", "last7", "last30", "last90", "thisMonth", "lastMonth",
+]);
+
+function validDay(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    && Number.isFinite(Date.parse(value))
+    && new Date(value).toISOString().slice(0, 10) === value;
+}
+
+function loadDateSelection(): DateSelection {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(RANGE_KEY) ?? "null");
+    if (saved?.preset === "lifetime") return { preset: "lifetime", range: null };
+    if (ROLLING_PRESETS.has(saved?.preset)) {
+      // Persist the intent, not the absolute dates from a previous visit.
+      return { preset: saved.preset, range: resolvePreset(saved.preset) };
+    }
+    if (saved?.preset === "custom" && validDay(saved.from) && validDay(saved.to)
+      && saved.from <= saved.to) {
+      return { preset: "custom", range: { from: saved.from, to: saved.to } };
+    }
+  } catch {
+    // Invalid or unavailable storage must not block current data.
+  }
+  return { preset: "last30", range: resolvePreset("last30") };
 }
 
 function fmtDay(d: string): string {
   const t = Date.parse(d);
   return Number.isNaN(t)
     ? d
-    : new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+    : new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
 /** Small caption under a widget title naming the window it really covers. */
@@ -80,8 +100,13 @@ function loadOrder(): string[] {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_ORDER;
     const parsed = JSON.parse(raw) as string[];
-    if (Array.isArray(parsed) && DEFAULT_ORDER.every((id) => parsed.includes(id)) && parsed.length === DEFAULT_ORDER.length) {
-      return parsed;
+    if (Array.isArray(parsed)) {
+      const saved = [...new Set(parsed.filter((id) => DEFAULT_ORDER.includes(id)))];
+      // Preserve existing widget arrangements when this section is added.
+      if (!saved.includes("session-performance") && saved.includes("kpis")) {
+        saved.splice(saved.indexOf("kpis") + 1, 0, "session-performance");
+      }
+      return [...saved, ...DEFAULT_ORDER.filter((id) => !saved.includes(id))];
     }
     return DEFAULT_ORDER;
   } catch {
@@ -101,29 +126,33 @@ function WidgetSkeleton({ heightPx = 96 }: { heightPx?: number }) {
   );
 }
 
+const subscribeToHydration = () => () => {};
+const clientSnapshot = () => true;
+const serverSnapshot = () => false;
+
 export function Dashboard() {
-  const [order, setOrder] = useState<string[]>(DEFAULT_ORDER);
+  // Read saved filters before mounting fetch hooks, avoiding an unwanted
+  // lifetime request followed immediately by the selected range.
+  const hydrated = useSyncExternalStore(subscribeToHydration, clientSnapshot, serverSnapshot);
+  return hydrated ? <DashboardContent /> : <WidgetSkeleton heightPx={240} />;
+}
 
-  // Default to lifetime so the first paint matches what this tab has always
-  // shown -- switching the default would silently change every number for
-  // anyone who had bookmarked a figure.
-  const [preset, setPreset] = useState<string>("lifetime");
-  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
-
+function DashboardContent() {
+  const [order, setOrder] = useState<string[]>(loadOrder);
+  const [{ preset, range }, setDateSelection] = useState<DateSelection>(loadDateSelection);
   useEffect(() => {
-    setOrder(loadOrder());
-    try {
-      const raw = window.localStorage.getItem(RANGE_KEY);
-      if (raw) {
-        const p = JSON.parse(raw) as { preset: string; from: string; to: string };
-        if (p?.preset) {
-          setPreset(p.preset);
-          setRange(p.preset === "lifetime" ? null : { from: p.from, to: p.to });
-        }
-      }
-    } catch {
-      // localStorage unavailable -- the picker still works for this session.
-    }
+    const updateRollingDates = () => setDateSelection((current) => {
+      if (!ROLLING_PRESETS.has(current.preset)) return current;
+      const next = resolvePreset(current.preset);
+      return next.from === current.range?.from && next.to === current.range?.to
+        ? current : { preset: current.preset, range: next };
+    });
+    const timer = window.setInterval(updateRollingDates, 60_000);
+    window.addEventListener("focus", updateRollingDates);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", updateRollingDates);
+    };
   }, []);
 
   const from = range?.from ?? null;
@@ -134,11 +163,15 @@ export function Dashboard() {
   // no widget blocks another. If any one fails, only that tile goes
   // dark -- the rest still render.
   //
-  // The range is part of the cache key for the three tiles that honour it,
-  // or last-30d and lifetime would share one cached payload.
-  const rangeKey = from && to ? `${from}|${to}` : "lifetime";
+  // Every tile shares the exact range. Version the cache to discard the
+  // previous fixed-window SKU and landing-page payloads.
+  const rangeKey = `v2|${from && to ? `${from}|${to}` : "lifetime"}`;
   const kpis     = useCachedFetch<DashboardKpis>(`dashboard/kpis|${rangeKey}`,
                                                    () => fetchDashboardKpis(from, to));
+  const sessions = useCachedFetch<DashboardSessions>(`dashboard/sessions|${rangeKey}`,
+                                                   () => fetchDashboardSessions(from, to));
+  const sessionTrend = useCachedFetch<DashboardSessionTrend>(`dashboard/session-trend|${rangeKey}`,
+                                                   () => fetchDashboardSessionTrend(from, to));
   const category = useCachedFetch<BreakdownItem[]>(`dashboard/category-breakdown|${rangeKey}`,
                                                    () => fetchDashboardCategoryBreakdown(from, to));
   const channel  = useCachedFetch<BreakdownItem[]>(`dashboard/channel-breakdown|${rangeKey}`,
@@ -156,8 +189,17 @@ export function Dashboard() {
   const spendFloorNote = kpis.data?.spend_data_from
     ? `Spend and impressions only exist from ${fmtDay(kpis.data.spend_data_from)} onwards — earlier days in this range are not included.`
     : null;
-  const cpisLabel  = from && to ? `Last ${cpisWindowFor(from, to).replace("d", " days")}` : "Last 7 days";
-  const landingLabel = from && to ? rangeLabel : "Last 30 days";
+  const sessionCount = sessions.data?.total_sessions ?? null;
+  const costPerSession = kpis.data && sessionCount !== null && sessionCount > 0
+    ? kpis.data.total_spend / sessionCount : null;
+  const revenuePerSession = kpis.data && sessionCount !== null && sessionCount > 0
+    ? kpis.data.total_shopify_revenue / sessionCount : null;
+  const conversionRate = kpis.data && sessionCount !== null && sessionCount > 0
+    ? kpis.data.total_shopify_orders / sessionCount : null;
+  const requestedDays = from && to
+    ? Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1 : null;
+  const partialSessions = sessions.data && requestedDays !== null
+    && sessions.data.available_days < requestedDays;
 
   const error =
     kpis.error?.message ||
@@ -168,8 +210,7 @@ export function Dashboard() {
     null;
 
   function handleApplyRange(r: { from: string; to: string }, pk: string) {
-    setPreset(pk);
-    setRange(pk === "lifetime" ? null : { from: r.from, to: r.to });
+    setDateSelection({ preset: pk as PresetKey, range: pk === "lifetime" ? null : r });
     try {
       window.localStorage.setItem(RANGE_KEY, JSON.stringify({ preset: pk, from: r.from, to: r.to }));
     } catch {
@@ -215,6 +256,79 @@ export function Dashboard() {
         </div>
       ) : (
         <WidgetSkeleton heightPx={80} />
+      ),
+    },
+    {
+      id: "session-performance",
+      span: 3,
+      content: (
+        <section aria-labelledby="dashboard-session-performance">
+          <h3 id="dashboard-session-performance" className="text-sm font-medium text-text-primary">
+            Session performance<WindowBadge text={rangeLabel} />
+          </h3>
+          {sessions.error || kpis.error ? (
+            <div role="alert" className="mt-3 flex flex-wrap items-center gap-3 text-sm text-error-text">
+              <span>Could not load session performance.</span>
+              <button type="button" className="underline underline-offset-2" onClick={() => {
+                if (sessions.error) sessions.refetch();
+                if (kpis.error) kpis.refetch();
+              }}>Retry session metrics</button>
+            </div>
+          ) : !sessions.data || !kpis.data ? (
+            <div className="mt-3" role="status" aria-label="Loading session performance">
+              <WidgetSkeleton heightPx={100} />
+            </div>
+          ) : (
+            <>
+              <dl className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <dt className="text-xs text-text-secondary">Cost / session</dt>
+                  <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatPerSession(costPerSession)}</dd>
+                  <dd className="mt-1 text-xs text-text-secondary">Ad spend ÷ all Shopify sessions</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-text-secondary">Revenue / session</dt>
+                  <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatPerSession(revenuePerSession)}</dd>
+                  <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify revenue ÷ all Shopify sessions</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-text-secondary">Conversion rate (attributed)</dt>
+                  <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatConversionRate(conversionRate)}</dd>
+                  <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify orders ÷ all Shopify sessions × 100</dd>
+                </div>
+              </dl>
+              <p className="mt-3 border-t border-border-primary pt-3 text-xs text-text-secondary">
+                {sessionCount === null
+                  ? "No Shopify session data is available for this period."
+                  : sessionCount === 0
+                    ? "No Shopify sessions were recorded for this period. Session metrics are unavailable."
+                    : `${sessionCount.toLocaleString("en-IN")} Shopify sessions across all traffic sources.`}
+                {sessions.data.session_data_from && sessions.data.session_data_to && (
+                  <> Recorded {fmtDay(sessions.data.session_data_from)} – {fmtDay(sessions.data.session_data_to)}.</>
+                )}
+              </p>
+              {sessionCount !== null && sessionCount > 0 && (partialSessions || !range) && (
+                <p className="mt-1 text-xs text-text-secondary">
+                  {partialSessions
+                    ? "Session coverage is incomplete for this range. These ratios use the available session count."
+                    : "Lifetime ratios use all available data; spend, revenue, orders and session history may cover different periods."}
+                </p>
+              )}
+            </>
+          )}
+          <div className="mt-4 border-t border-border-primary pt-4">
+            {sessionTrend.error ? (
+              <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-error-text">
+                <span>Could not load daily session trends.</span>
+                <button type="button" className="underline underline-offset-2" onClick={sessionTrend.refetch}>Retry chart</button>
+              </div>
+            ) : sessionTrend.data ? (
+              <SessionTrendChart key={rangeKey} points={sessionTrend.data.points} />
+            ) : (
+              <div role="status" aria-label="Loading daily session trends"><WidgetSkeleton heightPx={340} /></div>
+            )}
+          </div>
+        </section>
       ),
     },
     {
@@ -272,7 +386,7 @@ export function Dashboard() {
       content: (
         <div>
           <h3 className="text-sm font-medium text-text-primary">
-            Top landing pages<WindowBadge text={landingLabel} />
+            Top landing pages<WindowBadge text={rangeLabel} />
           </h3>
           <div className="mt-3 flex flex-col gap-2">
             {landing.data ? (
@@ -297,7 +411,7 @@ export function Dashboard() {
       content: (
         <div>
           <h3 className="text-sm font-medium text-text-primary">
-            Top SKUs by ad spend (cost / NCP)<WindowBadge text={cpisLabel} />
+            Top SKUs by ad spend (cost / NCP)<WindowBadge text={rangeLabel} />
           </h3>
           <div className="mt-3 flex flex-col gap-2">
             {cpisSkus.data ? (

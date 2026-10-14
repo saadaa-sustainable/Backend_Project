@@ -71,9 +71,32 @@ def get_engine() -> AsyncEngine:
             pool_pre_ping=True,
             pool_recycle=1800,
             future=True,
+            # SQLAlchemy's pool_timeout only bounds the wait for a slot in
+            # THIS pool. It does nothing once asyncpg owns the socket, and
+            # without the two below asyncpg waits forever.
+            #
+            # Measured 2026-10-14: with Supavisor under load, a request sat
+            # for 30+ minutes having never reached Postgres --
+            # pg_stat_activity showed no query at all. Worse, the analytics
+            # response cache keys a fill lock per filter set, so every later
+            # request for the same filters queued behind the hung one and
+            # the section stayed blank rather than erroring. A hang is a
+            # worse loading experience than a slow query, because nothing
+            # ever renders and Retry never appears.
+            #
+            # connect timeout: handshake to Supavisor only -- 10s is far
+            # above the ~1ms a warm pooler takes, so this fires only when
+            # the pooler is genuinely not answering.
+            #
+            # command_timeout: 150s, deliberately ABOVE the database's own
+            # 120s statement_timeout. The server cancelling its own query
+            # gives a real SQLSTATE the endpoint can report; this is only
+            # the backstop for when no answer comes back at all.
             connect_args={
                 "statement_cache_size": 0,
                 "prepared_statement_name_func": lambda: f"__ctd_{_uuid.uuid4().hex[:12]}__",
+                "timeout": 10,
+                "command_timeout": 150,
             },
         )
     return _engine
