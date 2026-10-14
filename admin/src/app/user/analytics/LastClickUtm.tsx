@@ -943,37 +943,63 @@ export function LastClickUtm() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {/* A cascade, drawn as one. Six colour-topped cards of equal
+            size said nothing about the shape of the thing they describe:
+            step 1 resolves 86.6% of orders and step 5 resolves 0.0%, and
+            both cards were the same width in the same two-row grid.
+
+            Each bar's length is its share of the scope, so the funnel
+            narrows on screen the way it narrows in fact, and Unmatched
+            sits at the end carrying the one figure anyone acts on. Click
+            still filters the table to that step; the counts, the
+            percentages and the #/% toggle are untouched. */}
+        <div className="flex flex-col">
           {STEP_TILES.map((t) => {
             const sum = stepSummary[t] ?? { count: 0, sales: 0 };
             const pct = scopeOrders > 0 ? (sum.count / scopeOrders) * 100 : 0;
             const meta = TIER_STEP[t];
             const selected = tier === t;
+            const unmatched = t === "unmatched";
             return (
-              <StatTile
+              <button
                 key={t}
-                eyebrow={meta.step}
-                label={meta.title}
-                color={TIER_COLOR[t]}
-                value={stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
-                sub={`${stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} · ${fmtRs(sum.sales)}`}
+                type="button"
                 title={meta.hint}
-                dim={sum.count === 0}
-                selected={selected}
+                aria-pressed={selected}
                 onClick={() => {
                   if (selected) {
                     setTier("");
                     return;
                   }
                   setTier(t);
-                  // Keep the table honest about what the tile counted:
-                  // a Meta-scoped step tile means Meta rows at that step.
+                  // Keep the table honest about what the step counted:
+                  // a Meta-scoped step means Meta rows at that step.
                   if (stepScope !== "All") {
                     setChannel(stepScope as UtmChannel);
                     setDrillOpen(false);
                   }
                 }}
-              />
+                className={`flex items-center gap-3 border-t border-border-soft py-2 text-left first:border-t-0 ${
+                  selected ? "bg-bg-surface" : "hover:bg-bg-surface"
+                } ${sum.count === 0 ? "opacity-50" : ""}`}
+              >
+                <span className="w-[34px] shrink-0 text-[10px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">
+                  {meta.step}
+                </span>
+                <span className="w-[168px] shrink-0 truncate text-[13px] text-text-primary">{meta.title}</span>
+                <span className="h-2 min-w-[40px] flex-1 bg-bg-muted">
+                  <span
+                    className={`block h-full ${unmatched ? "bg-error-mid" : "bg-text-primary"}`}
+                    style={{ width: `${Math.max(Math.min(pct, 100), 0)}%` }}
+                  />
+                </span>
+                <span className="w-[84px] shrink-0 text-right text-[13px] text-text-primary tabular-nums">
+                  {stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
+                </span>
+                <span className="w-[136px] shrink-0 text-right text-[12px] text-text-tertiary tabular-nums">
+                  {stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} · {fmtRs(sum.sales)}
+                </span>
+              </button>
             );
           })}
         </div>
