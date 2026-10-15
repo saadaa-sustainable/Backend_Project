@@ -13,10 +13,17 @@ from app.services.silver import shopify_flatten as silver
 @pytest.fixture
 def database():
     connection = sqlite3.connect(":memory:")
-    connection.execute("CREATE TABLE shopify_sessions(day TEXT, sessions NUMERIC)")
-    connection.executemany("INSERT INTO shopify_sessions VALUES (?, ?)", [
-        ("2026-01-01", 50), ("2026-01-01", 150), ("2026-01-02", 0),
-        ("2026-01-03", None), (None, 500),
+    connection.execute(
+        "CREATE TABLE shopify_sessions(day TEXT, sessions NUMERIC, utm_source TEXT)"
+    )
+    # Sources chosen to exercise the Meta rule, not just to fill a column:
+    # 'META' and ' ig ' must match (prefix, and the trim), 'kwikengage'
+    # must not, and the NULL source must not. So day 1 is 200 sessions of
+    # which 50 are Meta.
+    connection.executemany("INSERT INTO shopify_sessions VALUES (?, ?, ?)", [
+        ("2026-01-01", 50, "META"), ("2026-01-01", 150, "kwikengage"),
+        ("2026-01-02", 0, " ig "), ("2026-01-03", None, "META"),
+        (None, 500, "META"),
     ])
     connection.commit()
 
@@ -24,7 +31,9 @@ def database():
         sql = str(query)
         if sql.startswith(("LOCK ", "SELECT pg_advisory", "ALTER ", "REVOKE ", "ANALYZE ")):
             return None
-        return connection.execute(sql.replace("public.", ""))
+        # btrim is Postgres' spelling of SQL-standard trim; sqlite has
+        # trim() with the same semantics for the no-argument form.
+        return connection.execute(sql.replace("public.", "").replace("btrim(", "trim("))
 
     async def scalar(query):
         assert str(query) == summary._EXISTS
@@ -39,7 +48,8 @@ def database():
 
 def test_postgresql_summary_sql_parses():
     parse_sql = pytest.importorskip("pglast").parse_sql
-    for query in (summary._EXISTS, summary._CREATE, summary._INSERT):
+    for query in (summary._EXISTS, summary._CREATE, summary._ADD_META_COLUMN,
+                  summary._INSERT):
         parse_sql(query)
 
 
@@ -47,8 +57,12 @@ async def test_bootstrap_then_unchanged_source_does_no_scan(database):
     db, session = database
     assert await summary.refresh_dashboard_sessions(session, only_if_missing=True)
     db.commit()
-    assert db.execute("SELECT day,sessions FROM shopify_sessions_daily ORDER BY day").fetchall() == [
-        ("2026-01-01", 200), ("2026-01-02", 0),
+    assert db.execute(
+        "SELECT day,sessions,meta_sessions FROM shopify_sessions_daily ORDER BY day"
+    ).fetchall() == [
+        # 200 sessions on day 1, but only the 50 from utm_source=META
+        # count as Meta -- kwikengage is WhatsApp tooling, not Meta.
+        ("2026-01-01", 200, 50), ("2026-01-02", 0, 0),
     ]
     session.execute.reset_mock()
     assert not await summary.refresh_dashboard_sessions(session, only_if_missing=True)
@@ -60,10 +74,12 @@ async def test_replacement_updates_corrected_days_and_removes_deleted_days(datab
     await summary.refresh_dashboard_sessions(session)
     db.commit()
     db.execute("DELETE FROM shopify_sessions")
-    db.execute("INSERT INTO shopify_sessions VALUES ('2026-01-01', 17)")
+    db.execute("INSERT INTO shopify_sessions VALUES ('2026-01-01', 17, 'facebook')")
     await summary.refresh_dashboard_sessions(session)
     db.commit()
-    assert db.execute("SELECT day,sessions FROM shopify_sessions_daily").fetchall() == [("2026-01-01", 17)]
+    assert db.execute(
+        "SELECT day,sessions,meta_sessions FROM shopify_sessions_daily"
+    ).fetchall() == [("2026-01-01", 17, 17)]
     await summary.refresh_dashboard_sessions(session)
     assert db.execute("SELECT SUM(sessions) FROM shopify_sessions_daily").fetchone()[0] == 17
 

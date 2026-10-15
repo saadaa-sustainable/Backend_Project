@@ -43,7 +43,16 @@ var VIEWS = [
   { view: 'meta_direct_active_30d', tab: 'Active 30d', order: 'ad_id',      enabled: true  },
   { view: 'meta_direct_active_90d', tab: 'Active 90d', order: 'ad_id',      enabled: true  },
   { view: 'meta_direct_daily_30d',  tab: 'Daily 30d',  order: 'date,ad_id', enabled: true  },
-  { view: 'meta_direct_daily_90d',  tab: 'Daily 90d',  order: 'date,ad_id', enabled: true  }
+  { view: 'meta_direct_daily_90d',  tab: 'Daily 90d',  order: 'date,ad_id', enabled: true  },
+  // Ad set and campaign roll-ups, 30 days. Both are small -- about 3.4k
+  // and 600 rows -- so they cost one or two API pages each and add
+  // roughly 150k cells between them against the 10M ceiling.
+  //
+  // They carry d3/d7 last-click ROAS, which the ad-level views do not:
+  // at ad grain a three-day window is mostly noise, while a campaign
+  // spending lakhs a week has a meaningful three-day read.
+  { view: 'meta_direct_adset_30d',    tab: 'Ad Sets 30d',   order: 'adset_id',    enabled: true },
+  { view: 'meta_direct_campaign_30d', tab: 'Campaigns 30d', order: 'campaign_id', enabled: true }
 ];
 
 var PAGE = 1000;          // PostgREST's own maximum per request

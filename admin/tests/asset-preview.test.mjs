@@ -5,7 +5,7 @@ import ts from "typescript";
 
 const source = await readFile(new URL("../src/lib/assetPreview.ts", import.meta.url), "utf8");
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext } });
-const { getAssetPreview } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+const { getAssetPreview, getAdPreviews } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
 test("Drive file sharing formats resolve to a preview while preserving access resource keys", () => {
   for (const link of [
@@ -84,4 +84,35 @@ test("Facebook post links become official embeds with their original URL encoded
   assert.equal(preview.kind, "embed");
   assert.equal(new URL(preview.src).origin, "https://www.facebook.com");
   assert.equal(new URL(preview.src).searchParams.get("href"), link);
+});
+
+test("video-only ads expose playback even without an is_video flag or poster", () => {
+  for (const field of ["video_source_url", "video_url"]) {
+    const url = "https://cdn.example.com/signed-source?signature=abc%2B123";
+    const previews = getAdPreviews({ ad_id: "123", [field]: url });
+    assert.equal(previews[0].kind, "video");
+    assert.equal(previews[0].src, url);
+  }
+});
+
+test("direct media precedes social embeds, with all available alternatives retained", () => {
+  const previews = getAdPreviews({ ad_id: "123", video_source_url: "https://cdn.example.com/v.mp4", video_url: "https://cdn.example.com/v.mp4", thumbnail_url: "https://cdn.example.com/i.jpg", instagram_permalink: "https://www.instagram.com/reels/creative_123/", effective_object_story_id: "123_456" });
+  assert.deepEqual(previews.map((p) => p.provider), ["Video", "Image", "Instagram", "Facebook", "Ads Manager"]);
+  assert.match(previews[2].src, /\/reel\/creative_123\/embed\/captioned\//);
+  assert.equal(new URL(previews[3].src).searchParams.get("href"), "https://www.facebook.com/123/posts/456");
+});
+
+test("invalid media never becomes an embed; ads without media retain their manager link", () => {
+  const previews = getAdPreviews({ ad_id: "ad &1", account_id: "act_123", thumbnail_url: "javascript:alert(1)", video_url: "Pending", instagram_permalink: "https://instagram.com.evil.example/p/abc/", effective_object_story_id: "not_a_story" });
+  assert.equal(previews.length, 1);
+  assert.equal(previews[0].kind, "link");
+  assert.equal(new URL(previews[0].href).searchParams.get("selected_ad_ids"), "ad &1");
+  assert.equal(new URL(previews[0].href).searchParams.get("act"), "act_123");
+  assert.deepEqual(getAdPreviews({ ad_id: "" }), []);
+});
+
+test("provider video links use their embed instead of being treated as a video file", () => {
+  const previews = getAdPreviews({ ad_id: "123", video_url: "https://drive.google.com/file/d/abc/view" });
+  assert.equal(previews[0].kind, "embed");
+  assert.equal(previews[0].src, "https://drive.google.com/file/d/abc/preview");
 });

@@ -17,6 +17,7 @@ import {
   fetchDashboardTopLandingPages,
 } from "@/lib/api";
 import { useCachedFetch } from "@/lib/useCachedFetch";
+import { fromKpis as acquisitionFromKpis } from "./acquisitionMer";
 import { DraggableGrid, GridItem } from "./DraggableGrid";
 import { BarChart } from "./charts/BarChart";
 import { SessionTrendChart } from "./charts/SessionTrendChart";
@@ -186,10 +187,29 @@ function DashboardContent() {
   // spend table begins, i.e. spend/impressions are genuinely partial. Without
   // saying so, a range reaching into 2025 shows a far smaller spend and reads
   // as a collapse rather than as missing history.
+  // Acquisition MER = new-customer sales over the window / ad spend
+  // over the same window. Derived in acquisitionMer.ts rather than
+  // here because its awkward cases -- a cached payload carrying no
+  // acquisition figure, a window with spend but no acquisitions, a
+  // window with acquisitions but no spend -- each need a test, and
+  // inline in JSX none of them had one.
+  const { newCustomers, acquisitionMer, costPerNewCustomer } = acquisitionFromKpis(kpis.data);
+
+  // Acquisition MER divides BY spend, so a window reaching past the
+  // daily table's floor does not merely understate spend -- it
+  // overstates the ratio, and in the flattering direction. The note has
+  // to say so, or a range starting before 2025-12-29 silently reads as
+  // the best acquisition the account has ever had.
   const spendFloorNote = kpis.data?.spend_data_from
-    ? `Spend and impressions only exist from ${fmtDay(kpis.data.spend_data_from)} onwards — earlier days in this range are not included.`
+    ? `Spend and impressions only exist from ${fmtDay(kpis.data.spend_data_from)} onwards — earlier days in this range are not included, so Acquisition MER reads high and cost per new customer reads low.`
     : null;
+  // Meta-driven sessions. Every numerator below is Meta's, so the
+  // denominator has to be too -- against all traffic, cost per session
+  // read 27.6% low (14,519,759 Meta sessions of 20,045,933 lifetime).
   const sessionCount = sessions.data?.total_sessions ?? null;
+  const allSessionCount = sessions.data?.all_sessions ?? null;
+  const metaShare = allSessionCount && allSessionCount > 0 && sessionCount !== null
+    ? (sessionCount / allSessionCount) * 100 : null;
   const costPerSession = kpis.data && sessionCount !== null && sessionCount > 0
     ? kpis.data.total_spend / sessionCount : null;
   const revenuePerSession = kpis.data && sessionCount !== null && sessionCount > 0
@@ -232,7 +252,7 @@ function DashboardContent() {
       id: "kpis",
       span: 3,
       content: kpis.data ? (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           <div>
             <p className="tabular-nums text-2xl font-semibold text-text-primary">{formatCurrency(kpis.data.total_spend)}</p>
             <p className="mt-0.5 text-xs text-text-secondary">
@@ -252,6 +272,34 @@ function DashboardContent() {
               {(kpis.data.total_impressions / 1_000_000).toFixed(1)}M
             </p>
             <p className="mt-0.5 text-xs text-text-secondary">Impressions</p>
+          </div>
+          {/* Acquisition MER: new-customer SALES ÷ spend, both over the
+              selected window. A customer counts here only if their
+              FIRST EVER Shopify order falls inside it, so this is
+              revenue from customers acquired, not from customers
+              active.
+
+              Money over money, so it reads like a ROAS -- which is the
+              point, because it is directly comparable with the account
+              MER. The head count and the per-customer cost sit under
+              it: 2.85x says how efficiently spend converts, ₹464 says
+              what each acquisition cost. */}
+          <div>
+            <p
+              className="tabular-nums text-2xl font-semibold text-text-primary"
+              title="Acquisition MER — revenue from customers acquired in this window ÷ ad spend over the same window."
+            >
+              {acquisitionMer === null ? "—" : `${acquisitionMer.toFixed(2)}x`}
+            </p>
+            <p className="mt-0.5 text-xs text-text-secondary">
+              Acquisition MER<WindowBadge text={rangeLabel} />
+            </p>
+            {newCustomers !== null && (
+              <p className="mt-1 text-[11px] text-text-tertiary tabular-nums">
+                {newCustomers.toLocaleString("en-IN")} new customers
+                {costPerNewCustomer !== null && <> · {formatCurrency(costPerNewCustomer)} each</>}
+              </p>
+            )}
           </div>
         </div>
       ) : (
@@ -284,25 +332,28 @@ function DashboardContent() {
                 <div>
                   <dt className="text-xs text-text-secondary">Cost / session</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatPerSession(costPerSession)}</dd>
-                  <dd className="mt-1 text-xs text-text-secondary">Ad spend ÷ all Shopify sessions</dd>
+                  <dd className="mt-1 text-xs text-text-secondary">Ad spend ÷ Meta-driven Shopify sessions</dd>
                 </div>
                 <div>
                   <dt className="text-xs text-text-secondary">Revenue / session</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatPerSession(revenuePerSession)}</dd>
-                  <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify revenue ÷ all Shopify sessions</dd>
+                  <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify revenue ÷ Meta-driven Shopify sessions</dd>
                 </div>
                 <div>
                   <dt className="text-xs text-text-secondary">Conversion rate (attributed)</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatConversionRate(conversionRate)}</dd>
-                  <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify orders ÷ all Shopify sessions × 100</dd>
+                  <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify orders ÷ Meta-driven Shopify sessions × 100</dd>
                 </div>
               </dl>
               <p className="mt-3 border-t border-border-primary pt-3 text-xs text-text-secondary">
                 {sessionCount === null
                   ? "No Shopify session data is available for this period."
                   : sessionCount === 0
-                    ? "No Shopify sessions were recorded for this period. Session metrics are unavailable."
-                    : `${sessionCount.toLocaleString("en-IN")} Shopify sessions across all traffic sources.`}
+                    ? "No Meta-driven Shopify sessions were recorded for this period. Session metrics are unavailable."
+                    : `${sessionCount.toLocaleString("en-IN")} Meta-driven Shopify sessions`
+                      + (allSessionCount !== null && metaShare !== null
+                        ? ` — ${metaShare.toFixed(1)}% of ${allSessionCount.toLocaleString("en-IN")} across all traffic sources.`
+                        : ".")}
                 {sessions.data.session_data_from && sessions.data.session_data_to && (
                   <> Recorded {fmtDay(sessions.data.session_data_from)} – {fmtDay(sessions.data.session_data_to)}.</>
                 )}

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import pathlib
 import sys
 from dotenv import load_dotenv
@@ -48,6 +49,21 @@ from dotenv import load_dotenv
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env", override=False)  # override=False so GH secrets win
+
+# Every step below is spawned as a subprocess and inherits this, which
+# is the point: the async steps share app/database/session.py with the
+# API, and its 150s asyncpg command_timeout exists to stop a stalled
+# Supavisor connection hanging an HTTP request forever. A rebuild is not
+# an HTTP request -- it raises the server's statement_timeout on purpose
+# and holds single INSERTs open for many minutes. On 2026-10-15, the
+# first nightly to run with that ceiling in place, silver_shopify was
+# killed at 233.6s by the client rather than the server, taking
+# silver_shopify_attribution and gold_ad_performance down with it.
+#
+# 0 = no client-side cap; the database's own statement_timeout, which
+# each script sets for itself, stays the only limit. setdefault so an
+# operator can still pin a value on the command line.
+os.environ.setdefault("DB_COMMAND_TIMEOUT_S", "0")
 
 from utils.cron_log import CronRun  # noqa: E402
 

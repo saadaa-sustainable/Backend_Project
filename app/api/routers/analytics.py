@@ -3310,6 +3310,10 @@ _LANDING_PAGE_SORT_COLUMNS = {
     "atc_to_checkout_rate":      "atc_to_checkout_rate",
     "checkout_to_purchase_rate": "checkout_to_purchase_rate",
     "pdp_to_purchase_rate":      "pdp_to_purchase_rate",
+    "last_click_orders":         "last_click_orders",
+    "last_click_revenue":        "last_click_revenue",
+    "last_click_aov":            "last_click_aov",
+    "last_click_rev_per_session": "last_click_rev_per_session",
 }
 
 #: Page-type buckets, as predicates over the joined landing_page_path.
@@ -3368,6 +3372,17 @@ class LandingPageRow(BaseModel):
     landing_page_path: str
     #: Shopify
     shopify_sessions: int | None
+    #: Session COUNTS, carried alongside the rates so the summary band
+    #: can draw a Shopify funnel without multiplying a two-decimal rate
+    #: back up by the session count.
+    #:
+    #: shopify_checkout_sessions undercounts by roughly 10x -- GoKwik
+    #: owns the checkout, so Shopify never sees the completion. The
+    #: table's checkout and purchase columns are GA4's for that reason;
+    #: this is here only so Shopify's funnel has a third step, and the
+    #: UI says what it is.
+    shopify_atc_sessions: int | None
+    shopify_checkout_sessions: int | None
     shopify_atc_rate: float | None
     shopify_bounce_rate: float | None
     #: GA4 counts
@@ -3400,11 +3415,72 @@ class LandingPageRow(BaseModel):
     atc_to_checkout_rate: float | None
     checkout_to_purchase_rate: float | None
     pdp_to_purchase_rate: float | None
+    #: Last-click orders and revenue credited to this page, from
+    #: `ga4_order_attribution` (see `_LP_LAST_CLICK_SQL` for why GA4 and
+    #: not Shopify's own journey summary, and why the rupees are still
+    #: Shopify's). Narrowed by the `source` filter when one is given, so
+    #: these two move with it while every other column on the row stays
+    #: whole-traffic -- the source filter asks "which traffic bought",
+    #: not "which traffic visited".
+    #:
+    #: NULL means GA4 attributed no order in this window to this page,
+    #: which with 74% order coverage is not the same claim as zero.
+    last_click_orders: int | None
+    last_click_revenue: float | None
+    last_click_aov: float | None
+    last_click_rev_per_session: float | None
+
+
+#: The funnel figures, summed over EVERY page the filters match --
+#: not over the page of rows being returned.
+#:
+#: The summary band used to add up whatever 50 rows the client happened
+#: to hold, so it answered "where does the funnel leak across the rows
+#: on screen", which is a different and much less useful question than
+#: the one it appeared to answer. Loading more rows moved every figure.
+#:
+#: Carried on the response rather than fetched separately: these are
+#: window aggregates on the statement that already runs, evaluated
+#: before LIMIT, so they cost no extra query and no extra round trip --
+#: the same trick `_total` uses.
+class LandingPageTotals(BaseModel):
+    #: Pages the filters match. Equals `total`; repeated here so the
+    #: band can state its own basis without reaching outside itself.
+    pages: int
+    ga4_sessions: int
+    ga4_pdp_views: int
+    ga4_add_to_carts: int
+    ga4_checkouts: int
+    ga4_purchases: int
+    shopify_sessions: int
+    shopify_atc_sessions: int
+    shopify_checkout_sessions: int
+    #: Last click, narrowed by `source` exactly as the row columns are.
+    last_click_orders: int
+    last_click_revenue: float
+
+
+#: The columns the totals sum, as (response field, SQL column). One
+#: list, so adding a figure to the band cannot leave the SELECT and the
+#: model disagreeing about what was asked for.
+_LANDING_PAGE_TOTAL_COLUMNS = (
+    "ga4_sessions", "ga4_pdp_views", "ga4_add_to_carts", "ga4_checkouts",
+    "ga4_purchases", "shopify_sessions", "shopify_atc_sessions",
+    "shopify_checkout_sessions", "last_click_orders", "last_click_revenue",
+)
 
 
 class LandingPageResponse(BaseModel):
     rows: list[LandingPageRow]
     total: int
+    totals: LandingPageTotals
+    #: Echoed back so the client can show what the figures were narrowed
+    #: to without having to trust its own request state.
+    source: str | None = None
+    #: Every channel this filter accepts, in the order the rest of the
+    #: app lists them. Sent with the rows so the control cannot drift
+    #: from the classifier.
+    sources: list[str] = []
 
 
 #: FULL OUTER JOIN, not INNER: a page that only one source saw still
@@ -3412,11 +3488,88 @@ class LandingPageResponse(BaseModel):
 #: GA4 records a landing page for sessions Shopify's own analytics
 #: never attributed, and vice versa -- and dropping those rows would
 #: quietly shorten the list of pages the section is meant to cover.
+#: `ga4_order_attribution.last_landing` is a full URL with its query
+#: string (`https://saadaa.in/collections/x?utm_source=META&...`), while
+#: every landing-page table here keys on the bare path GA4's own
+#: `landingPage` dimension yields (`/collections/x`). This is the
+#: bridge: drop scheme and host, drop everything from `?` or `#`, then
+#: apply the same trailing-slash rule as
+#: `app.services.gold.landing_page.normalize_session_path` -- bare root
+#: stays "/", anything else loses its trailing slash.
+#:
+#: Measured over the 28,467 GA4-attributed orders in the 30 days to
+#: 2026-10-15: every one normalises to a path, and 97.1% of them land on
+#: a path that already exists in both landing-page tables.
+_LP_LAST_CLICK_PATH_SQL = """
+  CASE
+    WHEN regexp_replace(regexp_replace(g.last_landing, '^https?://[^/]*', ''),
+                        '[?#].*$', '') IN ('', '/')
+      THEN '/'
+    ELSE regexp_replace(
+           regexp_replace(regexp_replace(g.last_landing, '^https?://[^/]*', ''),
+                          '[?#].*$', ''),
+           '/+$', '')
+  END"""
+
+#: Last-click orders and revenue per landing page.
+#:
+#: WHY GA4 AND NOT SHOPIFY. Shopify's own `customerJourneySummary` --
+#: the only place Shopify records which page a buyer landed on -- is
+#: populated for 4.0% of orders on this store (1,528 of 38,464 in the
+#: 30 days to 2026-10-15; the rest carry `lastVisit: null`). GoKwik owns
+#: the checkout, so Shopify never observes the session. GA4 sees 74.0%
+#: of orders and 83.2% of revenue, and is the only workable source --
+#: the same conclusion `scripts/fetch_ga4_order_attribution.py` reached.
+#:
+#: WHY SHOPIFY'S RUPEES ANYWAY. `transaction_id` IS `shopify_orders.name`
+#: and joins for 95.7% of these rows, so the money is Shopify's
+#: `total_price` -- the same figure every other revenue column on this
+#: dashboard reports -- and only the 4.3% that cannot be joined fall
+#: back to GA4's own `revenue`. The PAGE is GA4's; the MONEY is
+#: Shopify's wherever Shopify has it.
+#:
+#: `utm_source` is likewise Shopify's where the order joined, because
+#: that is the column the Last Click UTM section classifies and a user
+#: reading both should not meet two different answers. The alias is
+#: literally `utm_source` so `_channel_sql_predicate()` -- the one
+#: ordered rule set behind every channel filter in this file -- applies
+#: here unchanged.
+_LP_LAST_CLICK_SQL = f"""
+  SELECT path, COUNT(*)::bigint AS orders, SUM(revenue) AS revenue
+    FROM (
+      SELECT {_LP_LAST_CLICK_PATH_SQL} AS path,
+             COALESCE(s.total_price, g.revenue)   AS revenue,
+             COALESCE(s.utm_source, g.last_source) AS utm_source,
+             -- The Organic (IG) rule reads utm_content as well as
+             -- utm_source, so the subquery has to expose it or the
+             -- predicate fails to compile -- which it did, with
+             -- `column "utm_content" does not exist`, the first time
+             -- any channel was selected. GA4 carries no equivalent
+             -- field, so this is Shopify's alone: the rule can only
+             -- fire for the 95.7% of orders that joined, and an
+             -- unjoined bio-link order classifies on its source.
+             s.utm_content                        AS utm_content
+        FROM public.ga4_order_attribution g
+        LEFT JOIN public.shopify_order_attribution s ON s.name = g.transaction_id
+       WHERE g.order_at >= :from_date
+         AND g.order_at < (CAST(:to_date AS date) + 1)
+    ) o
+   WHERE {{source_predicate}}
+   GROUP BY path"""
+
 _LANDING_PAGE_SQL = """
 WITH sh AS (
   SELECT landing_page_path AS path,
          SUM(sessions)::bigint                     AS sessions,
          SUM(sessions_with_cart_additions)::bigint AS atc,
+         -- Shopify's own checkout count. It reads about 10x low on this
+         -- store because GoKwik owns the checkout and Shopify never
+         -- observes the completion, which is exactly why the table's
+         -- checkout and purchase COLUMNS are GA4's. It is carried here
+         -- anyway because the summary band's Shopify funnel needs a
+         -- third step, and a step that is honestly labelled as
+         -- undercounted is more use than no step at all.
+         SUM(sessions_that_reached_checkout)::bigint AS checkouts,
          SUM(bounces)::bigint                      AS bounces
     FROM public.landing_page_sessions_daily
    WHERE session_date BETWEEN :from_date AND :to_date
@@ -3439,9 +3592,18 @@ WITH sh AS (
     FROM public.ga4_daily_landing
    WHERE day BETWEEN :from_date AND :to_date
    GROUP BY 1
+), lc AS (
+{last_click_cte}
 ), joined AS (
   SELECT COALESCE(ga.path, sh.path)                            AS landing_page_path,
          sh.sessions                                           AS shopify_sessions,
+         -- COUNTS, not only the rates below. The summary band draws a
+         -- funnel from these, and reconstructing them by multiplying a
+         -- rate rounded to two decimals back up by the session count
+         -- would put the bars out by hundreds on a page with 350k
+         -- sessions.
+         sh.atc                                                AS shopify_atc_sessions,
+         sh.checkouts                                          AS shopify_checkout_sessions,
          ROUND(100.0 * sh.atc     / NULLIF(sh.sessions, 0), 2) AS shopify_atc_rate,
          ROUND(100.0 * sh.bounces / NULLIF(sh.sessions, 0), 2) AS shopify_bounce_rate,
          ga.sessions                                           AS ga4_sessions,
@@ -3485,8 +3647,30 @@ WITH sh AS (
          ROUND(100.0 * ga.checkouts    / NULLIF(ga.pdp_views, 0),    2) AS pdp_to_checkout_rate,
          ROUND(100.0 * ga.checkouts    / NULLIF(ga.add_to_carts, 0), 2) AS atc_to_checkout_rate,
          ROUND(100.0 * ga.purchases    / NULLIF(ga.checkouts, 0),    2) AS checkout_to_purchase_rate,
-         ROUND(100.0 * ga.purchases    / NULLIF(ga.pdp_views, 0),    2) AS pdp_to_purchase_rate
-    FROM ga FULL OUTER JOIN sh ON sh.path = ga.path
+         ROUND(100.0 * ga.purchases    / NULLIF(ga.pdp_views, 0),    2) AS pdp_to_purchase_rate,
+         -- Last click. LEFT-joined onto the session rows, never
+         -- outer-joined into the page list: a page that took orders
+         -- but recorded no sessions in the window is a tracking
+         -- artefact (chiefly /account and /account/login, where the
+         -- "landing" is a return visit), and letting it create a row
+         -- would put pages in this table that the sessions half cannot
+         -- describe at all.
+         --
+         -- NULL, not 0, when a page has no last-click orders: this
+         -- table shows an em dash for an undefined figure, and with
+         -- GA4 seeing 74% of orders "no orders observed" and "no
+         -- orders" are genuinely different claims.
+         lc.orders                                             AS last_click_orders,
+         ROUND(lc.revenue, 2)                                  AS last_click_revenue,
+         ROUND(lc.revenue / NULLIF(lc.orders, 0), 2)           AS last_click_aov,
+         -- Revenue per GA4 session on the same page. GA4 on both sides
+         -- for the reason the funnel ratios give: the last-click order
+         -- is placed by a GA4-identified session, so Shopify's session
+         -- count is the wrong denominator for it.
+         ROUND(lc.revenue / NULLIF(ga.sessions, 0), 2)         AS last_click_rev_per_session
+    FROM ga
+         FULL OUTER JOIN sh ON sh.path = ga.path
+         LEFT JOIN lc ON lc.path = COALESCE(ga.path, sh.path)
 )
 SELECT * FROM joined
 """
@@ -3502,6 +3686,14 @@ async def get_landing_pages(
         description="Restrict to one section: " + ", ".join(_LANDING_PAGE_TYPE_SQL) + ", other. Omit for all pages.",
     ),
     sort: str = Query(default="ga4_sessions", description="One of " + ", ".join(_LANDING_PAGE_SORT_COLUMNS)),
+    source: str | None = Query(
+        default=None,
+        description=(
+            "Narrow the last-click order and revenue columns to one channel: "
+            + ", ".join(_CHANNEL_ORDER)
+            + ". Omit for combined (every source)."
+        ),
+    ),
     from_date: date | None = Query(default=None, description="Start of the window (defaults to 30 days back)."),
     to_date: date | None = Query(default=None, description="End of the window (defaults to today)."),
     limit: int = Query(default=50, ge=1, le=500),
@@ -3513,6 +3705,29 @@ async def get_landing_pages(
     to_d = to_date or date.today()
     from_d = from_date or (to_d - timedelta(days=29))
     params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
+
+    # The channel filter narrows the last-click CTE and nothing else, so
+    # it is built into the statement rather than applied as a WHERE over
+    # the joined result: filtering afterwards would have to either drop
+    # pages that took no orders from that source -- which is exactly the
+    # finding a reader is looking for -- or leave their session columns
+    # standing beside last-click figures belonging to a different
+    # population. Narrowing the CTE leaves every page in place with its
+    # last-click columns reading the em dash.
+    #
+    # The predicate itself comes from `_channel_sql_predicate`, the same
+    # ordered rule set the channel tiles and the Last Click UTM row
+    # filter use. Reimplementing it here is how two parts of one app
+    # come to disagree about what "Meta" means.
+    if source and source not in _CHANNEL_ORDER:
+        raise HTTPException(400, f"source must be one of {list(_CHANNEL_ORDER)}")
+    if source:
+        source_predicate, channel_params = _channel_sql_predicate(source)
+        params.update(channel_params)
+    else:
+        source_predicate = "TRUE"
+    last_click_cte = _LP_LAST_CLICK_SQL.format(source_predicate=source_predicate)
+    statement_sql = _LANDING_PAGE_SQL.format(last_click_cte=last_click_cte)
 
     # Filtered in SQL, not in the client. The response is paginated and
     # carries a total, and both have to describe the filtered set: a
@@ -3548,19 +3763,48 @@ async def get_landing_pages(
     # BEFORE LIMIT applies, so it is the same total the separate COUNT
     # returned -- the window sees every matching row, not just the 50
     # being sent back.
+    # Window aggregates, evaluated across the whole filtered set BEFORE
+    # LIMIT applies -- the same property that makes COUNT(*) OVER ()
+    # the real total rather than the page's length. So the summary band
+    # describes every page the filters match, at the cost of nothing:
+    # no second statement, no second round trip, and on this database a
+    # round trip is ~500ms against ~60ms of aggregation.
+    #
+    # COALESCE wraps the WINDOW, not the aggregate inside it: `OVER`
+    # binds to the aggregate call, so `COALESCE(SUM(c), 0) OVER ()` is
+    # a syntax error. It is needed because SUM skips NULLs and returns
+    # NULL when every row is one -- a page only one source saw has
+    # NULLs in the other's columns, and a filtered set of nothing but
+    # those would otherwise fail the non-optional model field.
+    total_selects = ", ".join(
+        f"COALESCE(SUM({c}) OVER (), 0) AS _t_{c}" for c in _LANDING_PAGE_TOTAL_COLUMNS
+    )
     rows_result = await session.execute(
         text(
-            f"SELECT *, COUNT(*) OVER () AS _total FROM ({_LANDING_PAGE_SQL}) t {where_sql} "
+            f"SELECT *, COUNT(*) OVER () AS _total, {total_selects} "
+            f"FROM ({statement_sql}) t {where_sql} "
             f"ORDER BY {sort_column} DESC NULLS LAST LIMIT :limit OFFSET :offset"
         ),
         {**params, "limit": limit, "offset": offset},
     )
     mappings = [dict(r._mapping) for r in rows_result]
-    # Popped, not just ignored: LandingPageRow would reject the extra key.
+    # Popped, not just ignored: LandingPageRow would reject the extra keys.
     total = mappings[0]["_total"] if mappings else 0
-    rows = [LandingPageRow(**{k: v for k, v in m.items() if k != "_total"}) for m in mappings]
+    extra = {"_total", *(f"_t_{c}" for c in _LANDING_PAGE_TOTAL_COLUMNS)}
+    rows = [LandingPageRow(**{k: v for k, v in m.items() if k not in extra}) for m in mappings]
+    # An empty result has no row to read the windows off. Zeroes are
+    # right here in a way they are not on a row: "no page matched these
+    # filters" really is a total of nothing.
+    first = mappings[0] if mappings else {}
+    totals = LandingPageTotals(
+        pages=total,
+        **{c: (first.get(f"_t_{c}") or 0) for c in _LANDING_PAGE_TOTAL_COLUMNS},
+    )
 
-    return LandingPageResponse(rows=rows, total=total)
+    return LandingPageResponse(
+        rows=rows, total=total, totals=totals,
+        source=source, sources=list(_CHANNEL_ORDER),
+    )
 
 
 class LandingPageAdRow(BaseModel):
@@ -7152,6 +7396,19 @@ class KpisResponse(BaseModel):
     total_impressions: float
     total_shopify_revenue: float
     total_shopify_orders: int
+    #: Customers whose FIRST EVER Shopify order falls inside the
+    #: selected window -- newly acquired in that window, not merely
+    #: active in it. Read off `order_customer_type.is_new_customer`,
+    #: which flags exactly one order per customer (the builder asserts
+    #: new-order count == distinct customers before it publishes).
+    #:
+    #: Windowed on `order_day`, the same calendar the spend beside it
+    #: uses, so Acquisition MER divides two figures covering one period.
+    new_customers: int = 0
+    #: What those customers spent on that first order. Carried beside
+    #: the count because the count alone cannot say whether cheaper
+    #: acquisition bought worse customers.
+    new_customer_revenue: float = 0.0
     #: Earliest day insights_daily_by_ad actually covers. Only set on a
     #: windowed request, and only when the window reaches back past it --
     #: spend/impressions before this day are NOT in the daily table, so the
@@ -7160,7 +7417,15 @@ class KpisResponse(BaseModel):
 
 
 class DashboardSessionsResponse(BaseModel):
+    #: Meta-driven sessions. This is what the Dashboard's session
+    #: ratios divide by, because their numerator -- `total_spend` --
+    #: is Meta ad spend. Dividing Meta spend by all traffic, which is
+    #: what this field used to carry, understated cost per session by
+    #: the 27.6% of sessions Meta never sent.
     total_sessions: int | None
+    #: All traffic, kept so the tile can say what share of it is Meta
+    #: rather than quoting a smaller number with no explanation.
+    all_sessions: int | None
     session_data_from: date | None
     session_data_to: date | None
     available_days: int
@@ -7210,7 +7475,8 @@ async def get_dashboard_session_trend(
                        COALESCE(CAST(:dt AS date), MAX(day)) AS hi
                 FROM public.shopify_sessions_daily
             ), session_days AS (
-                SELECT s.day, s.sessions FROM public.shopify_sessions_daily s, bounds b
+                SELECT s.day, s.meta_sessions AS sessions
+                FROM public.shopify_sessions_daily s, bounds b
                 WHERE s.day BETWEEN b.lo AND b.hi
             ), ad_days AS (
                 SELECT d.day, SUM(d.spend) AS spend
@@ -7239,7 +7505,9 @@ async def get_dashboard_session_trend(
         """), {"df": date_from, "dt": date_to})).all()
     except DBAPIError as exc:
         sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
-        if sqlstate == "42P01":
+        # 42703 = undefined_column, i.e. a rollup built before the Meta
+        # split added meta_sessions. Same remedy as a missing table.
+        if sqlstate in ("42P01", "42703"):
             raise HTTPException(status_code=503, detail="Daily session trend sources are not ready.") from exc
         raise
 
@@ -7298,11 +7566,18 @@ async def get_dashboard_sessions(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
 ) -> DashboardSessionsResponse:
-    """All Shopify sessions, independently cached from the headline KPIs.
+    """Meta-driven Shopify sessions, cached apart from the headline KPIs.
 
-    The silver refresh pre-aggregates all traffic into one row per day.
-    Read that small snapshot instead of scanning millions of session rows on
-    each cache miss. NULL distinguishes missing data from a recorded zero.
+    The silver refresh pre-aggregates one row per day, carrying both the
+    all-traffic total and the Meta-only subset (the source rule lives in
+    `app.services.dashboard_sessions.META_SOURCE_SQL`). Read that small
+    snapshot instead of scanning millions of session rows on each cache
+    miss. NULL distinguishes missing data from a recorded zero.
+
+    Meta-only because every numerator paired with it on the Dashboard --
+    ad spend, attributed revenue, attributed orders -- is Meta's. Over
+    all history that is 14,519,759 sessions of 20,045,933, so the old
+    all-traffic denominator made cost per session read 27.6% low.
     """
     if (date_from is None) != (date_to is None):
         raise HTTPException(status_code=422, detail="Provide both date_from and date_to")
@@ -7315,7 +7590,7 @@ async def get_dashboard_sessions(
         params = {"date_from": date_from, "date_to": date_to}
     try:
         row = (await session.execute(text(
-            "SELECT SUM(sessions), MIN(day), MAX(day), COUNT(*) "
+            "SELECT SUM(meta_sessions), SUM(sessions), MIN(day), MAX(day), COUNT(*) "
             f"FROM public.shopify_sessions_daily {where}"
         ), params)).one()
     except DBAPIError as exc:
@@ -7326,10 +7601,19 @@ async def get_dashboard_sessions(
                 status_code=503,
                 detail="Session summary is not ready. Run scripts/refresh_dashboard_sessions.py once.",
             ) from exc
+        # 42703 = undefined_column: the rollup predates meta_sessions.
+        # Same answer as a missing table -- rerun the refresh -- and the
+        # same refusal to quietly serve all-traffic numbers in its place.
+        if sqlstate == "42703":
+            raise HTTPException(
+                status_code=503,
+                detail="Session summary predates the Meta split. Run scripts/refresh_dashboard_sessions.py once.",
+            ) from exc
         raise
     return DashboardSessionsResponse(
         total_sessions=int(row[0]) if row[0] is not None else None,
-        session_data_from=row[1], session_data_to=row[2], available_days=int(row[3]),
+        all_sessions=int(row[1]) if row[1] is not None else None,
+        session_data_from=row[2], session_data_to=row[3], available_days=int(row[4]),
     )
 
 
@@ -7378,11 +7662,17 @@ async def get_dashboard_kpis(
             "COALESCE(SUM(shopify_revenue),0), COALESCE(SUM(shopify_orders),0) "
             "FROM ad_performance_summary"
         ))).one()
+        acq = (await session.execute(text(
+            "SELECT COUNT(*), COALESCE(SUM(total_price),0) "
+            "FROM public.order_customer_type WHERE is_new_customer"
+        ))).one()
         return KpisResponse(
             total_spend=float(totals[0]),
             total_impressions=float(totals[1]),
             total_shopify_revenue=float(totals[2]),
             total_shopify_orders=int(totals[3]),
+            new_customers=int(acq[0]),
+            new_customer_revenue=float(acq[1]),
         )
 
     ads = (await session.execute(text(
@@ -7391,12 +7681,23 @@ async def get_dashboard_kpis(
         "FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt"
     ), {"df": df, "dt": dt})).one()
     shop = await _get_dashboard_order_groups(session, df, dt)
+    # `order_day` is a date, so BETWEEN is inclusive on both ends and
+    # matches the spend window above exactly -- the two halves of
+    # Acquisition MER must cover the same days or the ratio is a
+    # comparison between two different periods.
+    acq = (await session.execute(text(
+        "SELECT COUNT(*), COALESCE(SUM(total_price),0) "
+        "FROM public.order_customer_type "
+        "WHERE is_new_customer AND order_day BETWEEN :df AND :dt"
+    ), {"df": df, "dt": dt})).one()
     floor = ads[2]
     return KpisResponse(
         total_spend=float(ads[0]),
         total_impressions=float(ads[1]),
         total_shopify_revenue=float(sum(row[2] or 0 for row in shop)),
         total_shopify_orders=sum(row[3] for row in shop),
+        new_customers=int(acq[0]),
+        new_customer_revenue=float(acq[1]),
         spend_data_from=floor.isoformat() if floor and df < floor else None,
     )
 

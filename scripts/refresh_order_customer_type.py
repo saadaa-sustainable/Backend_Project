@@ -91,15 +91,63 @@ FROM (
 
 
 #: The names the side table's indexes are built under, before the swap
-#: renames each to its canonical name. Dropped defensively first: a run
-#: that died between CREATE INDEX and the rename would otherwise leave
-#: one behind and the next run would collide on it.
+#: renames each to its canonical name. Vacated defensively first -- see
+#: _vacate() for why that is a rename and not a drop.
 _NEW_INDEXES = (
     "order_customer_type_new_pkey",
     "ix_oct_customer_new",
     "ix_oct_day_new",
     "ix_oct_new_new",
 )
+
+
+def _vacate(cur, name: str) -> None:
+    """Free the index name `name` for the index this run is about to build.
+
+    This used to be `DROP INDEX IF EXISTS`, and that was wrong twice over.
+
+    An index name is unique per schema, not per table, so the name may
+    well belong to a LIVE index rather than to debris on the side table.
+    It does here: every swap before 2026-10-15 renamed the table but not
+    its indexes, so the real `order_customer_type` carries a primary key
+    still called `order_customer_type_new_pkey`. Dropping a live table's
+    primary key halfway through a rebuild is not a cleanup.
+
+    And it is not even possible. A constraint owns its index, so
+    Postgres refuses: `cannot drop index order_customer_type_new_pkey
+    because constraint order_customer_type_new_pkey on table
+    order_customer_type requires it`. That is what killed the step on
+    the 2026-10-15 nightly, leaving the table a day stale.
+
+    So rename it aside instead, through ALTER TABLE ... RENAME CONSTRAINT
+    when a constraint owns it so that the two names stay in step. The
+    parked index rides on the table this run is replacing and is dropped
+    with it a few statements later, which is what keeps the names from
+    piling up run after run.
+    """
+    cur.execute(
+        """
+        SELECT t.relname, con.conname
+        FROM pg_class c
+        JOIN pg_namespace n  ON n.oid = c.relnamespace AND n.nspname = 'public'
+        JOIN pg_index i      ON i.indexrelid = c.oid
+        JOIN pg_class t      ON t.oid = i.indrelid
+        LEFT JOIN pg_constraint con ON con.conindid = c.oid
+        WHERE c.relname = %s
+        """,
+        (name,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return
+    table, conname = row
+    parked = f"{name}_stale_{int(time.time())}"
+    if conname:
+        cur.execute(f'ALTER TABLE public."{table}" '
+                    f'RENAME CONSTRAINT "{conname}" TO "{parked}"')
+    else:
+        cur.execute(f'ALTER INDEX public."{name}" RENAME TO "{parked}"')
+    print(f"[pg] parked pre-existing {name} on {table} as {parked}", flush=True)
 
 
 def main() -> int:
@@ -131,7 +179,7 @@ def main() -> int:
             # below -- so this script decides the index set, not the
             # server's name generator.
             for name in _NEW_INDEXES:
-                cur.execute(f"DROP INDEX IF EXISTS public.{name}")
+                _vacate(cur, name)
             cur.execute("ALTER TABLE public.order_customer_type_new "
                         "ADD CONSTRAINT order_customer_type_new_pkey "
                         "PRIMARY KEY (order_id)")

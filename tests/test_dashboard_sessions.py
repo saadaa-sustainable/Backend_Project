@@ -25,14 +25,19 @@ def clear_cache():
 @pytest.fixture
 def session():
     connection = sqlite3.connect(":memory:")
+    # Built through the production _INSERT, so the Meta rule under test
+    # is the one that actually ships. 225 sessions of which 75 are Meta:
+    # the 150 kwikengage sessions are WhatsApp tooling and must not count.
     connection.executescript("""
-        CREATE TABLE shopify_sessions (day TEXT, sessions NUMERIC);
+        CREATE TABLE shopify_sessions (day TEXT, sessions NUMERIC, utm_source TEXT);
         INSERT INTO shopify_sessions VALUES
-            ('2026-01-01',50), ('2026-01-01',150), ('2026-01-02',0),
-            ('2026-01-03',25), ('2026-01-04',NULL), (NULL,1000);
+            ('2026-01-01',50,'META'), ('2026-01-01',150,'kwikengage'),
+            ('2026-01-02',0,'facebook'), ('2026-01-03',25,'ig'),
+            ('2026-01-04',NULL,'META'), (NULL,1000,'META');
     """)
     connection.execute(_CREATE.replace("public.", ""))
-    connection.execute(_INSERT.replace("public.", ""))
+    # btrim is Postgres' name for the standard no-argument trim.
+    connection.execute(_INSERT.replace("public.", "").replace("btrim(", "trim("))
 
     async def execute(query, params):
         # A cache miss must never regress to the multi-million-row source.
@@ -46,16 +51,22 @@ def session():
     connection.close()
 
 
-@pytest.mark.parametrize(("start", "end", "expected", "days"), [
-    (None, None, 225, 3),
-    (date(2026, 1, 1), date(2026, 1, 1), 200, 1),
-    (date(2026, 1, 2), date(2026, 1, 2), 0, 1),
-    (date(2026, 1, 4), date(2026, 1, 4), None, 0),
-    (date(2026, 1, 5), date(2026, 1, 6), None, 0),
+# `expected` is the META total, `expected_all` the all-traffic total --
+# they differ on every populated range, so reading the wrong column
+# cannot pass.
+@pytest.mark.parametrize(("start", "end", "expected", "expected_all", "days"), [
+    (None, None, 75, 225, 3),
+    (date(2026, 1, 1), date(2026, 1, 1), 50, 200, 1),
+    (date(2026, 1, 2), date(2026, 1, 2), 0, 0, 1),
+    (date(2026, 1, 4), date(2026, 1, 4), None, None, 0),
+    (date(2026, 1, 5), date(2026, 1, 6), None, None, 0),
 ])
-async def test_additive_sessions_date_bounds_and_missing_values(session, start, end, expected, days):
+async def test_additive_sessions_date_bounds_and_missing_values(
+    session, start, end, expected, expected_all, days,
+):
     response = await analytics.get_dashboard_sessions(session, date_from=start, date_to=end)
     assert response.total_sessions == expected
+    assert response.all_sessions == expected_all
     assert response.available_days == days
     if days == 0:
         assert response.session_data_from is response.session_data_to is None
@@ -72,8 +83,8 @@ async def test_cache_reuses_same_range_and_separates_changed_dates(session):
     filtered = await analytics.get_dashboard_sessions(
         session, date_from=date(2026, 1, 1), date_to=date(2026, 1, 1),
     )
-    assert first.total_sessions == 225
-    assert filtered.total_sessions == 200
+    assert (first.total_sessions, first.all_sessions) == (75, 225)
+    assert (filtered.total_sessions, filtered.all_sessions) == (50, 200)
     assert session.execute.await_count == 2
 
 
@@ -91,7 +102,8 @@ async def test_http_response_contract_reads_summary(session):
         )
     assert response.status_code == 200
     assert response.json() == {
-        "total_sessions": 200, "session_data_from": "2026-01-01",
+        "total_sessions": 50, "all_sessions": 200,
+        "session_data_from": "2026-01-01",
         "session_data_to": "2026-01-02", "available_days": 2,
     }
 

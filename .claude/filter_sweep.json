@@ -1,0 +1,47 @@
+{
+  "_README": [
+    "Per-endpoint knowledge the OpenAPI schema cannot carry.",
+    "",
+    "  base          parameters pinned on every probe for this endpoint",
+    "  limit         page size for the baseline (smaller = faster sweep)",
+    "  values        probe values for a parameter the schema leaves open",
+    "  search_probe  a substring known to match something real",
+    "  scope         response fields a filter MUST NOT move.",
+    "",
+    "`scope` is the part worth maintaining. A filter that narrows the",
+    "wrong half of a row is invisible to row counts and to timings -- the",
+    "totals simply come back wrong, and nobody notices for weeks. Naming",
+    "the frozen fields turns that into a test."
+  ],
+
+  "landing-pages": {
+    "limit": 25,
+    "search_probe": "kurta",
+    "values": {
+      "page_type": ["collections", "products", "home", "pages", "other"],
+      "source": ["Meta", "Google", "Retention", "Brand Collab", "AI",
+                 "Organic (Direct)", "Organic (IG)", "Loyalty", "Other"]
+    },
+    "scope": {
+      "source": [
+        "ga4_sessions", "ga4_pdp_views", "ga4_add_to_carts",
+        "ga4_checkouts", "ga4_purchases",
+        "shopify_sessions", "shopify_atc_sessions", "shopify_checkout_sessions"
+      ]
+    }
+  },
+
+  "ads-analyse": {
+    "limit": 25
+  },
+
+  "last-click-utm": {
+    "limit": 25,
+    "search_probe": "META"
+  },
+
+  "creative-testing": { "limit": 25 },
+  "cpis-utm": { "limit": 25 },
+  "asset-analysis": { "limit": 25 },
+  "untested": { "limit": 25 }
+}

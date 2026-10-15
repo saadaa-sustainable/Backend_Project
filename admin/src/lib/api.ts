@@ -1083,6 +1083,12 @@ export interface LandingPageRow {
   landing_page_path: string;
   /** Shopify: reliable at the top of the funnel. */
   shopify_sessions: number | null;
+  /** Session counts, carried beside the rates so the summary band can
+   *  draw Shopify's funnel without multiplying a rounded rate back up.
+   *  `shopify_checkout_sessions` undercounts ~10x — GoKwik owns the
+   *  checkout and Shopify never sees the completion. */
+  shopify_atc_sessions: number | null;
+  shopify_checkout_sessions: number | null;
   shopify_atc_rate: number | null;
   shopify_bounce_rate: number | null;
   /** GA4: the only working checkout tail — Shopify's reads ~10x low
@@ -1110,11 +1116,54 @@ export interface LandingPageRow {
   atc_to_checkout_rate: number | null;
   checkout_to_purchase_rate: number | null;
   pdp_to_purchase_rate: number | null;
+  /** Last-click orders and revenue credited to this page, from GA4's
+   *  per-order attribution — Shopify's own journey summary is populated
+   *  for 4% of orders on this store, so it cannot answer this.
+   *
+   *  The rupees are still Shopify's `total_price` wherever the order
+   *  joins (95.7% of them), so they agree with every other revenue
+   *  figure in the app.
+   *
+   *  These four move with the `source` filter; every other column on
+   *  the row stays whole-traffic. Null means GA4 attributed no order
+   *  here, which at 74% order coverage is not a claim of zero. */
+  last_click_orders: number | null;
+  last_click_revenue: number | null;
+  last_click_aov: number | null;
+  last_click_rev_per_session: number | null;
+}
+
+/** The funnel figures summed over EVERY page the filters match, not
+ *  over the rows returned. Computed server-side as window aggregates on
+ *  the statement that already runs, so they describe the whole set and
+ *  do not move when more rows are loaded. */
+export interface LandingPageTotals {
+  /** Pages matching the filters — the same number as `total`. */
+  pages: number;
+  ga4_sessions: number;
+  ga4_pdp_views: number;
+  ga4_add_to_carts: number;
+  ga4_checkouts: number;
+  ga4_purchases: number;
+  shopify_sessions: number;
+  shopify_atc_sessions: number;
+  shopify_checkout_sessions: number;
+  /** Narrowed by `source`, exactly as the row columns are. */
+  last_click_orders: number;
+  last_click_revenue: number;
 }
 
 export interface LandingPageResponse {
   rows: LandingPageRow[];
   total: number;
+  totals: LandingPageTotals;
+  /** The channel the last-click columns were narrowed to, or null for
+   *  combined. Echoed by the server rather than read back off the
+   *  client's own request state. */
+  source: string | null;
+  /** Channels the filter accepts, server-ordered, so the control cannot
+   *  drift from the classifier behind it. */
+  sources: string[];
 }
 
 /** One entity, seen from both ends of the order's journey.
@@ -1179,6 +1228,9 @@ export interface LandingPageParams {
   search?: string;
   /** One of "collections" | "products" | "home" | "pages" | "other"; omit for all pages. */
   page_type?: string;
+  /** A channel name from the response's `sources`; omit for combined.
+   *  Narrows the last-click columns only. */
+  source?: string;
   sort?: string;
   from_date?: string;
   to_date?: string;
@@ -1190,6 +1242,7 @@ export function fetchLandingPages(params: LandingPageParams = {}): Promise<Landi
   const qs = new URLSearchParams();
   if (params.search) qs.set("search", params.search);
   if (params.page_type) qs.set("page_type", params.page_type);
+  if (params.source) qs.set("source", params.source);
   if (params.sort) qs.set("sort", params.sort);
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
@@ -2129,6 +2182,22 @@ export interface DashboardKpis {
   total_impressions: number;
   total_shopify_revenue: number;
   total_shopify_orders: number;
+  /** Customers whose FIRST EVER Shopify order falls inside the selected
+   *  window — acquired in it, not merely active in it. Windowed on the
+   *  same calendar as `total_spend`, so Acquisition MER divides two
+   *  figures covering one period.
+   *
+   *  OPTIONAL, though the server always sends it. `request()` casts the
+   *  JSON without validating it, and useCachedFetch serves payloads out
+   *  of sessionStorage for five minutes — so a tab opened before this
+   *  field shipped, or one talking to an older server mid-deploy, hands
+   *  back an object that is missing it. Typed honestly so the compiler
+   *  makes callers handle that instead of throwing
+   *  `Cannot read properties of undefined` at render. */
+  new_customers?: number;
+  /** What those customers spent on that first order. Optional for the
+   *  same reason as `new_customers`. */
+  new_customer_revenue?: number;
   /** Set only when a window reaches back past the daily spend table's floor
    *  (2025-12-29). Spend/impressions before that day are missing, so the
    *  figure is partial -- surface it rather than let it read as a decline. */
@@ -2136,7 +2205,12 @@ export interface DashboardKpis {
 }
 
 export interface DashboardSessions {
+  /** Meta-driven sessions -- what the session ratios divide by, since
+   *  their numerators (ad spend, attributed revenue, attributed orders)
+   *  are all Meta's. */
   total_sessions: number | null;
+  /** All traffic, for stating what share of it Meta accounts for. */
+  all_sessions: number | null;
   session_data_from: string | null;
   session_data_to: string | null;
   available_days: number;

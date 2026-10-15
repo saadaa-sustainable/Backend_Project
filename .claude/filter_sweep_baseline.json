@@ -1,0 +1,333 @@
+[
+  {
+    "path": "/landing-pages",
+    "baseline": {
+      "rows": 25,
+      "total": 2747,
+      "ms": 2604,
+      "blocks": 57184,
+      "tuples": 112319
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 4,
+        "blocks": 2,
+        "tuples": 0,
+        "rows": 1,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 2429,
+        "blocks": 57346,
+        "tuples": 112375,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "page_type",
+        "value": "collections",
+        "status": 200,
+        "ms": 4139,
+        "blocks": 57185,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 332,
+        "verdict": "ok"
+      },
+      {
+        "param": "page_type",
+        "value": "products",
+        "status": 200,
+        "ms": 2615,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 1087,
+        "verdict": "ok"
+      },
+      {
+        "param": "page_type",
+        "value": "home",
+        "status": 200,
+        "ms": 2257,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 1,
+        "total": 1,
+        "verdict": "ok"
+      },
+      {
+        "param": "page_type",
+        "value": "pages",
+        "status": 200,
+        "ms": 2361,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 94,
+        "verdict": "ok"
+      },
+      {
+        "param": "page_type",
+        "value": "other",
+        "status": 200,
+        "ms": 2331,
+        "blocks": 57334,
+        "tuples": 112335,
+        "rows": 25,
+        "total": 1233,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "kurta",
+        "status": 200,
+        "ms": 2322,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 315,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ga4_purchases",
+        "status": 200,
+        "ms": 2145,
+        "blocks": 57249,
+        "tuples": 112347,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ga4_pdp_views",
+        "status": 200,
+        "ms": 2196,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ga4_add_to_carts",
+        "status": 200,
+        "ms": 2415,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ga4_checkouts",
+        "status": 200,
+        "ms": 2215,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ga4_bounce_rate",
+        "status": 200,
+        "ms": 2202,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "shopify_sessions",
+        "status": 200,
+        "ms": 3126,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "shopify_atc_rate",
+        "status": 200,
+        "ms": 2507,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "shopify_bounce_rate",
+        "status": 200,
+        "ms": 2022,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "sessions_delta",
+        "status": 200,
+        "ms": 2351,
+        "blocks": 57188,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "sessions_delta_pct",
+        "status": 200,
+        "ms": 2311,
+        "blocks": 57184,
+        "tuples": 112319,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "bounce_rate_delta",
+        "status": 200,
+        "ms": 2285,
+        "blocks": 57328,
+        "tuples": 112333,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Meta",
+        "status": 200,
+        "ms": 2505,
+        "blocks": 57210,
+        "tuples": 112329,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Google",
+        "status": 200,
+        "ms": 2275,
+        "blocks": 57210,
+        "tuples": 112329,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Retention",
+        "status": 200,
+        "ms": 2397,
+        "blocks": 57207,
+        "tuples": 112328,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Brand Collab",
+        "status": 200,
+        "ms": 2352,
+        "blocks": 57207,
+        "tuples": 112328,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "AI",
+        "status": 200,
+        "ms": 2260,
+        "blocks": 57207,
+        "tuples": 112328,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Organic (Direct)",
+        "status": 200,
+        "ms": 2354,
+        "blocks": 57366,
+        "tuples": 112383,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Organic (IG)",
+        "status": 200,
+        "ms": 2192,
+        "blocks": 57210,
+        "tuples": 112329,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Loyalty",
+        "status": 200,
+        "ms": 2225,
+        "blocks": 57208,
+        "tuples": 112328,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      },
+      {
+        "param": "source",
+        "value": "Other",
+        "status": 200,
+        "ms": 2359,
+        "blocks": 57196,
+        "tuples": 112323,
+        "rows": 25,
+        "total": 2747,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/dashboard/top-landing-pages",
+    "baseline": {
+      "rows": 5,
+      "total": 5,
+      "ms": 2886,
+      "blocks": 24588,
+      "tuples": 97876
+    },
+    "probes": []
+  }
+]

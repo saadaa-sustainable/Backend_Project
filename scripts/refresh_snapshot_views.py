@@ -50,22 +50,40 @@ VIEWS = (
     "meta_direct_active_90d",
     "meta_direct_daily_30d",
     "meta_direct_daily_90d",
+    "meta_direct_adset_30d",
+    "meta_direct_campaign_30d",
 )
 
 
-#: Every view below must depend on this table, not on a swapped-out
-#: predecessor of it.
-LIVE_SOURCE = "insights_daily_by_ad"
+#: The live daily tables the snapshots read. Each is rebuilt by its own
+#: nightly step into `<table>_new` and rename-swapped, so each can leave
+#: a view bound to a `<table>_old` that still holds the previous build.
+#:
+#: A SET, not one name. The check below used to be
+#: `relname LIKE 'insights_daily_by_ad%' AND relname <> 'insights_daily_by_ad'`,
+#: which reads correctly for the ad views and is a trap for any other:
+#: `insights_daily_by_adset` matches that prefix and is not equal to it,
+#: so an ad-set view would have been reported as permanently drifted and
+#: the DDL re-applied on every single nightly run.
+LIVE_SOURCES = (
+    "insights_daily_by_ad",
+    "insights_daily_by_adset",
+    "insights_daily_by_campaign",
+)
 
 DDL_PATH = Path(__file__).resolve().parents[1] / "sql" / "snapshot_views.sql"
 
 
 def _verify_bindings(cur) -> list[str]:
-    """Names of meta_direct_* views bound to something other than LIVE_SOURCE.
+    """Names of meta_direct_* views bound to a swapped-out daily table.
 
     Reads pg_depend, so it reports where the view will ACTUALLY read on
     its next refresh rather than what its printed definition says -- the
     two diverge after a rename-swap, which is the whole point.
+
+    Drift means "reads a table whose name is one of the live ones plus a
+    suffix" -- `insights_daily_by_ad_old`, never `insights_daily_by_adset`.
+    Matching on a bare prefix confuses the two.
     """
     cur.execute("""
         SELECT DISTINCT v.relname, src.relname
@@ -75,14 +93,14 @@ def _verify_bindings(cur) -> list[str]:
           JOIN pg_depend d      ON d.objid = r.oid AND d.classid = 'pg_rewrite'::regclass
           JOIN pg_class src     ON src.oid = d.refobjid
          WHERE n.nspname = 'public'
-           AND v.relname LIKE %s
+           AND v.relname LIKE 'meta_direct%%'
            AND src.relkind IN ('r', 'p')
-           AND src.relname LIKE %s
-           AND src.relname <> %s
-    """, ("meta_direct%", LIVE_SOURCE + "%", LIVE_SOURCE))
+           AND src.relname <> ALL(%s)
+           AND src.relname ~ %s
+    """, (list(LIVE_SOURCES), r"^(" + "|".join(LIVE_SOURCES) + r")_"))
     drifted = cur.fetchall()
     for view, src in drifted:
-        print(f"[drift] {view} reads public.{src}, not public.{LIVE_SOURCE}", flush=True)
+        print(f"[drift] {view} reads public.{src}, a swapped-out table", flush=True)
     return sorted({v for v, _ in drifted})
 
 

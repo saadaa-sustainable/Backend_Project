@@ -82,3 +82,41 @@ export function getAssetPreview(source: AssetPreviewSource): AssetPreview {
   // Unknown websites may disallow embedding. Keep their original link available.
   return preview;
 }
+
+export interface AdPreviewSource {
+  ad_id: string;
+  account_id?: string | null;
+  thumbnail_url?: string | null;
+  video_source_url?: string | null;
+  video_url?: string | null;
+  instagram_permalink?: string | null;
+  effective_object_story_id?: string | null;
+}
+
+/** Direct media first; social posts remain available when a signed URL expires. */
+export function getAdPreviews(ad: AdPreviewSource): AssetPreview[] {
+  const previews: AssetPreview[] = [];
+  const add = (preview: AssetPreview) => {
+    if (preview.href && !previews.some((p) => p.src === preview.src && p.href === preview.href)) previews.push(preview);
+  };
+  for (const value of [ad.video_source_url, ad.video_url]) {
+    const url = webUrl(value);
+    if (!url) continue;
+    const parsed = getAssetPreview({ preview_url: url.href });
+    // Meta's `source` field can be a signed video URL without an extension.
+    add(parsed.kind === "link" ? { ...parsed, kind: "video", src: url.href, provider: "Video" } : parsed);
+  }
+  const thumbnail = webUrl(ad.thumbnail_url)?.href;
+  if (thumbnail) add({ href: thumbnail, thumbnail, kind: "image", src: thumbnail, provider: "Image" });
+  const instagram = getAssetPreview({ preview_url: ad.instagram_permalink });
+  if (instagram.provider === "Instagram") add(instagram);
+  const story = ad.effective_object_story_id?.trim().match(/^(\d+)_(\d+)$/);
+  if (story) add(getAssetPreview({ preview_url: `https://www.facebook.com/${story[1]}/posts/${story[2]}` }));
+  if (ad.ad_id.trim()) {
+    const manager = new URL("https://business.facebook.com/adsmanager/manage/ads/edit");
+    manager.searchParams.set("selected_ad_ids", ad.ad_id);
+    if (ad.account_id) manager.searchParams.set("act", ad.account_id);
+    add({ href: manager.href, thumbnail: null, kind: "link", src: null, provider: "Ads Manager" });
+  }
+  return previews;
+}

@@ -1,7 +1,46 @@
 # meta_direct_* → Google Sheet
 
-`MetaDirectSync.gs` pulls the four snapshot views into a sheet and
+`MetaDirectSync.gs` pulls the six snapshot views into a sheet and
 keeps them current nightly.
+
+## Tabs
+
+| tab | view | grain | rows |
+|---|---|---|---|
+| Active 30d | `meta_direct_active_30d` | ad | ~1.7k |
+| Active 90d | `meta_direct_active_90d` | ad | ~1.7k |
+| Daily 30d | `meta_direct_daily_30d` | ad × day | ~26k |
+| Daily 90d | `meta_direct_daily_90d` | ad × day | ~66k |
+| Ad Sets 30d | `meta_direct_adset_30d` | ad set | ~440 |
+| Campaigns 30d | `meta_direct_campaign_30d` | campaign | ~90 |
+
+The script pulls `select=*` and takes its headers from the first row, so
+a column added to a view appears in the sheet on the next sync with no
+change here.
+
+### Columns that must not be summed
+
+`repeat_customers` is DISTINCT people, counted per row. One person who
+buys through two ad sets is one customer and two rows, so a SUM down
+that column overstates. `repeat_customer_orders` sits beside it and is
+additive — total that instead. Same hazard, and the same remedy, as
+`reach_daily_sum` vs `reach_unique_to_date`.
+
+`acq_mer` is a ratio — **new-customer sales ÷ spend**, money over money,
+so it reads like the ROAS columns beside it. A ratio cannot be averaged
+down a column: total `new_customer_sales` and total `spend` separately
+and divide those. Blank when nothing was spent, never zero.
+
+### d3 / d7 ROAS
+
+Only on the ad set and campaign tabs. Last-click revenue over spend,
+both summed across the same trailing window ending on the newest day of
+data. **Blank, not zero, when nothing was spent in that window** — about
+half the rows on any given day — so a sheet sorted by d3 ROAS does not
+bury a paused entity at the bottom as though it performed badly.
+
+At ad grain a three-day window is mostly noise, which is why the two
+ad-level tabs do not carry it.
 
 ## Setup
 
