@@ -94,6 +94,8 @@ def landing_page_results():
         "landing_page_path": "/collections/autumn",
         # Shopify: the top of the funnel, where it is reliable.
         "shopify_sessions": 100,
+        "shopify_atc_sessions": 20,
+        "shopify_checkout_sessions": 6,
         "shopify_atc_rate": Decimal("20.00"),
         "shopify_bounce_rate": Decimal("25.00"),
         # GA4: deliberately disagreeing with Shopify on the same page,
@@ -115,8 +117,35 @@ def landing_page_results():
         "atc_to_checkout_rate": Decimal("50.00"),
         "checkout_to_purchase_rate": Decimal("50.00"),
         "pdp_to_purchase_rate": Decimal("5.00"),
+        # Last click, from GA4's per-order attribution. Orders (3) match
+        # GA4's purchase count for the page on purpose -- the same three
+        # orders, counted by the two queries that see them.
+        "last_click_orders": 3,
+        "last_click_revenue": Decimal("4500.00"),
+        "last_click_aov": Decimal("1500.00"),
+        "last_click_rev_per_session": Decimal("52.94"),
         "_total": 1,
     }
+    # The window aggregates the endpoint reads the summary band off.
+    # Present on every row against a real database, so the fixture
+    # carries them too -- without them the totals read 0 while the row
+    # beside them reads real figures, a shape production never produces.
+    #
+    # Deliberately NOT equal to this row's own values: the band sums
+    # every matching page, not the page of rows returned, and a fixture
+    # where the two agree could not tell the difference.
+    row.update({
+        "_t_ga4_sessions": 8_500,
+        "_t_ga4_pdp_views": 6_000,
+        "_t_ga4_add_to_carts": 1_200,
+        "_t_ga4_checkouts": 600,
+        "_t_ga4_purchases": 300,
+        "_t_shopify_sessions": 10_000,
+        "_t_shopify_atc_sessions": 2_000,
+        "_t_shopify_checkout_sessions": 600,
+        "_t_last_click_orders": 300,
+        "_t_last_click_revenue": Decimal("450000.00"),
+    })
     return [[SimpleNamespace(_mapping=row)]]
 
 
@@ -186,6 +215,14 @@ async def test_landing_pages_http_response_and_cache(client, session):
 
     first = await client.get("/admin/analytics/landing-pages")
     assert first.status_code == 200, first.text
+    totals = first.json()["totals"]
+    # Summed across the whole filtered set, so they are NOT this row's
+    # figures -- 8,500 sessions against the row's 85.
+    assert totals["pages"] == 1
+    assert totals["ga4_sessions"] == 8_500
+    assert totals["shopify_sessions"] == 10_000
+    assert totals["last_click_orders"] == 300
+    assert totals["last_click_revenue"] == 450000.0
     payload = first.json()
     # The total comes from COUNT(*) OVER () inside the rows, so it has to
     # survive being stripped off before the row model is built.

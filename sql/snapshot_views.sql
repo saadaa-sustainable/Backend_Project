@@ -42,7 +42,8 @@ BEGIN
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relname IN (
       'meta_direct_active_30d', 'meta_direct_active_90d',
-      'meta_direct_daily_30d', 'meta_direct_daily_90d'
+      'meta_direct_daily_30d', 'meta_direct_daily_90d',
+      'meta_direct_adset_30d', 'meta_direct_campaign_30d'
     )
   LOOP
     IF snapshot.relkind = 'm' THEN
@@ -129,11 +130,26 @@ shop AS (
   SELECT a.matched_ad_id AS ad_id,
          COUNT(*)::int                                  AS shopify_orders,
          COALESCE(SUM(a.total_price), 0)                AS shopify_sales,
+         -- New vs repeat, on the same orders the two columns above
+         -- count. "New" is the customer's FIRST EVER order, decided
+         -- over the whole order history by
+         -- scripts/refresh_order_customer_type.py -- not first within
+         -- this window.
+         COUNT(*) FILTER (WHERE oct.is_new_customer)::int        AS new_customers,
+         COUNT(*) FILTER (WHERE NOT oct.is_new_customer)::int    AS repeat_customer_orders,
+         COUNT(DISTINCT oct.customer_id)
+           FILTER (WHERE NOT oct.is_new_customer)::int           AS repeat_customers_distinct,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE oct.is_new_customer), 0)                AS new_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE NOT oct.is_new_customer), 0)            AS repeat_customer_sales,
          MODE() WITHIN GROUP (ORDER BY a.tier)          AS matched_tier,
          MODE() WITHIN GROUP (ORDER BY a.utm_content)   AS utm_content,
          MODE() WITHIN GROUP (ORDER BY a.utm_term)      AS utm_term,
          MODE() WITHIN GROUP (ORDER BY a.utm_campaign)  AS utm_campaign
-    FROM public.shopify_order_attribution a, win
+    FROM public.shopify_order_attribution a
+    LEFT JOIN public.order_customer_type oct ON oct.order_id = a.order_id
+    CROSS JOIN win
    WHERE a.matched_ad_id IS NOT NULL
      AND a.created_at::date BETWEEN win.since AND win.until
    GROUP BY a.matched_ad_id
@@ -176,6 +192,28 @@ SELECT al.account_name,
        CASE WHEN m.spend > 0
             THEN ROUND(COALESCE(shop.shopify_sales, 0) / m.spend, 4)
             ELSE 0 END                                   AS shopify_roas,
+       COALESCE(shop.new_customers, 0)                   AS new_customers,
+       -- ADDITIVE: one first order per person, so the order count and
+       -- the customer count are the same number.
+       COALESCE(shop.repeat_customer_orders, 0)          AS repeat_customer_orders,
+       -- NOT ADDITIVE. Distinct people, counted per row. One person who
+       -- buys through two ads is one customer and two rows, so a SUM
+       -- down this column in a sheet overstates. Same hazard the
+       -- reach_daily_sum / reach_unique_to_date pair exists for.
+       COALESCE(shop.repeat_customers_distinct, 0)       AS repeat_customers,
+       COALESCE(shop.new_customer_sales, 0)              AS new_customer_sales,
+       COALESCE(shop.repeat_customer_sales, 0)           AS repeat_customer_sales,
+       -- Acquisition MER: revenue from newly acquired customers over
+       -- the ad spend that acquired them, both across this row's
+       -- window. Money over money, so it reads like the ROAS columns
+       -- beside it rather than like a rate.
+       --
+       -- NULL, not 0, when nothing was spent: a ratio with an empty
+       -- denominator has no value, and 0 would sort a paused entity
+       -- below one that genuinely acquired badly.
+       CASE WHEN m.spend > 0
+            THEN ROUND(COALESCE(shop.new_customer_sales, 0) / m.spend, 4)
+            END                                          AS acq_mer,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
@@ -253,11 +291,26 @@ shop AS (
   SELECT a.matched_ad_id AS ad_id,
          COUNT(*)::int                                  AS shopify_orders,
          COALESCE(SUM(a.total_price), 0)                AS shopify_sales,
+         -- New vs repeat, on the same orders the two columns above
+         -- count. "New" is the customer's FIRST EVER order, decided
+         -- over the whole order history by
+         -- scripts/refresh_order_customer_type.py -- not first within
+         -- this window.
+         COUNT(*) FILTER (WHERE oct.is_new_customer)::int        AS new_customers,
+         COUNT(*) FILTER (WHERE NOT oct.is_new_customer)::int    AS repeat_customer_orders,
+         COUNT(DISTINCT oct.customer_id)
+           FILTER (WHERE NOT oct.is_new_customer)::int           AS repeat_customers_distinct,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE oct.is_new_customer), 0)                AS new_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE NOT oct.is_new_customer), 0)            AS repeat_customer_sales,
          MODE() WITHIN GROUP (ORDER BY a.tier)          AS matched_tier,
          MODE() WITHIN GROUP (ORDER BY a.utm_content)   AS utm_content,
          MODE() WITHIN GROUP (ORDER BY a.utm_term)      AS utm_term,
          MODE() WITHIN GROUP (ORDER BY a.utm_campaign)  AS utm_campaign
-    FROM public.shopify_order_attribution a, win
+    FROM public.shopify_order_attribution a
+    LEFT JOIN public.order_customer_type oct ON oct.order_id = a.order_id
+    CROSS JOIN win
    WHERE a.matched_ad_id IS NOT NULL
      AND a.created_at::date BETWEEN win.since AND win.until
    GROUP BY a.matched_ad_id
@@ -300,6 +353,28 @@ SELECT al.account_name,
        CASE WHEN m.spend > 0
             THEN ROUND(COALESCE(shop.shopify_sales, 0) / m.spend, 4)
             ELSE 0 END                                   AS shopify_roas,
+       COALESCE(shop.new_customers, 0)                   AS new_customers,
+       -- ADDITIVE: one first order per person, so the order count and
+       -- the customer count are the same number.
+       COALESCE(shop.repeat_customer_orders, 0)          AS repeat_customer_orders,
+       -- NOT ADDITIVE. Distinct people, counted per row. One person who
+       -- buys through two ads is one customer and two rows, so a SUM
+       -- down this column in a sheet overstates. Same hazard the
+       -- reach_daily_sum / reach_unique_to_date pair exists for.
+       COALESCE(shop.repeat_customers_distinct, 0)       AS repeat_customers,
+       COALESCE(shop.new_customer_sales, 0)              AS new_customer_sales,
+       COALESCE(shop.repeat_customer_sales, 0)           AS repeat_customer_sales,
+       -- Acquisition MER: revenue from newly acquired customers over
+       -- the ad spend that acquired them, both across this row's
+       -- window. Money over money, so it reads like the ROAS columns
+       -- beside it rather than like a rate.
+       --
+       -- NULL, not 0, when nothing was spent: a ratio with an empty
+       -- denominator has no value, and 0 would sort a paused entity
+       -- below one that genuinely acquired badly.
+       CASE WHEN m.spend > 0
+            THEN ROUND(COALESCE(shop.new_customer_sales, 0) / m.spend, 4)
+            END                                          AS acq_mer,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
@@ -326,11 +401,26 @@ shop AS (
          a.created_at::date                              AS day,
          COUNT(*)::int                                   AS shopify_orders,
          COALESCE(SUM(a.total_price), 0)                 AS shopify_sales,
+         -- New vs repeat, on the same orders the two columns above
+         -- count. "New" is the customer's FIRST EVER order, decided
+         -- over the whole order history by
+         -- scripts/refresh_order_customer_type.py -- not first within
+         -- this window.
+         COUNT(*) FILTER (WHERE oct.is_new_customer)::int        AS new_customers,
+         COUNT(*) FILTER (WHERE NOT oct.is_new_customer)::int    AS repeat_customer_orders,
+         COUNT(DISTINCT oct.customer_id)
+           FILTER (WHERE NOT oct.is_new_customer)::int           AS repeat_customers_distinct,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE oct.is_new_customer), 0)                AS new_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE NOT oct.is_new_customer), 0)            AS repeat_customer_sales,
          MODE() WITHIN GROUP (ORDER BY a.tier)           AS matched_tier,
          MODE() WITHIN GROUP (ORDER BY a.utm_content)    AS utm_content,
          MODE() WITHIN GROUP (ORDER BY a.utm_term)       AS utm_term,
          MODE() WITHIN GROUP (ORDER BY a.utm_campaign)   AS utm_campaign
-    FROM public.shopify_order_attribution a, win
+    FROM public.shopify_order_attribution a
+    LEFT JOIN public.order_customer_type oct ON oct.order_id = a.order_id
+    CROSS JOIN win
    WHERE a.matched_ad_id IS NOT NULL
      AND a.created_at::date BETWEEN win.since AND win.until
    GROUP BY a.matched_ad_id, a.created_at::date
@@ -376,6 +466,28 @@ SELECT i.day                                             AS date,
        CASE WHEN i.spend > 0
             THEN ROUND(COALESCE(shop.shopify_sales, 0) / i.spend, 4)
             ELSE 0 END                                    AS shopify_roas,
+       COALESCE(shop.new_customers, 0)                   AS new_customers,
+       -- ADDITIVE: one first order per person, so the order count and
+       -- the customer count are the same number.
+       COALESCE(shop.repeat_customer_orders, 0)          AS repeat_customer_orders,
+       -- NOT ADDITIVE. Distinct people, counted per row. One person who
+       -- buys through two ads is one customer and two rows, so a SUM
+       -- down this column in a sheet overstates. Same hazard the
+       -- reach_daily_sum / reach_unique_to_date pair exists for.
+       COALESCE(shop.repeat_customers_distinct, 0)       AS repeat_customers,
+       COALESCE(shop.new_customer_sales, 0)              AS new_customer_sales,
+       COALESCE(shop.repeat_customer_sales, 0)           AS repeat_customer_sales,
+       -- Acquisition MER: revenue from newly acquired customers over
+       -- the ad spend that acquired them, both across this row's
+       -- window. Money over money, so it reads like the ROAS columns
+       -- beside it rather than like a rate.
+       --
+       -- NULL, not 0, when nothing was spent: a ratio with an empty
+       -- denominator has no value, and 0 would sort a paused entity
+       -- below one that genuinely acquired badly.
+       CASE WHEN i.spend > 0
+            THEN ROUND(COALESCE(shop.new_customer_sales, 0) / i.spend, 4)
+            END                                          AS acq_mer,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
@@ -403,11 +515,26 @@ shop AS (
          a.created_at::date                              AS day,
          COUNT(*)::int                                   AS shopify_orders,
          COALESCE(SUM(a.total_price), 0)                 AS shopify_sales,
+         -- New vs repeat, on the same orders the two columns above
+         -- count. "New" is the customer's FIRST EVER order, decided
+         -- over the whole order history by
+         -- scripts/refresh_order_customer_type.py -- not first within
+         -- this window.
+         COUNT(*) FILTER (WHERE oct.is_new_customer)::int        AS new_customers,
+         COUNT(*) FILTER (WHERE NOT oct.is_new_customer)::int    AS repeat_customer_orders,
+         COUNT(DISTINCT oct.customer_id)
+           FILTER (WHERE NOT oct.is_new_customer)::int           AS repeat_customers_distinct,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE oct.is_new_customer), 0)                AS new_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE NOT oct.is_new_customer), 0)            AS repeat_customer_sales,
          MODE() WITHIN GROUP (ORDER BY a.tier)           AS matched_tier,
          MODE() WITHIN GROUP (ORDER BY a.utm_content)    AS utm_content,
          MODE() WITHIN GROUP (ORDER BY a.utm_term)       AS utm_term,
          MODE() WITHIN GROUP (ORDER BY a.utm_campaign)   AS utm_campaign
-    FROM public.shopify_order_attribution a, win
+    FROM public.shopify_order_attribution a
+    LEFT JOIN public.order_customer_type oct ON oct.order_id = a.order_id
+    CROSS JOIN win
    WHERE a.matched_ad_id IS NOT NULL
      AND a.created_at::date BETWEEN win.since AND win.until
    GROUP BY a.matched_ad_id, a.created_at::date
@@ -453,6 +580,28 @@ SELECT i.day                                             AS date,
        CASE WHEN i.spend > 0
             THEN ROUND(COALESCE(shop.shopify_sales, 0) / i.spend, 4)
             ELSE 0 END                                    AS shopify_roas,
+       COALESCE(shop.new_customers, 0)                   AS new_customers,
+       -- ADDITIVE: one first order per person, so the order count and
+       -- the customer count are the same number.
+       COALESCE(shop.repeat_customer_orders, 0)          AS repeat_customer_orders,
+       -- NOT ADDITIVE. Distinct people, counted per row. One person who
+       -- buys through two ads is one customer and two rows, so a SUM
+       -- down this column in a sheet overstates. Same hazard the
+       -- reach_daily_sum / reach_unique_to_date pair exists for.
+       COALESCE(shop.repeat_customers_distinct, 0)       AS repeat_customers,
+       COALESCE(shop.new_customer_sales, 0)              AS new_customer_sales,
+       COALESCE(shop.repeat_customer_sales, 0)           AS repeat_customer_sales,
+       -- Acquisition MER: revenue from newly acquired customers over
+       -- the ad spend that acquired them, both across this row's
+       -- window. Money over money, so it reads like the ROAS columns
+       -- beside it rather than like a rate.
+       --
+       -- NULL, not 0, when nothing was spent: a ratio with an empty
+       -- denominator has no value, and 0 would sort a paused entity
+       -- below one that genuinely acquired badly.
+       CASE WHEN i.spend > 0
+            THEN ROUND(COALESCE(shop.new_customer_sales, 0) / i.spend, 4)
+            END                                          AS acq_mer,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
@@ -502,6 +651,270 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.meta_direct_daily_90d    FROM 
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.meta_direct_data_through FROM authenticated;
 
 
+-- =====================================================================
+-- meta_direct_adset_30d / meta_direct_campaign_30d
+--   one row per ad set / campaign, last 30 days of DATA
+--
+-- Grain, mapping and additivity all follow the ad-level views above.
+-- Three things are specific to this pair:
+--
+--  1. ATTRIBUTION MAPPING. An order reaches a campaign through
+--     `matched_campaign_id` and an ad set through `utm_term`, which is
+--     the ad set id Meta writes into the URL. That is deliberately the
+--     same mapping app/api/routers/analytics.py uses for its rollup
+--     (`_customer_mix_rollup_sql`, `_rolling_lc_sql`), so the sheet and
+--     the dashboard can never disagree about which orders belong to an
+--     entity. The utm_source guard on the ad set side keeps a non-Meta
+--     order whose utm_term happens to collide with an ad set id out.
+--
+--  2. THE WINDOW IS THIS TABLE'S OWN. Each view anchors on MAX(day) of
+--     the entity table it reads, not on insights_daily_by_ad's. The
+--     three tables are built by different steps of the nightly and can
+--     land a day apart; anchoring each on its own source keeps spend
+--     and orders describing the same dates even on a night when one
+--     step failed.
+--
+--  3. ROLLING 3d / 7d. Revenue and spend are each summed over the last
+--     3 and 7 days ENDING AT THE SAME `until`, so the ratio is a real
+--     window ROAS rather than a short revenue window over a long spend
+--     one. A window with no spend yields NULL, not 0 -- "nothing was
+--     spent" and "spent and earned nothing" are different findings, and
+--     a sheet sorted by ROAS must not put the former at the bottom.
+-- =====================================================================
+CREATE MATERIALIZED VIEW public.meta_direct_adset_30d AS
+WITH win AS (
+  SELECT (SELECT MAX(day) FROM public.insights_daily_by_adset) - 29 AS since,
+         (SELECT MAX(day) FROM public.insights_daily_by_adset)      AS until
+),
+metrics AS (
+  SELECT i.adset_id,
+         SUM(i.impressions)                                     AS impressions,
+         SUM(i.reach)                                           AS reach_daily_sum,
+         CASE WHEN SUM(i.reach) > 0
+              THEN ROUND(SUM(i.impressions)::numeric / SUM(i.reach)::numeric, 4)
+              END                                               AS frequency,
+         ROUND(SUM(i.spend), 2)                                 AS spend,
+         SUM(i.clicks)                                          AS link_clicks,
+         SUM(i.all_clicks)                                      AS all_clicks,
+         CASE WHEN SUM(i.impressions) > 0
+              THEN ROUND(100.0 * SUM(i.clicks)::numeric / SUM(i.impressions)::numeric, 4)
+              END                                               AS ctr,
+         CASE WHEN SUM(i.clicks) > 0
+              THEN ROUND(SUM(i.spend) / SUM(i.clicks)::numeric, 4)
+              END                                               AS cpc,
+         CASE WHEN SUM(i.impressions) > 0
+              THEN ROUND(1000.0 * SUM(i.spend) / SUM(i.impressions)::numeric, 4)
+              END                                               AS cpm,
+         SUM(i.purchases)                                       AS purchases,
+         SUM(i.conv_value)                                      AS conv_value,
+         CASE WHEN SUM(i.spend) > 0
+              THEN ROUND(SUM(i.conv_value) / SUM(i.spend), 4)
+              END                                               AS purchase_roas,
+         SUM(i.ftewv_count)                                     AS ftewv_count,
+         MIN(i.day)                                             AS date_start,
+         MAX(i.day)                                             AS date_stop,
+         -- Rolling spend, same `until` as the revenue below.
+         ROUND(SUM(i.spend) FILTER (WHERE i.day > (SELECT until FROM win) - 3), 2) AS d3_spend,
+         ROUND(SUM(i.spend) FILTER (WHERE i.day > (SELECT until FROM win) - 7), 2) AS d7_spend
+    FROM public.insights_daily_by_adset i, win
+   WHERE i.day BETWEEN win.since AND win.until
+   GROUP BY i.adset_id
+),
+shop AS (
+  SELECT a.utm_term AS adset_id,
+         COUNT(*)::int                                          AS shopify_orders,
+         COALESCE(SUM(a.total_price), 0)                        AS shopify_sales,
+         COUNT(*) FILTER (WHERE oct.is_new_customer)::int       AS new_customers,
+         COUNT(*) FILTER (WHERE NOT oct.is_new_customer)::int   AS repeat_customer_orders,
+         COUNT(DISTINCT oct.customer_id)
+           FILTER (WHERE NOT oct.is_new_customer)::int          AS repeat_customers_distinct,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE oct.is_new_customer), 0)               AS new_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE NOT oct.is_new_customer), 0)           AS repeat_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE a.created_at::date > (SELECT until FROM win) - 3), 0) AS d3_lc_revenue,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE a.created_at::date > (SELECT until FROM win) - 7), 0) AS d7_lc_revenue
+    FROM public.shopify_order_attribution a
+    LEFT JOIN public.order_customer_type oct ON oct.order_id = a.order_id
+    JOIN public.meta_adsets s ON s.adset_id = a.utm_term
+    CROSS JOIN win
+   WHERE a.utm_term IS NOT NULL AND BTRIM(a.utm_term) <> ''
+     AND LOWER(COALESCE(a.utm_source, '')) ~ '(meta|facebook|fb|instagram|ig)'
+     AND a.created_at::date BETWEEN win.since AND win.until
+   GROUP BY a.utm_term
+)
+SELECT s.account_name,
+       s.campaign_id,
+       s.campaign_name,
+       m.adset_id,
+       s.adset_name,
+       s.adset_status,
+       m.impressions,
+       m.reach_daily_sum,
+       m.frequency,
+       m.spend,
+       m.link_clicks,
+       m.all_clicks,
+       m.ctr,
+       m.cpc,
+       m.cpm,
+       m.purchases,
+       m.conv_value,
+       m.purchase_roas,
+       m.ftewv_count,
+       COALESCE(shop.shopify_orders, 0)                         AS shopify_orders,
+       COALESCE(shop.shopify_sales, 0)                          AS shopify_sales,
+       CASE WHEN m.spend > 0
+            THEN ROUND(COALESCE(shop.shopify_sales, 0) / m.spend, 4)
+            END                                                 AS shopify_roas,
+       COALESCE(shop.new_customers, 0)                          AS new_customers,
+       COALESCE(shop.repeat_customer_orders, 0)                 AS repeat_customer_orders,
+       -- NOT ADDITIVE -- distinct people, per row. See the ad views.
+       COALESCE(shop.repeat_customers_distinct, 0)              AS repeat_customers,
+       COALESCE(shop.new_customer_sales, 0)                     AS new_customer_sales,
+       COALESCE(shop.repeat_customer_sales, 0)                  AS repeat_customer_sales,
+       -- Revenue from newly acquired customers over the spend that
+       -- acquired them. Money over money, like the ROAS columns beside
+       -- it; NULL when nothing was spent.
+       CASE WHEN m.spend > 0
+            THEN ROUND(COALESCE(shop.new_customer_sales, 0) / m.spend, 4)
+            END                                                 AS acq_mer,
+       m.d3_spend,
+       COALESCE(shop.d3_lc_revenue, 0)                          AS d3_lc_revenue,
+       CASE WHEN m.d3_spend > 0
+            THEN ROUND(COALESCE(shop.d3_lc_revenue, 0) / m.d3_spend, 4)
+            END                                                 AS d3_lc_roas,
+       m.d7_spend,
+       COALESCE(shop.d7_lc_revenue, 0)                          AS d7_lc_revenue,
+       CASE WHEN m.d7_spend > 0
+            THEN ROUND(COALESCE(shop.d7_lc_revenue, 0) / m.d7_spend, 4)
+            END                                                 AS d7_lc_roas,
+       m.date_start,
+       m.date_stop
+  FROM metrics m
+  JOIN public.meta_adsets s USING (adset_id)
+  LEFT JOIN shop USING (adset_id);
+
+COMMENT ON MATERIALIZED VIEW public.meta_direct_adset_30d IS
+  'One row per ad set over the last 30 days of DATA. Orders map through utm_term, the same mapping Ads Analyse uses. repeat_customers is DISTINCT people and must not be summed across rows; repeat_customer_orders is the additive column. d3/d7 ROAS is last-click revenue over spend across the same window, NULL when nothing was spent.';
+
+-- =====================================================================
+CREATE MATERIALIZED VIEW public.meta_direct_campaign_30d AS
+WITH win AS (
+  SELECT (SELECT MAX(day) FROM public.insights_daily_by_campaign) - 29 AS since,
+         (SELECT MAX(day) FROM public.insights_daily_by_campaign)      AS until
+),
+metrics AS (
+  SELECT i.campaign_id,
+         SUM(i.impressions)                                     AS impressions,
+         SUM(i.reach)                                           AS reach_daily_sum,
+         CASE WHEN SUM(i.reach) > 0
+              THEN ROUND(SUM(i.impressions)::numeric / SUM(i.reach)::numeric, 4)
+              END                                               AS frequency,
+         ROUND(SUM(i.spend), 2)                                 AS spend,
+         SUM(i.clicks)                                          AS link_clicks,
+         SUM(i.all_clicks)                                      AS all_clicks,
+         CASE WHEN SUM(i.impressions) > 0
+              THEN ROUND(100.0 * SUM(i.clicks)::numeric / SUM(i.impressions)::numeric, 4)
+              END                                               AS ctr,
+         CASE WHEN SUM(i.clicks) > 0
+              THEN ROUND(SUM(i.spend) / SUM(i.clicks)::numeric, 4)
+              END                                               AS cpc,
+         CASE WHEN SUM(i.impressions) > 0
+              THEN ROUND(1000.0 * SUM(i.spend) / SUM(i.impressions)::numeric, 4)
+              END                                               AS cpm,
+         SUM(i.purchases)                                       AS purchases,
+         SUM(i.conv_value)                                      AS conv_value,
+         CASE WHEN SUM(i.spend) > 0
+              THEN ROUND(SUM(i.conv_value) / SUM(i.spend), 4)
+              END                                               AS purchase_roas,
+         SUM(i.ftewv_count)                                     AS ftewv_count,
+         MIN(i.day)                                             AS date_start,
+         MAX(i.day)                                             AS date_stop,
+         ROUND(SUM(i.spend) FILTER (WHERE i.day > (SELECT until FROM win) - 3), 2) AS d3_spend,
+         ROUND(SUM(i.spend) FILTER (WHERE i.day > (SELECT until FROM win) - 7), 2) AS d7_spend
+    FROM public.insights_daily_by_campaign i, win
+   WHERE i.day BETWEEN win.since AND win.until
+   GROUP BY i.campaign_id
+),
+shop AS (
+  SELECT a.matched_campaign_id AS campaign_id,
+         COUNT(*)::int                                          AS shopify_orders,
+         COALESCE(SUM(a.total_price), 0)                        AS shopify_sales,
+         COUNT(*) FILTER (WHERE oct.is_new_customer)::int       AS new_customers,
+         COUNT(*) FILTER (WHERE NOT oct.is_new_customer)::int   AS repeat_customer_orders,
+         COUNT(DISTINCT oct.customer_id)
+           FILTER (WHERE NOT oct.is_new_customer)::int          AS repeat_customers_distinct,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE oct.is_new_customer), 0)               AS new_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE NOT oct.is_new_customer), 0)           AS repeat_customer_sales,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE a.created_at::date > (SELECT until FROM win) - 3), 0) AS d3_lc_revenue,
+         COALESCE(SUM(a.total_price)
+           FILTER (WHERE a.created_at::date > (SELECT until FROM win) - 7), 0) AS d7_lc_revenue
+    FROM public.shopify_order_attribution a
+    LEFT JOIN public.order_customer_type oct ON oct.order_id = a.order_id
+    CROSS JOIN win
+   WHERE a.matched_campaign_id IS NOT NULL
+     AND a.created_at::date BETWEEN win.since AND win.until
+   GROUP BY a.matched_campaign_id
+)
+SELECT c.account_name,
+       m.campaign_id,
+       c.campaign_name,
+       c.campaign_status,
+       c.objective,
+       m.impressions,
+       m.reach_daily_sum,
+       m.frequency,
+       m.spend,
+       m.link_clicks,
+       m.all_clicks,
+       m.ctr,
+       m.cpc,
+       m.cpm,
+       m.purchases,
+       m.conv_value,
+       m.purchase_roas,
+       m.ftewv_count,
+       COALESCE(shop.shopify_orders, 0)                         AS shopify_orders,
+       COALESCE(shop.shopify_sales, 0)                          AS shopify_sales,
+       CASE WHEN m.spend > 0
+            THEN ROUND(COALESCE(shop.shopify_sales, 0) / m.spend, 4)
+            END                                                 AS shopify_roas,
+       COALESCE(shop.new_customers, 0)                          AS new_customers,
+       COALESCE(shop.repeat_customer_orders, 0)                 AS repeat_customer_orders,
+       COALESCE(shop.repeat_customers_distinct, 0)              AS repeat_customers,
+       COALESCE(shop.new_customer_sales, 0)                     AS new_customer_sales,
+       COALESCE(shop.repeat_customer_sales, 0)                  AS repeat_customer_sales,
+       -- Revenue from newly acquired customers over the spend that
+       -- acquired them. Money over money, like the ROAS columns beside
+       -- it; NULL when nothing was spent.
+       CASE WHEN m.spend > 0
+            THEN ROUND(COALESCE(shop.new_customer_sales, 0) / m.spend, 4)
+            END                                                 AS acq_mer,
+       m.d3_spend,
+       COALESCE(shop.d3_lc_revenue, 0)                          AS d3_lc_revenue,
+       CASE WHEN m.d3_spend > 0
+            THEN ROUND(COALESCE(shop.d3_lc_revenue, 0) / m.d3_spend, 4)
+            END                                                 AS d3_lc_roas,
+       m.d7_spend,
+       COALESCE(shop.d7_lc_revenue, 0)                          AS d7_lc_revenue,
+       CASE WHEN m.d7_spend > 0
+            THEN ROUND(COALESCE(shop.d7_lc_revenue, 0) / m.d7_spend, 4)
+            END                                                 AS d7_lc_roas,
+       m.date_start,
+       m.date_stop
+  FROM metrics m
+  JOIN public.meta_campaigns c USING (campaign_id)
+  LEFT JOIN shop USING (campaign_id);
+
+COMMENT ON MATERIALIZED VIEW public.meta_direct_campaign_30d IS
+  'One row per campaign over the last 30 days of DATA. Orders map through matched_campaign_id, the same mapping Ads Analyse uses. repeat_customers is DISTINCT people and must not be summed across rows. d3/d7 ROAS is last-click revenue over spend across the same window, NULL when nothing was spent.';
+
 -- ---------------------------------------------------------------------
 -- Refresh support.
 --
@@ -522,3 +935,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_daily_90d  ON public.meta_direct_daily
 -- Sheets filter and sort by date far more than anything else.
 CREATE INDEX IF NOT EXISTS ix_mdir_daily_30d_date ON public.meta_direct_daily_30d (date);
 CREATE INDEX IF NOT EXISTS ix_mdir_daily_90d_date ON public.meta_direct_daily_90d (date);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_adset_30d    ON public.meta_direct_adset_30d    (adset_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mdir_campaign_30d ON public.meta_direct_campaign_30d (campaign_id);

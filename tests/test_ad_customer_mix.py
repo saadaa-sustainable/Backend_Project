@@ -54,14 +54,14 @@ async def test_success_restores_statement_timeout_and_preserves_metrics():
     assert await mix.read_ad_customer_mix(session, ["a"], None, None) == {
         "a": (2, 1, 100.0, 75.0),
     }
-    assert events == ["begin", "3000ms", "query", "2min", "release"]
+    assert events == ["begin", f"{mix.CUSTOMER_MIX_TIMEOUT_MS}ms", "query", "2min", "release"]
 
 
 async def test_timeout_rolls_back_savepoint_without_retrying_or_returning_zero():
     error = DBAPIError("SELECT", {}, DatabaseFailure("57014"), False)
     session, events = session_with_savepoint(error=error)
     assert await mix.read_ad_customer_mix(session, ["a"], None, None) is None
-    assert events == ["begin", "3000ms", "query", "rollback"]
+    assert events == ["begin", f"{mix.CUSTOMER_MIX_TIMEOUT_MS}ms", "query", "rollback"]
     assert session.execute.await_count == 2
 
 
@@ -71,7 +71,7 @@ async def test_connection_and_schema_errors_are_not_hidden(sqlstate):
     session, events = session_with_savepoint(error=error)
     with pytest.raises(DBAPIError):
         await mix.read_ad_customer_mix(session, ["a"], None, None)
-    assert events == ["begin", "3000ms", "query", "rollback"]
+    assert events == ["begin", f"{mix.CUSTOMER_MIX_TIMEOUT_MS}ms", "query", "rollback"]
 
 
 async def test_empty_page_does_not_open_a_transaction():
@@ -162,3 +162,23 @@ async def test_ad_response_keeps_main_metrics_when_customer_mix_is_unavailable(m
         analytics._get_ads_analyse_summary.assert_awaited_once()
     finally:
         analytics.get_ads_analyse.analytics_cache.entries.clear()
+
+
+def test_budget_clears_the_measured_cold_read():
+    """The four Customers columns blank whenever this budget is missed,
+    and a cold read of the top 100 ads over 30 days measured 3,097ms on
+    2026-10-15 against a 3,000ms budget -- so they blanked on the first
+    load after any cache eviction and filled on every load after it.
+
+    Pinned at a multiple of that cold read rather than at the exact
+    figure: the point is headroom, and a budget that merely scrapes
+    past today's measurement is the same bug waiting for a busier day.
+    """
+    measured_cold_ms = 3097
+    assert mix.CUSTOMER_MIX_TIMEOUT_MS >= measured_cold_ms * 3, (
+        "budget must leave room above the measured cold read, or the "
+        "columns silently go missing again"
+    )
+    # ...and still well inside the database's own 120s statement_timeout,
+    # so a pathological query is cancelled rather than holding the page.
+    assert mix.CUSTOMER_MIX_TIMEOUT_MS < 120_000

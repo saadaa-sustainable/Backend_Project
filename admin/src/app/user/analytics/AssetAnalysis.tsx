@@ -42,7 +42,7 @@ import {
   type AssetAnalysisParams,
 } from "@/lib/api";
 import { DateRangePicker } from "@/components/DateRangePicker";
-import { getAssetPreview } from "@/lib/assetPreview";
+import { AssetPreviewCell } from "./AssetPreview";
 import {
   FilterRule, FilterCell, Segmented, filterControlClass,
 } from "./SectionChrome";
@@ -128,88 +128,66 @@ function AssetCard({
 }: { r: AssetAnalysisRow; onOpen: () => void; showPreview?: boolean }) {
   const winnerNow = r.current_result === "Winner" || r.current_result === "Incremental Winner";
   const days = spanDays(r.first_tested, r.last_tested);
-  /* The preview is only drawn in the card grid. In a board lane the
-     frames would push the cards below the fold and the lane stops being
-     a queue you can read. Same row either way, so switching view never
-     changes what an asset says about itself. */
-  const preview = showPreview ? getAssetPreview(r) : null;
-  const [thumbFailed, setThumbFailed] = useState(false);
-  const thumb = thumbFailed ? null : preview?.thumbnail;
   return (
-    <button
-      type="button"
-      data-asset={r.asset_id}
-      onClick={onOpen}
-      className="flex flex-col border border-border-primary bg-bg-white text-left transition-colors hover:border-text-tertiary"
-    >
-      {showPreview && (
-        <div className="flex aspect-[4/3] items-center justify-center overflow-hidden border-b border-border-primary bg-bg-surface">
-          {thumb ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={thumb}
-              alt=""
-              loading="lazy"
-              onError={() => setThumbFailed(true)}
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <span className="text-[11px] text-text-tertiary">
-              {preview?.href ? `${r.media ?? "asset"} · no thumbnail` : "no preview registered"}
-            </span>
-          )}
+    <article data-asset={r.asset_id} className="flex flex-col border border-border-primary bg-bg-white text-left transition-colors hover:border-text-tertiary">
+      {showPreview ? <AssetPreviewCell asset={r} variant="card" appearance="standard" /> : (
+        <div className="flex items-center gap-3 px-3 pt-3">
+          <AssetPreviewCell asset={r} variant="compact" appearance="standard" />
+          <div className="min-w-0 break-words font-mono text-[12.5px] font-semibold text-text-primary">{r.asset_id}</div>
         </div>
       )}
-      <div className="flex flex-col gap-2 px-3 pt-3">
-        <div className="font-mono text-[12.5px] font-semibold text-text-primary">{r.asset_id}</div>
-        <div className="flex flex-wrap gap-1">
-          <span className={`px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] ${
-            RESULT_CHIP[r.current_result ?? ""] ?? "bg-bg-muted text-text-secondary"}`}>
-            {r.current_result ?? "—"}
-          </span>
-          {/* The win, kept whatever the current result says. */}
-          {r.first_win_iter != null && (
-            <span
-              title={`First reached winner grade at iteration ${r.first_win_iter} of ${r.iterations}, on ${day(r.first_win_date)}`}
-              className="border border-dashed border-success-text px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] text-success-text"
-            >
-              ★ Won ITE {r.first_win_iter}
+      <button type="button" onClick={onOpen} aria-label={`View ads for asset ${r.asset_id}`} className="flex flex-1 flex-col text-left hover:bg-bg-surface focus-visible:outline-2 focus-visible:outline-text-primary">
+        <div className="flex flex-col gap-2 px-3 pt-3">
+          {showPreview && <div className="break-words font-mono text-[12.5px] font-semibold text-text-primary">{r.asset_id}</div>}
+          <div className="flex flex-wrap gap-1">
+            <span className={`px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] ${
+              RESULT_CHIP[r.current_result ?? ""] ?? "bg-bg-muted text-text-secondary"}`}>
+              {r.current_result ?? "—"}
             </span>
-          )}
-          {r.iterations > 1 && (
-            <span className="border border-warning-text px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] text-warning-text">
-              ITER ×{r.iterations}
-            </span>
-          )}
-        </div>
-        <div className="font-mono text-[11.5px] leading-[1.4] text-text-secondary break-words">
-          {r.latest_ad_name ?? "—"}
-        </div>
-        <div className="text-[11px] text-text-tertiary">{r.account_name ?? "—"}</div>
-      </div>
-
-      <div className="mt-2.5 grid grid-cols-3 border-t border-border-soft">
-        {([["Spend", money(r.spend)], ["ROAS", r.roas == null ? "—" : `${r.roas.toFixed(2)}x`],
-           ["Ads", num(r.ads)]] as const).map(([k, v], i) => (
-          <div key={k} className={`px-3 py-2 ${i ? "border-l border-border-soft" : ""}`}>
-            <div className="text-[9px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">{k}</div>
-            <div className="mt-0.5 font-mono text-[14px] text-text-primary tabular-nums">{v}</div>
+            {/* The win, kept whatever the current result says. */}
+            {r.first_win_iter != null && (
+              <span
+                title={`First reached winner grade at iteration ${r.first_win_iter} of ${r.iterations}, on ${day(r.first_win_date)}`}
+                className="border border-dashed border-success-text px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] text-success-text"
+              >
+                ★ Won ITE {r.first_win_iter}
+              </span>
+            )}
+            {r.iterations > 1 && (
+              <span className="border border-warning-text px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] text-warning-text">
+                ITER ×{r.iterations}
+              </span>
+            )}
           </div>
-        ))}
-      </div>
-
-      <div className="px-3 pt-2 text-[11px] leading-[1.5] text-text-tertiary">
-        First tested {day(r.first_tested)} · last {day(r.last_tested)}
-        {days != null ? ` · ran ${days} days` : ""}
-      </div>
-
-      {r.first_win_iter != null && !winnerNow && (
-        <div className="mx-3 mt-2 bg-success-bg px-2 py-1.5 text-[11.5px] leading-[1.45] text-success-text">
-          Won at iteration {r.first_win_iter} of {r.iterations} — the current result does not show it.
+          <div className="font-mono text-[11.5px] leading-[1.4] text-text-secondary break-words">
+            {r.latest_ad_name ?? "—"}
+          </div>
+          <div className="text-[11px] text-text-tertiary">{r.account_name ?? "—"}</div>
         </div>
-      )}
-      <div className="px-3 pb-3 pt-2 text-[11.5px] text-text-secondary">Open →</div>
-    </button>
+
+        <div className="mt-2.5 grid w-full grid-cols-3 border-t border-border-soft">
+          {([["Spend", money(r.spend)], ["ROAS", r.roas == null ? "—" : `${r.roas.toFixed(2)}x`],
+             ["Ads", num(r.ads)]] as const).map(([k, v], i) => (
+            <div key={k} className={`px-3 py-2 ${i ? "border-l border-border-soft" : ""}`}>
+              <div className="text-[9px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">{k}</div>
+              <div className="mt-0.5 font-mono text-[14px] text-text-primary tabular-nums">{v}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="px-3 pt-2 text-[11px] leading-[1.5] text-text-tertiary">
+          First tested {day(r.first_tested)} · last {day(r.last_tested)}
+          {days != null ? ` · ran ${days} days` : ""}
+        </div>
+
+        {r.first_win_iter != null && !winnerNow && (
+          <div className="mx-3 mt-2 bg-success-bg px-2 py-1.5 text-[11.5px] leading-[1.45] text-success-text">
+            Won at iteration {r.first_win_iter} of {r.iterations} — the current result does not show it.
+          </div>
+        )}
+        <div className="px-3 pb-3 pt-2 text-[11.5px] text-text-link">View ads</div>
+      </button>
+    </article>
   );
 }
 
@@ -507,7 +485,7 @@ export function AssetAnalysis() {
           <table className="w-full min-w-[1040px] border-collapse">
             <thead>
               <tr className="border-b border-border-primary bg-bg-muted">
-                {([["Asset", "left"], ["Current result", "left"], ["First win", "right"],
+                {([["Preview", "left"], ["Asset", "left"], ["Current result", "left"], ["First win", "right"],
                    ["Iterations", "right"], ["Lane", "left"], ["Spend", "right"],
                    ["ROAS", "right"], ["NCP", "right"], ["Cost / NCP", "right"],
                    ["Last tested", "right"]] as const).map(([h, a]) => (
@@ -522,7 +500,8 @@ export function AssetAnalysis() {
               {(data?.rows ?? []).map((r) => (
                 <tr key={r.asset_id} onClick={() => setOpen(r)}
                     className="cursor-pointer border-b border-border-soft hover:bg-bg-surface">
-                  <td className="px-3 py-2 font-mono text-[12.5px]">{r.asset_id}</td>
+                  <td className="w-20 px-3 py-2"><AssetPreviewCell asset={r} variant="compact" appearance="standard" /></td>
+                  <td className="px-3 py-2 font-mono text-[12.5px]"><button type="button" onClick={(event) => { event.stopPropagation(); setOpen(r); }} aria-label={`View ads for asset ${r.asset_id}`} className="text-left hover:underline focus-visible:outline-2">{r.asset_id}</button></td>
                   <td className="px-3 py-2">
                     <span className={`px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.05em] ${
                       RESULT_CHIP[r.current_result ?? ""] ?? "bg-bg-muted text-text-secondary"}`}>

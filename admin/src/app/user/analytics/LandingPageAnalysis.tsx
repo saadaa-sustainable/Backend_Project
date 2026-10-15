@@ -9,11 +9,12 @@ import {
   ApiError,
   LandingPageAdRow,
   LandingPageRow,
+  LandingPageTotals,
   fetchLandingPageAdBreakdown,
   fetchLandingPages,
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
-import { SectionHeader, FilterRule, FilterCell, FieldLabel, filterControlClass } from "./SectionChrome";
+import { SectionHeader, FilterRule, FilterCell, FieldLabel, Segmented, filterControlClass } from "./SectionChrome";
 import { MarkClose } from "./Pictograms";
 
 const PAGE_SIZE = 50;
@@ -21,6 +22,10 @@ const PAGE_SIZE = 50;
 type LandingSort = string;
 
 const SORT_OPTIONS: { value: LandingSort; label: string }[] = [
+  { value: "last_click_revenue", label: "Last-click revenue" },
+  { value: "last_click_orders", label: "Last-click orders" },
+  { value: "last_click_aov", label: "Last-click AOV" },
+  { value: "last_click_rev_per_session", label: "Last-click revenue / session" },
   { value: "ga4_sessions", label: "GA4 sessions" },
   { value: "ga4_purchases", label: "GA4 purchases" },
   { value: "ga4_pdp_views", label: "GA4 PDP views" },
@@ -60,7 +65,7 @@ const PAGE_TYPE_OPTIONS: { value: string; label: string }[] = [
 // is what makes this exact.
 const SIDEBAR_WIDTH = "16rem";
 
-type Band = "shopify" | "ga4" | "delta";
+type Band = "shopify" | "ga4" | "delta" | "lastclick";
 
 type MetricColumn = {
   key: Exclude<keyof LandingPageRow, "landing_page_path">;
@@ -73,12 +78,16 @@ type MetricColumn = {
   band: Band;
   /** Opens a group -- draws the divider on this column's left edge and
    *  starts a new span in the group header row above. */
-  bandStart?: "ga4" | "delta" | "ratios";
+  bandStart?: "ga4" | "delta" | "ratios" | "lastclick";
   percent?: boolean;
   /** Percentage POINTS. A difference between two rates is not itself a
    *  rate, and labelling it "%" invites reading a 14-point gap as a 14%
    *  relative change -- here it is the gap between 54% and 40%. */
   points?: boolean;
+  /** Rupees. Rendered with the ₹ sign and no decimals: these run to
+   *  seven figures, where paise are noise and the column is read by
+   *  comparing magnitudes down it. */
+  money?: boolean;
   /** Always render the sign, so "+" and "-" read as a direction rather
    *  than "-" looking like a stray minus on an ordinary figure. */
   signed?: boolean;
@@ -125,31 +134,48 @@ const METRIC_COLUMNS: MetricColumn[] = [
     title: "GA4 purchases / GA4 checkouts" },
   { key: "pdp_to_purchase_rate", label: "PDP → Purchase", band: "ga4", percent: true,
     title: "GA4 purchases / PDP views" },
+  // Last. Appending rather than inserting beside the GA4 counts keeps
+  // every column a reader already knows where it was, and these four
+  // behave differently from all of them -- they are the only ones the
+  // source filter moves.
+  { key: "last_click_orders", label: "LC orders", band: "lastclick", bandStart: "lastclick",
+    title: "Orders whose LAST click before buying landed on this page, from GA4's per-order attribution. GA4 sees 74% of orders, so an em dash means none was attributed here — not that none happened." },
+  { key: "last_click_revenue", label: "LC revenue", band: "lastclick", money: true,
+    title: "Revenue of those orders. Shopify's own total_price wherever the order joins to a Shopify order (95.7% of them), GA4's figure for the rest — so this agrees with the revenue columns elsewhere in the app." },
+  { key: "last_click_aov", label: "LC AOV", band: "lastclick", money: true,
+    title: "Last-click revenue / last-click orders, for this page." },
+  { key: "last_click_rev_per_session", label: "LC rev / session", band: "lastclick", money: true,
+    title: "Last-click revenue / GA4 sessions on this page. GA4 on both sides: the order is placed by a GA4-identified session, so Shopify's session count is the wrong denominator." },
 ];
 
 const COL_COUNT = METRIC_COLUMNS.length + 1;
 
-/* ── which source a column came from, said rather than tinted ──────
+/* ── which source a column came from: named AND tinted ─────────────
  *
- * This was three fills -- green cells for Shopify, blue for GA4,
- * orange for the gap -- plus a fourth left-border tint for the ratios,
- * decoded by a legend of four swatches above the table. Eighteen
- * columns of wash and a key to read it is the clutter the user named,
- * and the hues were off-palette besides.
+ * Both, because they answer the question at different moments. The
+ * group header row names the source, which is what a reader needs the
+ * first time they meet the table. The fill is what they need on the
+ * forty-first row, when the header has scrolled off and the only thing
+ * on screen is eighteen columns of figures.
  *
- * The same fact, stated: a group header row that NAMES the source over
- * its own columns, and one hairline where a group begins. Nothing is
- * lost -- the legend's four entries are now four headings, each sitting
- * directly above the columns it describes instead of a swatch the
- * reader has to carry across the page.
+ * Naming alone was tried (2026-10-14) and taken out again by request:
+ * stated once at the top, the distinction stops being available at the
+ * point of reading. The legend of four swatches that used to decode
+ * the fills does NOT come back -- the group headings replaced it, and
+ * they sit directly above the columns they describe rather than asking
+ * the reader to carry a key across the page.
+ *
+ * Colours are the palette's (globals.css, `.lpa-h-*` / `.lpa-c-*`),
+ * not the stock Tailwind greens and blues this carried originally.
  */
-type GroupKey = "shopify" | "ga4" | "delta" | "ratios";
+type GroupKey = "shopify" | "ga4" | "delta" | "ratios" | "lastclick";
 
 const GROUP_LABEL: Record<GroupKey, string> = {
   shopify: "Shopify",
   ga4: "GA4 counts",
   delta: "GA4 − Shopify",
   ratios: "GA4 funnel ratios",
+  lastclick: "Last click",
 };
 
 const GROUP_TITLE: Record<GroupKey, string> = {
@@ -157,17 +183,29 @@ const GROUP_TITLE: Record<GroupKey, string> = {
   ga4: "GA4's figures. The two sources count sessions and bounces differently, so these will not agree with Shopify's.",
   delta: "GA4 minus Shopify, on the two things both of them measure.",
   ratios: "Derived from the GA4 counts to their left — the same five numbers divided by each other. The funnel above is the quick read; these are the per-page detail.",
+  lastclick: "Orders and revenue credited to this page by last click, from GA4's per-order attribution — Shopify's own journey summary is populated for 4% of orders here, so it cannot answer this. The rupees are Shopify's wherever the order joins (95.7%). These are the only columns the source filter narrows.",
 };
 
 /** Column spans for the group header row, derived from the columns
  *  themselves so adding a column cannot leave a hand-written colSpan
  *  one short and shear the whole header. */
-const COLUMN_GROUPS: { key: GroupKey; span: number }[] = (() => {
-  const out: { key: GroupKey; span: number }[] = [];
+const COLUMN_GROUPS: { key: GroupKey; span: number }[] = [];
+
+/** Each column's group, by index, built in the SAME walk as the spans
+ *  above. Two walks could disagree -- and a body cell tinted for one
+ *  group under a header spanning another is worse than no tint at all,
+ *  because it asserts the wrong source rather than none. */
+const COLUMN_GROUP: GroupKey[] = (() => {
+  const out: GroupKey[] = [];
+  let current: GroupKey = "shopify";
   METRIC_COLUMNS.forEach((c, i) => {
     const opens: GroupKey | undefined = i === 0 ? "shopify" : c.bandStart;
-    if (opens) out.push({ key: opens, span: 0 });
-    out[out.length - 1].span += 1;
+    if (opens) {
+      current = opens;
+      COLUMN_GROUPS.push({ key: opens, span: 0 });
+    }
+    COLUMN_GROUPS[COLUMN_GROUPS.length - 1].span += 1;
+    out.push(current);
   });
   return out;
 })();
@@ -187,6 +225,10 @@ function formatNumber(n: number | null, opts: Intl.NumberFormatOptions = {}): st
  *  source ever saw -- and showing 0 would assert something false. */
 function formatMetric(v: number | null, c: MetricColumn): string {
   if (v === null || v === undefined) return "—";
+  // Indian grouping for rupees (12,64,32,66 not 12,643,266) -- it is how
+  // every other money figure in this app reads, and a seven-figure
+  // number in the wrong grouping is misread at a glance.
+  if (c.money) return `₹${v.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
   const decimals = c.percent || c.points ? 2 : 0;
   const body = v.toLocaleString(undefined, {
     maximumFractionDigits: decimals,
@@ -203,12 +245,16 @@ function formatMetric(v: number | null, c: MetricColumn): string {
  * One row of five figures, each bar shorter than the last, and the
  * drop between every pair, answers that before the table is reached.
  */
-const FUNNEL_STEPS: {
-  key: "ga4_sessions" | "ga4_pdp_views" | "ga4_add_to_carts" | "ga4_checkouts" | "ga4_purchases";
+type FunnelStep = {
+  /** A field of LandingPageTotals, not of a row: the band describes
+   *  every page the filters match, and the server sums those for it. */
+  key: keyof LandingPageTotals;
   label: string;
   bar: string;
   title: string;
-}[] = [
+};
+
+const GA4_FUNNEL: FunnelStep[] = [
   { key: "ga4_sessions", label: "Sessions", bar: "bg-text-primary",
     title: "GA4 sessions that landed on the pages in view." },
   { key: "ga4_pdp_views", label: "PDP views", bar: "bg-text-secondary",
@@ -221,6 +267,33 @@ const FUNNEL_STEPS: {
     title: "GA4 ecommerce purchases. GA4 records about 76% of orders." },
 ];
 
+/* Three steps, not five, and that is the finding rather than a gap in
+ * the implementation. Shopify records a session, a cart addition and a
+ * reach-checkout per landing page and nothing after it: GoKwik owns the
+ * checkout, so Shopify never observes the completion and has no
+ * per-page purchase count at all. Padding this to five with GA4's tail
+ * would be the one thing this whole section exists to avoid -- a
+ * blended number belonging to neither source. */
+const SHOPIFY_FUNNEL: FunnelStep[] = [
+  { key: "shopify_sessions", label: "Sessions", bar: "bg-text-primary",
+    title: "Shopify sessions that landed on the pages in view. Runs higher than GA4's for the same page — Shopify counts server-side and loses nothing to blocked tracking." },
+  { key: "shopify_atc_sessions", label: "Cart additions", bar: "bg-text-secondary",
+    title: "Shopify sessions with at least one cart addition. A SESSION count, where GA4's add_to_cart is an EVENT count — one session can add to cart repeatedly, which is why this reads lower." },
+  { key: "shopify_checkout_sessions", label: "Reached checkout", bar: "bg-text-tertiary",
+    title: "Shopify sessions that reached checkout. UNDERCOUNTS by roughly 10x: GoKwik owns the checkout, so Shopify sees only the fraction that go through its own. Read the direction, not the level — and use GA4's checkout column in the table for the real figure." },
+];
+
+type FunnelSource = "combined" | "ga4" | "shopify";
+
+const FUNNEL_SOURCES: { key: FunnelSource; label: string; title: string }[] = [
+  { key: "combined", label: "Combined",
+    title: "Both funnels, one above the other. The two disagree on every step they share — that disagreement is the point of this section." },
+  { key: "ga4", label: "Google",
+    title: "GA4's five steps, sessions through purchases. The only source with a working checkout tail on this store." },
+  { key: "shopify", label: "Shopify",
+    title: "Shopify's own three steps. Reliable at the top, and its checkout step undercounts ~10x because GoKwik owns the checkout." },
+];
+
 /** Red where a step loses most of what reached it, amber where it loses
  *  a lot, green where the loss is ordinary. Thresholds, not a gradient:
  *  three bands are readable at 11px, a ramp is not. */
@@ -230,33 +303,45 @@ function dropTone(dropPct: number): string {
   return "text-success-text";
 }
 
-function FunnelBand({ rows, total }: { rows: LandingPageRow[]; total: number }) {
-  const totals = useMemo(
-    () => FUNNEL_STEPS.map((s) => rows.reduce((n, r) => n + (r[s.key] ?? 0), 0)),
-    [rows],
+/** One funnel's row of steps. Extracted so Combined can render two of
+ *  them without the bars, the drops and the scale being written twice
+ *  -- which is how the two halves would come to disagree. */
+function FunnelRow({ totals, steps, caption }: {
+  totals: LandingPageTotals;
+  steps: FunnelStep[];
+  caption?: string;
+}) {
+  const values = useMemo(
+    () => steps.map((s) => (totals[s.key] as number | null) ?? 0),
+    [totals, steps],
   );
-  const head = totals[0] ?? 0;
+  const head = values[0] ?? 0;
 
   // A fourth root, not a linear scale. Purchases are ~2% of sessions,
   // so proportional heights would draw the last bar at one pixel and
   // the four steps between would be indistinguishable. The compressed
   // scale keeps every step visible; the DROP figures beside them, not
   // the bar lengths, are what the reader is meant to measure with.
+  //
+  // Each funnel is scaled to ITS OWN head, so Combined's two rows are
+  // read down their own steps rather than against each other: the two
+  // sources disagree on session count by design, and a shared scale
+  // would draw Shopify's whole funnel taller and invite exactly the
+  // cross-source comparison the section warns against.
   const BAR_MAX = 58;
   const barHeight = (v: number) => (head > 0 ? Math.max(Math.round(BAR_MAX * Math.pow(v / head, 0.25)), 7) : 7);
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
-        <FieldLabel>Where the funnel leaks</FieldLabel>
-        <span className="text-[11.5px] text-text-tertiary tabular-nums">
-          GA4 · summed over the {rows.length.toLocaleString()} of {total.toLocaleString()} pages loaded
+    <div className="flex flex-col gap-1">
+      {caption && (
+        <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
+          {caption}
         </span>
-      </div>
+      )}
       <div className="flex items-end overflow-x-auto pb-1">
-        {FUNNEL_STEPS.map((s, i) => {
-          const v = totals[i] ?? 0;
-          const prev = i > 0 ? totals[i - 1] ?? 0 : 0;
+        {steps.map((s, i) => {
+          const v = values[i] ?? 0;
+          const prev = i > 0 ? values[i - 1] ?? 0 : 0;
           const drop = i > 0 && prev > 0 ? (1 - v / prev) * 100 : null;
           return (
             <React.Fragment key={s.key}>
@@ -268,7 +353,7 @@ function FunnelBand({ rows, total }: { rows: LandingPageRow[]; total: number }) 
                     <span
                       className={`text-[11.5px] tabular-nums ${dropTone(drop)}`}
                       title={
-                        `${prev.toLocaleString("en-IN")} ${FUNNEL_STEPS[i - 1].label} to ${v.toLocaleString("en-IN")} ${s.label} — ` +
+                        `${prev.toLocaleString("en-IN")} ${steps[i - 1].label} to ${v.toLocaleString("en-IN")} ${s.label} — ` +
                         (drop >= 0
                           ? `${(prev - v).toLocaleString("en-IN")} lost at this step`
                           : `${(v - prev).toLocaleString("en-IN")} MORE than the step before it. GA4 counts events, not people: one session can fire view_item many times, so this step can exceed the one above it.`)
@@ -296,6 +381,52 @@ function FunnelBand({ rows, total }: { rows: LandingPageRow[]; total: number }) 
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function FunnelBand({ totals, source, onSource }: {
+  totals: LandingPageTotals;
+  source: FunnelSource;
+  onSource: (s: FunnelSource) => void;
+}) {
+  const combined = source === "combined";
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
+        <FieldLabel>Where the funnel leaks</FieldLabel>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Every page the filters match, not the page of rows on
+              screen. It used to say "the 50 of 2,747 pages loaded",
+              which was honest about what it summed but meant the whole
+              funnel moved every time Load more was pressed. */}
+          <span className="text-[11.5px] text-text-tertiary tabular-nums">
+            all {totals.pages.toLocaleString("en-IN")} pages matching these filters
+          </span>
+          {/* The band only. The TABLE keeps every column in every state
+              -- a reader looking at one source still wants the other's
+              figures on the row in front of them, and columns that
+              appear and vanish under a toggle cost more than they save. */}
+          <Segmented
+            options={FUNNEL_SOURCES.map((o) => ({ value: o.key, label: o.label, title: o.title }))}
+            value={source}
+            onChange={(v) => onSource(v as FunnelSource)}
+          />
+        </div>
+      </div>
+      {(combined || source === "ga4") && (
+        <FunnelRow totals={totals} steps={GA4_FUNNEL} caption={combined ? "Google (GA4)" : undefined} />
+      )}
+      {(combined || source === "shopify") && (
+        <FunnelRow totals={totals} steps={SHOPIFY_FUNNEL} caption={combined ? "Shopify" : undefined} />
+      )}
+      {source !== "ga4" && (
+        <p className="text-[11px] text-text-tertiary">
+          Shopify&apos;s <b>Reached checkout</b> undercounts by roughly 10x — GoKwik owns the
+          checkout, so Shopify never sees the completion. Read its direction, not its level;
+          the table&apos;s Checkouts and Purchases columns are GA4&apos;s for the same reason.
+        </p>
+      )}
     </div>
   );
 }
@@ -384,7 +515,20 @@ function AdBreakdownPanel({ path, onClose }: { path: string; onClose: () => void
 export function LandingPageAnalysis() {
   const [search, setSearch] = useState("");
   const [pageType, setPageType] = useState("");
+  // Narrows the last-click columns to one channel; "" is combined.
+  // Only those columns move -- the sessions and funnel columns stay
+  // whole-traffic, because the question this filter answers is "which
+  // traffic BOUGHT here", not "which traffic visited".
+  const [source, setSource] = useState("");
+  // Server-supplied, so the options cannot drift from the classifier
+  // that implements them. Seeded empty and filled from the response.
+  const [sources, setSources] = useState<string[]>([]);
   const [sort, setSort] = useState<LandingSort>("ga4_sessions");
+  // Which source the summary band is drawn from. Not part of `filters`:
+  // it changes nothing about the request, only which of the figures
+  // already on the row the band adds up -- so switching it must not
+  // refetch.
+  const [funnelSource, setFunnelSource] = useState<FunnelSource>("combined");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   // The shared picker, the same control Ads Analyse and CPIS use, so
   // the three sections speak one vocabulary of presets.
@@ -401,6 +545,9 @@ export function LandingPageAnalysis() {
 
   const [rows, setRows] = useState<LandingPageRow[]>([]);
   const [total, setTotal] = useState(0);
+  // Server-summed over every matching page. Null until the first
+  // response, which is also why the band renders only once rows exist.
+  const [totals, setTotals] = useState<LandingPageTotals | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -409,11 +556,12 @@ export function LandingPageAnalysis() {
     () => ({
       search: search || undefined,
       page_type: pageType || undefined,
+      source: source || undefined,
       sort,
       from_date: fromDate,
       to_date: toDate,
     }),
-    [search, pageType, sort, fromDate, toDate],
+    [search, pageType, source, sort, fromDate, toDate],
   );
 
   useEffect(() => {
@@ -425,6 +573,8 @@ export function LandingPageAnalysis() {
         if (cancelled) return;
         setRows(res.rows);
         setTotal(res.total);
+        setTotals(res.totals);
+        if (res.sources?.length) setSources(res.sources);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -442,6 +592,10 @@ export function LandingPageAnalysis() {
     try {
       const res = await fetchLandingPages({ ...filters, limit: PAGE_SIZE, offset: rows.length });
       setRows((prev) => [...prev, ...res.rows]);
+      // Deliberately NOT re-set from this response: the totals already
+      // cover every matching page, so loading more rows must leave the
+      // band exactly where it was. Re-setting would be harmless (the
+      // server returns the same figures) but would imply otherwise.
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not load more rows.");
     } finally {
@@ -512,6 +666,27 @@ export function LandingPageAnalysis() {
           </select>
         </FilterCell>
 
+        {/* Combined by default. The option list is the server's, so a
+            channel added to the classifier appears here without a
+            second edit -- and a value this build has never heard of
+            cannot be selected. */}
+        <FilterCell label="Last-click source" className="w-44" htmlFor="lp-source">
+          <select
+            id="lp-source"
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            title="Narrows the last-click order and revenue columns to one channel. Sessions and funnel columns stay whole-traffic."
+            className={filterControlClass}
+          >
+            <option value="">Combined</option>
+            {sources.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </FilterCell>
+
         <FilterCell label="Sort by" className="w-52" htmlFor="lp-sort">
           <select
             id="lp-sort"
@@ -530,7 +705,9 @@ export function LandingPageAnalysis() {
 
       {error && <div className="bg-error-bg px-3 py-2 text-sm text-error-text">{error}</div>}
 
-      {!loading && rows.length > 0 && <FunnelBand rows={rows} total={total} />}
+      {!loading && rows.length > 0 && totals && (
+        <FunnelBand totals={totals} source={funnelSource} onSource={setFunnelSource} />
+      )}
 
       {/* Full-bleed, escaping the page container's centred
           max-w-[1600px]. The arithmetic on the box below works ONLY
@@ -586,7 +763,7 @@ export function LandingPageAnalysis() {
                 a header cannot silently push the table past a hardcoded
                 number and start clipping labels. Below that width the box
                 scrolls sideways; w-full still lets it fill a wider one. */}
-            <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
+            <table className="lpa-table w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
               <thead>
                 <tr>
                   <th
@@ -599,7 +776,7 @@ export function LandingPageAnalysis() {
                       colSpan={g.span}
                       title={GROUP_TITLE[g.key]}
                       className={
-                        "sticky top-0 z-30 whitespace-nowrap bg-bg-muted px-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary" +
+                        `sticky top-0 z-30 whitespace-nowrap px-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] lpa-h-${g.key}` +
                         (i > 0 ? " border-l border-border-primary" : "")
                       }
                       style={{ height: GROUP_ROW_H }}
@@ -615,12 +792,12 @@ export function LandingPageAnalysis() {
                   >
                     Page
                   </th>
-                  {METRIC_COLUMNS.map((c) => (
+                  {METRIC_COLUMNS.map((c, i) => (
                     <th
                       key={c.key}
                       title={c.title}
                       className={
-                        "sticky z-30 h-9 whitespace-nowrap border-b border-border-primary bg-bg-muted px-2 py-2 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] leading-tight text-text-tertiary" +
+                        `sticky z-30 h-9 whitespace-nowrap border-b border-border-primary px-2 py-2 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] leading-tight lpa-h-${COLUMN_GROUP[i]}` +
                         (c.bandStart ? " border-l border-border-primary" : "")
                       }
                       style={{ top: GROUP_ROW_H }}
@@ -635,7 +812,11 @@ export function LandingPageAnalysis() {
                   <React.Fragment key={row.landing_page_path}>
                     <tr
                       onClick={() => setSelectedPath((prev) => (prev === row.landing_page_path ? null : row.landing_page_path))}
-                      className="cursor-pointer hover:bg-bg-surface"
+                      // Hover lives in `.lpa-table tbody tr:hover > td`
+                      // (globals.css): a tinted cell paints over any
+                      // background set here, so a class on the row
+                      // would highlight only the page column.
+                      className="cursor-pointer"
                     >
                       {/* Wide enough for the paths that matter: the longest
                           among the 200 pages that carry real traffic is 62
@@ -652,13 +833,13 @@ export function LandingPageAnalysis() {
                       >
                         {row.landing_page_path}
                       </td>
-                      {METRIC_COLUMNS.map((c) => {
+                      {METRIC_COLUMNS.map((c, i) => {
                         const v = row[c.key];
                         return (
                           <td
                             key={c.key}
                             className={
-                              "border-b border-border-soft px-2 py-1.5 text-right font-mono text-[11px] text-text-primary" +
+                              `border-b border-border-soft px-2 py-1.5 text-right font-mono text-[11px] text-text-primary lpa-c-${COLUMN_GROUP[i]}` +
                               (c.bandStart ? " border-l border-l-border-primary" : "")
                             }
                           >

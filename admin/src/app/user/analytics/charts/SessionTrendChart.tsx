@@ -108,7 +108,7 @@ export function SessionTrendChart({ points }: { points: DashboardSessionTrendPoi
       </div>
       <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-xs text-text-secondary" aria-live="off">
         <span className="font-medium text-text-primary">{point.day}</span>
-        <span>{point.sessions === null ? "Sessions unavailable" : `${point.sessions.toLocaleString("en-IN")} sessions`}</span>
+        <span>{point.sessions === null ? "Sessions unavailable" : `${point.sessions.toLocaleString("en-IN")} Meta sessions`}</span>
         <span>Cost / session: <strong className="font-medium text-text-primary">{money(point.cost_per_session)}</strong></span>
         <span>Revenue / session: <strong className="font-medium text-text-primary">{money(point.revenue_per_session)}</strong></span>
         <span>Conversion: <strong className="font-medium text-text-primary">{percent(point.conversion_rate)}</strong></span>
@@ -116,7 +116,7 @@ export function SessionTrendChart({ points }: { points: DashboardSessionTrendPoi
       {points.length > 1 && <input type="range" min="0" max={points.length - 1} value={active}
         aria-label="Inspect daily session metrics" aria-valuetext={`${point.day}, cost per session ${money(point.cost_per_session)}, revenue per session ${money(point.revenue_per_session)}, conversion ${percent(point.conversion_rate)}`}
         onChange={(event) => setSelected(Number(event.target.value))} className="mt-3 h-5 w-full cursor-pointer accent-[var(--accent-yellow)]" />}
-      <p className="mt-1 text-xs text-text-secondary">Daily ratios use the same definitions as the cards above. Gaps mark days with zero sessions or unavailable data.</p>
+      <p className="mt-1 text-xs text-text-secondary">Daily ratios use the same definitions as the cards above. Sessions are Meta-driven only, matching the cards. Gaps mark days with zero sessions or unavailable data.</p>
     </div>
   );
 }

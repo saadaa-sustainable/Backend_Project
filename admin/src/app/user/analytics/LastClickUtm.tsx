@@ -45,7 +45,7 @@ import { NameMissPanel } from "./NameMissPanel";
 import { StatTile } from "./StatTile";
 import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
-import { RankedList, FieldLabel, SectionHeader } from "./SectionChrome";
+import { FieldLabel, SectionHeader } from "./SectionChrome";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -762,24 +762,32 @@ export function LastClickUtm() {
       </SectionHeader>
 
       {/* ═══════════════════════════════════════════════════════════════
-          Orders by channel, ranked.
+          Orders by channel -- one accented KPI card per channel: share
+          badge, order count, attributed sales.
 
-          Was ten accented cards on a 5-column grid: Total plus nine
-          channels, each with its own hue along its top edge. The hues
-          carried nothing -- pink for Organic IG, teal for Loyalty -- and
-          the grid spent the whole first screen before the stepwise
-          cascade, let alone the table. Five of the ten together came to
-          3.3% of orders and took the same space as Meta's 50%.
+          Back to cards (2026-10-15, by request), after a spell as a
+          ranked monochrome bar list. The bars ordered the channels and
+          sized them honestly, but a channel's three numbers had to be
+          read across a row instead of sitting together, and the sales
+          figure went missing from the row entirely -- which is the
+          column most of this panel's readers come for.
 
-          Ranked, with one monochrome bar: rank answers "which channel",
-          length answers "by how much", and a share under 3% is visibly
-          a sliver instead of a card. Every number is unchanged -- the
-          SERVER's windowed aggregate over the whole period, which is why
-          these keep meaning "everything in this period" while the table
-          below narrows.
+          Cards are still sorted by order count, so rank is preserved;
+          only the shape changed back. The accent is the one piece of
+          colour on an otherwise plain card -- a channel stays findable
+          at a glance without nine tinted backgrounds competing.
 
-          Click still selects the channel and opens its utm_source
-          breakdown; clicking the selected row again toggles it shut.
+          Every number here is the SERVER's windowed aggregate over the
+          whole period -- the query ignores every filter except the date
+          range on purpose, so these keep meaning "everything in this
+          period" while the table below narrows. They are never computed
+          from the rows paged in.
+
+          First click selects the channel and opens its utm_source
+          breakdown; clicking the selected card again toggles that
+          breakdown shut. The `all channels` control in the header
+          clears the selection, which is why no Total card is needed --
+          the header already carries the total orders and sales.
          ═══════════════════════════════════════════════════════════════ */}
       <div className="flex flex-col gap-2">
         <div className="flex items-baseline justify-between border-b border-border-primary pb-1.5">
@@ -794,28 +802,34 @@ export function LastClickUtm() {
             all channels · {totalOrders.toLocaleString("en-IN")} orders · {fmtRs(totalSales)}
           </button>
         </div>
-        <RankedList
-          labelWidth={150}
-          rows={[...CHANNEL_ORDER]
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-5">
+          {[...CHANNEL_ORDER]
             .map((ch) => ({ ch, sum: channelCounts?.[ch] ?? { count: 0, sales: 0 } }))
             .sort((a, b) => b.sum.count - a.sum.count)
-            .map(({ ch, sum }) => ({
-              key: ch,
-              label: ch,
-              value: sum.count.toLocaleString("en-IN"),
-              share: `${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`,
-              fraction: totalOrders > 0 ? sum.count / totalOrders : 0,
-              selected: channel === ch,
-              onSelect: () => {
-                if (channel === ch) {
-                  setDrillOpen((d) => !d);
-                } else {
-                  setChannel(ch);
-                  setDrillOpen(true);
-                }
-              },
-            }))}
-        />
+            .map(({ ch, sum }) => {
+              const selected = channel === ch;
+              return (
+                <StatTile
+                  key={ch}
+                  label={ch}
+                  color={CHANNEL_COLOR[ch]}
+                  value={sum.count.toLocaleString("en-IN")}
+                  sub={fmtRs(sum.sales)}
+                  badge={`${(totalOrders > 0 ? (sum.count / totalOrders) * 100 : 0).toFixed(1)}%`}
+                  dim={sum.count === 0}
+                  selected={selected}
+                  onClick={() => {
+                    if (selected) {
+                      setDrillOpen((d) => !d);
+                    } else {
+                      setChannel(ch);
+                      setDrillOpen(true);
+                    }
+                  }}
+                />
+              );
+            })}
+        </div>
       </div>
 
       {/* Channel drill-down -- compact, capped height so it doesn't
@@ -949,63 +963,50 @@ export function LastClickUtm() {
           </div>
         )}
 
-        {/* A cascade, drawn as one. Six colour-topped cards of equal
-            size said nothing about the shape of the thing they describe:
-            step 1 resolves 86.6% of orders and step 5 resolves 0.0%, and
-            both cards were the same width in the same two-row grid.
+        {/* Back to KPI cards (2026-10-15, by request). The funnel bars
+            that briefly replaced these drew each step's share as a bar
+            length, which showed the shape of the cascade but cost the
+            thing the panel is actually read for: a step's count, its
+            share and its revenue all legible at a glance, each in its
+            own card. At 86.7 / 5.0 / 0.5 / 0.1 / 0.0 the bars after
+            step 1 are hairlines anyway, so the shape they conveyed was
+            "step 1, then nothing" -- which the numbers already say.
 
-            Each bar's length is its share of the scope, so the funnel
-            narrows on screen the way it narrows in fact, and Unmatched
-            sits at the end carrying the one figure anyone acts on. Click
-            still filters the table to that step; the counts, the
-            percentages and the #/% toggle are untouched. */}
-        <div className="flex flex-col">
+            Behaviour is unchanged from the bars: click still filters
+            the table to that step, a Meta-scoped step still narrows the
+            channel with it, and the counts, percentages, #/% toggle and
+            All/Meta/Google scope all read exactly as before. */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
           {STEP_TILES.map((t) => {
             const sum = stepSummary[t] ?? { count: 0, sales: 0 };
             const pct = scopeOrders > 0 ? (sum.count / scopeOrders) * 100 : 0;
             const meta = TIER_STEP[t];
             const selected = tier === t;
-            const unmatched = t === "unmatched";
             return (
-              <button
+              <StatTile
                 key={t}
-                type="button"
+                eyebrow={meta.step}
+                label={meta.title}
+                color={TIER_COLOR[t]}
+                value={stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
+                sub={`${stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} · ${fmtRs(sum.sales)}`}
                 title={meta.hint}
-                aria-pressed={selected}
+                dim={sum.count === 0}
+                selected={selected}
                 onClick={() => {
                   if (selected) {
                     setTier("");
                     return;
                   }
                   setTier(t);
-                  // Keep the table honest about what the step counted:
-                  // a Meta-scoped step means Meta rows at that step.
+                  // Keep the table honest about what the tile counted:
+                  // a Meta-scoped step tile means Meta rows at that step.
                   if (stepScope !== "All") {
                     setChannel(stepScope as UtmChannel);
                     setDrillOpen(false);
                   }
                 }}
-                className={`flex items-center gap-3 border-t border-border-soft py-2 text-left first:border-t-0 ${
-                  selected ? "bg-bg-surface" : "hover:bg-bg-surface"
-                } ${sum.count === 0 ? "opacity-50" : ""}`}
-              >
-                <span className="w-[34px] shrink-0 text-[10px] font-semibold uppercase tracking-[0.07em] text-text-tertiary">
-                  {meta.step}
-                </span>
-                <span className="w-[168px] shrink-0 truncate text-[13px] text-text-primary">{meta.title}</span>
-                <span className="h-2 min-w-[40px] flex-1 bg-bg-muted">
-                  <span
-                    className={`block h-full ${unmatched ? "bg-error-mid" : "bg-text-primary"}`}
-                    style={{ width: `${Math.max(Math.min(pct, 100), 0)}%` }}
-                  />
-                </span>
-                <span className="w-[84px] shrink-0 text-right text-[13px] text-text-primary tabular-nums">
-                  {stepMode === "#" ? sum.count.toLocaleString("en-IN") : `${pct.toFixed(1)}%`}
-                </span>
-                <span className="w-[136px] shrink-0 text-right text-[12px] text-text-tertiary tabular-nums">
-                  {stepMode === "#" ? `${pct.toFixed(1)}%` : sum.count.toLocaleString("en-IN")} · {fmtRs(sum.sales)}
-                </span>
-              </button>
+              />
             );
           })}
         </div>

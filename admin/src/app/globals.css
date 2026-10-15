@@ -362,6 +362,52 @@ body {
 .lp-blog  { background: var(--warning-bg); color: var(--warning-text); }
 .lp-other { background: var(--bg-muted); color: var(--text-secondary); }
 
+/* ── Landing Page Analysis: source colour coding ───────────────────
+ *
+ * Eighteen columns from three sources read as one undifferentiated
+ * wall without this. The group header row names the source, but a
+ * reader scanning a row mid-table has scrolled that row off the top --
+ * the fill is what tells them, at the point of reading, whether the
+ * figure under the cursor came from Shopify or from GA4.
+ *
+ * Green Shopify, blue GA4, amber the gap between them -- the same
+ * assignment this table used before, now drawn from the Vienna palette
+ * rather than from stock Tailwind greens and blues. Amber lands on the
+ * delta columns because they exist to surface disagreement; the tint
+ * is on the whole band and never on an individual value, since a -29%
+ * session gap is a fact about tracking, not a good or bad outcome.
+ *
+ * The GA4 funnel ratios keep GA4's blue -- they are GA4's numbers
+ * divided by each other -- and are set apart by being a shade lighter
+ * plus the group divider, exactly as the old left-border tint did.
+ *
+ * Header fills are the palette tokens at full strength; body fills are
+ * mixed back toward the page so eighteen tinted columns stay a
+ * background and the figures keep the contrast. */
+.lpa-h-shopify { background: var(--success-bg); color: var(--success-text); }
+.lpa-h-ga4     { background: var(--info-bg);    color: var(--info-text); }
+.lpa-h-delta   { background: var(--warning-bg); color: var(--warning-text); }
+.lpa-h-ratios  { background: color-mix(in srgb, var(--info-bg) 60%, var(--bg-white));
+                 color: var(--info-text); }
+
+.lpa-c-shopify { background: color-mix(in srgb, var(--success-bg) 45%, var(--bg-white)); }
+.lpa-c-ga4     { background: color-mix(in srgb, var(--info-bg)    45%, var(--bg-white)); }
+.lpa-c-delta   { background: color-mix(in srgb, var(--warning-bg) 45%, var(--bg-white)); }
+.lpa-c-ratios  { background: color-mix(in srgb, var(--info-bg)    22%, var(--bg-white)); }
+
+/* Last click is money, and the only band the source filter moves, so
+   it gets the fourth hue rather than sharing one -- purple, the one
+   accent not already spoken for by Shopify, GA4 or the gap. */
+.lpa-h-lastclick { background: var(--accent-purple-bg); color: var(--accent-purple); }
+.lpa-c-lastclick { background: color-mix(in srgb, var(--accent-purple-bg) 45%, var(--bg-white)); }
+
+/* A tinted <td> paints over any background set on its <tr>, so the
+   row hover has to be stated per cell or it would survive only on the
+   untinted page column -- which is where the cursor is least likely
+   to be. Darkening rather than replacing keeps each cell's own band
+   legible while the row is highlighted. */
+.lpa-table tbody tr:hover > td { filter: brightness(0.962); }
+
 /* Sticky-header table for the wide Ads Analyse layout so the column
    headers stay pinned as the user scrolls right through 68 columns. */
 .ae-table thead th {
@@ -385,6 +431,31 @@ body {
   text-align: right;
   font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.72rem;
+}
+
+/* One scroll surface keeps headers, values and totals aligned in both
+   directions. Separate borders remain visible on sticky table cells. */
+.ae-summary-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.ae-summary-table thead th {
+  z-index: 2;
+  border-bottom: 1px solid var(--border-primary);
+}
+.ae-summary-table tbody td {
+  border-bottom: 1px solid var(--border-soft);
+}
+.ae-summary-table tfoot th,
+.ae-summary-table tfoot td {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------------------

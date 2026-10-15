@@ -10,7 +10,29 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-CUSTOMER_MIX_TIMEOUT_MS = 3000
+#: How long the optional customer-mix read may take before it is
+#: abandoned and the four Customers columns render as em dashes.
+#:
+#: Was 3000ms, which this instance misses on a cold read by about 3%.
+#: Measured 2026-10-15 over the top 100 ads by spend, a 30-day window:
+#:
+#:     cold   3,097 ms   <- budget was 3,000
+#:     warm     272 ms
+#:     warm     433 ms
+#:     lifetime, cold   1,338 ms / warm 866 ms
+#:
+#: So the columns blanked on the FIRST load after any cache eviction
+#: and filled on every load after it -- which reads as missing data
+#: rather than as a timeout, and is exactly how a user concludes the
+#: new-customer figures do not exist. `ads_customer_mix_timed_out`
+#: appears three times in one afternoon's API log.
+#:
+#: 12s is four times the measured cold read, and still an order of
+#: magnitude inside the database's own 120s statement_timeout, so a
+#: genuinely pathological query is still cancelled and the page still
+#: renders without these columns rather than failing. The savepoint
+#: that makes that possible is unchanged.
+CUSTOMER_MIX_TIMEOUT_MS = 12000
 CustomerMix = dict[str, tuple[int, int, float, float]]
 
 # Materialize the selected ads' order IDs before joining customer history.

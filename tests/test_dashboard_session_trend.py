@@ -25,10 +25,16 @@ def reset_cache():
 def session():
     db = sqlite3.connect(":memory:")
     db.executescript("""
-        CREATE TABLE shopify_sessions_daily(day TEXT PRIMARY KEY, sessions NUMERIC);
+        -- The trend reads meta_sessions, not sessions. `sessions` is
+        -- deliberately larger on every row so a regression that reads
+        -- the all-traffic column again fails loudly on the ratios
+        -- rather than quietly returning a plausible smaller number.
+        CREATE TABLE shopify_sessions_daily(
+            day TEXT PRIMARY KEY, sessions NUMERIC, meta_sessions NUMERIC);
         INSERT INTO shopify_sessions_daily VALUES
-            ('2026-09-30',100), ('2026-10-01',100), ('2026-10-02',0),
-            ('2026-10-03',200), ('2026-10-05',100), ('2026-10-06',100), ('2026-10-07',100);
+            ('2026-09-30',900,100), ('2026-10-01',900,100), ('2026-10-02',900,0),
+            ('2026-10-03',900,200), ('2026-10-05',900,100), ('2026-10-06',900,100),
+            ('2026-10-07',900,100);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC);
         INSERT INTO insights_daily_by_ad VALUES
             ('a','2026-10-01',100), ('b','2026-10-01',50),

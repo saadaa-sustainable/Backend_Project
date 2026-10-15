@@ -7,6 +7,7 @@ import { lockBodyScroll } from "@/lib/bodyScrollLock";
 import { useAnalyticsSectionVisible } from "@/lib/analyticsSectionVisibility";
 import { FigureBand, Segmented } from "./SectionChrome";
 import { MarkClose } from "./Pictograms";
+import { AssetPreviewCell } from "./AssetPreview";
 
 const number = (n: number | null | undefined) => n == null ? "—" : Math.round(n).toLocaleString("en-IN");
 const money = (n: number | null | undefined) => n == null ? "—" : `₹${number(n)}`;
@@ -126,13 +127,14 @@ export function AssetAnalysisDrawer({ row, onClose }: { row: AssetAnalysisRow; o
     className="fixed inset-y-0 left-auto right-0 m-0 h-dvh max-h-none w-full max-w-[1060px] overflow-y-auto border-0 border-l border-border-primary bg-bg-white p-0 text-text-primary backdrop:bg-black/25 sm:w-[96vw]">
     <div className="px-4 py-5 sm:px-6">
       <div className="flex items-start justify-between gap-4 border-b border-border-primary pb-3">
-        <div className="min-w-0">
+        <AssetPreviewCell asset={row} variant="compact" appearance="standard" />
+        <div className="min-w-0 flex-1">
           <h3 id={titleId} className="break-words font-mono text-[20px] font-semibold">{row.asset_id}</h3>
           <p className="mt-1.5 text-[12px] text-text-secondary">Current result: {ads ? newestAd?.category ?? "Unrated" : "—"}</p>
           {firstWin && <p className="mt-1 text-[12px] text-success-text">First won at iteration {firstWin.iter_no} · {day(firstWin.ad_created_date)}</p>}
           <p className="mt-1.5 text-[12px] text-text-secondary">{row.media ?? "—"} · {row.account_name ?? "—"}</p>
         </div>
-        <button type="button" onClick={onClose} aria-label="Close asset preview" autoFocus className="flex min-h-10 min-w-10 shrink-0 items-center justify-center p-2 text-text-secondary hover:text-text-primary"><MarkClose /></button>
+        <button type="button" onClick={onClose} aria-label="Close asset details" autoFocus className="flex min-h-10 min-w-10 shrink-0 items-center justify-center p-2 text-text-secondary hover:text-text-primary"><MarkClose /></button>
       </div>
       <FigureBand figures={[
         { label: "Lifetime spend", value: money(spend) }, { label: "Meta ROAS", value: ratio(divide(conv, spend)) },

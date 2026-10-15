@@ -44,11 +44,21 @@ def session():
         CREATE TABLE ad_performance_summary(
             spend NUMERIC, impressions INTEGER, shopify_revenue NUMERIC, shopify_orders INTEGER);
         INSERT INTO ad_performance_summary VALUES (500,5000,2000,20);
+        -- Acquisition MER's numerator. 'repeat' is inside the window
+        -- but is not an acquisition, so the windowed count is 2 while
+        -- the lifetime count is 3.
+        CREATE TABLE order_customer_type(
+            order_id TEXT, is_new_customer INT, order_day TEXT, total_price NUMERIC);
+        INSERT INTO order_customer_type VALUES
+            ('first', 1, '2026-09-02', 100),
+            ('repeat', 0, '2026-09-02', 150),
+            ('last',  1, '2026-09-03', 200),
+            ('older', 1, '2026-08-20', 400);
     """)
 
     async def execute(query, params=None):
         await asyncio.sleep(0)  # Exercise overlapping widget requests.
-        sql = str(query)
+        sql = str(query).replace("public.", "")
         values = {k: str(v) for k, v in (params or {}).items()}
         if "CAST(:df AS date)" in sql:
             sql = sql.replace("CAST(:df AS date)", ":start").replace("(CAST(:dt AS date) + 1)", ":end")
@@ -75,8 +85,17 @@ async def test_dashboard_widgets_share_one_scan_and_include_end_day(session):
     assert any(row.label == analytics._classify_channel("instagram", "link_in_bio")
                and row.value == 200 for row in channels)
     statements = [str(call.args[0]) for call in session.execute.call_args_list]
-    assert len(statements) == 2  # One ad aggregate (including floor), one order aggregate.
+    # Three: one ad aggregate (carrying the spend floor), one order
+    # aggregate SHARED with the channel widget, and one acquisition
+    # count. The third was added for Acquisition MER and is a separate
+    # statement on purpose -- it reads order_customer_type, a different
+    # table on a different key, and folding it into the shared order
+    # scan would make BOTH widgets pay for a join only one of them
+    # reads. What this assertion protects is the shared scan: still one
+    # pass over shopify_order_attribution for two widgets.
+    assert len(statements) == 3
     assert sum("FROM shopify_order_attribution" in q for q in statements) == 1
+    assert sum("FROM public.order_customer_type" in q for q in statements) == 1
     assert all("created_at::date" not in q for q in statements)
 
 
@@ -84,18 +103,28 @@ async def test_dashboard_cache_keeps_ranges_separate_and_empty_counts_zero(sessi
     result = await analytics.get_dashboard_kpis(session, date_from="2026-09-02", date_to="2026-09-02")
     assert result.total_shopify_orders == 2
     assert result.total_shopify_revenue == 100
+    # Two acquisitions on 2 Sep ('first' is new, 'repeat' is not) --
+    # the figure Acquisition MER divides by spend.
+    assert result.new_customers == 1
     repeated = await analytics.get_dashboard_kpis(session, date_from="2026-09-02", date_to="2026-09-02")
     assert repeated == result
-    assert session.execute.await_count == 2
+    # 3 per windowed call: ad aggregate, order aggregate, acquisition
+    # count. The repeat is served from cache and costs none.
+    assert session.execute.await_count == 3
     empty = await analytics.get_dashboard_kpis(session, date_from="2026-10-01", date_to="2026-10-01")
     assert empty.total_shopify_orders == empty.total_shopify_revenue == empty.total_spend == 0
-    assert session.execute.await_count == 4
+    assert empty.new_customers == 0
+    assert session.execute.await_count == 6
 
 
 async def test_lifetime_keeps_gold_totals_and_spend_floor_stays_visible(session):
     lifetime = await analytics.get_dashboard_kpis(session)
     assert (lifetime.total_shopify_orders, lifetime.total_shopify_revenue) == (20, 2000)
-    session.execute.assert_awaited_once()
+    # Lifetime counts every acquisition ever, including 'older' outside
+    # any window the other tests use.
+    assert lifetime.new_customers == 3
+    # Two: the gold table, and the acquisition count.
+    assert session.execute.await_count == 2
     window = await analytics.get_dashboard_kpis(session, date_from="2026-08-01", date_to="2026-09-03")
     assert window.spend_data_from == "2026-09-01"
 

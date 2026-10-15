@@ -63,7 +63,6 @@ import {
   Segmented,
   filterControlClass,
 } from "./SectionChrome";
-import { getAssetPreview } from "@/lib/assetPreview";
 
 /** CTD's cream/gold palette. Scoped here rather than pushed into the
  *  app's design tokens, which are blue-based for every other tab. */
@@ -792,14 +791,9 @@ function CardFigure({ label, value, tone }: { label: string; value: string; tone
  * tile with no border bleeds into the next one.
  */
 function AssetCard({ r, onOpen }: { r: CreativeTestingRow; onOpen: () => void }) {
-  const preview = getAssetPreview(r);
-  const [failed, setFailed] = useState(false);
-  const thumb = failed ? null : preview.thumbnail;
   const cat = (r.category ?? "Discarded") as CategoryKey;
   return (
-    <button
-      type="button"
-      onClick={onOpen}
+    <article data-asset={r.asset_id}
       title={
         `${r.asset_id} · ${cat}\n` +
         `${r.media ?? "unknown media"} · ${r.kind === "new" ? "New" : `Iteration ×${r.iteration_count}`}` +
@@ -811,61 +805,50 @@ function AssetCard({ r, onOpen }: { r: CreativeTestingRow; onOpen: () => void })
       }
       className="flex flex-col overflow-hidden border border-border-primary bg-bg-white text-left transition-colors hover:border-text-primary"
     >
-      <div className="relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden border-b border-border-primary bg-bg-muted">
-        {thumb ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={thumb}
-            alt=""
-            loading="lazy"
-            referrerPolicy="no-referrer"
-            className="absolute inset-0 h-full w-full object-cover"
-            onError={() => setFailed(true)}
-          />
-        ) : (
-          <span className="text-[11px] text-text-tertiary">{r.media ?? "no preview"}</span>
-        )}
-      </div>
-      <div className="flex flex-col gap-2.5 px-3 py-3">
-        <div className="flex items-start justify-between gap-2">
-          <span className="min-w-0 break-all font-mono text-[12px] leading-[1.35] text-text-primary">
-            {r.asset_id}
-            {r.name_conflict && (
-              <span
-                className="ml-1 bg-warning-bg px-1 text-[10px] text-warning-text"
-                title="An ad naming this asset also names another one."
-              >
-                ⚠
-              </span>
-            )}
-          </span>
-          <span
-            title={cat}
-            className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.05em] ${CAT_CHIP[cat]}`}
-          >
-            {FUNNEL_SHORT[cat]}
-          </span>
+      <AssetPreviewCell asset={r} variant="card" />
+      <button type="button" onClick={onOpen} aria-label={`View ads for asset ${r.asset_id}`} className="flex flex-1 flex-col text-left hover:bg-bg-surface focus-visible:outline-2 focus-visible:outline-text-primary">
+        <div className="flex flex-col gap-2.5 px-3 py-3">
+          <div className="flex items-start justify-between gap-2">
+            <span className="min-w-0 break-all font-mono text-[12px] leading-[1.35] text-text-primary">
+              {r.asset_id}
+              {r.name_conflict && (
+                <span
+                  className="ml-1 bg-warning-bg px-1 text-[10px] text-warning-text"
+                  title="An ad naming this asset also names another one."
+                >
+                  ⚠
+                </span>
+              )}
+            </span>
+            <span
+              title={cat}
+              className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.05em] ${CAT_CHIP[cat]}`}
+            >
+              {FUNNEL_SHORT[cat]}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+            <CardFigure label="Spend" value={fmtMoney(r.spend)} />
+            <CardFigure
+              label="ROAS"
+              value={fmtNum(r.roas)}
+              tone={r.roas !== null && r.roas !== undefined && r.roas < 1 ? "bad" : undefined}
+            />
+            <CardFigure label="NCP" value={num(r.ncp_count)} />
+            <CardFigure
+              label="Cost / NCP"
+              value={fmtMoney(r.cost_per_ncp)}
+              tone={
+                r.cost_per_ncp !== null && r.cost_per_ncp !== undefined && r.cost_per_ncp > 525
+                  ? "bad"
+                  : undefined
+              }
+            />
+          </div>
+          <span className="text-xs text-text-link">View ads</span>
         </div>
-        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-          <CardFigure label="Spend" value={fmtMoney(r.spend)} />
-          <CardFigure
-            label="ROAS"
-            value={fmtNum(r.roas)}
-            tone={r.roas !== null && r.roas !== undefined && r.roas < 1 ? "bad" : undefined}
-          />
-          <CardFigure label="NCP" value={num(r.ncp_count)} />
-          <CardFigure
-            label="Cost / NCP"
-            value={fmtMoney(r.cost_per_ncp)}
-            tone={
-              r.cost_per_ncp !== null && r.cost_per_ncp !== undefined && r.cost_per_ncp > 525
-                ? "bad"
-                : undefined
-            }
-          />
-        </div>
-      </div>
-    </button>
+      </button>
+    </article>
   );
 }
 
@@ -1939,7 +1922,7 @@ export function CreativeTesting() {
 
       <div className="flex items-center justify-between border-b border-border-primary pb-2.5 text-[11.5px] text-text-tertiary">
         <span>
-          {view === "grid" ? "click a card" : "click a row"} to see the ad(s) behind it ·{" "}
+          {view === "grid" ? "Click Preview to view the asset or View ads for its results" : "Click a row to see its ads"} ·{" "}
           {allRows.length.toLocaleString("en-IN")} asset{allRows.length === 1 ? "" : "s"} · showing{" "}
           {pageRows.length ? page * PAGE_SIZE + 1 : 0}–{page * PAGE_SIZE + pageRows.length}
         </span>

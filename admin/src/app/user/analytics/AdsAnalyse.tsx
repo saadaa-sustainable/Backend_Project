@@ -47,9 +47,11 @@ import { DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
 import { SectionHeader, FilterRule, FilterCell, FigureBand, VerdictBand, Segmented, filterControlClass, type Verdict } from "./SectionChrome";
 import { MultiFilter, MultiFilterState } from "./MultiFilter";
 import { TableSkeleton } from "./TableSkeleton";
+import { AdMediaPreview } from "./AdMediaPreview";
 import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
+import { getAdTableTotals, sumTableRows, totalUnavailableReason, type TableTotals } from "./adsTableTotals";
 
 // ─────────────────────────────────────────────────────────────────────
 // Category definitions — mirrors CTD dashboard.js:5874-5896 (aeCategorise)
@@ -744,287 +746,6 @@ function AssetIdCell({ row }: { row: AdsAnalyseRow }) {
   );
 }
 
-// Preview cell. Renders a 40x40 thumbnail when available (Meta CDN URL
-// from ad_media silver, ~19% coverage). If we don't have the raw
-// thumbnail but DO have the FB post story_id (78% coverage), show a
-// small Facebook-logo tile so the user still gets access to the
-// iframe-embedded preview.
-//
-// Click -> lightbox with a fidelity ladder:
-//   1. FB post iframe embed if effective_object_story_id is set
-//      (this is what CTD dashboard.js does at _iframeUrlForFb -- shows
-//      the ACTUAL post with caption, CTA, likes, media, etc.)
-//   2. Video <video controls autoplay> if is_video + video_url set
-//   3. Full-size image
-//   4. Grey placeholder (no data at all)
-/** Geometry for cropping a social embed down to a thumbnail.
- *
- *  The IG and FB embeds are whole post CARDS -- avatar row, then media,
- *  then caption. Scaled naively into a 40px box that reads as a grey
- *  smear with a sliver of username. So the iframe is rendered at its
- *  natural width (the embeds reflow badly below these) and then scaled
- *  and pushed up so the MEDIA band alone fills the square.
- *
- *  `headerPx` is the card chrome above the media at that width, measured
- *  against the live embeds. Tune these two numbers if Meta restyles the
- *  cards -- nothing else here depends on them. */
-/** Preview cell edge, px. The embeds are scaled against this, so the
- *  cell size and the crop maths cannot drift apart. */
-const PREVIEW_PX = 40;
-
-const EMBED_CROP = {
-  ig: { width: 320, headerPx: 54 },
-  fb: { width: 500, headerPx: 74 },
-} as const;
-
-/** A social embed cropped to its media and rendered as a thumbnail.
- *
- *  Mounted only once the row is actually near the viewport. Without
- *  that, paging the table would fire 50-100 third-party iframes at once
- *  -- slow, and enough traffic for Meta to start refusing embeds. The
- *  observer disconnects after the first hit, so a row that scrolls away
- *  keeps what it already loaded.
- *
- *  `pointer-events-none` matters: the iframe would otherwise swallow the
- *  click that opens the full-size lightbox. */
-function MiniEmbed({
-  src,
-  kind,
-  size,
-  title,
-}: {
-  src: string;
-  kind: "ig" | "fb";
-  size: number;
-  title: string;
-}) {
-  const box = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const el = box.current;
-    if (!el || visible) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setVisible(true);
-          io.disconnect();
-        }
-      },
-      { rootMargin: "300px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [visible]);
-
-  const geom = EMBED_CROP[kind];
-  const scale = size / geom.width;
-
-  return (
-    <div ref={box} className="relative h-full w-full overflow-hidden bg-bg-muted">
-      {visible && (
-        <iframe
-          src={src}
-          title={title}
-          scrolling="no"
-          loading="lazy"
-          tabIndex={-1}
-          aria-hidden
-          className="pointer-events-none absolute left-0 top-0 origin-top-left border-0"
-          style={{
-            width: geom.width,
-            // Tall enough that the media band is inside the frame before
-            // the crop; the wrapper clips the rest.
-            height: geom.width + geom.headerPx,
-            transform: `scale(${scale}) translateY(-${geom.headerPx}px)`,
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function ThumbnailCell({ row }: { row: AdsAnalyseRow }) {
-  const [open, setOpen] = useState(false);
-  const hasThumb = !!row.thumbnail_url;
-  const hasIg = !!row.instagram_permalink;
-  const hasStory = !!row.effective_object_story_id;
-  const hasVideo = !!row.video_source_url || (row.is_video && !!row.video_url);
-  const hasAnyPreview = hasThumb || hasIg || hasStory;
-
-  // Preview priority (matches CTD dashboard.js:1536-1541):
-  //   1. Instagram /embed/captioned/ -- 89% coverage, works for dark posts
-  //   2. Native <video> playback if we have a signed source URL
-  //   3. Facebook plugin/post.php -- 78% coverage but often fails on dark posts
-  //   4. Static image
-  const igEmbedUrl = row.instagram_permalink
-    ? (() => {
-        const m = row.instagram_permalink.match(/instagram\.com\/(p|reel|tv)\/([^/?#]+)/i);
-        if (!m) return null;
-        return `https://www.instagram.com/${m[1]}/${m[2]}/embed/captioned/`;
-      })()
-    : null;
-  const fbIframeUrl = row.effective_object_story_id
-    ? (() => {
-        const [pageId, postId] = row.effective_object_story_id.split("_");
-        if (!pageId || !postId) return null;
-        const href = `https://www.facebook.com/${pageId}/posts/${postId}`;
-        return `https://www.facebook.com/plugins/post.php?href=${encodeURIComponent(href)}&show_text=true&width=500`;
-      })()
-    : null;
-
-  if (!hasAnyPreview) {
-    return (
-      <div
-        style={{ width: PREVIEW_PX, height: PREVIEW_PX }}
-        className="flex items-center justify-center rounded bg-bg-muted text-[9px] text-text-tertiary"
-        title="No preview available — ad has no IG permalink, no FB story_id, and no cached thumbnail"
-      >
-        —
-      </div>
-    );
-  }
-
-  return (
-    <>
-      <button
-        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
-        style={{ width: PREVIEW_PX, height: PREVIEW_PX }}
-        className="group relative overflow-hidden rounded ring-1 border-border-primary hover:border-border-primary"
-        title={
-          igEmbedUrl
-            ? "Instagram post — click for iframe preview"
-            : fbIframeUrl
-              ? "Click to preview Facebook post"
-              : hasVideo
-                ? "Video ad — click to play"
-                : "Click to enlarge"
-        }
-      >
-        {hasThumb ? (
-          <>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={row.thumbnail_url!}
-              alt=""
-              loading="lazy"
-              className="h-full w-full object-cover"
-            />
-            {(row.is_video || hasVideo) && (
-              <span className="absolute inset-0 flex items-center justify-center bg-black/25 text-white text-[10px] font-bold">
-                ▶
-              </span>
-            )}
-          </>
-        ) : igEmbedUrl ? (
-          // The real post, cropped to its media. This used to be a flat
-          // "IG" gradient tile -- it told you a preview EXISTED but
-          // nothing about the creative, which is the one thing a preview
-          // column is for. 68% of rows land here rather than on a cached
-          // thumbnail, so it was most of the column.
-          <MiniEmbed
-            src={igEmbedUrl}
-            kind="ig"
-            size={PREVIEW_PX}
-            title={row.ad_name ?? "Instagram post preview"}
-          />
-        ) : fbIframeUrl ? (
-          <MiniEmbed
-            src={fbIframeUrl}
-            kind="fb"
-            size={PREVIEW_PX}
-            title={row.ad_name ?? "Facebook post preview"}
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center bg-bg-muted text-[9px] text-text-tertiary">
-            —
-          </div>
-        )}
-      </button>
-      {open && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-8"
-          onClick={() => setOpen(false)}
-        >
-          <div
-            className="relative flex max-h-[90vh] max-w-[90vw] flex-col rounded-lg bg-white p-2 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={() => setOpen(false)}
-              className="absolute -right-3 -top-3 z-10 h-8 w-8 rounded-full bg-white text-lg font-bold shadow-lg"
-              aria-label="Close"
-            >
-              ×
-            </button>
-            {igEmbedUrl ? (
-              // Instagram post iframe embed -- Meta serves the correct
-              // X-Frame-Options for this endpoint so it works for
-              // dark-post ads too. Height 640 accommodates typical
-              // reels/feed posts; the modal shell handles scroll.
-              <iframe
-                src={igEmbedUrl}
-                width={400}
-                height={640}
-                className="rounded border-0"
-                title={row.ad_name ?? "Instagram post preview"}
-                allow="encrypted-media"
-                allowFullScreen
-                scrolling="no"
-              />
-            ) : row.video_source_url || (row.is_video && row.video_url) ? (
-              // eslint-disable-next-line jsx-a11y/media-has-caption
-              <video
-                src={row.video_source_url ?? row.video_url!}
-                controls
-                autoPlay
-                className="max-h-[85vh] max-w-[85vw] rounded"
-              />
-            ) : fbIframeUrl ? (
-              <iframe
-                src={fbIframeUrl}
-                width={500}
-                height={640}
-                className="rounded border-0"
-                title={row.ad_name ?? "Facebook post preview"}
-                allow="encrypted-media"
-                allowFullScreen
-              />
-            ) : (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={row.thumbnail_url!}
-                alt={row.ad_name ?? ""}
-                className="max-h-[85vh] max-w-[85vw] rounded object-contain"
-              />
-            )}
-            <div className="mt-2 max-w-[500px] px-2 text-center text-xs text-text-secondary">
-              {row.ad_name}
-              {igEmbedUrl ? (
-                <div className="mt-1 text-[10px] text-text-tertiary">
-                  Instagram post embed ·{" "}
-                  <a
-                    href={row.instagram_permalink!}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline"
-                  >
-                    open on IG ↗
-                  </a>
-                </div>
-              ) : fbIframeUrl ? (
-                <div className="mt-1 text-[10px] text-text-tertiary">
-                  Facebook post embed · story_id {row.effective_object_story_id}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
 // Landing-page cell. Priority: real URL from ad_media silver
 // (link_urls[0].website_url) > fall back to the "?" badge. Renders the
 // URL type badge (Prod/Coll/Home/etc from landingType) + a clickable
@@ -1271,6 +992,19 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
   { key: "repeat_customer_sales", header: "Repeat cust. sales", group: "Customers", defaultVisible: true, align: "right",
     title: "Order value from returning customers",
     render: (r) => <>{!r.repeat_customer_sales ? "—" : rMoney(r.repeat_customer_sales)}</> },
+  // What the ad PAID to acquire, from the two columns already above it.
+  // Derived in the client because both inputs are already on the row --
+  // a server round trip to divide two numbers it already sent would be
+  // the expensive way to get the same figure.
+  { key: "cost_per_new_customer", header: "Cost / new cust.", group: "Customers", defaultVisible: true, align: "right",
+    title: "Spend ÷ new customers, for this ad over the selected dates. Em dash when the ad acquired nobody — cost per nobody has no value, and 0 would read as free acquisition.",
+    render: (r) => <>{!r.new_customers || r.spend == null ? "—" : rMoney(r.spend / r.new_customers)}</> },
+  { key: "acq_mer", header: "Acq. MER", group: "Customers", defaultVisible: true, align: "right",
+    title: "Acquisition MER — new-customer sales ÷ spend, the same ratio as the Dashboard card. Money over money, so it compares directly with the ROAS columns. Em dash when nothing was spent.",
+    render: (r) => <>{!r.spend || r.new_customer_sales == null ? "—" : `${(r.new_customer_sales / r.spend).toFixed(2)}x`}</> },
+  { key: "new_customer_aov", header: "New cust. AOV", group: "Customers", defaultVisible: false, align: "right",
+    title: "New-customer sales ÷ new customers. Says whether cheaper acquisition bought smaller first orders.",
+    render: (r) => <>{!r.new_customers || r.new_customer_sales == null ? "—" : rMoney(r.new_customer_sales / r.new_customers)}</> },
 
   { key: "shopify_roas", header: "Shop. ROAS", group: "Shopify", defaultVisible: true, align: "right",
     title: "Shopify revenue ÷ Meta spend",
@@ -1400,7 +1134,7 @@ const ROLLUP_DEFAULT_HIDDEN = new Set(
 const COLUMNS: ColDef[] = [
   // Identity
   { key: "preview_thumb", header: "Preview", kind: "link", group: "Identity", defaultVisible: true,
-    render: (r) => <ThumbnailCell row={r} /> },
+    render: (r) => <AdMediaPreview row={r} /> },
   { key: "ad_name", header: "Ad Name", kind: "text", group: "Identity", defaultVisible: true,
     render: (r) => <span title={r.ad_name ?? ""}>{r.ad_name ?? "—"}</span> },
   { key: "ad_id", header: "Ad ID", kind: "text", group: "Identity", defaultVisible: true,
@@ -1545,6 +1279,18 @@ const COLUMNS: ColDef[] = [
     render: (r) => <span className="num">₹{money(r.new_customer_sales)}</span> },
   { key: "repeat_customer_sales", header: "Repeat Cust Sales", kind: "money", group: "Customers", defaultVisible: true,
     render: (r) => <span className="num">₹{money(r.repeat_customer_sales)}</span> },
+  { key: "cost_per_new_customer", header: "Cost / New Cust", kind: "money", group: "Customers", defaultVisible: true,
+    render: (r) => (
+      <span className="num">
+        {!r.new_customers || r.spend == null ? "—" : `₹${money(r.spend / r.new_customers)}`}
+      </span>
+    ) },
+  { key: "acq_mer", header: "Acq MER", kind: "num", group: "Customers", defaultVisible: true,
+    render: (r) => (
+      <span className="num">
+        {!r.spend || r.new_customer_sales == null ? "—" : `${(r.new_customer_sales / r.spend).toFixed(2)}x`}
+      </span>
+    ) },
   { key: "meta_shop_diff_pct", header: "% Meta vs Shop", kind: "pct", group: "Shopify", defaultVisible: true,
     render: (r) => (
       <span
@@ -1603,7 +1349,7 @@ const COLUMNS: ColDef[] = [
   { key: "engagement_count", header: "Engagement", kind: "int", group: "Delivery",
     render: (r) => <span className="num">{fmt(r.engagement_count, { maximumFractionDigits: 0 })}</span> },
   { key: "preview_link", header: "Preview", kind: "link", group: "Links",
-    render: () => <Placeholder reason="Preview link needs Meta ad-preview URL construction — audit item D" /> },
+    render: (r) => <AdMediaPreview row={r} linkOnly /> },
   { key: "ad_link", header: "Ad Link", kind: "link", group: "Links",
     render: (r) => (
       <a
@@ -1648,6 +1394,52 @@ const LEGACY_COLUMN_KEYS: Record<string, string> = {
 // ─────────────────────────────────────────────────────────────────────
 
 const PAGE_SIZE = 100;
+
+const TOTAL_MONEY_KEYS = new Set([
+  "spend", "conv_value", "shopify_revenue", "new_customer_sales", "repeat_customer_sales",
+  "cpm", "cost_per_purchase", "cost_per_shopify_order", "cost_per_ncp",
+  ...[3, 7, 14, 28].flatMap((d) => [`d${d}_spend`, `d${d}_lc_revenue`, `d${d}_cost_per_ftewv`, `d${d}_cost_per_ftewv_v`]),
+]);
+const TOTAL_COUNT_KEYS = new Set(["ads", "impressions", "clicks", "shopify_orders", "new_customers"]);
+
+function TableTotalRow({ columns, values, count, unit, partial }: {
+  columns: readonly { key: string; header: string; kind?: string; align?: string }[];
+  values: TableTotals;
+  count: number;
+  unit: string;
+  partial: boolean;
+}) {
+  function valueFor(column: typeof columns[number]) {
+    const value = values[column.key];
+    if (value == null || !Number.isFinite(value)) {
+      return <span title={totalUnavailableReason(column.key)}>—</span>;
+    }
+    const currency = column.kind === "money" || TOTAL_MONEY_KEYS.has(column.key);
+    const percent = column.kind === "pct" || column.key === "ctr" || column.key.endsWith("_pct");
+    const integer = column.kind === "int" || TOTAL_COUNT_KEYS.has(column.key);
+    return <span className="num">{currency ? "₹" : ""}{value.toLocaleString("en-IN", {
+      maximumFractionDigits: integer ? 0 : 2,
+    })}{percent ? "%" : ""}</span>;
+  }
+  return (
+    <tfoot aria-label="Table totals">
+      <tr>
+        {columns.map((column, index) => index === 0 ? (
+          <th key={column.key} scope="row" className="px-2.5 py-1.5 text-left leading-4">
+            <span className="block">{partial ? "Total (loaded)" : "Total"}</span>
+            <span className="block text-[11px] font-normal">{count.toLocaleString("en-IN")} {unit}</span>
+            {/* Column visibility may put a metric first. Keep its total too. */}
+            {column.key in values && <span className="block text-right">{valueFor(column)}</span>}
+          </th>
+        ) : (
+          <td key={column.key} data-total-key={column.key} className="px-2.5 py-1.5 text-right">
+            {valueFor(column)}
+          </td>
+        ))}
+      </tr>
+    </tfoot>
+  );
+}
 
 export function AdsAnalyse() {
   // ── data ─────────────────────────────────────────────────────
@@ -2185,6 +1977,14 @@ export function AdsAnalyse() {
   // ── pagination window ───────────────────────────────────────
   const pageRows = derived.filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const totalPages = Math.max(1, Math.ceil(derived.filtered.length / PAGE_SIZE));
+  const tableTotals = useMemo(() => getAdTableTotals({
+    rows: derived.filtered.map(({ row }) => row),
+    totals,
+    total,
+    loadedCount: rows.length,
+    hasLocalFilters: numericFilters.length > 0 || (thresholdsChanged && !!categoryFilter),
+  }), [derived.filtered, totals, total, rows.length, numericFilters.length, thresholdsChanged, categoryFilter]);
+  const rollupTableTotals = useMemo(() => sumTableRows(rollupFiltered), [rollupFiltered]);
 
   function toggleSort(key: string) {
     if (sortKey === key) {
@@ -2749,13 +2549,15 @@ export function AdsAnalyse() {
             />
           )}
 
-          <div className="overflow-x-auto rounded-lg border border-border-primary bg-white shadow-sm">
-            <table className="ae-table w-full min-w-full text-sm">
+          <div role="region" aria-label={`${levelToggle === "adset" ? "Ad sets" : "Campaigns"} table`} tabIndex={0}
+            className="max-h-[70vh] overflow-auto rounded-lg border border-border-primary bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text-primary">
+            <table className="ae-table ae-summary-table w-full min-w-full text-sm">
               <thead className="bg-bg-muted text-left text-[11px] uppercase tracking-wide text-text-tertiary">
                 <tr>
                   {rollupCols.map((c) => (
                     <th
                       key={c.key}
+                      scope="col"
                       title={c.title}
                       className={"px-3 py-2 " + (c.align === "right" ? "text-right" : "")}
                     >
@@ -2806,8 +2608,21 @@ export function AdsAnalyse() {
                     </tr>
                   ))}
               </tbody>
+              {!rollupLoading && !rollupError && (
+                <TableTotalRow columns={rollupCols} values={rollupTableTotals}
+                  count={rollupFiltered.length} unit={levelToggle === "adset" ? "ad sets" : "campaigns"}
+                  partial={rollupRows.length < rollupTotal} />
+              )}
             </table>
           </div>
+          {!rollupLoading && !rollupError && (
+            <p className="text-xs text-text-secondary">
+              {rollupRows.length < rollupTotal
+                ? `Totals cover ${rollupFiltered.length.toLocaleString()} matching loaded rows; ${rollupRows.length.toLocaleString()} of ${rollupTotal.toLocaleString()} entities loaded.`
+                : "Totals cover all rows matching the selected filters."}
+              {" "}ROAS and costs use combined values. Reach and distinct repeat customers are not added together.
+            </p>
+          )}
           <p className="text-[11px] leading-relaxed text-text-tertiary">
             Reach and frequency are Meta&rsquo;s own per-{levelToggle} figures, not a sum of the
             ads underneath — Meta dedupes a person per entity, so adding ad-level reach counts the
@@ -3002,15 +2817,6 @@ export function AdsAnalyse() {
         </AdsLaunchDialog>
       )}
 
-      {/* Total ads bar */}
-      <div className="rounded-lg border border-border-primary bg-white px-3 py-1.5 text-xs text-text-secondary shadow-sm">
-        Total shown in table: <strong className="text-text-primary">{derived.filtered.length.toLocaleString()}</strong> ads
-        {categoryFilter && <> · filtered to <strong className="text-text-primary">{categoryFilter}</strong></>}
-        {numericFilters.length > 0 && <> · {numericFilters.length} numeric rule{numericFilters.length > 1 ? "s" : ""}</>}
-        · {total.toLocaleString()} total in DB
-        {rows.length < total && <> · fetched first {rows.length.toLocaleString()}</>}
-      </div>
-
       {/* Errors */}
       {customerMixUnavailable && !loading && (
         <p role="status" className="text-sm text-text-secondary">
@@ -3034,13 +2840,16 @@ export function AdsAnalyse() {
       {loading ? (
         <TableSkeleton rows={12} columns={14} />
       ) : (
-        <div className="max-h-[70vh] overflow-auto rounded-lg border border-border-primary bg-white shadow-sm">
-          <table className="ae-table w-full text-left text-xs">
+        <>
+        <div role="region" aria-label="Ads table" tabIndex={0}
+          className="max-h-[70vh] overflow-auto rounded-lg border border-border-primary bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text-primary">
+          <table className="ae-table ae-summary-table w-full text-left text-xs">
             <thead>
               <tr className="border-b border-border-primary text-[11px] text-text-secondary">
                 {visibleCols.map((c) => (
                   <th
                     key={c.key}
+                    scope="col"
                     onClick={() => toggleSort(c.key)}
                     className={
                       "cursor-pointer whitespace-nowrap px-2.5 py-2.5 font-medium hover:bg-bg-muted " +
@@ -3058,7 +2867,8 @@ export function AdsAnalyse() {
               {pageRows.map(({ row, cat }) => (
                 <tr key={row.ad_id} className="border-b border-border-soft hover:bg-bg-surface">
                   {visibleCols.map((c) => (
-                    <td key={c.key} className="px-2.5 py-1.5">
+                    <td key={c.key} className={"px-2.5 py-1.5 " +
+                      (["num", "int", "pct", "money"].includes(c.kind) ? "text-right" : "")}>
                       {c.render(row, cat)}
                     </td>
                   ))}
@@ -3072,8 +2882,22 @@ export function AdsAnalyse() {
                 </tr>
               )}
             </tbody>
+            {(!error || failedLoadMore) && (
+              <TableTotalRow columns={visibleCols} values={tableTotals.values}
+                count={tableTotals.count} unit="ads" partial={tableTotals.partial} />
+            )}
           </table>
         </div>
+        {(!error || failedLoadMore) && (
+          <p className="text-xs text-text-secondary">
+            {tableTotals.partial
+              ? `Totals cover ${tableTotals.count.toLocaleString()} matching loaded ads; load more to include additional matches.`
+              : `Totals cover all ${tableTotals.count.toLocaleString()} ads matching the selected filters, across pages.`}
+            {" "}ROAS and costs use combined values. Reach and distinct repeat customers are not added together.
+            {" "}A dash means an aggregate is unavailable for this scope.
+          </p>
+        )}
+        </>
       )}
 
         </>
