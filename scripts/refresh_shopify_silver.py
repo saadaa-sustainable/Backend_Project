@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import datetime
 from sqlalchemy import text
@@ -41,6 +42,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Make sure the app package is importable from the repo root.
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Before the import below builds the engine. app/database/session.py caps
+# asyncpg at 150s per statement so a stalled pooler cannot hang an HTTP
+# request; this flatten raises the server's statement_timeout and holds
+# single INSERTs open far longer than that on purpose, so the client-side
+# cap has to come off or it kills the step -- which it did, at 233.6s, on
+# the 2026-10-15 nightly. refresh_all_daily.py already sets this for the
+# steps it spawns; this line is what makes a manual run behave the same.
+os.environ.setdefault("DB_COMMAND_TIMEOUT_S", "0")
 
 from app.database.session import session_scope, dispose_engine  # noqa: E402
 from app.services.silver.shopify_flatten import refresh_shopify_tables  # noqa: E402

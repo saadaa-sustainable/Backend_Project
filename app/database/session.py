@@ -9,6 +9,7 @@ commit/rollback context.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -24,6 +25,25 @@ from app.config import get_settings
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def _command_timeout_s() -> float | None:
+    """Per-statement client-side ceiling for asyncpg, in seconds.
+
+    Defaults to the request-path value; ``DB_COMMAND_TIMEOUT_S=0`` (what
+    the nightly sets) means no client-side cap, leaving the database's
+    own statement_timeout as the only limit. The default stays low on
+    purpose: an unset cap is what let a stalled Supavisor connection
+    hang a request forever, and the API is where that hurt.
+    """
+    raw = os.getenv("DB_COMMAND_TIMEOUT_S")
+    if raw is None:
+        return 150.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 150.0
+    return value if value > 0 else None
 
 
 def get_engine() -> AsyncEngine:
@@ -88,15 +108,28 @@ def get_engine() -> AsyncEngine:
             # above the ~1ms a warm pooler takes, so this fires only when
             # the pooler is genuinely not answering.
             #
-            # command_timeout: 150s, deliberately ABOVE the database's own
-            # 120s statement_timeout. The server cancelling its own query
-            # gives a real SQLSTATE the endpoint can report; this is only
-            # the backstop for when no answer comes back at all.
+            # command_timeout: 150s by default, deliberately ABOVE the
+            # database's own 120s statement_timeout. The server
+            # cancelling its own query gives a real SQLSTATE the endpoint
+            # can report; this is only the backstop for when no answer
+            # comes back at all.
+            #
+            # That ceiling is right for a request and wrong for a batch
+            # rebuild, which raises the server's statement_timeout on
+            # purpose and legitimately holds one INSERT open for many
+            # minutes. Measured 2026-10-15, the first nightly to run
+            # with the timeout in place: `silver_shopify` died at 233.6s
+            # with a bare asyncpg TimeoutError, `silver_shopify_attribution`
+            # and `gold_ad_performance` skipped behind it, and the
+            # Shopify silver tables did not refresh at all. So batch
+            # entry points raise it through DB_COMMAND_TIMEOUT_S -- see
+            # scripts/refresh_all_daily.py, which sets it for every step
+            # it spawns. 0 disables the client-side cap entirely.
             connect_args={
                 "statement_cache_size": 0,
                 "prepared_statement_name_func": lambda: f"__ctd_{_uuid.uuid4().hex[:12]}__",
                 "timeout": 10,
-                "command_timeout": 150,
+                "command_timeout": _command_timeout_s(),
             },
         )
     return _engine
