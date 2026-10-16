@@ -1228,6 +1228,9 @@ export interface LandingPageParams {
   search?: string;
   /** One of "collections" | "products" | "home" | "pages" | "other"; omit for all pages. */
   page_type?: string;
+  /** "men" | "women" | "other"; omit for all. The three partition the
+   *  set, so their counts add up to the unfiltered total. */
+  gender?: string;
   /** A channel name from the response's `sources`; omit for combined.
    *  Narrows the last-click columns only. */
   source?: string;
@@ -1242,6 +1245,7 @@ export function fetchLandingPages(params: LandingPageParams = {}): Promise<Landi
   const qs = new URLSearchParams();
   if (params.search) qs.set("search", params.search);
   if (params.page_type) qs.set("page_type", params.page_type);
+  if (params.gender) qs.set("gender", params.gender);
   if (params.source) qs.set("source", params.source);
   if (params.sort) qs.set("sort", params.sort);
   if (params.from_date) qs.set("from_date", params.from_date);
@@ -1664,6 +1668,9 @@ export interface CpisUtmRow {
   ip_doq: number | null;
   total_doh: number | null;
   oos_pct: number | null;
+  /** Days the worst variant was out of stock in the trailing 30. Replaces
+   *  mm_oos_days_30, which froze at 2026-10-01 with the BigQuery pull. */
+  oos_days_30: number | null;
   tentative_replenish_date: string | null;
   halo_sale_pct: number | null;
   pipeline_avail_to_test: number | null;
@@ -2211,6 +2218,18 @@ export interface DashboardSessions {
   total_sessions: number | null;
   /** All traffic, for stating what share of it Meta accounts for. */
   all_sessions: number | null;
+  /** GA4 revenue ÷ GA4 active user-DAYS over the selected range, both
+   *  figures GA4's own. Summed from a daily table, so it answers every
+   *  date range rather than only stored presets.
+   *
+   *  It is NOT GA4's own window ARPU and will read lower: GA4
+   *  deduplicates active users per query, so someone active on eight
+   *  days is one user there and eight user-days here — 31.42 against
+   *  GA4's 37.52 over a 30-day window. The card names the denominator. */
+  ga4_arpu?: number | null;
+  /** User-days over the range, not unique users. */
+  ga4_active_users?: number | null;
+  ga4_revenue?: number | null;
   session_data_from: string | null;
   session_data_to: string | null;
   available_days: number;
@@ -2226,6 +2245,12 @@ export interface DashboardSessionTrendPoint {
   revenue_per_session: number | null;
   /** Fraction: 0.05 means 5%. */
   conversion_rate: number | null;
+  /** GA4 revenue ÷ GA4 active users for THIS day. Exact at day grain —
+   *  one day is one deduplication window — unlike the card's figure,
+   *  which sums these denominators and so counts a repeat visitor once
+   *  per day. Null where GA4 has no row for the day. */
+  ga4_arpu?: number | null;
+  ga4_active_users?: number | null;
 }
 
 export interface DashboardSessionTrend {
@@ -2260,6 +2285,54 @@ export const fetchDashboardTopLandingPages = (from?: string | null, to?: string 
   request<TopLandingPage[]>(`/admin/analytics/dashboard/top-landing-pages${dashboardRange(from, to)}`);
 export const fetchDashboardTopCpisSkus = (from?: string | null, to?: string | null) =>
   request<TopCpisSku[]>(`/admin/analytics/dashboard/top-cpis-skus${dashboardRange(from, to)}`);
+
+/** One day's figures for one row of the comparative section. Which keys
+ *  are populated depends on the dimension: sales/units for products,
+ *  sessions/atc/conversion_rate for landing pages. */
+export interface ComparativeMetrics {
+  sales: number | null;
+  units: number | null;
+  sessions: number | null;
+  atc: number | null;
+  /** Percent, 0-100. Purchases/sessions on GA4; reached-checkout/sessions
+   *  on Shopify, which has no purchase event at this grain. */
+  conversion_rate: number | null;
+}
+
+export type ComparativeBasis = "yesterday" | "last_week" | "last_month";
+
+export interface ComparativeRow {
+  /** master_sku for products, landing page path for landing pages. */
+  key: string;
+  current: ComparativeMetrics;
+  yesterday: ComparativeMetrics;
+  last_week: ComparativeMetrics;
+  last_month: ComparativeMetrics;
+}
+
+export interface ComparativeResponse {
+  dimension: "products" | "landing-pages";
+  source: "ga4" | "shopify" | null;
+  anchor: string;
+  /** The anchor is today, so its figures cover only the hours so far and
+   *  are not comparable with the three complete days beside them. */
+  anchor_is_partial: boolean;
+  basis_days: Record<ComparativeBasis, string>;
+  rows: ComparativeRow[];
+  totals: ComparativeRow;
+  row_count: number;
+}
+
+export const fetchDashboardComparative = (
+  dimension: "products" | "landing-pages",
+  source: "ga4" | "shopify",
+  anchor?: string | null,
+  limit = 25,
+) => {
+  const qs = new URLSearchParams({ dimension, source, limit: String(limit) });
+  if (anchor) qs.set("anchor", anchor);
+  return request<ComparativeResponse>(`/admin/analytics/dashboard/comparative?${qs.toString()}`);
+};
 
 export function retryFailedJobs(maxJobs = 100): Promise<RetryFailedJobsResponse> {
   return request<RetryFailedJobsResponse>(`/failed-jobs/retry?max_jobs=${maxJobs}`, {

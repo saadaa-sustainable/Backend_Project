@@ -23,6 +23,7 @@ import { DateRangePicker } from "@/components/DateRangePicker";
 import { SectionHeader, FilterRule, FilterCell, FieldLabel, Segmented, FigureBand, filterControlClass } from "./SectionChrome";
 import { MarkChevron } from "./Pictograms";
 import { ExportButton } from "@/components/ExportButton";
+import { fetchAllPages } from "@/lib/fetchAllPages";
 
 // Bumped from 50 -> 500 (2026-09-02) so the KPI strip's client-side
 // sums represent the entire matched SKU set, not just the first page.
@@ -612,6 +613,13 @@ function CpisView() {
               filename="cpis"
               window={fromDate && toDate ? `${fromDate}_${toDate}` : window_}
               disabled={loading || showingPreviousResults || search !== debouncedSearch || !hasCurrentRange || !rows.length}
+              totalRows={total}
+              fetchAll={() => fetchAllPages<Record<string, unknown>>(
+                async (offset, limit) => {
+                  const res = await fetchCpisUtm({ ...filters, limit, offset });
+                  return { rows: res.rows as unknown as Record<string, unknown>[],
+                           total: res.total };
+                })}
             />
           </>
         }
@@ -1041,9 +1049,12 @@ function CpisView() {
                     title="Tentative replenish date = today + lead_time. Naive projection assuming the PO fires now.">
                   Replenish
                 </th>
-                {/* MapleMonk sell-through planning (retained: DoQ + OOS) */}
+                {/* Sell-through planning. Both columns are Shopify-sourced now:
+                    DoQ always was, and OOS 30d moved off MapleMonk/BigQuery on
+                    2026-10-16 when that pull was dropped and the cell froze at
+                    as_of_date 2026-10-01. */}
                 <th className="border-l border-border-soft px-3 py-3 text-right" title="DoQ (Daily Order Quantity) — average units of this SKU sold per day over the trailing 30 days, from Shopify. This is the rate Total DOH divides by: DOH = Units in Stock ÷ DoQ.">DoQ</th>
-                <th className="px-3 py-3 text-right" title="Worst-case OOS days in the last 30 days (max across variants)">OOS 30d</th>
+                <th className="px-3 py-3 text-right" title="Worst-case OOS days in the last 30 days — the single variant of this SKU that spent the most days with no sellable stock, counted off Shopify's daily inventory grain. Depth, where OOS % is breadth: one size gone all month reads 30 here and barely moves OOS %.">OOS 30d</th>
                 {/* 2026-09-03: per-size stock columns (XS -> 5XL) removed
                     from the main table. Var In-Stock % + Size In-Stock %
                     above cover the "how much of the range can I sell"
@@ -1366,12 +1377,12 @@ function CpisView() {
                   <td className="px-3 py-2.5 text-right font-mono text-[12px] text-text-secondary">
                     {row.tentative_replenish_date ?? "—"}
                   </td>
-                  {/* MapleMonk sell-through planning */}
+                  {/* Sell-through planning (DoQ + OOS, both from Shopify) */}
                   <td className="border-l border-border-soft px-3 py-2.5 text-right font-mono text-[12px] text-text-primary">
                     {row.daily_order_qty !== null ? row.daily_order_qty.toFixed(1) : "—"}
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono text-[12px]">
-                    <OosCell value={row.mm_oos_days_30} outOf={30} />
+                    <OosCell value={row.oos_days_30} outOf={30} />
                   </td>
                 </tr>
               ))}

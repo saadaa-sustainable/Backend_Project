@@ -5,6 +5,7 @@
 // React needs, which logged a "unique key prop" warning on every render.
 import React, { useEffect, useMemo, useState } from "react";
 import { DateRangePicker } from "@/components/DateRangePicker";
+import { fetchAllPages } from "@/lib/fetchAllPages";
 import {
   ApiError,
   LandingPageAdRow,
@@ -57,6 +58,22 @@ const PAGE_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "home", label: "Home" },
   { value: "pages", label: "Content pages" },
   { value: "other", label: "Other" },
+];
+
+/** Men, women, and everything neither claims.
+ *
+ *  Read from the page slug, and for product pages from Shopify's own
+ *  product tags. "Other" is not a dumping ground for failures -- it is
+ *  mostly the home page and the collections named after the garment
+ *  rather than who wears it (/collections/cotton-trousers,
+ *  /collections/viscose-palazzo-pants), which carry no gender anywhere
+ *  in the data this section reads. The three buckets partition the
+ *  pages, so their session counts add up to the unfiltered total. */
+const GENDER_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "All" },
+  { value: "men", label: "Men" },
+  { value: "women", label: "Women" },
+  { value: "other", label: "Other pages" },
 ];
 
 // The sidebar is `w-64` on UserNav's <aside>. The table escapes the
@@ -515,6 +532,7 @@ function AdBreakdownPanel({ path, onClose }: { path: string; onClose: () => void
 export function LandingPageAnalysis() {
   const [search, setSearch] = useState("");
   const [pageType, setPageType] = useState("");
+  const [gender, setGender] = useState("");
   // Narrows the last-click columns to one channel; "" is combined.
   // Only those columns move -- the sessions and funnel columns stay
   // whole-traffic, because the question this filter answers is "which
@@ -556,12 +574,13 @@ export function LandingPageAnalysis() {
     () => ({
       search: search || undefined,
       page_type: pageType || undefined,
+      gender: gender || undefined,
       source: source || undefined,
       sort,
       from_date: fromDate,
       to_date: toDate,
     }),
-    [search, pageType, source, sort, fromDate, toDate],
+    [search, pageType, gender, source, sort, fromDate, toDate],
   );
 
   useEffect(() => {
@@ -623,6 +642,16 @@ export function LandingPageAnalysis() {
               rows={rows as unknown as Record<string, unknown>[]}
               filename="landing_page_analysis"
               disabled={loading || !rows.length}
+              totalRows={total}
+              // The same `filters` the table is showing, so the file
+              // matches the screen -- including the gender and section
+              // filters, which is the whole point of exporting it.
+              fetchAll={() => fetchAllPages<Record<string, unknown>>(
+                async (offset, limit) => {
+                  const res = await fetchLandingPages({ ...filters, limit, offset });
+                  return { rows: res.rows as unknown as Record<string, unknown>[],
+                           total: res.total };
+                })}
             />
           </>
         }
@@ -659,6 +688,21 @@ export function LandingPageAnalysis() {
             className={filterControlClass}
           >
             {PAGE_TYPE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </FilterCell>
+
+        <FilterCell label="Gender" className="w-36" htmlFor="lp-gender">
+          <select
+            id="lp-gender"
+            value={gender}
+            onChange={(e) => setGender(e.target.value)}
+            className={filterControlClass}
+          >
+            {GENDER_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>

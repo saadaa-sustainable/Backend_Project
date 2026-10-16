@@ -46,6 +46,7 @@ import { StatTile } from "./StatTile";
 import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
 import { FieldLabel, SectionHeader } from "./SectionChrome";
+import { fetchAllPages } from "@/lib/fetchAllPages";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -757,6 +758,13 @@ export function LastClickUtm() {
             filename="last_click_utm"
             window={preset}
             disabled={loading || !sorted.length}
+            totalRows={total}
+            fetchAll={() => fetchAllPages<Record<string, unknown>>(
+              async (offset, limit) => {
+                const res = await fetchLastClickUtm({ ...filters, limit, offset });
+                return { rows: res.rows as unknown as Record<string, unknown>[],
+                         total: res.total };
+              })}
           />
         </div>
       </SectionHeader>
