@@ -1,65 +1,720 @@
 [
   {
-    "path": "/landing-pages",
+    "path": "/ad-lifecycle",
     "baseline": {
-      "rows": 25,
-      "total": 2747,
-      "ms": 2604,
-      "blocks": 57184,
-      "tuples": 112319
+      "rows": 50,
+      "total": 22261,
+      "ms": 2646,
+      "blocks": 4020,
+      "tuples": 110
     },
     "probes": [
       {
         "param": "limit",
         "value": 1,
         "status": 200,
-        "ms": 4,
-        "blocks": 2,
-        "tuples": 0,
+        "ms": 2358,
+        "blocks": 3981,
+        "tuples": 96,
         "rows": 1,
-        "total": 2747,
+        "total": 22261,
         "verdict": "ok"
       },
       {
         "param": "offset",
         "value": 1,
         "status": 200,
-        "ms": 2429,
-        "blocks": 57346,
-        "tuples": 112375,
+        "ms": 2505,
+        "blocks": 125401,
+        "tuples": 68914,
+        "rows": 50,
+        "total": 22261,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 2856,
+        "blocks": 78393,
+        "tuples": 27158,
+        "rows": 50,
+        "total": 19083,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "roas",
+        "status": 200,
+        "ms": 2493,
+        "blocks": 3981,
+        "tuples": 96,
+        "rows": 50,
+        "total": 22261,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "impressions",
+        "status": 200,
+        "ms": 2582,
+        "blocks": 34611,
+        "tuples": 711,
+        "rows": 50,
+        "total": 22261,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ncp",
+        "status": 200,
+        "ms": 2769,
+        "blocks": 4144,
+        "tuples": 152,
+        "rows": 50,
+        "total": 22261,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ftewv",
+        "status": 200,
+        "ms": 3045,
+        "blocks": 3981,
+        "tuples": 96,
+        "rows": 50,
+        "total": 22261,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/ads-analyse",
+    "baseline": {
+      "rows": 25,
+      "total": 2273,
+      "ms": 7426,
+      "blocks": 38122,
+      "tuples": 8667
+    },
+    "probes": [
+      {
+        "param": "date_field",
+        "value": "first_seen",
+        "status": 200,
+        "ms": 7355,
+        "blocks": 19933,
+        "tuples": 4742,
         "rows": 25,
-        "total": 2747,
+        "total": 1219,
+        "verdict": "ok"
+      },
+      {
+        "param": "date_field",
+        "value": "delivery",
+        "status": 200,
+        "ms": 13910,
+        "blocks": 53270,
+        "tuples": 177742,
+        "rows": 25,
+        "total": 2505,
+        "verdict": "WIDENS"
+      },
+      {
+        "param": "excl_copy",
+        "value": true,
+        "status": 200,
+        "ms": 7868,
+        "blocks": 37028,
+        "tuples": 8418,
+        "rows": 25,
+        "total": 931,
+        "verdict": "ok"
+      },
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 6303,
+        "blocks": 11203,
+        "tuples": 2379,
+        "rows": 1,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 6459,
+        "blocks": 16323,
+        "tuples": 4091,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_with_shopify_orders",
+        "value": true,
+        "status": 200,
+        "ms": 6922,
+        "blocks": 38056,
+        "tuples": 8637,
+        "rows": 25,
+        "total": 340,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 6701,
+        "blocks": 38059,
+        "tuples": 8660,
+        "rows": 25,
+        "total": 2196,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "meta_roas",
+        "status": 200,
+        "ms": 7074,
+        "blocks": 12389,
+        "tuples": 3040,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "shopify_roas",
+        "status": 200,
+        "ms": 7791,
+        "blocks": 12872,
+        "tuples": 3199,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "shopify_revenue",
+        "status": 200,
+        "ms": 6576,
+        "blocks": 16647,
+        "tuples": 4200,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "impressions",
+        "status": 200,
+        "ms": 6670,
+        "blocks": 16137,
+        "tuples": 4050,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ncp",
+        "status": 200,
+        "ms": 6832,
+        "blocks": 10450,
+        "tuples": 893,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ftewv",
+        "status": 200,
+        "ms": 6396,
+        "blocks": 10134,
+        "tuples": 749,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "contrib_margin_pct",
+        "status": 200,
+        "ms": 6586,
+        "blocks": 10216,
+        "tuples": 807,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "roas",
+        "status": 200,
+        "ms": 6117,
+        "blocks": 10248,
+        "tuples": 766,
+        "rows": 25,
+        "total": 2273,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/first-click",
+    "baseline": {
+      "rows": 50,
+      "total": 50,
+      "ms": 7218,
+      "blocks": 29198,
+      "tuples": 53073
+    },
+    "probes": [
+      {
+        "param": "grain",
+        "value": "ad",
+        "status": 200,
+        "ms": 2142,
+        "blocks": 42785,
+        "tuples": 81466,
+        "rows": 50,
+        "total": 50,
+        "verdict": "ok"
+      },
+      {
+        "param": "grain",
+        "value": "adset",
+        "status": 200,
+        "ms": 2668,
+        "blocks": 33206,
+        "tuples": 58763,
+        "rows": 50,
+        "total": 50,
+        "verdict": "ok"
+      },
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 2037,
+        "blocks": 29072,
+        "tuples": 53006,
+        "rows": 1,
+        "total": 1,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "spend",
+        "status": 200,
+        "ms": 2545,
+        "blocks": 29072,
+        "tuples": 53006,
+        "rows": 50,
+        "total": 50,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "last_click_revenue",
+        "status": 200,
+        "ms": 2005,
+        "blocks": 29072,
+        "tuples": 53006,
+        "rows": 50,
+        "total": 50,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "avg_days_to_convert",
+        "status": 200,
+        "ms": 2098,
+        "blocks": 29072,
+        "tuples": 53006,
+        "rows": 50,
+        "total": 50,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "avg_sessions",
+        "status": 200,
+        "ms": 2100,
+        "blocks": 29072,
+        "tuples": 53006,
+        "rows": 50,
+        "total": 50,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/last-click-utm",
+    "baseline": {
+      "rows": 25,
+      "total": 35928,
+      "ms": 3021,
+      "blocks": 4370,
+      "tuples": 72087
+    },
+    "probes": [
+      {
+        "param": "channel",
+        "value": "Meta",
+        "status": 200,
+        "ms": 3107,
+        "blocks": 4489,
+        "tuples": 72196,
+        "rows": 25,
+        "total": 17857,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Google",
+        "status": 200,
+        "ms": 2977,
+        "blocks": 4614,
+        "tuples": 72526,
+        "rows": 25,
+        "total": 2942,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Retention",
+        "status": 200,
+        "ms": 2714,
+        "blocks": 4350,
+        "tuples": 72611,
+        "rows": 25,
+        "total": 3787,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Organic (IG)",
+        "status": 200,
+        "ms": 2583,
+        "blocks": 4749,
+        "tuples": 79443,
+        "rows": 25,
+        "total": 83,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Brand Collab",
+        "status": 200,
+        "ms": 4759,
+        "blocks": 9210,
+        "tuples": 108950,
+        "rows": 25,
+        "total": 674,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "AI",
+        "status": 200,
+        "ms": 3553,
+        "blocks": 6611,
+        "tuples": 108406,
+        "rows": 14,
+        "total": 14,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Organic (Direct)",
+        "status": 200,
+        "ms": 4439,
+        "blocks": 26415,
+        "tuples": 112000,
+        "rows": 25,
+        "total": 5485,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Loyalty",
+        "status": 200,
+        "ms": 3204,
+        "blocks": 7986,
+        "tuples": 108706,
+        "rows": 25,
+        "total": 369,
+        "verdict": "ok"
+      },
+      {
+        "param": "channel",
+        "value": "Other",
+        "status": 200,
+        "ms": 2968,
+        "blocks": 4332,
+        "tuples": 72188,
+        "rows": 25,
+        "total": 4717,
+        "verdict": "ok"
+      },
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 2446,
+        "blocks": 3845,
+        "tuples": 71858,
+        "rows": 1,
+        "total": 35928,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 2473,
+        "blocks": 3953,
+        "tuples": 71897,
+        "rows": 25,
+        "total": 35928,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_matched",
+        "value": true,
+        "status": 200,
+        "ms": 2495,
+        "blocks": 4122,
+        "tuples": 71947,
+        "rows": 25,
+        "total": 16531,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_unmatched",
+        "value": true,
+        "status": 200,
+        "ms": 2385,
+        "blocks": 3929,
+        "tuples": 71921,
+        "rows": 25,
+        "total": 19397,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "META",
+        "status": 200,
+        "ms": 2951,
+        "blocks": 5740,
+        "tuples": 107784,
+        "rows": 0,
+        "total": 0,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "total_price",
+        "status": 200,
+        "ms": 2657,
+        "blocks": 6337,
+        "tuples": 108022,
+        "rows": 25,
+        "total": 35928,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "customer_num_orders",
+        "status": 200,
+        "ms": 4882,
+        "blocks": 17127,
+        "tuples": 109848,
+        "rows": 25,
+        "total": 35928,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/last-click-utm/name-misses",
+    "baseline": {
+      "rows": 11,
+      "total": null,
+      "ms": 4042,
+      "blocks": 95839,
+      "tuples": 310994
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 2528,
+        "blocks": 95711,
+        "tuples": 310935,
+        "rows": 1,
+        "total": null,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/customer-journey",
+    "baseline": {
+      "rows": 50,
+      "total": 405985,
+      "ms": 3695,
+      "blocks": 36361,
+      "tuples": 493
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 3340,
+        "blocks": 36222,
+        "tuples": 437,
+        "rows": 1,
+        "total": 405985,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 3112,
+        "blocks": 36335,
+        "tuples": 485,
+        "rows": 50,
+        "total": 405985,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_matched",
+        "value": true,
+        "status": 200,
+        "ms": 2911,
+        "blocks": 36485,
+        "tuples": 551,
+        "rows": 50,
+        "total": 196023,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_with_customer",
+        "value": true,
+        "status": 200,
+        "ms": 3672,
+        "blocks": 37824,
+        "tuples": 665,
+        "rows": 50,
+        "total": 311086,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 5205,
+        "blocks": 42593,
+        "tuples": 612,
+        "rows": 50,
+        "total": 311006,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "total_price",
+        "status": 200,
+        "ms": 9370,
+        "blocks": 57283,
+        "tuples": 625,
+        "rows": 50,
+        "total": 405985,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "customer_lifetime_spend",
+        "status": 200,
+        "ms": 4254,
+        "blocks": 57284,
+        "tuples": 625,
+        "rows": 50,
+        "total": 405985,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/landing-pages",
+    "baseline": {
+      "rows": 25,
+      "total": 2729,
+      "ms": 7802,
+      "blocks": 55753,
+      "tuples": 108297
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 2430,
+        "blocks": 55464,
+        "tuples": 108125,
+        "rows": 1,
+        "total": 2729,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 2617,
+        "blocks": 55464,
+        "tuples": 108125,
+        "rows": 25,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "page_type",
         "value": "collections",
         "status": 200,
-        "ms": 4139,
-        "blocks": 57185,
-        "tuples": 112319,
+        "ms": 2640,
+        "blocks": 55464,
+        "tuples": 108125,
         "rows": 25,
-        "total": 332,
+        "total": 331,
         "verdict": "ok"
       },
       {
         "param": "page_type",
         "value": "products",
         "status": 200,
-        "ms": 2615,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2577,
+        "blocks": 56281,
+        "tuples": 109637,
         "rows": 25,
-        "total": 1087,
+        "total": 1078,
         "verdict": "ok"
       },
       {
         "param": "page_type",
         "value": "home",
         "status": 200,
-        "ms": 2257,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2533,
+        "blocks": 55464,
+        "tuples": 108125,
         "rows": 1,
         "total": 1,
         "verdict": "ok"
@@ -68,266 +723,1309 @@
         "param": "page_type",
         "value": "pages",
         "status": 200,
-        "ms": 2361,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2703,
+        "blocks": 55730,
+        "tuples": 109876,
         "rows": 25,
-        "total": 94,
+        "total": 92,
         "verdict": "ok"
       },
       {
         "param": "page_type",
         "value": "other",
         "status": 200,
-        "ms": 2331,
-        "blocks": 57334,
-        "tuples": 112335,
+        "ms": 4480,
+        "blocks": 55770,
+        "tuples": 109847,
         "rows": 25,
-        "total": 1233,
+        "total": 1227,
         "verdict": "ok"
       },
       {
         "param": "search",
         "value": "kurta",
         "status": 200,
-        "ms": 2322,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2885,
+        "blocks": 55879,
+        "tuples": 116256,
         "rows": 25,
-        "total": 315,
+        "total": 311,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "ga4_purchases",
         "status": 200,
-        "ms": 2145,
-        "blocks": 57249,
-        "tuples": 112347,
+        "ms": 2621,
+        "blocks": 56623,
+        "tuples": 130884,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "ga4_pdp_views",
         "status": 200,
-        "ms": 2196,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2721,
+        "blocks": 57380,
+        "tuples": 145701,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "ga4_add_to_carts",
         "status": 200,
-        "ms": 2415,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2569,
+        "blocks": 57224,
+        "tuples": 142729,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "ga4_checkouts",
         "status": 200,
-        "ms": 2215,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2621,
+        "blocks": 57449,
+        "tuples": 147217,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "ga4_bounce_rate",
         "status": 200,
-        "ms": 2202,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2560,
+        "blocks": 55464,
+        "tuples": 108125,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "shopify_sessions",
         "status": 200,
-        "ms": 3126,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2710,
+        "blocks": 55608,
+        "tuples": 108139,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "shopify_atc_rate",
         "status": 200,
-        "ms": 2507,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2408,
+        "blocks": 55464,
+        "tuples": 108125,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "shopify_bounce_rate",
         "status": 200,
-        "ms": 2022,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 2534,
+        "blocks": 56538,
+        "tuples": 129297,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "sessions_delta",
         "status": 200,
-        "ms": 2351,
-        "blocks": 57188,
-        "tuples": 112319,
+        "ms": 2660,
+        "blocks": 62014,
+        "tuples": 234579,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "sessions_delta_pct",
         "status": 200,
-        "ms": 2311,
-        "blocks": 57184,
-        "tuples": 112319,
+        "ms": 3174,
+        "blocks": 55464,
+        "tuples": 108125,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "sort",
         "value": "bounce_rate_delta",
         "status": 200,
-        "ms": 2285,
-        "blocks": 57328,
-        "tuples": 112333,
+        "ms": 2810,
+        "blocks": 55748,
+        "tuples": 109622,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Meta",
         "status": 200,
-        "ms": 2505,
-        "blocks": 57210,
-        "tuples": 112329,
+        "ms": 2529,
+        "blocks": 56178,
+        "tuples": 113983,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Google",
         "status": 200,
-        "ms": 2275,
-        "blocks": 57210,
-        "tuples": 112329,
+        "ms": 2058,
+        "blocks": 56503,
+        "tuples": 120326,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Retention",
         "status": 200,
-        "ms": 2397,
-        "blocks": 57207,
-        "tuples": 112328,
+        "ms": 2775,
+        "blocks": 57327,
+        "tuples": 136409,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Brand Collab",
         "status": 200,
-        "ms": 2352,
-        "blocks": 57207,
-        "tuples": 112328,
+        "ms": 2297,
+        "blocks": 57192,
+        "tuples": 133867,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "AI",
         "status": 200,
-        "ms": 2260,
-        "blocks": 57207,
-        "tuples": 112328,
+        "ms": 2394,
+        "blocks": 58379,
+        "tuples": 157188,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Organic (Direct)",
         "status": 200,
-        "ms": 2354,
-        "blocks": 57366,
-        "tuples": 112383,
+        "ms": 2052,
+        "blocks": 56907,
+        "tuples": 128545,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Organic (IG)",
         "status": 200,
-        "ms": 2192,
-        "blocks": 57210,
-        "tuples": 112329,
+        "ms": 1904,
+        "blocks": 56033,
+        "tuples": 108428,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Loyalty",
         "status": 200,
-        "ms": 2225,
-        "blocks": 57208,
-        "tuples": 112328,
+        "ms": 2275,
+        "blocks": 55886,
+        "tuples": 108413,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       },
       {
         "param": "source",
         "value": "Other",
         "status": 200,
-        "ms": 2359,
-        "blocks": 57196,
-        "tuples": 112323,
+        "ms": 2609,
+        "blocks": 55464,
+        "tuples": 108125,
         "rows": 25,
-        "total": 2747,
+        "total": 2729,
         "verdict": "ok"
       }
     ]
+  },
+  {
+    "path": "/cpis",
+    "baseline": {
+      "rows": 50,
+      "total": 97,
+      "ms": 4202,
+      "blocks": 39815,
+      "tuples": 60603
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 3079,
+        "blocks": 42771,
+        "tuples": 120482,
+        "rows": 1,
+        "total": 97,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 3649,
+        "blocks": 43770,
+        "tuples": 140356,
+        "rows": 50,
+        "total": 97,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_matched",
+        "value": true,
+        "status": 200,
+        "ms": 5991,
+        "blocks": 55330,
+        "tuples": 339402,
+        "rows": 50,
+        "total": 76,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 1860,
+        "blocks": 8953,
+        "tuples": 22507,
+        "rows": 10,
+        "total": 10,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ncp",
+        "status": 200,
+        "ms": 3142,
+        "blocks": 37578,
+        "tuples": 16845,
+        "rows": 50,
+        "total": 97,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_unit_sold",
+        "status": 200,
+        "ms": 4139,
+        "blocks": 37513,
+        "tuples": 16817,
+        "rows": 50,
+        "total": 97,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "units_sold",
+        "status": 200,
+        "ms": 3062,
+        "blocks": 37657,
+        "tuples": 16831,
+        "rows": 50,
+        "total": 97,
+        "verdict": "ok"
+      },
+      {
+        "param": "window",
+        "value": "1d",
+        "status": 200,
+        "ms": 3228,
+        "blocks": 44102,
+        "tuples": 144029,
+        "rows": 50,
+        "total": 97,
+        "verdict": "ok"
+      },
+      {
+        "param": "window",
+        "value": "30d",
+        "status": 200,
+        "ms": 4388,
+        "blocks": 47168,
+        "tuples": 204199,
+        "rows": 50,
+        "total": 97,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/cpis-utm",
+    "baseline": {
+      "rows": 25,
+      "total": 92,
+      "ms": 5822,
+      "blocks": 94180,
+      "tuples": 438725
+    },
+    "probes": [
+      {
+        "param": "include_archived",
+        "value": true,
+        "status": 200,
+        "ms": 2905,
+        "blocks": 46763,
+        "tuples": 177653,
+        "rows": 25,
+        "total": 100,
+        "verdict": "ok"
+      },
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 2028,
+        "blocks": 32772,
+        "tuples": 41435,
+        "rows": 1,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 2580,
+        "blocks": 41065,
+        "tuples": 58723,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "only_matched",
+        "value": true,
+        "status": 200,
+        "ms": 2565,
+        "blocks": 40777,
+        "tuples": 58025,
+        "rows": 25,
+        "total": 84,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 2646,
+        "blocks": 42896,
+        "tuples": 110967,
+        "rows": 15,
+        "total": 15,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ad_spend",
+        "status": 200,
+        "ms": 2479,
+        "blocks": 50065,
+        "tuples": 250258,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "attributed_orders",
+        "status": 200,
+        "ms": 2539,
+        "blocks": 41255,
+        "tuples": 58737,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "attributed_revenue",
+        "status": 200,
+        "ms": 2783,
+        "blocks": 41387,
+        "tuples": 59417,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_order",
+        "status": 200,
+        "ms": 2387,
+        "blocks": 38149,
+        "tuples": 51976,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_unit_sold",
+        "status": 200,
+        "ms": 2541,
+        "blocks": 36128,
+        "tuples": 47714,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "roas",
+        "status": 200,
+        "ms": 3077,
+        "blocks": 35790,
+        "tuples": 46467,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "window",
+        "value": "7d",
+        "status": 200,
+        "ms": 5426,
+        "blocks": 77390,
+        "tuples": 108867,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      },
+      {
+        "param": "window",
+        "value": "90d",
+        "status": 200,
+        "ms": 3240,
+        "blocks": 77392,
+        "tuples": 108878,
+        "rows": 25,
+        "total": 92,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/cpis-utm/daily-series",
+    "baseline": {
+      "rows": 28,
+      "total": null,
+      "ms": 1661,
+      "blocks": 8988,
+      "tuples": 28500
+    },
+    "probes": []
+  },
+  {
+    "path": "/cpis-utm/spend-trend",
+    "error": "baseline returned HTTP 422",
+    "probes": []
+  },
+  {
+    "path": "/untested",
+    "baseline": {
+      "rows": 1014,
+      "total": null,
+      "ms": 2809,
+      "blocks": 19945,
+      "tuples": 12045
+    },
+    "probes": [
+      {
+        "param": "match_state",
+        "value": "matched",
+        "status": 200,
+        "ms": 5968,
+        "blocks": 19993,
+        "tuples": 12035,
+        "rows": 976,
+        "total": null,
+        "verdict": "ok"
+      },
+      {
+        "param": "match_state",
+        "value": "all",
+        "status": 200,
+        "ms": 5331,
+        "blocks": 18007,
+        "tuples": 12069,
+        "rows": 1990,
+        "total": null,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "graphic",
+        "status": 200,
+        "ms": 2861,
+        "blocks": 20944,
+        "tuples": 8095,
+        "rows": 1373,
+        "total": null,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "influencer",
+        "status": 200,
+        "ms": 12327,
+        "blocks": 79151,
+        "tuples": 13716,
+        "rows": 13352,
+        "total": null,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/instagram",
+    "baseline": {
+      "rows": 0,
+      "total": 0,
+      "ms": 4043,
+      "blocks": 569,
+      "tuples": 175
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 4179,
+        "blocks": 271,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 3991,
+        "blocks": 271,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 4362,
+        "blocks": 271,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "sort",
+        "value": "like_count",
+        "status": 200,
+        "ms": 4056,
+        "blocks": 415,
+        "tuples": 17,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "sort",
+        "value": "comments_count",
+        "status": 200,
+        "ms": 3903,
+        "blocks": 271,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "sort",
+        "value": "insights_reach",
+        "status": 200,
+        "ms": 3973,
+        "blocks": 437,
+        "tuples": 59,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "sort",
+        "value": "insights_views",
+        "status": 200,
+        "ms": 4303,
+        "blocks": 272,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "sort",
+        "value": "total_views_count",
+        "status": 200,
+        "ms": 3751,
+        "blocks": 271,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      },
+      {
+        "param": "sort",
+        "value": "insights_total_interactions",
+        "status": 200,
+        "ms": 3942,
+        "blocks": 271,
+        "tuples": 3,
+        "rows": 0,
+        "total": 0,
+        "verdict": "DEAD"
+      }
+    ]
+  },
+  {
+    "path": "/saturation-curve",
+    "baseline": {
+      "rows": 22261,
+      "total": null,
+      "ms": 3598,
+      "blocks": 4024,
+      "tuples": 56
+    },
+    "probes": [
+      {
+        "param": "y_metric",
+        "value": "purchases",
+        "status": 200,
+        "ms": 5767,
+        "blocks": 4024,
+        "tuples": 56,
+        "rows": 22261,
+        "total": null,
+        "verdict": "ok"
+      },
+      {
+        "param": "y_metric",
+        "value": "ftewv_count",
+        "status": 200,
+        "ms": 4107,
+        "blocks": 4291,
+        "tuples": 187,
+        "rows": 22261,
+        "total": null,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/dashboard/session-trend",
+    "baseline": {
+      "rows": 30,
+      "total": null,
+      "ms": 2348,
+      "blocks": 9951,
+      "tuples": 63023
+    },
+    "probes": []
+  },
+  {
+    "path": "/dashboard/sessions",
+    "baseline": {
+      "rows": 1,
+      "total": null,
+      "ms": 1541,
+      "blocks": 12,
+      "tuples": 29
+    },
+    "probes": []
+  },
+  {
+    "path": "/dashboard/kpis",
+    "baseline": {
+      "rows": 1,
+      "total": null,
+      "ms": 6417,
+      "blocks": 25306,
+      "tuples": 98950
+    },
+    "probes": []
+  },
+  {
+    "path": "/dashboard/category-breakdown",
+    "baseline": {
+      "rows": 8,
+      "total": 8,
+      "ms": 1772,
+      "blocks": 8761,
+      "tuples": 27155
+    },
+    "probes": []
+  },
+  {
+    "path": "/dashboard/channel-breakdown",
+    "baseline": {
+      "rows": 9,
+      "total": 9,
+      "ms": 2,
+      "blocks": 2,
+      "tuples": 0
+    },
+    "probes": []
   },
   {
     "path": "/dashboard/top-landing-pages",
     "baseline": {
       "rows": 5,
       "total": 5,
-      "ms": 2886,
-      "blocks": 24588,
-      "tuples": 97876
+      "ms": 3816,
+      "blocks": 23778,
+      "tuples": 94781
     },
     "probes": []
+  },
+  {
+    "path": "/dashboard/top-cpis-skus",
+    "baseline": {
+      "rows": 5,
+      "total": 5,
+      "ms": 2557,
+      "blocks": 11722,
+      "tuples": 27153
+    },
+    "probes": []
+  },
+  {
+    "path": "/creative-testing",
+    "baseline": {
+      "rows": 25,
+      "total": 1033,
+      "ms": 4113,
+      "blocks": 60396,
+      "tuples": 25460
+    },
+    "probes": [
+      {
+        "param": "kind",
+        "value": "new",
+        "status": 200,
+        "ms": 2129,
+        "blocks": 60387,
+        "tuples": 25451,
+        "rows": 25,
+        "total": 666,
+        "verdict": "ok"
+      },
+      {
+        "param": "kind",
+        "value": "historical_discarded",
+        "status": 200,
+        "ms": 2095,
+        "blocks": 60387,
+        "tuples": 25451,
+        "rows": 25,
+        "total": 187,
+        "verdict": "ok"
+      },
+      {
+        "param": "kind",
+        "value": "refresh_discarded",
+        "status": 200,
+        "ms": 1976,
+        "blocks": 60398,
+        "tuples": 25462,
+        "rows": 25,
+        "total": 180,
+        "verdict": "ok"
+      },
+      {
+        "param": "kind",
+        "value": "iteration",
+        "status": 200,
+        "ms": 1998,
+        "blocks": 60542,
+        "tuples": 25476,
+        "rows": 25,
+        "total": 367,
+        "verdict": "ok"
+      },
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 1717,
+        "blocks": 60268,
+        "tuples": 25428,
+        "rows": 1,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "video",
+        "status": 200,
+        "ms": 2015,
+        "blocks": 60396,
+        "tuples": 25460,
+        "rows": 25,
+        "total": 301,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "graphic",
+        "status": 200,
+        "ms": 2042,
+        "blocks": 60396,
+        "tuples": 25460,
+        "rows": 25,
+        "total": 297,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "influencer",
+        "status": 200,
+        "ms": 2253,
+        "blocks": 60396,
+        "tuples": 25460,
+        "rows": 25,
+        "total": 435,
+        "verdict": "ok"
+      },
+      {
+        "param": "multi_filter",
+        "value": "[{\"field",
+        "status": 400,
+        "ms": 6,
+        "blocks": 2,
+        "tuples": 0,
+        "verdict": "ERROR"
+      },
+      {
+        "param": "multi_filter",
+        "value": "op",
+        "status": 400,
+        "ms": 3,
+        "blocks": 2,
+        "tuples": 0,
+        "verdict": "ERROR"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 2008,
+        "blocks": 60396,
+        "tuples": 25460,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 2207,
+        "blocks": 60403,
+        "tuples": 25463,
+        "rows": 25,
+        "total": 334,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "impressions",
+        "status": 200,
+        "ms": 2044,
+        "blocks": 60398,
+        "tuples": 25462,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "purchases",
+        "status": 200,
+        "ms": 2020,
+        "blocks": 60397,
+        "tuples": 25461,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "roas",
+        "status": 200,
+        "ms": 2099,
+        "blocks": 60387,
+        "tuples": 25451,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ncp",
+        "status": 200,
+        "ms": 2005,
+        "blocks": 60455,
+        "tuples": 25483,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "cost_per_ftewv",
+        "status": 200,
+        "ms": 2111,
+        "blocks": 60387,
+        "tuples": 25451,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "asset_created",
+        "status": 200,
+        "ms": 2137,
+        "blocks": 60531,
+        "tuples": 25465,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "launched_in_window",
+        "status": 200,
+        "ms": 2090,
+        "blocks": 60387,
+        "tuples": 25451,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "last_ad_date",
+        "status": 200,
+        "ms": 2019,
+        "blocks": 60387,
+        "tuples": 25451,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ads",
+        "status": 200,
+        "ms": 2089,
+        "blocks": 60563,
+        "tuples": 25521,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/ads-analyse/rollup",
+    "error": "baseline returned HTTP 422",
+    "probes": []
+  },
+  {
+    "path": "/ads-analyse/rollup/scalable-creatives",
+    "error": "baseline returned HTTP 422",
+    "probes": []
+  },
+  {
+    "path": "/ads-analyse/launches",
+    "baseline": {
+      "rows": 26,
+      "total": null,
+      "ms": 1509,
+      "blocks": 8596,
+      "tuples": 0
+    },
+    "probes": [
+      {
+        "param": "basis",
+        "value": "first_seen",
+        "status": 200,
+        "ms": 2264,
+        "blocks": 20467,
+        "tuples": 18012,
+        "rows": 26,
+        "total": null,
+        "verdict": "ok"
+      },
+      {
+        "param": "excl_copy",
+        "value": true,
+        "status": 200,
+        "ms": 1509,
+        "blocks": 10867,
+        "tuples": 2273,
+        "rows": 25,
+        "total": null,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 1475,
+        "blocks": 10867,
+        "tuples": 2273,
+        "rows": 26,
+        "total": null,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/shopify-analytics",
+    "baseline": {
+      "rows": 28,
+      "total": null,
+      "ms": 14310,
+      "blocks": 155477,
+      "tuples": 119145
+    },
+    "probes": [
+      {
+        "param": "include_returns",
+        "value": true,
+        "status": 200,
+        "ms": 4689,
+        "blocks": 361089,
+        "tuples": 243002,
+        "rows": 28,
+        "total": null,
+        "verdict": "ok"
+      }
+    ]
+  },
+  {
+    "path": "/asset-analysis",
+    "baseline": {
+      "rows": 25,
+      "total": 1033,
+      "ms": 3370,
+      "blocks": 127154,
+      "tuples": 136597
+    },
+    "probes": [
+      {
+        "param": "limit",
+        "value": 1,
+        "status": 200,
+        "ms": 2944,
+        "blocks": 2224,
+        "tuples": 6560,
+        "rows": 1,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "video",
+        "status": 200,
+        "ms": 3197,
+        "blocks": 1967,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 301,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "graphic",
+        "status": 200,
+        "ms": 3080,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 297,
+        "verdict": "ok"
+      },
+      {
+        "param": "media",
+        "value": "influencer",
+        "status": 200,
+        "ms": 2925,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 435,
+        "verdict": "ok"
+      },
+      {
+        "param": "offset",
+        "value": 1,
+        "status": 200,
+        "ms": 3010,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "only",
+        "value": "ever_won",
+        "status": 200,
+        "ms": 3037,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 15,
+        "total": 15,
+        "verdict": "ok"
+      },
+      {
+        "param": "only",
+        "value": "won_fell",
+        "status": 200,
+        "ms": 3150,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 7,
+        "total": 7,
+        "verdict": "ok"
+      },
+      {
+        "param": "only",
+        "value": "never",
+        "status": 200,
+        "ms": 3024,
+        "blocks": 2031,
+        "tuples": 6463,
+        "rows": 25,
+        "total": 1018,
+        "verdict": "ok"
+      },
+      {
+        "param": "search",
+        "value": "a",
+        "status": 200,
+        "ms": 3230,
+        "blocks": 2110,
+        "tuples": 6449,
+        "rows": 25,
+        "total": 1017,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "roas",
+        "status": 200,
+        "ms": 3062,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "iterations",
+        "status": 200,
+        "ms": 2938,
+        "blocks": 2120,
+        "tuples": 6488,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "last_tested",
+        "status": 200,
+        "ms": 3751,
+        "blocks": 2128,
+        "tuples": 6491,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "sort",
+        "value": "ncp",
+        "status": 200,
+        "ms": 2969,
+        "blocks": 1966,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 1033,
+        "verdict": "ok"
+      },
+      {
+        "param": "status",
+        "value": "active",
+        "status": 200,
+        "ms": 4296,
+        "blocks": 14566,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 531,
+        "verdict": "ok"
+      },
+      {
+        "param": "status",
+        "value": "inactive",
+        "status": 200,
+        "ms": 3168,
+        "blocks": 14566,
+        "tuples": 6435,
+        "rows": 25,
+        "total": 502,
+        "verdict": "ok"
+      }
+    ]
   }
 ]

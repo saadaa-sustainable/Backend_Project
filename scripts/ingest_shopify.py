@@ -954,9 +954,11 @@ async def _run(
     max_pages: int | None,
     date_start: date | None,
     date_end: date | None,
+    ql_days: int = 30,
     incremental: bool = False,
     database_url: str | None = None,
     table: str = "raw_dump_shopify",
+    on_result: Callable[[FetchResult], Awaitable[None]] | None = None,
 ) -> list[FetchResult]:
     # SEQUENTIAL, in the caller's object_types order -- deliberately not
     # asyncio.gather any more.
@@ -986,7 +988,8 @@ async def _run(
                 if object_type == "shop":
                     results.append(await _fetch_shop(client, store))
                 elif object_type in _SHOPIFYQL_TABLE_CONFIG:
-                    ql_start = date_start or (datetime.now(timezone.utc).date() - timedelta(days=30))
+                    ql_start = date_start or (datetime.now(timezone.utc).date()
+                                              - timedelta(days=ql_days))
                     ql_end = date_end or datetime.now(timezone.utc).date()
                     results.append(
                         await _fetch_shopifyql_table(client, store, object_type, ql_start, ql_end)
@@ -1008,6 +1011,11 @@ async def _run(
                 print(f"    [done] {object_type}: {len(results[-1].items)} rows "
                       f"in {results[-1].duration_seconds:.1f}s"
                       + (f" -- FAILED: {results[-1].error}" if results[-1].error else ""))
+                # Persist this source before fetching the next. Holding all
+                # results until the final source finished let a timeout lose
+                # sessions that Shopify had already returned successfully.
+                if on_result is not None:
+                    await on_result(results[-1])
     return results
 
 
@@ -1026,10 +1034,9 @@ async def run_for_admin(
 ) -> bool:
     """Admin-panel-triggered entry point (see app/api/routers/admin.py's
     `_run_shopify`, mirroring `_run_instagram`'s use of
-    ingest_instagram_chronological.py's `_run()`). Unlike `_run()` above
-    (fetch everything in parallel, THEN write everything, used by the CLI's
-    timing-focused main()), this fetches AND writes each (store,
-    object_type) unit one at a time so `on_progress` can report real
+    ingest_instagram_chronological.py's `_run()`). Like the CLI, this
+    fetches AND writes each (store, object_type) unit one at a time,
+    with progress callbacks so `on_progress` can report real
     incremental status -- a long Jan-Aug fetch shouldn't look frozen at 0%
     until the very end. Returns True if every unit succeeded.
 
@@ -1381,10 +1388,10 @@ async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *,
     financial_status/fulfillment_status, customer amount_spent/
     numberOfOrders, and session-aggregate counts all legitimately change
     after first fetch, so refreshing in place beats accumulating stale
-    duplicate snapshots), but batched via `executemany` instead of one
-    `fetchval` round-trip per row -- confirmed live a ~5,000-row sessions
-    chunk took over 60s round-tripping one row at a time to the remote
-    Supabase Postgres; batching is required for sessions' realistic volume.
+    duplicate snapshots). Each chunk is ONE multi-row INSERT, rather
+    than executemany's separate execution for every row. The nightly
+    fetch finished but timed out while writing its 637k rows, leaving
+    session data behind despite a successful Shopify response.
     Trades away the inserted-vs-updated split Instagram's version reports
     (only obtainable per-row via RETURNING) for a total-rows-written count,
     which is what actually matters for a Bronze ingestion log."""
@@ -1392,17 +1399,24 @@ async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *,
         return 0
     import asyncpg  # lazy, matching the rest of this module
     columns = list(rows[0].keys())
-    placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    # asyncpg permits at most 32,767 bound arguments per statement.
+    chunk_size = min(chunk_size, 32767 // len(columns))
     update_cols = [c for c in columns if c not in ("id", "source_id", "object_type")]
     update_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols) + ', "ingested_at" = now()'
-    sql = (
-        f'INSERT INTO "{table}" ({", ".join(columns)}) VALUES ({placeholders}) '
-        f'ON CONFLICT (object_type, source_id) WHERE source_id IS NOT NULL '
-        f'DO UPDATE SET {update_clause}'
-    )
     total = 0
     for start in range(0, len(rows), chunk_size):
         chunk = rows[start : start + chunk_size]
+        # PostgreSQL cannot update a conflict key twice in one INSERT.
+        # Preserve the old sequential behavior: first ID, latest payload.
+        # NULL source IDs do not participate in the partial unique index.
+        unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for index, row in enumerate(chunk):
+            key = (row["object_type"], row["source_id"]) if row["source_id"] is not None else (index,)
+            if key in unique:
+                row = {**row, "id": unique[key]["id"]}
+            unique[key] = row
         values_batch = [
             [
                 uuid.UUID(row[c]) if c in ("id", "batch_id") else
@@ -1411,8 +1425,18 @@ async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *,
                 row[c]
                 for c in columns
             ]
-            for row in chunk
+            for row in unique.values()
         ]
+        placeholders = ", ".join(
+            "(" + ", ".join(f"${offset + i + 1}" for i in range(len(columns))) + ")"
+            for offset in range(0, len(values_batch) * len(columns), len(columns))
+        )
+        sql = (
+            f'INSERT INTO "{table}" ({", ".join(columns)}) VALUES {placeholders} '
+            f'ON CONFLICT (object_type, source_id) WHERE source_id IS NOT NULL '
+            f'DO UPDATE SET {update_clause}'
+        )
+        values = [value for batch in values_batch for value in batch]
         # Retry the chunk on a dropped connection.
         #
         # The fetch is the expensive half -- a 29-day sales backfill is
@@ -1430,7 +1454,7 @@ async def _insert_rows(conn: Any, table: str, rows: list[dict[str, Any]], *,
         # connection usable -- so both paths are attempted.
         for attempt in range(1, _INSERT_ATTEMPTS + 1):
             try:
-                await conn.executemany(sql, values_batch)
+                await conn.execute(sql, *values)
                 break
             except (OSError, asyncpg.PostgresConnectionError) as exc:
                 if attempt == _INSERT_ATTEMPTS:
@@ -1465,6 +1489,13 @@ def main() -> int:
     )
     parser.add_argument("--date-start", type=date.fromisoformat, default=None, help="ISO date, e.g. 2026-01-01. Omit to fetch full history (orders/products/customers) or the last 30 days (sessions).")
     parser.add_argument("--date-end", type=date.fromisoformat, default=None, help="ISO date, defaults to today.")
+    parser.add_argument(
+        "--ql-days", type=int, default=30,
+        help="Trailing days to re-pull for the ShopifyQL tables (sessions, "
+             "inventory, sales, discounts, fulfillments, customer_analytics). "
+             "Default 30. Lower it for the nightly: these have no incremental "
+             "mode, so every run re-fetches and re-writes the whole window, "
+             "and that write is what makes the step time out.")
     parser.add_argument(
         "--incremental", action="store_true",
         help="For orders/customers/products, fetch only records whose updated_at is "
@@ -1537,6 +1568,7 @@ def main() -> int:
             stores, object_types, database_url, args.table,
             page_size=args.page_size, max_pages=args.max_pages,
             date_start=args.date_start, date_end=args.date_end,
+            ql_days=args.ql_days,
             api_version=api_version, no_insert=args.no_insert,
             incremental=args.incremental,
         )
@@ -1554,22 +1586,61 @@ async def _run_and_report(
     max_pages: int | None,
     date_start: date | None,
     date_end: date | None,
+    ql_days: int = 30,
     api_version: str,
     no_insert: bool,
     incremental: bool = False,
 ) -> int:
-    """CLI-only wrapper around `_run()`'s async core, adding the printed
-    summary + write step -- kept separate from `_run()` itself so
+    """CLI wrapper that saves each completed fetch before starting another.
+
+    Persistence stays optional in `_run()` so
     admin.py's `_run_shopify` (mirroring `_run_instagram`) can call `_run()`
     directly with its own on_progress callback instead of going through
     this print-heavy path."""
+    total_written = 0
+    write_wall_time = 0.0
+    index_ready = False
+
+    async def save_result(result: FetchResult) -> None:
+        nonlocal total_written, write_wall_time, index_ready
+        # A failed source may contain partial fetched rows. Do not publish
+        # those as a completed snapshot or advance its freshness watermark.
+        if result.error:
+            return
+        import asyncpg
+
+        started = time.monotonic()
+        # Keep no database connection open while Shopify throttles/fetches
+        # the next source. Disabling the statement cache supports the
+        # transaction pooler used by the existing ingestion path.
+        conn = await asyncpg.connect(
+            _to_asyncpg_dsn(database_url), statement_cache_size=0,
+            timeout=10, command_timeout=150,
+        )
+        try:
+            if not index_ready:
+                await _ensure_unique_index(conn)
+                index_ready = True
+            rows = _build_rows(
+                result, batch_id=uuid.uuid4(), api_version=api_version,
+                extracted_at=datetime.now(timezone.utc),
+            )
+            written = await _insert_rows(conn, table, rows)
+            total_written += written
+            print(f"  [{result.store.key}] {result.store.name:<24} "
+                  f"{result.object_type:<10} wrote {written} rows", flush=True)
+        finally:
+            await conn.close()
+            write_wall_time += time.monotonic() - started
+
     fetch_start = time.monotonic()
     results = await _run(
         stores, object_types, page_size=page_size, max_pages=max_pages,
-        date_start=date_start, date_end=date_end,
+        date_start=date_start, date_end=date_end, ql_days=ql_days,
         incremental=incremental, database_url=database_url, table=table,
+        on_result=None if no_insert else save_result,
     )
-    fetch_wall_time = time.monotonic() - fetch_start
+    fetch_wall_time = time.monotonic() - fetch_start - write_wall_time
 
     print("Fetch results:")
     total_rows = 0
@@ -1589,46 +1660,11 @@ async def _run_and_report(
         print("\n--no-insert set -- stopping before any write.")
         return 1 if any_error else 0
 
-    import asyncpg  # imported lazily -- only needed on a real (non-dry-run) run
-
-    # statement_cache_size=0 is REQUIRED when DATABASE_URL points at
-    # Supabase's pgbouncer (transaction mode). Without it, pgbouncer
-    # rotates the underlying Postgres backend between transactions and
-    # asyncpg's per-connection prepared-statement cache references a
-    # __asyncpg_stmt_N__ that the next backend has never seen ->
-    # "prepared statement does not exist" mid-write, dropping the
-    # whole batch. Live-caught 2026-09-02 mid-orders-insert.
-    async def _connect():
-        return await asyncpg.connect(
-            _to_asyncpg_dsn(database_url),
-            statement_cache_size=0,
-        )
-
-    conn = await _connect()
-    write_start = time.monotonic()
-    total_written = 0
-    write_any_error = False
-    try:
-        await _ensure_unique_index(conn)
-        extracted_at = datetime.now(timezone.utc)
-        for r in results:
-            if r.error:
-                write_any_error = True
-                continue
-            batch_id = uuid.uuid4()
-            rows = _build_rows(r, batch_id=batch_id, api_version=api_version, extracted_at=extracted_at)
-            written = await _insert_rows(conn, table, rows)
-            total_written += written
-            print(f"  [{r.store.key}] {r.store.name:<24} {r.object_type:<10} wrote {written} rows")
-    finally:
-        await conn.close()
-    write_wall_time = time.monotonic() - write_start
-
     print(f"\nWrite time: {write_wall_time:.2f}s")
     print(f"Total rows written: {total_written} into {table}")
     print(f"\nGrand total (fetch + write): {fetch_wall_time + write_wall_time:.2f}s")
 
-    return 1 if (any_error or write_any_error) else 0
+    return 1 if any_error else 0
 
 
 if __name__ == "__main__":
