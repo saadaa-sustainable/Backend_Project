@@ -35,6 +35,15 @@ def session():
             ('2026-09-30',900,100), ('2026-10-01',900,100), ('2026-10-02',900,0),
             ('2026-10-03',900,200), ('2026-10-05',900,100), ('2026-10-06',900,100),
             ('2026-10-07',900,100);
+        -- Daily ARPU. The mobile row must never reach the line: a
+        -- person on two devices in one day would be counted twice.
+        -- 2 Oct is deliberately absent, so the series has a real gap.
+        CREATE TABLE ga4_arpu_daily(
+            day TEXT, device_category TEXT, active_users INTEGER, total_revenue NUMERIC);
+        INSERT INTO ga4_arpu_daily VALUES
+            ('2026-10-01','(all)',  100, 2500),
+            ('2026-10-01','mobile',  90, 2300),
+            ('2026-10-03','(all)',   50, 2000);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC);
         INSERT INTO insights_daily_by_ad VALUES
             ('a','2026-10-01',100), ('b','2026-10-01',50),
@@ -53,7 +62,7 @@ def session():
         sql = sql.replace("CAST(o.created_at AS date)", "date(o.created_at)")
         sql = sql.replace("(b.hi + 1)", "datetime(b.hi, '+1 day')")
         raw = db.execute(sql, {k: str(v) if v is not None else None for k, v in params.items()}).fetchall()
-        rows = [tuple(date.fromisoformat(v) if i in (0, 5, 6) and v else v for i, v in enumerate(r)) for r in raw]
+        rows = [tuple(date.fromisoformat(v) if i in (0, 5, 6) and v else v for i, v in enumerate(r)) for r in raw]  # noqa: E501
         return SimpleNamespace(all=lambda: rows)
 
     fake = SimpleNamespace(execute=AsyncMock(side_effect=execute))
@@ -132,3 +141,25 @@ async def test_http_response_serializes_dates_and_fractional_rate(session):
     assert response.status_code == 200
     assert response.json()["points"][0]["conversion_rate"] == 0.02
     assert response.json()["points"][0]["day"] == "2026-10-01"
+
+
+async def test_daily_arpu_is_exact_per_day_and_gaps_where_ga4_has_no_row(session):
+    """Day grain is the one grain where ARPU needs no caveat: GA4
+    deduplicates active users per query, and one day is one
+    deduplication window. So 2,500 / 100 is simply 25.0.
+
+    2 Oct has no GA4 row and must come back null, not 0 -- the ARPU
+    table starts later than the session history, and a zero would read
+    as "nobody spent anything" rather than "not measured here"."""
+    result = await analytics.get_dashboard_session_trend(
+        session, date(2026, 10, 1), date(2026, 10, 3))
+    by_day = {p.day: p for p in result.points}
+
+    assert by_day[date(2026, 10, 1)].ga4_arpu == 25.0
+    assert by_day[date(2026, 10, 1)].ga4_active_users == 100
+    # The mobile row (90 users, 2,300) is excluded, which is the point
+    # of reading only `(all)`.
+    assert by_day[date(2026, 10, 3)].ga4_arpu == 40.0
+
+    assert by_day[date(2026, 10, 2)].ga4_arpu is None
+    assert by_day[date(2026, 10, 2)].ga4_active_users is None

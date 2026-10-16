@@ -328,7 +328,7 @@ function DashboardContent() {
             </div>
           ) : (
             <>
-              <dl className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <dl className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div>
                   <dt className="text-xs text-text-secondary">Cost / session</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatPerSession(costPerSession)}</dd>
@@ -343,6 +343,33 @@ function DashboardContent() {
                   <dt className="text-xs text-text-secondary">Conversion rate (attributed)</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">{formatConversionRate(conversionRate)}</dd>
                   <dd className="mt-1 text-xs text-text-secondary">Attributed Shopify orders ÷ Meta-driven Shopify sessions × 100</dd>
+                </div>
+                {/* ARPU is GA4's end to end -- its revenue over its own
+                    user count. Deliberately NOT Shopify revenue over
+                    GA4 users: the value of this figure is that one
+                    source counted both halves, and mixing them would
+                    describe neither. It therefore disagrees with the
+                    Shopify revenue on the cards above, and should.
+
+                    The denominator is active user-DAYS, summed from a
+                    daily table. GA4's own window ARPU deduplicates
+                    users across the period and so reads higher (37.52
+                    against 31.42 over 30 days). Daily was chosen so
+                    every date range gets an answer instead of only the
+                    windows a lookup table happened to store -- the
+                    label says user-days precisely so the two are not
+                    confused. */}
+                <div>
+                  <dt className="text-xs text-text-secondary">ARPU (GA4)</dt>
+                  <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">
+                    {sessions.data.ga4_arpu == null ? "—" : formatPerSession(sessions.data.ga4_arpu)}
+                  </dd>
+                  <dd className="mt-1 text-xs text-text-secondary">
+                    {sessions.data.ga4_arpu == null
+                      ? "No GA4 user data for this range"
+                      : <>GA4 revenue ÷ GA4 active user-days{sessions.data.ga4_active_users != null
+                          && <> · {sessions.data.ga4_active_users.toLocaleString("en-IN")} user-days</>}</>}
+                  </dd>
                 </div>
               </dl>
               <p className="mt-3 border-t border-border-primary pt-3 text-xs text-text-secondary">
