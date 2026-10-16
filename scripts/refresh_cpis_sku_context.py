@@ -103,6 +103,20 @@ CREATE TABLE IF NOT EXISTS public.cpis_sku_context (
     variant_days            integer,
     oos_variant_days        integer,
     oos_pct                 numeric,
+    -- Days the WORST variant of this master SKU sat out of stock in the
+    -- trailing 30. Re-sourced from shopify_inventory on 2026-10-16 to
+    -- replace master_sku_inventory_current.oos_days_30, which came from
+    -- MapleMonk through BigQuery and froze at as_of_date 2026-10-01 when
+    -- that pull was dropped. Same derivation as MapleMonk's: per variant,
+    -- count the days with no sellable stock; per master, take the MAX.
+    --
+    -- Distinct from oos_pct beside it. oos_pct is breadth -- what share of
+    -- all variant-days were out of stock. This is depth: one size gone for
+    -- the whole month reads 30 here and barely moves oos_pct. Both
+    -- saturate on this catalogue (108 of 130 masters read 30), which the
+    -- MapleMonk column did too (78 of 107), so this is the metric behaving
+    -- as it always has, not a regression.
+    oos_days_30             integer,
 
     -- Provenance shown on the dashboard's Units in Stock tile.
     inventory_as_of         timestamptz,
@@ -113,6 +127,13 @@ CREATE TABLE IF NOT EXISTS public.cpis_sku_context (
     computed_at             timestamptz
 )
 """
+
+#: The DDL above is CREATE TABLE IF NOT EXISTS, so it does nothing to a
+#: table that already exists. Every column added after the first deploy
+#: needs its own ALTER here or the INSERT fails on a live database.
+MIGRATIONS = [
+    "ALTER TABLE public.cpis_sku_context ADD COLUMN IF NOT EXISTS oos_days_30 integer",
+]
 
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS ix_cpis_sku_context_live ON public.cpis_sku_context (is_live)",
@@ -300,13 +321,46 @@ products_as_of AS (
 ),
 inv_daily AS (
     SELECT vs.master_sku,
+           si.product_variant_sku                 AS variant_sku,
+           si.day                                 AS day,
            COALESCE(si.inventory_units_sold, 0)   AS units_sold,
-           COALESCE(si.ending_inventory_units, 0) AS ending_units
+           COALESCE(si.ending_inventory_units, 0) AS ending_units,
+           si.product_status                      AS product_status
     FROM shopify_inventory si
     JOIN variant_stock vs ON vs.variant_sku = si.product_variant_sku
     CROSS JOIN inv_window w
     WHERE si.day >= w.anchor_day - 29
       AND si.day <= w.anchor_day
+),
+-- One stock figure per variant per day before any OOS day can be counted.
+-- shopify_inventory carries a row per LISTING, and 29,282 of 167,200
+-- variant-days in the window sit on two to four listings of the same SKU,
+-- so counting rows straight would let a variant log more than 30 OOS days
+-- in a 30-day window -- measured up to 111 before this dedupe.
+--
+-- Which listing wins is the rule variant_stock already settled on: the
+-- ACTIVE one, even when it reads zero. An unpublished duplicate does not
+-- sell, so its number freezes while the live listing's keeps falling, and
+-- zero sellable stock is the answer rather than a reason to go looking for
+-- a bigger figure on a draft.
+inv_variant_day AS (
+    SELECT master_sku, variant_sku, day,
+           COALESCE(
+             MAX(ending_units) FILTER (WHERE product_status = 'ACTIVE'),
+             MAX(ending_units)
+           ) AS ending_units
+    FROM inv_daily
+    GROUP BY master_sku, variant_sku, day
+),
+oos_depth AS (
+    SELECT master_sku, MAX(oos_days)::int AS oos_days_30
+    FROM (
+        SELECT master_sku, variant_sku,
+               COUNT(*) FILTER (WHERE ending_units <= 0) AS oos_days
+        FROM inv_variant_day
+        GROUP BY master_sku, variant_sku
+    ) v
+    GROUP BY master_sku
 ),
 velocity_ctx AS (
     SELECT
@@ -327,6 +381,7 @@ INSERT INTO public.cpis_sku_context (
     units_in_stock, variant_total_ct, variant_in_stock_ct, variant_in_stock_rate,
     size_total_ct, size_in_stock_ct, size_in_stock_rate, stock_by_size,
     units_sold_30d, avg_daily_units, variant_days, oos_variant_days, oos_pct,
+    oos_days_30,
     inventory_as_of, velocity_anchor_day, is_live, has_active_variant, computed_at
 )
 SELECT
@@ -336,6 +391,7 @@ SELECT
     sc.units_in_stock, sc.variant_total_ct, sc.variant_in_stock_ct, sc.variant_in_stock_rate,
     sc.size_total_ct, sc.size_in_stock_ct, sc.size_in_stock_rate, sbs.stock_by_size,
     vc.units_sold_30d, vc.avg_daily_units, vc.variant_days, vc.oos_variant_days, vc.oos_pct,
+    od.oos_days_30,
     (SELECT inventory_as_of FROM products_as_of),
     (SELECT anchor_day FROM inv_window),
     -- is_live: on hand, still listed, or still selling. The third
@@ -359,6 +415,7 @@ FROM stock_ctx sc
 LEFT JOIN products_ctx       pc  USING (master_sku)
 LEFT JOIN stock_by_size_ctx  sbs USING (master_sku)
 LEFT JOIN velocity_ctx       vc  USING (master_sku)
+LEFT JOIN oos_depth          od  USING (master_sku)
 """
 
 
@@ -377,6 +434,8 @@ def main() -> int:
             cur.execute("SET LOCAL statement_timeout = '600s'")
             cur.execute("SET LOCAL work_mem = '64MB'")
             cur.execute(DDL)
+            for statement in MIGRATIONS:
+                cur.execute(statement)
             for statement in INDEXES:
                 cur.execute(statement)
             # TRUNCATE + INSERT in ONE transaction: a failure rolls back

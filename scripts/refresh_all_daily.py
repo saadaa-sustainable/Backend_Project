@@ -20,7 +20,6 @@ Phase layout mirrors CTD's _refresh_all_dashboard_data.py:
      fetch_ad_product_insights.py           Meta DPA product_id breakdown
      ingest_instagram_chronological.py      IG posts bronze
      ingest_shopify.py                      Shopify products/orders/customers bronze
-     fetch_bq_inventory_daily.py            BigQuery inventory pull
 
   PHASE 2 -- SILVER (DB-only, depends on Phase 1)
      refresh_raw_dump_meta_daily.py         bronze meta -> daily flatten
@@ -85,21 +84,11 @@ PY = sys.executable
 # an unscoped daily run is exactly what was failing.
 SHOPIFY_INGEST_TIMEOUT_S = 5400
 
-#: ORDER MATTERS and is cheapest-first on purpose. ingest_shopify.py runs
-#: these sequentially in the order given (fixed 2026-09-04 -- it used to
-#: group ShopifyQL tables ahead of everything else, so the 1.28M-row
-#: `inventory` ran before the 635-row `products` regardless of what you
-#: asked for). Writes are per page/chunk, so a run later killed has still
-#: committed whatever finished -- which is what makes ordering pay:
-#:
-#:   products  ~1.3k rows, seconds  -> Units in Stock, in-stock rates,
-#:                                     Selling Price and the cost model
-#:   inventory ShopifyQL, 30 days   -> DoQ, Total DOH, OOS %
-#:   orders    full history, ~347k  -> the UTM attribution behind CPIS
-#:
-#: Deliberately omits customers/sessions/fulfillments/sales/discounts/
-#: customer_analytics: ~2.9M rows no CPIS column reads. Pass
-#: --shopify-object-types (or 'all') to widen it.
+#: Fetch and save core dashboard sources before the large inventory and
+#: fulfillment datasets. On October 16, Shopify returned sessions but
+#: the 90-minute ingestion limit expired while saving results; sessions
+#: were last and the dashboard stayed on October 14. The ingest now
+#: persists each completed source before starting the next one.
 #: What the nightly fetches from Shopify.
 #:
 #: Was "products,inventory,orders" -- which is why every ShopifyQL dataset
@@ -125,7 +114,7 @@ DEFAULT_SHOPIFY_OBJECT_TYPES = (
     # added_to_cart_rate and sessions_with_cart_additions; nothing else
     # in the warehouse records a cart addition, because a cart is not an
     # order and the Admin API has no cart object.
-    "products,inventory,orders,sales,sales_daily,customer_analytics,discounts,fulfillments,sessions"
+    "products,orders,sessions,sales_daily,sales,customer_analytics,discounts,inventory,fulfillments"
 )
 
 #: --incremental makes orders/customers/products resume from the newest
@@ -134,10 +123,31 @@ DEFAULT_SHOPIFY_OBJECT_TYPES = (
 #: spent 1079s on a ~347k-order full walk and returned ZERO rows before
 #: failing. Falls back to a full walk automatically when bronze is empty
 #: or the watermark can't be read, so a fresh database still backfills.
+#: --ql-days 7, not the 30-day default.
+#:
+#: The six ShopifyQL tables have no incremental mode: every run
+#: re-fetches and re-writes the whole window. At 30 days that is
+#: ~240k session rows alone, re-pulled nightly to capture maybe two
+#: days of revision, and the WRITE is what overruns -- run #74 spent
+#: 1,404s fetching and the remaining ~4,000s writing before the 5,400s
+#: cap killed it.
+#:
+#: `sessions` is last in the object list, so the cap landed on it: on
+#: 2026-10-16 the day 14 Oct held 8,871 sessions against ~60,000 on
+#: every neighbouring day, because it had last been extracted at 03:09
+#: ON the 14th -- three hours of that day -- and no later run got far
+#: enough down the list to replace it. Revenue/session and conversion
+#: rate on the dashboard both spiked that day off the short
+#: denominator.
+#:
+#: Seven days still covers Shopify's own revision of recent figures
+#: and cuts the ShopifyQL work roughly fourfold. A deeper repair is a
+#: one-off: --object-types sessions --date-start/--date-end.
 SHOPIFY_INGEST_CMD = [
     "scripts/ingest_shopify.py",
     "--object-types", DEFAULT_SHOPIFY_OBJECT_TYPES,
     "--incremental",
+    "--ql-days", "7",
 ]
 
 # (label, [script + args], timeout_seconds). Ordered by dependency.
@@ -245,13 +255,56 @@ PHASE_INGEST = [
     ("meta_dpa_products",     ["scripts/fetch_ad_product_insights.py"],     1800),
     ("instagram_posts",       ["scripts/ingest_instagram_chronological.py"], 1800),
     ("shopify_daily",         SHOPIFY_INGEST_CMD,        SHOPIFY_INGEST_TIMEOUT_S),
-    ("bq_inventory",          ["scripts/fetch_bq_inventory_daily.py"],       900),
+    # REMOVED 2026-10-16, by request: BigQuery inventory.
+    #
+    #   ("bq_inventory",     ["scripts/fetch_bq_inventory_daily.py"],   900),
+    #   ("silver_inventory", ["scripts/refresh_master_sku_inventory.py"], 600),
+    #
+    # Shopify is the inventory source this dashboard uses. The CPIS
+    # stock, price, DoQ and in-stock columns read raw_dump_shopify and
+    # the shopify_inventory silver table through cpis_sku_context, and
+    # none of that touches BigQuery.
+    #
+    # What the pull cost for that: 14.1M source rows scanned in
+    # BigQuery, streamed into a 1,085,000-row / 245 MB Postgres table,
+    # every night, on a 1 GB Micro instance -- for one rendered column.
+    #
+    # What it fed: public.bq_inventory_daily -> master_sku_inventory_current
+    # -> twelve mm_* fields on /cpis, of which the UI rendered exactly
+    # one, mm_oos_days_30 (the OOS-days cell), frozen at as_of_date
+    # 2026-10-01 from the moment the pull was dropped.
+    #
+    # 2026-10-16: that cell was re-sourced from shopify_inventory and now
+    # comes off cpis_sku_context.oos_days_30, built in the cpis_sku_context
+    # step below. Same derivation MapleMonk used -- per variant, days with
+    # no sellable stock in the trailing 30; per master, the MAX -- so the
+    # column means what it always did, minus the BigQuery round trip. The
+    # frozen mm_* fields stay on the API for now; nothing renders them.
     # The three creative-asset registers (video / influencer / graphics).
     # Ingest, not silver: two are other Supabase projects and one is a
     # Google Sheet, so this is an external-API pull like every other step
     # in this phase. Feeds ad_asset_map in PHASE_SILVER below.
     ("asset_sources",         ["scripts/ingest_asset_sources.py",
                                "--source", "all"],                          900),
+    # GA4. Neither of these has ever been in the nightly, which is why
+    # ga4_daily_landing sat five days stale and ga4_order_attribution
+    # four on 2026-10-16 while everything around them was current.
+    #
+    # Both need Google credentials, so they will fail in CI until
+    # GOOGLE_CREDS_JSON is set -- the same blocker silver_returns has.
+    # Listed anyway: a step that fails loudly every night is a standing
+    # reminder, where a step nobody wrote down is invisible.
+    #
+    # ga4_landing feeds the Landing Page Analysis GA4 columns.
+    ("ga4_landing",           ["scripts/fetch_ga4_daily.py", "--days", "10"], 1200),
+    # ga4_attribution feeds the last-click order/revenue columns. The
+    # 90-day session lookback makes this the expensive one -- ~91 GiB
+    # scanned, about $0.56 a run -- so it takes a short order window.
+    ("ga4_attribution",       ["scripts/fetch_ga4_order_attribution.py",
+                               "--days", "5"],                              1800),
+    # ARPU by day and by window, split by device. Cheap: six small
+    # Data API calls, no BigQuery.
+    ("ga4_arpu",              ["scripts/fetch_ga4_arpu.py", "--days", "35"],  900),
 ]
 
 PHASE_SILVER = [
@@ -352,7 +405,6 @@ PHASE_SILVER = [
     # metrics to Shopify-attributed revenue; earlier just rebuilds
     # yesterday's answer.
     ("gold_ad_performance",   ["scripts/refresh_ad_performance_summary.py"], 1200),
-    ("silver_inventory",      ["scripts/refresh_master_sku_inventory.py"],   600),
     # Must run AFTER silver_shopify: it reads raw_dump_shopify products
     # and the shopify_inventory silver table, and precomputes the
     # per-SKU stock/price/velocity context the CPIS endpoint used to
