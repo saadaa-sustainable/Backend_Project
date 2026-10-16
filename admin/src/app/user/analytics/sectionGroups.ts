@@ -1,5 +1,5 @@
 /**
- * The five groups the thirteen analytics sections hang under.
+ * The five groups the analytics sections hang under.
  *
  * Thirteen tabs did not fit on one line. Measured 2026-10-14 at 1700px,
  * the strip wrapped onto a second row and "Meta Explorer" fell to it --
@@ -16,6 +16,7 @@
  */
 export type Tab =
   | "dashboard"
+  | "comparative"
   | "creative-testing"
   | "asset-analysis"
   | "ads-analyse"
@@ -40,7 +41,7 @@ export interface Group {
 }
 
 export const GROUPS: Group[] = [
-  { key: "overview", label: "Overview", tabs: ["dashboard"] },
+  { key: "overview", label: "Overview", tabs: ["dashboard", "comparative"] },
   { key: "creative", label: "Creative", tabs: ["creative-testing", "asset-analysis", "untested-assets", "instagram"] },
   { key: "attribution", label: "Attribution", tabs: ["last-click-utm", "first-click", "customer-journey", "landing-page"] },
   { key: "product", label: "Product", tabs: ["ads-analyse", "cpis"] },
