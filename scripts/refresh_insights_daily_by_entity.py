@@ -183,47 +183,32 @@ def refresh(cur, level: str) -> int:
     t0 = time.monotonic()
     print(f"\n=== {level}: rebuilding public.{table}", flush=True)
     cur.execute(ddl(table, id_col))
-    # Build into a side table and swap. A TRUNCATE holds ACCESS
-    # EXCLUSIVE for the whole transaction and blocks every reader --
-    # that took the Creative Testing section down for two minutes once.
+    # A `_new` stage may be left behind by a pre-2026-10-16 run that
+    # died mid-swap. Nothing creates one any more; this only cleans up.
     cur.execute(f"DROP TABLE IF EXISTS public.{table}_new")
-    # Columns only -- NOT `INCLUDING ALL`.
+    # PUBLISHED IN PLACE, not rename-swapped -- and the whole index
+    # dance above is gone with the swap that needed it.
     #
-    # INCLUDING ALL copied the indexes as well, under the names the
-    # server generates from the table it was cloning INTO: this table
-    # ended up carrying `{table}_new_pkey` and `{table}_new_day_idx`,
-    # and the swap below renames the table but not its indexes, so those
-    # `_new` names became the live ones. The next night `ddl()` ran
-    # `CREATE INDEX IF NOT EXISTS ix_{table}_day`, found nothing by that
-    # name, and built a SECOND index over the same column -- then
-    # INCLUDING ALL copied both, and the night after that copied four.
-    # One extra generation per run, 37 exact duplicates on each of the
-    # two insights tables and 72 on order_customer_type by 2026-10-14,
-    # 642 MB of indexes that served 0 scans between them. On 256 MB of
-    # shared_buffers that is what dropped the cache hit ratio to 75%.
+    # A materialized view binds to a table by OID. meta_direct_adset_30d
+    # reads insights_daily_by_adset, so renaming the table to `_old` left
+    # that view pointing at `_old` and the final DROP failed:
     #
-    # So: name every index explicitly here, and rename each one into its
-    # canonical name as part of the swap. The set is then fixed by this
-    # code rather than grown by the server.
-    cur.execute(f"CREATE TABLE public.{table}_new "
-                f"(LIKE public.{table} INCLUDING DEFAULTS INCLUDING STORAGE)")
-    cur.execute(rebuild_sql(table, id_col, absent))
+    #   cannot drop table insights_daily_by_adset_old because other
+    #   objects depend on it
+    #   DETAIL: materialized view meta_direct_adset_30d depends on it
+    #
+    # The step then rolls back and the table never refreshes. It failed
+    # that way on the 2026-10-16 nightly, the first run after the ad set
+    # and campaign snapshots were added.
+    #
+    # DELETE, not TRUNCATE: TRUNCATE holds ACCESS EXCLUSIVE for the
+    # whole insert and would block every reader for its duration, while
+    # DELETE takes ROW EXCLUSIVE and lets readers keep the previous
+    # committed rows until this transaction commits.
+    cur.execute(f"DELETE FROM public.{table}")
+    cur.execute(rebuild_sql(table, id_col, absent).replace(
+        f"public.{table}_new", f"public.{table}"))
     n = cur.rowcount
-    # Indexed AFTER the insert: the bulk load pays no index maintenance,
-    # and the two indexes are built once over the finished table.
-    cur.execute(f"DROP INDEX IF EXISTS public.ix_{table}_new_day")
-    cur.execute(f"ALTER TABLE public.{table}_new "
-                f"ADD CONSTRAINT {table}_new_pkey PRIMARY KEY ({id_col}, day)")
-    cur.execute(f"CREATE INDEX ix_{table}_new_day ON public.{table}_new(day)")
-    # Old index names have to move aside first: renaming a table does
-    # NOT rename its indexes, and the PK name collides otherwise.
-    cur.execute(f"ALTER TABLE public.{table} RENAME TO {table}_old")
-    cur.execute(f"ALTER INDEX IF EXISTS {table}_pkey RENAME TO {table}_old_pkey")
-    cur.execute(f"ALTER INDEX IF EXISTS ix_{table}_day RENAME TO ix_{table}_old_day")
-    cur.execute(f"ALTER TABLE public.{table}_new RENAME TO {table}")
-    cur.execute(f"ALTER INDEX {table}_new_pkey RENAME TO {table}_pkey")
-    cur.execute(f"ALTER INDEX ix_{table}_new_day RENAME TO ix_{table}_day")
-    cur.execute(f"DROP TABLE IF EXISTS public.{table}_old")
     # Fresh table, no statistics: without this the planner reads it as
     # empty until autoanalyze happens to visit, which is how
     # insights_daily_by_ad came to be 11 days stale.
