@@ -501,6 +501,52 @@ def _to_tuples(rows, *, property_id: str, tz: str, sampled: bool,
     return out
 
 
+#: A day GA4 has not finished processing comes back with its landing
+#: pages unresolved, piled into `(not set)`, AND with a session total
+#: well above the settled figure. Storing it puts a number on the
+#: dashboard that is wrong by more than half.
+#:
+#: Measured on this property, the two states do not overlap:
+#:
+#:     settled days      677 - 1,517 (not set)    1.3% of sessions
+#:     2026-10-15 @12:03   43,228                  38.1%   -> settled to 61,256
+#:     2026-10-16 @11:03   46,151                  38.9%   -> total read 118,652
+#:
+#: 2026-10-15 was fetched the morning after and read 113,594 sessions
+#: against a true 61,256; the same fetch a few hours later returned the
+#: settled figure. 2026-10-16 did it again the next morning. The window
+#: re-fetch would eventually have healed both, but the dashboard showed
+#: a doubled GA4 session count until it did -- and every ratio built on
+#: it (conversion rate, ARPU, bounce, the GA4/Shopify delta column) was
+#: wrong for that day meanwhile.
+#:
+#: 10% sits an order of magnitude above every settled day and a quarter
+#: of the way to every provisional one.
+NOT_SET_REJECT_SHARE = 0.10
+
+
+def _drop_unsettled_days(rows: list[tuple]) -> tuple[list[tuple], list[tuple]]:
+    """Split fetched rows into days worth storing and days to skip.
+
+    Returns (keep, skipped_report). An absent day renders as an em dash,
+    which is a truthful statement about a day GA4 cannot yet describe;
+    a doubled session count is not.
+    """
+    # Positional: property_id, day, landing_page, channel_group, sessions...
+    by_day: dict[date, list[int]] = {}
+    for r in rows:
+        day, page, sessions = r[1], r[2], r[4]
+        tot, unset = by_day.setdefault(day, [0, 0])
+        by_day[day] = [tot + sessions, unset + (sessions if page in ("(not set)", "") else 0)]
+
+    unsettled = {d for d, (tot, unset) in by_day.items()
+                 if tot > 0 and unset / tot >= NOT_SET_REJECT_SHARE}
+    if not unsettled:
+        return rows, []
+    report = sorted((d, by_day[d][0], by_day[d][1]) for d in unsettled)
+    return [r for r in rows if r[1] not in unsettled], report
+
+
 def _write(conn_factory, rows: list[tuple]) -> int:
     written = 0
     for i in range(0, len(rows), WRITE_CHUNK):
@@ -628,6 +674,14 @@ def main() -> int:
             raise _explain(exc) from exc
         tuples = _to_tuples(rows, property_id=args.property, tz=tz,
                             sampled=sampled, thresholded=thresholded)
+        # A day GA4 is still processing is worse than an absent one: it
+        # arrives inflated, overwrites the row that was right, and every
+        # ratio built on it reads wrong until the next window re-fetch.
+        tuples, unsettled = _drop_unsettled_days(tuples)
+        for day, tot, unset in unsettled:
+            print(f"  {day}  SKIPPED -- still processing: {unset:,} of {tot:,} "
+                  f"sessions ({100.0 * unset / tot:.0f}%) have no landing page. "
+                  f"Re-run once GA4 settles the day.")
         n = 0 if args.dry_run else _write(_conn, tuples)
         total += len(tuples)
         any_sampled = any_sampled or sampled
