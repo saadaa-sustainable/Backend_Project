@@ -92,10 +92,24 @@ jobs:
     # above the sum of the steps that actually run long.
     #
     # This is a safety net, not an expectation: a healthy run is still
-    # ~45-60 min. GitHub's own hard ceiling is 6h; 240 leaves room for a
-    # Meta-throttle day without letting a wedged run burn the whole
-    # allowance.
-    timeout-minutes: 240
+    # ~45-60 min. GitHub's own hard ceiling is 6h.
+    #
+    # Raised from 240 (2026-10-13). 240 stopped being a safety net and
+    # became the thing that broke the pipeline. Measured on run
+    # 38333177098: started 01:39:39Z, cancelled 05:40Z at exactly 4h01m,
+    # mid-`landing_page_gold` -- the SECOND-TO-LAST step. `snapshot_views`
+    # is last, so the four meta_direct_* materialized views feeding the
+    # founder sheet never refreshed, and they sat at 2026-10-10 while
+    # insights_daily_by_ad already held 10-12.
+    #
+    # The run was not wedged. It had completed every ingest and every
+    # silver step and needed maybe ten more minutes. The pipeline got
+    # slower because the database is saturated (see
+    # docs/explain_toolkit.sql), not because a step hung -- each step
+    # carries its own timeout in refresh_all_daily.py, which is where a
+    # genuinely stuck step gets killed. The job cap only has to be
+    # larger than their sum.
+    timeout-minutes: 330
 
     # actions:read is what the duplicate guard below needs to see this
     # workflow's own run history. Nothing here writes to the repo.
@@ -123,6 +137,22 @@ jobs:
         # workflow_dispatch with force_refresh -- not an automatic
         # retry.
         #
+        # EXCEPT when the earlier attempt never finished (2026-10-13).
+        # Counting attempts regardless of outcome meant three days with
+        # no refresh at all, and a green tick on every one of them:
+        #
+        #   01:39Z  workflow_dispatch  ran 4h01m, CANCELLED on the job cap
+        #   07:xx Z schedule           guard saw an attempt -> skipped
+        #                              every step -> conclusion: success
+        #
+        # So an unfinished run both failed to do the work and suppressed
+        # the one chance left to do it. A run that SUCCEEDED, or that is
+        # still going, holds the slot as before -- that is the case the
+        # attempt-counting was written for. One that was cancelled,
+        # failed or timed out does not, because there is nothing to
+        # protect: the database is not busy with it and the day's data
+        # is not in.
+        #
         # The concurrency group below still serialises writes; this
         # stops a second run being started at all, which the group
         # alone would only queue.
@@ -142,15 +172,19 @@ jobs:
           # day the rest of the warehouse means.
           IST_DAY="$(TZ=Asia/Kolkata date +%F)"
           CUTOFF="$(date -u -d "$IST_DAY 00:00:00 +0530" +%Y-%m-%dT%H:%M:%SZ)"
+          # status != completed covers queued and in_progress: another
+          # run is working right now, so this one stays out of its way.
           EARLIER="$(gh run list \
               --repo "${{ github.repository }}" \
               --workflow daily-refresh.yml \
               --limit 30 \
-              --json databaseId,createdAt,event \
+              --json databaseId,createdAt,event,status,conclusion \
               --jq "[.[] | select(.databaseId != ${{ github.run_id }})
                         | select(.event != \"pull_request\")
-                        | select(.createdAt > \"$CUTOFF\")] | length")"
-          echo "refresh attempts since $CUTOFF (IST day $IST_DAY, excluding this one): $EARLIER"
+                        | select(.createdAt > \"$CUTOFF\")
+                        | select(.status != \"completed\"
+                                 or .conclusion == \"success\")] | length")"
+          echo "refresh attempts since $CUTOFF (IST day $IST_DAY, excluding this one) that succeeded or are still running: $EARLIER"
           if [ "$EARLIER" -gt 0 ]; then
             echo "One already ran today -- skipping. Dispatch with force_refresh to override."
             echo "skip=true" >> "$GITHUB_OUTPUT"
