@@ -52,6 +52,7 @@ import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
 import { RollupRow, fetchAdsAnalyseRollup } from "@/lib/api";
 import { getAdTableTotals, sumTableRows, totalUnavailableReason, type TableTotals } from "./adsTableTotals";
+import { fetchAllPages } from "@/lib/fetchAllPages";
 
 // ─────────────────────────────────────────────────────────────────────
 // Category definitions — mirrors CTD dashboard.js:5874-5896 (aeCategorise)
@@ -2722,6 +2723,13 @@ export function AdsAnalyse() {
           filename="ads_analyse"
           window={datePreset}
           disabled={loading || !rows.length}
+          totalRows={total}
+          fetchAll={() => fetchAllPages<Record<string, unknown>>(
+            async (offset, limit) => {
+              const res = await fetchAdsAnalyse({ ...filters, limit, offset });
+              return { rows: res.rows as unknown as Record<string, unknown>[],
+                       total: res.total };
+            })}
         />
       </div>
 

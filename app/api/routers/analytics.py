@@ -3349,6 +3349,96 @@ _LANDING_PAGE_TYPE_OTHER_SQL = (
 )
 
 
+# ----------------------------------------------------------------------
+# Landing page gender
+# ----------------------------------------------------------------------
+#: THE TRAP: "women" CONTAINS "men". A substring match files every
+#: women's page under men -- /collections/women-airy-linen-short-kurta
+#: would be a men's page. Both patterns therefore demand a token
+#: boundary: the word starts at the path start or after a `-` or `/`,
+#: and ends at a `-` or `/` or the path end. Measured over all 190,096
+#: distinct paths, the two patterns overlap on ZERO of them.
+#:
+#: `wo-?mens?` and `mens?` also take the plural and the hyphenated
+#: "wo-men" spelling, both of which occur in the catalogue's slugs.
+_LANDING_PAGE_GENDER_SLUG: dict[str, str] = {
+    "women": r"landing_page_path ~ '(^|[-/])wo-?mens?([-/]|$)'",
+    "men":   r"landing_page_path ~ '(^|[-/])mens?([-/]|$)'",
+}
+
+
+def _landing_page_gender_tag_sql(tag: str) -> str:
+    """Shopify's own `men` / `women` product tags, for product pages.
+
+    The slug alone leaves half the catalogue's traffic uncategorised,
+    because a collection like /collections/viscose-palazzo-pants names
+    the garment and not who wears it. Tags recover the product pages:
+    measured 2026-10-16 over the trailing 30 days, they move 153,466
+    sessions out of "other", taking it from 50.6% of traffic to 42.6%.
+
+    An IN-subquery rather than a join, so the row shape of the
+    surrounding SELECT is untouched -- Postgres hashes it once rather
+    than running it per row. The lookup reads 6,114 blocks against the
+    ~55,000 the endpoint already reads, so it is noise in the total.
+
+    Tags are matched exactly or as the head of a compound ("men",
+    "men topwear"), never as a substring: a bare LIKE '%men%' would
+    bring back every "women ..." tag and reintroduce the trap above.
+    """
+    # COALESCE(..., FALSE) is load-bearing, and its absence was a bug.
+    # `substring()` is NULL on every non-product page, and NULL IN
+    # (subquery) is NULL, not FALSE. That made the women expression NULL
+    # for a men's COLLECTION page, so `NOT (women) AND (men)` was NULL
+    # and the row fell out of men -- while "other" correctly rejected
+    # it, leaving it in no bucket at all. Measured before the fix: the
+    # three buckets returned 2,800 of 2,872 pages and 1.27M of 1.79M
+    # sessions. A three-valued predicate must be collapsed to two before
+    # it can be negated.
+    return (
+        "COALESCE(substring(landing_page_path from '^/products/([^/?#]+)') IN ("
+        " SELECT p.handle FROM ("
+        "  SELECT DISTINCT ON (source_id) raw_payload->>'handle' AS handle,"
+        "         raw_payload->'tags' AS tags"
+        "  FROM public.raw_dump_shopify WHERE object_type = 'products'"
+        "  ORDER BY source_id, extracted_at DESC"
+        " ) p, LATERAL jsonb_array_elements_text(p.tags) AS t"
+        f" WHERE p.handle IS NOT NULL"
+        f"   AND (lower(t) = '{tag}' OR lower(t) LIKE '{tag} %')), FALSE)"
+    )
+
+
+_LANDING_PAGE_WOMEN_SQL = (
+    f"({_LANDING_PAGE_GENDER_SLUG['women']}"
+    f" OR {_landing_page_gender_tag_sql('women')})"
+)
+_LANDING_PAGE_MEN_SQL = (
+    f"({_LANDING_PAGE_GENDER_SLUG['men']}"
+    f" OR {_landing_page_gender_tag_sql('men')})"
+)
+
+#: The three buckets PARTITION the pages, like the page_type ones do:
+#: every row lands in exactly one, so the three filtered counts add up
+#: to the unfiltered total and a reader can trust the split.
+#:
+#: Women wins a tie. Eight products carry both tags (bundles and
+#: pick-any sets), and a page cannot be in two buckets without breaking
+#: the partition; the women's catalogue is the larger of the two, so a
+#: both-tagged page is likelier to be read as women's.
+_LANDING_PAGE_GENDER_SQL: dict[str, str] = {
+    "women": _LANDING_PAGE_WOMEN_SQL,
+    "men": f"(NOT {_LANDING_PAGE_WOMEN_SQL} AND {_LANDING_PAGE_MEN_SQL})",
+}
+
+#: Everything neither bucket claims: the home page, and the collections
+#: whose slug names a garment rather than who wears it. COALESCE(...,
+#: TRUE) for the same reason the page_type version has it -- a NULL
+#: path is not men's and not women's, so "other" is where it belongs
+#: rather than vanishing from all three.
+_LANDING_PAGE_GENDER_OTHER_SQL = (
+    f"COALESCE(NOT ({_LANDING_PAGE_WOMEN_SQL} OR {_LANDING_PAGE_MEN_SQL}), TRUE)"
+)
+
+
 class LandingPageRow(BaseModel):
     """One landing page, with metrics from BOTH sources side by side.
 
@@ -3685,6 +3775,15 @@ async def get_landing_pages(
         default=None,
         description="Restrict to one section: " + ", ".join(_LANDING_PAGE_TYPE_SQL) + ", other. Omit for all pages.",
     ),
+    gender: str | None = Query(
+        default=None,
+        description="Restrict to men, women, or other. Read from the page "
+                    "slug, and for product pages from Shopify's own product "
+                    "tags. `other` is every page neither claims -- chiefly "
+                    "the home page and collections named after the garment "
+                    "rather than who wears it. The three partition the set, "
+                    "so their counts add up to the unfiltered total.",
+    ),
     sort: str = Query(default="ga4_sessions", description="One of " + ", ".join(_LANDING_PAGE_SORT_COLUMNS)),
     source: str | None = Query(
         default=None,
@@ -3747,6 +3846,14 @@ async def get_landing_pages(
         else:
             raise HTTPException(
                 400, f"page_type must be one of {sorted(_LANDING_PAGE_TYPE_SQL) + ['other']}")
+    if gender:
+        if gender == "other":
+            where_clauses.append(_LANDING_PAGE_GENDER_OTHER_SQL)
+        elif gender in _LANDING_PAGE_GENDER_SQL:
+            where_clauses.append(_LANDING_PAGE_GENDER_SQL[gender])
+        else:
+            raise HTTPException(
+                400, f"gender must be one of {sorted(_LANDING_PAGE_GENDER_SQL) + ['other']}")
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     # ONE statement, not two. The previous form ran the whole FULL OUTER
@@ -4889,6 +4996,12 @@ class CpisUtmRow(BaseModel):
     ip_doq: float | None            # in-process days of cover
     total_doh: float | None         # days on hand from Shopify stock
     oos_pct: float | None           # % of variant-days out of stock, 30d
+    # Depth beside oos_pct's breadth: days the WORST variant of this
+    # master sat out of stock in the trailing 30. Replaces
+    # mm_oos_days_30, which held the same MAX-across-variants figure but
+    # came through MapleMonk/BigQuery and froze at 2026-10-01 when that
+    # pull was dropped. Same derivation, now off shopify_inventory.
+    oos_days_30: int | None
     tentative_replenish_date: date | None  # today + lead_time
     # Halo attribution share
     halo_sale_pct: float | None
@@ -5698,7 +5811,7 @@ async def get_cpis_utm(
       ),
       velocity_ctx AS (
         SELECT master_sku, units_sold_30d, avg_daily_units, variant_days,
-               oos_variant_days, oos_pct
+               oos_variant_days, oos_pct, oos_days_30
         FROM public.cpis_sku_context
       ),
       products_as_of AS (
@@ -5860,6 +5973,11 @@ async def get_cpis_utm(
              -- variant-days closed with no sellable stock. See
              -- velocity_ctx for why the MapleMonk version was wrong.
              vc.oos_pct                                      AS oos_pct,
+             -- Depth, not breadth: days the worst variant was out of
+             -- stock in the trailing 30. Was mm.oos_days_30 until the
+             -- BigQuery pull behind it was dropped and it froze at
+             -- 2026-10-01; same derivation, now off shopify_inventory.
+             vc.oos_days_30                                  AS oos_days_30,
              -- Tentative replenish date: today + lead_time. Naive
              -- projection -- assumes replenishment kicks off right now
              -- and lead-time is a straight-line delay from PO to stock.
@@ -7426,6 +7544,26 @@ class DashboardSessionsResponse(BaseModel):
     #: All traffic, kept so the tile can say what share of it is Meta
     #: rather than quoting a smaller number with no explanation.
     all_sessions: int | None
+    #: GA4's ARPU for the window: GA4 revenue / GA4 active users, both
+    #: GA4's own figures. NOT Shopify revenue -- the point of this
+    #: number is that GA4 deduplicates the user count itself, and
+    #: dividing someone else's revenue by it would describe neither.
+    #:
+    #: Summed from ga4_arpu_daily over the selected range, which means
+    #: it is revenue per active user-DAY. GA4 deduplicates activeUsers
+    #: per query window, so a user active on eight days is one user in
+    #: GA4's own 30-day figure and eight here: 1,390,380 user-days
+    #: against 1,164,394 users over 2026-09-16..10-15, ARPU 31.42
+    #: against GA4's 37.52.
+    #:
+    #: Daily on purpose. A stored-window table matched GA4 exactly but
+    #: only for the windows it held, and answered a custom date range
+    #: with nothing. This answers every range, and the UI names the
+    #: denominator so the two are not mistaken for each other.
+    ga4_arpu: float | None = None
+    #: User-DAYS over the range, not unique users.
+    ga4_active_users: int | None = None
+    ga4_revenue: float | None = None
     session_data_from: date | None
     session_data_to: date | None
     available_days: int
@@ -7434,6 +7572,15 @@ class DashboardSessionsResponse(BaseModel):
 class DashboardSessionTrendPoint(BaseModel):
     day: date
     sessions: int | None
+    #: GA4 revenue / GA4 active users, for THIS day.
+    #:
+    #: Exact at day grain, unlike the windowed figure on the card: GA4
+    #: deduplicates active users per query, and a single day is one
+    #: deduplication window. The card's number is a sum of these
+    #: denominators and so counts a repeat visitor once per day; a
+    #: point on this line does not.
+    ga4_arpu: float | None = None
+    ga4_active_users: int | None = None
     ad_spend: float | None
     attributed_revenue: float
     attributed_orders: int
@@ -7478,6 +7625,13 @@ async def get_dashboard_session_trend(
                 SELECT s.day, s.meta_sessions AS sessions
                 FROM public.shopify_sessions_daily s, bounds b
                 WHERE s.day BETWEEN b.lo AND b.hi
+            ), arpu_days AS (
+                -- `(all)` only: the per-device rows beside it would
+                -- double-count anyone who used two devices that day.
+                SELECT g.day, g.active_users, g.total_revenue
+                FROM public.ga4_arpu_daily g, bounds b
+                WHERE g.device_category = '(all)'
+                  AND g.day BETWEEN b.lo AND b.hi
             ), ad_days AS (
                 SELECT d.day, SUM(d.spend) AS spend
                 FROM insights_daily_by_ad d, bounds b
@@ -7495,11 +7649,13 @@ async def get_dashboard_session_trend(
                 SELECT MIN(day) AS first_day, MAX(day) AS last_day FROM insights_daily_by_ad
             )
             SELECT d.day, s.sessions, a.spend, o.revenue, o.orders,
-                   sb.first_day, sb.last_day
+                   sb.first_day, sb.last_day,
+                   g.active_users, g.total_revenue
             FROM days d
             LEFT JOIN session_days s ON s.day = d.day
             LEFT JOIN ad_days a ON a.day = d.day
             LEFT JOIN order_days o ON o.day = d.day
+            LEFT JOIN arpu_days g ON g.day = d.day
             CROSS JOIN spend_bounds sb
             ORDER BY d.day
         """), {"df": date_from, "dt": date_to})).all()
@@ -7527,8 +7683,16 @@ async def get_dashboard_session_trend(
         revenue = float((row[3] if row else 0) or 0)
         orders = int((row[4] if row else 0) or 0)
         denominator = sessions if sessions and sessions > 0 else None
+        # NULL where GA4 has no row for the day, never 0: the ARPU
+        # table starts later than the session history, and a zero line
+        # would read as "nobody spent anything" rather than "not
+        # measured here".
+        g_users = int(row[7]) if row and row[7] is not None else None
+        g_rev = float(row[8]) if row and row[8] is not None else None
         points.append(DashboardSessionTrendPoint(
             day=day, sessions=sessions, ad_spend=spend,
+            ga4_active_users=g_users,
+            ga4_arpu=(g_rev / g_users) if g_users and g_rev is not None else None,
             attributed_revenue=revenue, attributed_orders=orders,
             cost_per_session=spend / denominator if denominator and spend is not None else None,
             revenue_per_session=revenue / denominator if denominator else None,
@@ -7557,6 +7721,272 @@ async def _get_dashboard_order_groups(
         + where + "GROUP BY utm_source, 2"
     ), params)
     return [tuple(row) for row in result.all()]
+
+
+# ----------------------------------------------------------------------
+# Comparative analysis (Overview)
+# ----------------------------------------------------------------------
+#: Day-over-day comparison on three fixed bases. One ANCHOR day is
+#: measured against the same metrics on three earlier days:
+#:
+#:   yesterday    anchor - 1 day    raw movement, noisiest
+#:   last_week    anchor - 7 days   same weekday, so Friday meets Friday
+#:   last_month   anchor - 1 month  same date, so the 16th meets the 16th
+#:
+#: Seven days back rather than "the previous Friday" by name because
+#: retail traffic is strongly weekday-shaped -- comparing a Friday with
+#: a Thursday mostly measures the day of the week, not the business. One
+#: calendar month back rather than 30 days for the same reason in
+#: reverse: the 16th is the 16th whatever weekday it lands on, which is
+#: what a month-on-month read of a date is asking for. Postgres clamps a
+#: month subtraction to the last valid day, so 31 Mar - 1 month gives
+#: 28/29 Feb rather than an error.
+#:
+#: All three bases come back in ONE response. They are four cheap day
+#: lookups against an indexed day column, and returning them together
+#: makes the basis toggle instant instead of a refetch each time -- the
+#: point of the section is reading one movement three ways.
+_COMPARATIVE_BASES: dict[str, str] = {
+    "yesterday": "1 day",
+    "last_week": "7 days",
+    "last_month": "1 month",
+}
+
+
+class ComparativeMetrics(BaseModel):
+    """One day's figures for one row. Null where that day has no data."""
+    # Products
+    sales: float | None = None
+    units: int | None = None
+    # Landing pages
+    sessions: int | None = None
+    atc: int | None = None
+    #: Percent, 0-100. Purchases/sessions on GA4; Shopify has no purchase
+    #: event at this grain and uses reached-checkout/sessions, a strictly
+    #: earlier funnel step, so the UI labels which one is showing.
+    conversion_rate: float | None = None
+
+
+class ComparativeRow(BaseModel):
+    #: master_sku for products, landing page path for landing pages.
+    key: str
+    current: ComparativeMetrics
+    yesterday: ComparativeMetrics
+    last_week: ComparativeMetrics
+    last_month: ComparativeMetrics
+
+
+class ComparativeResponse(BaseModel):
+    dimension: str
+    source: str | None
+    #: The day everything is measured against. Echoed back because the
+    #: request may name a day the source has not landed yet (GA4 runs a
+    #: day behind Shopify) and the UI has to say which day it drew.
+    anchor: date
+    #: True when the anchor is the current date, so its figures cover
+    #: only the hours elapsed so far and are NOT comparable with the
+    #: three complete days beside them. Measured 2026-10-16 at 16:30
+    #: IST, product sales read 89,706 against 591,959 the day before --
+    #: a 85% "drop" that is only the clock. The UI says so on the face
+    #: of the section rather than letting the deltas be read straight.
+    anchor_is_partial: bool
+    basis_days: dict[str, date]
+    rows: list[ComparativeRow]
+    #: Summed over the rows RETURNED, not the whole store. For products
+    #: that is the tracked master-SKU catalogue, which was 88% of store
+    #: sales and 74% of units on 2026-10-15; the rest sits on SKUs
+    #: outside the SD/SM/SU master pattern.
+    totals: ComparativeRow
+    row_count: int
+
+
+#: Four day-slots pivoted in one pass. A FILTER per slot beats four
+#: scans or a self-join: the day column is indexed, the IN list is four
+#: literals, and every matching row is visited once.
+_COMPARATIVE_SQL: dict[str, str] = {
+    "products": """
+SELECT master_sku AS key,
+       {agg}
+FROM cpis_by_sku_daily
+WHERE day IN (:d_current, :d_yesterday, :d_last_week, :d_last_month)
+GROUP BY master_sku
+""",
+    "landing-pages:ga4": """
+SELECT landing_page AS key,
+       {agg}
+FROM ga4_daily_landing
+WHERE day IN (:d_current, :d_yesterday, :d_last_week, :d_last_month)
+  AND landing_page IS NOT NULL
+GROUP BY landing_page
+""",
+    "landing-pages:shopify": """
+SELECT landing_page_path AS key,
+       {agg}
+FROM landing_page_sessions_daily
+WHERE session_date IN (:d_current, :d_yesterday, :d_last_week, :d_last_month)
+  AND landing_page_path IS NOT NULL
+GROUP BY landing_page_path
+""",
+}
+
+#: Per source, the SQL for each metric inside a slot's FILTER. `{d}` is
+#: the day parameter for that slot.
+_COMPARATIVE_METRICS: dict[str, dict[str, str]] = {
+    "products": {
+        "sales": "COALESCE(SUM(order_revenue) FILTER (WHERE day = {d}), 0)",
+        "units": "COALESCE(SUM(order_units) FILTER (WHERE day = {d}), 0)",
+    },
+    "landing-pages:ga4": {
+        "sessions": "COALESCE(SUM(sessions) FILTER (WHERE day = {d}), 0)",
+        "atc": "COALESCE(SUM(add_to_carts) FILTER (WHERE day = {d}), 0)",
+        "conversion_rate": (
+            "ROUND(100.0 * SUM(purchases) FILTER (WHERE day = {d}) "
+            "/ NULLIF(SUM(sessions) FILTER (WHERE day = {d}), 0), 2)"),
+    },
+    "landing-pages:shopify": {
+        "sessions": "COALESCE(SUM(sessions) FILTER (WHERE session_date = {d}), 0)",
+        "atc": ("COALESCE(SUM(sessions_with_cart_additions) "
+                "FILTER (WHERE session_date = {d}), 0)"),
+        "conversion_rate": (
+            "ROUND(100.0 * SUM(sessions_that_reached_checkout) "
+            "FILTER (WHERE session_date = {d}) "
+            "/ NULLIF(SUM(sessions) FILTER (WHERE session_date = {d}), 0), 2)"),
+    },
+}
+
+#: Which metric orders the table, per dimension. Biggest current value
+#: first -- the rows worth comparing are the ones carrying the volume.
+_COMPARATIVE_SORT = {"products": "sales", "landing-pages": "sessions"}
+
+#: Newest day each source holds, for clamping the anchor.
+_COMPARATIVE_NEWEST: dict[str, str] = {
+    "products": "SELECT MAX(day) FROM cpis_by_sku_daily",
+    "landing-pages:ga4": "SELECT MAX(day) FROM ga4_daily_landing",
+    "landing-pages:shopify":
+        "SELECT MAX(session_date) FROM landing_page_sessions_daily",
+}
+
+
+def _comparative_key(dimension: str, source: str) -> str:
+    return dimension if dimension == "products" else dimension + ":" + source
+
+
+@router.get("/dashboard/comparative", response_model=ComparativeResponse)
+@cached_analytics(ttl=300.0)
+async def get_dashboard_comparative(
+    session: SessionDep,
+    dimension: Literal["products", "landing-pages"] = Query(
+        default="products", description="Which table to compare."),
+    source: Literal["ga4", "shopify"] = Query(
+        default="ga4",
+        description="Landing pages only. GA4 reads purchases for the "
+                    "conversion rate; Shopify has no purchase event at "
+                    "this grain and reads reached-checkout instead."),
+    anchor: date | None = Query(
+        default=None,
+        description="Day under comparison. Defaults to the newest day the "
+                    "chosen source holds, which is not the same day for "
+                    "every source."),
+    limit: int = Query(default=25, ge=1, le=200),
+) -> ComparativeResponse:
+    """One day against yesterday, the same weekday last week, and the
+    same date last month.
+
+    All three bases come back together; the UI switches between them
+    without another request.
+    """
+    key = _comparative_key(dimension, source)
+    # Clamp to what the source actually holds. GA4 lands a day behind
+    # Shopify, so asking for today is a reasonable request that would
+    # otherwise come back empty with nothing explaining why.
+    newest = (await session.execute(text(_COMPARATIVE_NEWEST[key]))).scalar()
+    empty = ComparativeMetrics()
+    if newest is None:
+        return ComparativeResponse(
+            dimension=dimension,
+            source=None if dimension == "products" else source,
+            anchor=date.today(), anchor_is_partial=True, basis_days={}, rows=[],
+            totals=ComparativeRow(key="TOTAL", current=empty, yesterday=empty,
+                                  last_week=empty, last_month=empty),
+            row_count=0)
+    resolved = min(anchor, newest) if anchor else newest
+
+    # Date arithmetic in Postgres, not Python: '1 month' has to clamp to
+    # the month's last valid day, which timedelta cannot express. All
+    # three in one statement rather than one round trip each.
+    #
+    # CAST(:a AS date), not :a::date -- SQLAlchemy's text() reads the
+    # colon in `::` as the start of another bind parameter and emits
+    # SQL the driver rejects.
+    basis_sql = ", ".join(
+        "CAST(CAST(:a AS date) - INTERVAL '" + interval + "' AS date) AS " + name
+        for name, interval in _COMPARATIVE_BASES.items())
+    basis_row = (await session.execute(
+        text("SELECT " + basis_sql), {"a": resolved})).mappings().one()
+    basis_days: dict[str, date] = {name: basis_row[name] for name in _COMPARATIVE_BASES}
+    params: dict[str, object] = {"d_current": resolved}
+    for name, day in basis_days.items():
+        params["d_" + name] = day
+
+    metrics = _COMPARATIVE_METRICS[key]
+    slots = ["current", *_COMPARATIVE_BASES]
+    agg = ",\n       ".join(
+        expr.format(d=":d_" + slot) + " AS " + slot + "_" + metric
+        for slot in slots for metric, expr in metrics.items())
+    sort_metric = _COMPARATIVE_SORT[dimension]
+    sql = (_COMPARATIVE_SQL[key].format(agg=agg)
+           + "ORDER BY current_" + sort_metric + " DESC NULLS LAST, key\n"
+           + "LIMIT :limit")
+    params["limit"] = limit
+
+    result = (await session.execute(text(sql), params)).mappings().all()
+
+    def pick(row, slot: str) -> ComparativeMetrics:
+        out: dict[str, float | int | None] = {}
+        for m in metrics:
+            raw = row[slot + "_" + m]
+            out[m] = None if raw is None else (
+                float(raw) if m in ("sales", "conversion_rate") else int(raw))
+        return ComparativeMetrics(**out)
+
+    rows = [ComparativeRow(key=r["key"], current=pick(r, "current"),
+                           yesterday=pick(r, "yesterday"),
+                           last_week=pick(r, "last_week"),
+                           last_month=pick(r, "last_month"))
+            for r in result]
+
+    def total(slot: str) -> ComparativeMetrics:
+        out: dict[str, float | int | None] = {}
+        for m in metrics:
+            if m == "conversion_rate":
+                continue
+            vals = [v for r in rows
+                    if (v := getattr(getattr(r, slot), m)) is not None]
+            out[m] = sum(vals) if vals else None
+        # A rate cannot be summed. Rebuild it from the slot's own
+        # numerator and denominator so a 40k-session page outweighs a
+        # 12-session one instead of counting the same.
+        if "conversion_rate" in metrics:
+            sess = 0
+            conv = 0.0
+            for r in rows:
+                slot_metrics = getattr(r, slot)
+                s = slot_metrics.sessions or 0
+                sess += s
+                conv += (slot_metrics.conversion_rate or 0.0) / 100.0 * s
+            out["conversion_rate"] = round(100.0 * conv / sess, 2) if sess else None
+        return ComparativeMetrics(**out)
+
+    return ComparativeResponse(
+        dimension=dimension,
+        source=None if dimension == "products" else source,
+        anchor=resolved, anchor_is_partial=resolved >= date.today(),
+        basis_days=basis_days, rows=rows,
+        totals=ComparativeRow(key="TOTAL", current=total("current"),
+                              yesterday=total("yesterday"),
+                              last_week=total("last_week"),
+                              last_month=total("last_month")),
+        row_count=len(rows))
 
 
 @router.get("/dashboard/sessions", response_model=DashboardSessionsResponse)
@@ -7610,10 +8040,35 @@ async def get_dashboard_sessions(
                 detail="Session summary predates the Meta split. Run scripts/refresh_dashboard_sessions.py once.",
             ) from exc
         raise
+    # ARPU comes from a separate, tiny table and must not take the
+    # whole tile down if it is missing -- it was added later than the
+    # rest of this response.
+    arpu = {}
+    try:
+        # The `(all)` rows only: the per-device rows beside them would
+        # double-count anyone who used two devices in a day.
+        where = "WHERE device_category = '(all)'"
+        aparams: dict[str, object] = {}
+        if date_from and date_to:
+            where += " AND day BETWEEN :af AND :at"
+            aparams = {"af": date_from, "at": date_to}
+        a = (await session.execute(text(
+            "SELECT COALESCE(SUM(active_users), 0), COALESCE(SUM(total_revenue), 0) "
+            f"FROM public.ga4_arpu_daily {where}"
+        ), aparams)).first()
+        if a and a[0]:
+            arpu = {"ga4_arpu": float(a[1]) / int(a[0]),
+                    "ga4_active_users": int(a[0]),
+                    "ga4_revenue": float(a[1])}
+    except DBAPIError:
+        # Table not built yet. The session figures are still good.
+        pass
+
     return DashboardSessionsResponse(
         total_sessions=int(row[0]) if row[0] is not None else None,
         all_sessions=int(row[1]) if row[1] is not None else None,
         session_data_from=row[2], session_data_to=row[3], available_days=int(row[4]),
+        **arpu,
     )
 
 

@@ -37,6 +37,7 @@ import {
   Segmented,
   filterControlClass,
 } from "./SectionChrome";
+import { fetchAllPages } from "@/lib/fetchAllPages";
 
 const PAGE_SIZE = 60;
 
@@ -281,6 +282,13 @@ export function Instagram() {
               rows={rows as unknown as Record<string, unknown>[]}
               filename="instagram"
               disabled={loading || !rows.length}
+              totalRows={total}
+              fetchAll={() => fetchAllPages<Record<string, unknown>>(
+                async (offset, limit) => {
+                  const res = await fetchInstagram({ ...filters, limit, offset });
+                  return { rows: res.rows as unknown as Record<string, unknown>[],
+                           total: res.total };
+                })}
             />
           </>
         }

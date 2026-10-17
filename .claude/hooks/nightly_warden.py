@@ -33,7 +33,14 @@ ROOT = Path(__file__).resolve().parents[2]
 #:
 #: Derived from .github/workflows/daily-refresh.yml, which invokes
 #: scripts/refresh_all_daily.py, which imports from app/.
-NIGHTLY_PATHS = ("scripts/", "app/", "utils/", ".github/workflows/")
+#:
+#: sql/ is in the list because refresh_snapshot_views.py READS
+#: sql/snapshot_views.sql at run time and re-applies it whenever a view
+#: has drifted off its source table. A change there is executed by the
+#: cron as surely as a change to a script -- and it was missed on the
+#: first pass, which left sql/snapshot_views.sql drifting silently
+#: while the warden reported everything around it.
+NIGHTLY_PATHS = ("scripts/", "app/", "utils/", "sql/", ".github/workflows/")
 
 #: 01:30 UTC in daily-refresh.yml. The real trigger is an external
 #: workflow_dispatch a few minutes later; the cron time is the honest

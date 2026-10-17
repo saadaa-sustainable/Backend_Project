@@ -123,10 +123,31 @@ DEFAULT_SHOPIFY_OBJECT_TYPES = (
 #: spent 1079s on a ~347k-order full walk and returned ZERO rows before
 #: failing. Falls back to a full walk automatically when bronze is empty
 #: or the watermark can't be read, so a fresh database still backfills.
+#: --ql-days 7, not the 30-day default.
+#:
+#: The six ShopifyQL tables have no incremental mode: every run
+#: re-fetches and re-writes the whole window. At 30 days that is
+#: ~240k session rows alone, re-pulled nightly to capture maybe two
+#: days of revision, and the WRITE is what overruns -- run #74 spent
+#: 1,404s fetching and the remaining ~4,000s writing before the 5,400s
+#: cap killed it.
+#:
+#: `sessions` is last in the object list, so the cap landed on it: on
+#: 2026-10-16 the day 14 Oct held 8,871 sessions against ~60,000 on
+#: every neighbouring day, because it had last been extracted at 03:09
+#: ON the 14th -- three hours of that day -- and no later run got far
+#: enough down the list to replace it. Revenue/session and conversion
+#: rate on the dashboard both spiked that day off the short
+#: denominator.
+#:
+#: Seven days still covers Shopify's own revision of recent figures
+#: and cuts the ShopifyQL work roughly fourfold. A deeper repair is a
+#: one-off: --object-types sessions --date-start/--date-end.
 SHOPIFY_INGEST_CMD = [
     "scripts/ingest_shopify.py",
     "--object-types", DEFAULT_SHOPIFY_OBJECT_TYPES,
     "--incremental",
+    "--ql-days", "7",
 ]
 
 # (label, [script + args], timeout_seconds). Ordered by dependency.
@@ -249,16 +270,41 @@ PHASE_INGEST = [
     # every night, on a 1 GB Micro instance -- for one rendered column.
     #
     # What it fed: public.bq_inventory_daily -> master_sku_inventory_current
-    # -> twelve mm_* fields on /cpis, of which the UI renders exactly
-    # one, mm_oos_days_30 (the OOS-days cell). That cell now serves the
-    # last snapshot, frozen at as_of_date 2026-10-01, until it is either
-    # dropped from the UI or re-sourced from shopify_inventory.
+    # -> twelve mm_* fields on /cpis, of which the UI rendered exactly
+    # one, mm_oos_days_30 (the OOS-days cell), frozen at as_of_date
+    # 2026-10-01 from the moment the pull was dropped.
+    #
+    # 2026-10-16: that cell was re-sourced from shopify_inventory and now
+    # comes off cpis_sku_context.oos_days_30, built in the cpis_sku_context
+    # step below. Same derivation MapleMonk used -- per variant, days with
+    # no sellable stock in the trailing 30; per master, the MAX -- so the
+    # column means what it always did, minus the BigQuery round trip. The
+    # frozen mm_* fields stay on the API for now; nothing renders them.
     # The three creative-asset registers (video / influencer / graphics).
     # Ingest, not silver: two are other Supabase projects and one is a
     # Google Sheet, so this is an external-API pull like every other step
     # in this phase. Feeds ad_asset_map in PHASE_SILVER below.
     ("asset_sources",         ["scripts/ingest_asset_sources.py",
                                "--source", "all"],                          900),
+    # GA4. Neither of these has ever been in the nightly, which is why
+    # ga4_daily_landing sat five days stale and ga4_order_attribution
+    # four on 2026-10-16 while everything around them was current.
+    #
+    # Both need Google credentials, so they will fail in CI until
+    # GOOGLE_CREDS_JSON is set -- the same blocker silver_returns has.
+    # Listed anyway: a step that fails loudly every night is a standing
+    # reminder, where a step nobody wrote down is invisible.
+    #
+    # ga4_landing feeds the Landing Page Analysis GA4 columns.
+    ("ga4_landing",           ["scripts/fetch_ga4_daily.py", "--days", "10"], 1200),
+    # ga4_attribution feeds the last-click order/revenue columns. The
+    # 90-day session lookback makes this the expensive one -- ~91 GiB
+    # scanned, about $0.56 a run -- so it takes a short order window.
+    ("ga4_attribution",       ["scripts/fetch_ga4_order_attribution.py",
+                               "--days", "5"],                              1800),
+    # ARPU by day and by window, split by device. Cheap: six small
+    # Data API calls, no BigQuery.
+    ("ga4_arpu",              ["scripts/fetch_ga4_arpu.py", "--days", "35"],  900),
 ]
 
 PHASE_SILVER = [

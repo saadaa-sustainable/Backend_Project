@@ -119,3 +119,45 @@ def test_response_defaults_keep_old_callers_working():
     fields = analytics.KpisResponse.model_fields
     assert fields["new_customers"].default == 0
     assert fields["new_customer_revenue"].default == 0.0
+
+
+# ── GA4 ARPU ────────────────────────────────────────────────────────
+
+
+def test_arpu_is_summed_from_the_daily_table_for_any_range():
+    """Daily on purpose: a stored-window table matched GA4 exactly but
+    answered a custom date range with nothing. The cost is that the
+    denominator becomes active user-DAYS -- 1,390,380 against GA4's
+    1,164,394 unique users over 2026-09-16..10-15, ARPU 31.42 against
+    37.52 -- which the UI must name rather than imply."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1]
+           / "app" / "api" / "routers" / "analytics.py").read_text()
+    assert "FROM public.ga4_arpu_daily" in src
+    assert "ga4_arpu_window" not in src, "the window table was removed"
+    # Only the undimensioned rows: per-device rows beside them would
+    # double-count anyone who used two devices on one day.
+    assert "device_category = '(all)'" in src
+
+
+def test_arpu_fetcher_writes_one_grain_only():
+    import importlib.util
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "arpu", root / "scripts" / "fetch_ga4_arpu.py")
+    arpu = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(arpu)
+    assert "ga4_arpu_daily" in arpu.DDL
+    assert "ga4_arpu_window" not in arpu.DDL
+    assert not hasattr(arpu, "WINDOWS")
+    # The `(all)` row has to exist, because summing the device rows is
+    # 0.24% off -- 1,167,182 against 1,164,394.
+    assert arpu.ALL == "(all)"
+
+
+def test_arpu_fields_default_so_an_older_payload_still_validates():
+    from app.api.routers import analytics
+    fields = analytics.DashboardSessionsResponse.model_fields
+    for name in ("ga4_arpu", "ga4_active_users", "ga4_revenue"):
+        assert fields[name].default is None, name
