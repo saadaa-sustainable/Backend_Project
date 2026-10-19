@@ -28,8 +28,12 @@ def reset_cache():
     A.get_dashboard_blended_mer.analytics_cache.entries.clear()
 
 
-def _session(rows):
-    """rows: (day, revenue, meta_spend, google_spend)."""
+def _session(rows, kwik_default=None):
+    """rows: (day, revenue, meta_spend, google_spend[, new, ret, s_first, s_ret]).
+
+    kwik_default seeds the Kwikchat placeholder at that daily amount on
+    every day carrying spend; None leaves the table empty, which is how
+    most of these tests isolate the Meta/Google arithmetic."""
     db = sqlite3.connect(":memory:")
     # Postgres GREATEST/LEAST SKIP nulls; sqlite's max()/min() return
     # NULL if any argument is. The window clamp leans on the Postgres
@@ -40,15 +44,29 @@ def _session(rows):
                        lambda *a: max([x for x in a if x is not None], default=None))
     db.create_function("least", -1,
                        lambda *a: min([x for x in a if x is not None], default=None))
+
+    # Postgres bool_or; sqlite has no equivalent aggregate. Used to ask
+    # whether ANY day in a group still carries the Kwikchat estimate.
+    class _BoolOr:
+        def __init__(self): self.v = False
+        def step(self, value): self.v = self.v or bool(value)
+        def finalize(self): return self.v
+    db.create_aggregate("bool_or", 1, _BoolOr)
     db.executescript("""
         CREATE TABLE shopify_sales_daily(day TEXT, total_sales NUMERIC, gross_sales NUMERIC,
             new_customers INTEGER, returning_customers INTEGER,
             total_sales_first_time NUMERIC, total_sales_returning NUMERIC);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC);
         CREATE TABLE google_ads_spend_daily(day TEXT, campaign_id TEXT, spend NUMERIC);
+        CREATE TABLE kwikchat_spend_daily(day TEXT, spend NUMERIC, is_estimate INTEGER);
     """)
     for row in rows:
         day, rev, meta, goog = row[:4]
+        # Kwikchat is seeded for every day that has any spend at all,
+        # as the placeholder script does. `kwik` on the fixture row
+        # overrides the amount; None omits the day entirely.
+        if kwik_default is not None and (meta is not None or goog is not None):
+            db.execute("INSERT INTO kwikchat_spend_daily VALUES (?,?,1)", (day, kwik_default))
         # Customer columns default to a 2:1 new/returning split and a
         # 60/40 revenue split unless a test states its own.
         new_c, ret_c, s_first, s_ret = (row[4:] if len(row) > 4
@@ -246,6 +264,48 @@ async def test_no_customers_yields_no_cac_rather_than_a_division_error():
     assert r.blended_cac is None
     assert r.returning_customer_pct is None
     assert r.returning_revenue_pct is None
+    db.close()
+
+
+async def test_kwikchat_joins_the_denominator_and_lowers_the_ratio():
+    """Omitting it was not neutral -- every spend-divided figure read
+    high. Sep 2026 measured 3.58x without and 3.35x with."""
+    s, db = _session([("2026-09-01", 1000.0, 150.0, 50.0)], kwik_default=50.0)
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-01")
+    assert r.kwikchat_spend == 50
+    assert r.total_spend == 250
+    assert r.mer == 4.0                      # 1000 / 250, not 1000 / 200
+    db.close()
+
+
+async def test_estimated_kwikchat_days_are_counted_so_the_card_can_say_so():
+    s, db = _session([("2026-09-01", 1000.0, 150.0, 50.0),
+                      ("2026-09-02", 1000.0, 150.0, 50.0)], kwik_default=30.0)
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
+    assert r.kwikchat_estimated_days == 2
+    assert r.kwikchat_spend == 60
+    db.close()
+
+
+async def test_kwikchat_absent_leaves_the_ratio_on_meta_and_google():
+    """The table may simply not be seeded for a range; that must not
+    error, and must not silently count zero as a measured figure."""
+    s, db = _session([("2026-09-01", 1000.0, 150.0, 50.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-01")
+    assert r.kwikchat_spend == 0
+    assert r.kwikchat_estimated_days == 0
+    assert r.mer == 5.0
+    db.close()
+
+
+async def test_kwikchat_does_not_widen_or_narrow_the_window():
+    """The clamp is the days Meta and Google both report. A flat
+    placeholder must not get a vote on the range it is measured over."""
+    s, db = _session([("2026-09-01", 1000.0, 150.0, 50.0),
+                      ("2026-09-02", 9000.0, None, 50.0)], kwik_default=50.0)
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
+    assert r.window_to == date(2026, 9, 1)
+    assert r.kwikchat_spend == 50
     db.close()
 
 

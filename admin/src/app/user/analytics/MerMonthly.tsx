@@ -53,8 +53,10 @@ const ROWS: Row[] = [
   { label: "Ad spend", head: true },
   { label: "Meta", get: (m) => compact(m.meta_spend) },
   { label: "Google", get: (m) => compact(m.google_spend) },
+  { label: "Kwikchat", get: (m) => `${compact(m.kwikchat_spend)}${m.kwikchat_estimated ? " *" : ""}`,
+    note: "* a flat placeholder until the real figures arrive" },
   { label: "Total ad spend", get: (m) => compact(m.ad_spend), strong: true,
-    note: "Meta + Google only — the plan adds Kwikchat and six other lines" },
+    note: "Meta + Google + Kwikchat — the plan adds six further cost lines" },
 
   { label: "Platform claimed", head: true },
   { label: "Meta purchase value", get: (m) => compact(m.meta_claimed),
@@ -103,9 +105,10 @@ export function MerMonthly({ months }: { months: MerMonth[] }) {
       <TableFrame
         footer={
           <span className="text-[11.5px] text-text-tertiary">
-            Spend is Meta + Google. The plan&apos;s Total Ad spend also carries Kwikchat, Amazon,
-            Myntra, Zepto, RobyLon, content, influencer and tech cost, so its D2C MER reads lower
-            and its Blended CAC higher. Over-revenue reporting and attribution overlap are absent:
+            Spend is Meta + Google + Kwikchat, the plan&apos;s three D2C channels. Kwikchat is a
+            flat placeholder (marked *) until real figures land. The plan&apos;s Total Ad spend
+            adds Amazon, Myntra, Zepto, RobyLon, content, influencer and tech cost on top, so its
+            Total MER differs again. Over-revenue reporting and attribution overlap are absent:
             both need Kwikchat&apos;s claimed purchase value, and our Google claimed value runs
             12–44% above the plan&apos;s, so neither can be stated honestly yet.
           </span>

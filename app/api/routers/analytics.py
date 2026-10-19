@@ -8310,6 +8310,17 @@ goog AS (
   FROM public.google_ads_spend_daily g, bounds b
   WHERE g.day BETWEEN b.lo AND b.hi
   GROUP BY g.day
+),
+-- Kwikchat deliberately does NOT constrain the window above. It is a
+-- flat placeholder, so letting it clamp the range would be the tail
+-- wagging the dog; the window stays the days Meta and Google both
+-- report, and Kwikchat contributes whatever it has inside that.
+kwik AS (
+  SELECT k.day, SUM(k.spend) AS spend,
+         bool_or(k.is_estimate) AS is_estimate
+  FROM public.kwikchat_spend_daily k, bounds b
+  WHERE k.day BETWEEN b.lo AND b.hi
+  GROUP BY k.day
 )
 SELECT d.day,
        COALESCE(rev.revenue, 0)             AS revenue,
@@ -8318,11 +8329,14 @@ SELECT d.day,
        COALESCE(rev.sales_first_time, 0)    AS sales_first_time,
        COALESCE(rev.sales_returning, 0)     AS sales_returning,
        COALESCE(meta.spend, 0)   AS meta_spend,
-       COALESCE(goog.spend, 0)   AS google_spend
+       COALESCE(goog.spend, 0)   AS google_spend,
+       COALESCE(kwik.spend, 0)   AS kwikchat_spend,
+       COALESCE(kwik.is_estimate, false) AS kwikchat_is_estimate
 FROM days d
      LEFT JOIN rev  ON rev.day  = d.day
      LEFT JOIN meta ON meta.day = d.day
      LEFT JOIN goog ON goog.day = d.day
+     LEFT JOIN kwik ON kwik.day = d.day
 ORDER BY d.day
 """
 
@@ -8332,6 +8346,7 @@ class BlendedMerPoint(BaseModel):
     revenue: float
     meta_spend: float
     google_spend: float
+    kwikchat_spend: float
     #: None, not 0, on a day with revenue but no spend yet. Meta reports
     #: a day behind, so today's row would otherwise read as an enormous
     #: ratio rather than an absent one.
@@ -8342,6 +8357,15 @@ class BlendedMerResponse(BaseModel):
     revenue: float
     meta_spend: float
     google_spend: float
+    #: A flat placeholder until the real figures arrive, so every ratio
+    #: that divides by spend stops reading high. Omitting it was not
+    #: neutral: Sep 2026 gives MER 3.58x without and 3.35x with, against
+    #: the media plan's own 3.22x.
+    kwikchat_spend: float
+    #: Days in the window whose Kwikchat figure is still the estimate.
+    #: Non-zero means the card must say so -- an assumption a reader
+    #: cannot see is worse than one they can.
+    kwikchat_estimated_days: int
     total_spend: float
     mer: float | None
     #: Share of spend each platform carries, so a reader can see at a
@@ -8413,7 +8437,8 @@ async def get_dashboard_blended_mer(
     rows = (await session.execute(text(sql), params)).mappings().all()
 
     points: list[BlendedMerPoint] = []
-    revenue = meta_total = google_total = 0.0
+    revenue = meta_total = google_total = kwik_total = 0.0
+    kwik_estimated = 0
     new_c = ret_c = 0
     sales_first = sales_ret = 0.0
     missing_meta = missing_google = 0
@@ -8425,6 +8450,10 @@ async def get_dashboard_blended_mer(
         sales_ret += float(r["sales_returning"] or 0)
         ms = float(r["meta_spend"] or 0)
         gs = float(r["google_spend"] or 0)
+        ks = float(r["kwikchat_spend"] or 0)
+        if r["kwikchat_is_estimate"]:
+            kwik_estimated += 1
+        kwik_total += ks
         revenue += rv
         meta_total += ms
         google_total += gs
@@ -8432,16 +8461,19 @@ async def get_dashboard_blended_mer(
             missing_meta += 1
         if rv > 0 and gs == 0:
             missing_google += 1
-        spend = ms + gs
+        spend = ms + gs + ks
         points.append(BlendedMerPoint(
             day=r["day"], revenue=rv, meta_spend=ms, google_spend=gs,
+            kwikchat_spend=ks,
             mer=round(rv / spend, 3) if spend > 0 else None))
 
-    total_spend = meta_total + google_total
+    total_spend = meta_total + google_total + kwik_total
     return BlendedMerResponse(
         revenue=round(revenue, 2),
         meta_spend=round(meta_total, 2),
         google_spend=round(google_total, 2),
+        kwikchat_spend=round(kwik_total, 2),
+        kwikchat_estimated_days=kwik_estimated,
         total_spend=round(total_spend, 2),
         mer=round(revenue / total_spend, 3) if total_spend > 0 else None,
         google_share_of_spend=(round(100.0 * google_total / total_spend, 1)
@@ -8521,6 +8553,13 @@ goog AS (
   FROM public.google_ads_spend_daily g, bounds b
   WHERE g.day BETWEEN b.lo AND b.hi
   GROUP BY 1
+),
+kwik AS (
+  SELECT date_trunc('month', k.day)::date AS mo, SUM(k.spend) AS spend,
+         bool_or(k.is_estimate) AS is_estimate
+  FROM public.kwikchat_spend_daily k, bounds b
+  WHERE k.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
 )
 SELECT s.mo,
        COALESCE(s.revenue, 0)             AS revenue,
@@ -8530,9 +8569,12 @@ SELECT s.mo,
        COALESCE(s.sales_returning, 0)     AS sales_returning,
        COALESCE(m.spend, 0)               AS meta_spend,
        COALESCE(m.claimed, 0)             AS meta_claimed,
-       COALESCE(g.spend, 0)               AS google_spend
+       COALESCE(g.spend, 0)               AS google_spend,
+       COALESCE(k.spend, 0)               AS kwikchat_spend,
+       COALESCE(k.is_estimate, false)     AS kwikchat_is_estimate
 FROM shop s LEFT JOIN meta m ON m.mo = s.mo
             LEFT JOIN goog g ON g.mo = s.mo
+            LEFT JOIN kwik k ON k.mo = s.mo
 ORDER BY s.mo
 """
 
@@ -8542,6 +8584,9 @@ class MerMonth(BaseModel):
     revenue: float
     meta_spend: float
     google_spend: float
+    kwikchat_spend: float
+    #: True where any day of the month still carries the placeholder.
+    kwikchat_estimated: bool
     ad_spend: float
     #: Meta's own claimed purchase value. Matches the plan to the rupee
     #: (Aug 35,806,763 / Sep 37,231,279), unlike Google's, which runs
@@ -8585,7 +8630,8 @@ async def get_dashboard_mer_monthly(
         rev = float(r["revenue"] or 0)
         ms = float(r["meta_spend"] or 0)
         gs = float(r["google_spend"] or 0)
-        spend = ms + gs
+        ks = float(r["kwikchat_spend"] or 0)
+        spend = ms + gs + ks
         new_c = int(r["new_customers"] or 0)
         ret_c = int(r["returning_customers"] or 0)
         s_first = float(r["sales_first_time"] or 0)
@@ -8601,7 +8647,10 @@ async def get_dashboard_mer_monthly(
         out.append(MerMonth(
             month=r["mo"],
             revenue=round(rev, 2),
-            meta_spend=round(ms, 2), google_spend=round(gs, 2), ad_spend=round(spend, 2),
+            meta_spend=round(ms, 2), google_spend=round(gs, 2),
+            kwikchat_spend=round(ks, 2),
+            kwikchat_estimated=bool(r["kwikchat_is_estimate"]),
+            ad_spend=round(spend, 2),
             meta_claimed=round(claimed, 2),
             meta_mer=round(claimed / ms, 2) if ms > 0 else None,
             mer=round(rev / spend, 2) if spend > 0 else None,

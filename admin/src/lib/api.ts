@@ -2297,6 +2297,7 @@ export interface BlendedMerPoint {
   revenue: number;
   meta_spend: number;
   google_spend: number;
+  kwikchat_spend: number;
   mer: number | null;
 }
 
@@ -2304,6 +2305,12 @@ export interface BlendedMerResponse {
   revenue: number;
   meta_spend: number;
   google_spend: number;
+  /** A flat placeholder until real figures arrive. Omitting it made
+   *  every spend-divided ratio read high. */
+  kwikchat_spend: number;
+  /** Days in the window still carrying the estimate. Non-zero means
+   *  the card must say so. */
+  kwikchat_estimated_days: number;
   total_spend: number;
   mer: number | null;
   google_share_of_spend: number | null;
@@ -2342,6 +2349,8 @@ export interface MerMonth {
   revenue: number;
   meta_spend: number;
   google_spend: number;
+  kwikchat_spend: number;
+  kwikchat_estimated: boolean;
   ad_spend: number;
   meta_claimed: number;
   meta_mer: number | null;

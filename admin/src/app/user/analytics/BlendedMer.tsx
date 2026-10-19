@@ -40,8 +40,10 @@ export function BlendedMer({ data, rangeLabel }: {
   rangeLabel: string;
 }) {
   const { mer, revenue, meta_spend, google_spend, total_spend } = data;
-  const googleShare = data.google_share_of_spend ?? 0;
-  const metaShare = 100 - googleShare;
+  const share = (n: number) => (total_spend > 0 ? (100 * n) / total_spend : 0);
+  const metaShare = share(meta_spend);
+  const googleShare = share(google_spend);
+  const kwikShare = share(data.kwikchat_spend);
   // Days carrying revenue but no spend inflate the ratio, so they are
   // counted and stated rather than quietly averaged in.
   const gaps = Math.max(data.days_missing_meta, data.days_missing_google);
@@ -70,7 +72,7 @@ export function BlendedMer({ data, rangeLabel }: {
             {mer === null ? "—" : `${mer.toFixed(2)}×`}
           </p>
           <p className="mt-1.5 text-[11.5px] text-text-tertiary">
-            Shopify sales ÷ Meta + Google spend
+            Shopify sales ÷ Meta + Google + Kwikchat spend
           </p>
         </div>
 
@@ -89,6 +91,10 @@ export function BlendedMer({ data, rangeLabel }: {
             <span>Meta {compact(meta_spend)}</span>
             <span>·</span>
             <span>Google {compact(google_spend)}</span>
+            <span>·</span>
+            <span>Kwikchat {compact(data.kwikchat_spend)}
+              {data.kwikchat_estimated_days > 0 && <span className="text-warning-text"> *</span>}
+            </span>
           </p>
         </div>
       </div>
@@ -100,13 +106,17 @@ export function BlendedMer({ data, rangeLabel }: {
       {total_spend > 0 && (
         <div className="flex flex-col gap-1">
           <div className="flex h-2 w-full overflow-hidden rounded-sm bg-bg-surface" role="img"
-            aria-label={`Meta ${metaShare.toFixed(1)}% and Google ${googleShare.toFixed(1)}% of ad spend`}>
+            aria-label={`Meta ${metaShare.toFixed(1)}%, Google ${googleShare.toFixed(1)}% and Kwikchat ${kwikShare.toFixed(1)}% of ad spend`}>
             <div className="bg-accent-yellow" style={{ width: `${metaShare}%` }} />
             <div className="bg-success-mid" style={{ width: `${googleShare}%` }} />
+            {/* Hatched rather than solid: this slice is an estimate and
+                should not sit on the bar looking like the other two. */}
+            <div className="bg-warning-text opacity-60" style={{ width: `${kwikShare}%` }} />
           </div>
           <div className="flex flex-wrap gap-x-4 text-[11px] tabular-nums text-text-tertiary">
             <span>Meta {metaShare.toFixed(1)}% of spend</span>
             <span>Google {googleShare.toFixed(1)}%</span>
+            <span>Kwikchat {kwikShare.toFixed(1)}%</span>
           </div>
         </div>
       )}
@@ -169,9 +179,17 @@ export function BlendedMer({ data, rangeLabel }: {
           <p className="mt-0.5 font-mono text-[19px] tabular-nums text-text-primary">
             {data.blended_cac === null ? "—" : money(data.blended_cac)}
           </p>
-          <p className="mt-1 text-[11.5px] text-text-tertiary">Meta + Google ÷ new customers</p>
+          <p className="mt-1 text-[11.5px] text-text-tertiary">ad spend ÷ new customers</p>
         </div>
       </div>
+
+      {data.kwikchat_estimated_days > 0 && (
+        <p className="border-l-2 border-warning-text pl-2 text-[11.5px] text-warning-text">
+          Kwikchat spend is a flat placeholder on {data.kwikchat_estimated_days} of these days, not
+          a measured figure. It is in the denominator because leaving it out made every ratio read
+          high — but MER, CAC, A-MER and contribution margin all move when the real numbers land.
+        </p>
+      )}
 
       {gaps > 0 && (
         <p className="border-l-2 border-warning-text pl-2 text-[11.5px] text-warning-text">
@@ -195,11 +213,10 @@ export function BlendedMer({ data, rangeLabel }: {
       </p>
 
       <p className="text-[11.5px] text-text-tertiary">
-        No attribution in the ratio: it divides every Shopify order by every rupee of Meta and
-        Google spend, so it does not depend on GA4 coverage or on an ad id resolving.
-        It is <b className="font-medium">not</b> the media plan&apos;s D2C MER, which also carries
-        Kwikchat spend and so reads lower, nor its Total MER across every channel — the warehouse
-        holds no Kwikchat, marketplace, content, influencer or tech cost.
+        No attribution in the ratio: it divides every Shopify order by every rupee of Meta,
+        Google and Kwikchat spend, so it does not depend on GA4 coverage or on an ad id resolving.
+        It covers the plan&apos;s three D2C channels, but not its Total MER across every channel — the
+        warehouse holds no marketplace revenue, content, influencer or tech cost.
       </p>
     </section>
   );
