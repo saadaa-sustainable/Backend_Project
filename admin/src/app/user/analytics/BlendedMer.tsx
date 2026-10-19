@@ -32,6 +32,9 @@ function compact(n: number): string {
   return money(n);
 }
 
+const DAY = (iso: string) =>
+  new Date(`${iso}T12:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+
 export function BlendedMer({ data, rangeLabel }: {
   data: BlendedMerResponse;
   rangeLabel: string;
@@ -49,7 +52,15 @@ export function BlendedMer({ data, rangeLabel }: {
         <h3 id="dashboard-blended-mer" className="text-sm font-medium text-text-primary">
           MER · Meta + Google
         </h3>
-        <span className="text-[11.5px] text-text-tertiary">{rangeLabel}</span>
+        {/* The window MEASURED, not the one on the picker. Meta reports
+            a day behind Google, so "to today" almost always means "to
+            yesterday", and both sides of the ratio are cut to the days
+            the two platforms share. */}
+        <span className="text-[11.5px] text-text-tertiary">
+          {data.window_from && data.window_to
+            ? `${DAY(data.window_from)} – ${DAY(data.window_to)}`
+            : rangeLabel}
+        </span>
       </div>
 
       <div className="flex flex-wrap items-end gap-x-10 gap-y-4">
@@ -100,12 +111,20 @@ export function BlendedMer({ data, rangeLabel }: {
         </div>
       )}
 
+      {data.window_clamped && (
+        <p className="text-[11.5px] text-text-tertiary">
+          Measured {DAY(data.window_from!)} – {DAY(data.window_to!)}, the days both platforms
+          report. Meta&apos;s spend lands a day behind Google&apos;s, and counting revenue
+          against a denominator missing one of its two halves would read high.
+        </p>
+      )}
+
       {gaps > 0 && (
         <p className="border-l-2 border-warning-text pl-2 text-[11.5px] text-warning-text">
           {gaps === 1
-            ? "1 day in this range carries revenue with no spend recorded yet"
-            : `${gaps} days in this range carry revenue with no spend recorded yet`}
-          {" — Meta reports a day behind, so the ratio reads high until it lands."}
+            ? "1 day inside this window carries revenue with no spend recorded"
+            : `${gaps} days inside this window carry revenue with no spend recorded`}
+          {" — those days push the ratio up."}
         </p>
       )}
 

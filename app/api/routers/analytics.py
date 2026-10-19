@@ -8251,25 +8251,56 @@ def _dashboard_date_bounds(date_from: str | None, date_to: str | None) -> tuple[
 #: reproduced here yet. The UI says Meta + Google on its face for that
 #: reason: a reader comparing it with the monthly deck must be able to
 #: see why the two differ without being told.
+#: CLAMPED TO THE DAYS BOTH PLATFORMS COVER, and revenue to the same
+#: window.
+#:
+#: The two spend tables do not end on the same day. Meta's insights
+#: arrive a day behind while Google's land the same morning, so a range
+#: ending today picks up revenue and Google spend for a day Meta has
+#: not reported. That is a denominator missing one of its two parts
+#: against a full numerator, and the ratio reads high -- on 2026-10-19
+#: it was the difference between a real 3.55x and a day showing no Meta
+#: spend at all.
+#:
+#: So the window is the INTERSECTION: the later of the two first days,
+#: the earlier of the two last days, inside whatever range was asked
+#: for. Revenue is cut to the same window, because a numerator covering
+#: more days than its denominator is the same error in the other
+#: direction. The response hands back the window it actually used.
+#:
+#: GREATEST and LEAST skip NULLs in Postgres, so a bound coming back
+#: empty widens rather than annihilates the window.
 _BLENDED_MER_SQL = """
-WITH days AS (
-  SELECT day FROM public.shopify_sales_daily
-  {where_rev}
+WITH bounds AS (
+  SELECT GREATEST((SELECT MIN(day) FROM public.insights_daily_by_ad),
+                  (SELECT MIN(day) FROM public.google_ads_spend_daily)
+                  {clamp_lo}) AS lo,
+         LEAST((SELECT MAX(day) FROM public.insights_daily_by_ad),
+               (SELECT MAX(day) FROM public.google_ads_spend_daily)
+               {clamp_hi}) AS hi
+),
+days AS (
+  SELECT s.day FROM public.shopify_sales_daily s, bounds b
+  WHERE s.day BETWEEN b.lo AND b.hi
+  GROUP BY s.day
 ),
 rev AS (
-  SELECT day, SUM(total_sales) AS revenue
-  FROM public.shopify_sales_daily {where_rev}
-  GROUP BY day
+  SELECT s.day, SUM(s.total_sales) AS revenue
+  FROM public.shopify_sales_daily s, bounds b
+  WHERE s.day BETWEEN b.lo AND b.hi
+  GROUP BY s.day
 ),
 meta AS (
-  SELECT day, SUM(spend) AS spend
-  FROM public.insights_daily_by_ad {where_spend}
-  GROUP BY day
+  SELECT i.day, SUM(i.spend) AS spend
+  FROM public.insights_daily_by_ad i, bounds b
+  WHERE i.day BETWEEN b.lo AND b.hi
+  GROUP BY i.day
 ),
 goog AS (
-  SELECT day, SUM(spend) AS spend
-  FROM public.google_ads_spend_daily {where_spend}
-  GROUP BY day
+  SELECT g.day, SUM(g.spend) AS spend
+  FROM public.google_ads_spend_daily g, bounds b
+  WHERE g.day BETWEEN b.lo AND b.hi
+  GROUP BY g.day
 )
 SELECT d.day,
        COALESCE(rev.revenue, 0)  AS revenue,
@@ -8307,11 +8338,21 @@ class BlendedMerResponse(BaseModel):
     google_share_of_spend: float | None
     points: list[BlendedMerPoint]
     #: Days inside the window that carry revenue but no spend from one
-    #: of the two platforms. Stated rather than smoothed over: those
-    #: days push the ratio up and a reader should know how many there
-    #: are before reading a trend.
+    #: of the two platforms. After the clamp these are GAPS IN THE
+    #: MIDDLE, not the trailing reporting lag -- that is cut off by the
+    #: window itself. Stated rather than smoothed over: they push the
+    #: ratio up.
     days_missing_meta: int
     days_missing_google: int
+    #: The window actually measured: the days BOTH platforms cover,
+    #: inside whatever was asked for. Echoed back because it is often
+    #: narrower than the range on the picker -- Meta reports a day
+    #: behind Google, so "to today" almost always means "to yesterday".
+    window_from: date | None
+    window_to: date | None
+    #: True when the clamp moved either end, so the UI can say which
+    #: days it is actually describing instead of implying the picker's.
+    window_clamped: bool
 
 
 @router.get("/dashboard/blended-mer", response_model=BlendedMerResponse)
@@ -8324,12 +8365,13 @@ async def get_dashboard_blended_mer(
     """Shopify revenue over Meta + Google spend, with no attribution."""
     df, dt = _dashboard_date_bounds(date_from, date_to)
     params: dict[str, object] = {}
-    where_rev = where_spend = ""
+    # The requested range is one more bound among the coverage bounds,
+    # not a separate filter -- GREATEST/LEAST pick whichever is tighter.
+    clamp_lo = clamp_hi = ""
     if df and dt:
-        where_rev = "WHERE day BETWEEN :df AND :dt"
-        where_spend = "WHERE day BETWEEN :df AND :dt"
+        clamp_lo, clamp_hi = ", :df", ", :dt"
         params = {"df": df, "dt": dt}
-    sql = _BLENDED_MER_SQL.format(where_rev=where_rev, where_spend=where_spend)
+    sql = _BLENDED_MER_SQL.format(clamp_lo=clamp_lo, clamp_hi=clamp_hi)
     rows = (await session.execute(text(sql), params)).mappings().all()
 
     points: list[BlendedMerPoint] = []
@@ -8362,7 +8404,11 @@ async def get_dashboard_blended_mer(
                                if total_spend > 0 else None),
         points=points,
         days_missing_meta=missing_meta,
-        days_missing_google=missing_google)
+        days_missing_google=missing_google,
+        window_from=points[0].day if points else None,
+        window_to=points[-1].day if points else None,
+        window_clamped=bool(points) and bool(df and dt)
+                       and (points[0].day != df or points[-1].day != dt))
 
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)

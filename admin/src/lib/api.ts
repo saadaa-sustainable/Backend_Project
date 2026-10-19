@@ -2310,6 +2310,12 @@ export interface BlendedMerResponse {
   points: BlendedMerPoint[];
   days_missing_meta: number;
   days_missing_google: number;
+  /** The window actually measured: the days BOTH platforms report,
+   *  inside whatever range was asked for. Often narrower than the
+   *  picker, since Meta's spend lands a day behind Google's. */
+  window_from: string | null;
+  window_to: string | null;
+  window_clamped: boolean;
 }
 
 export const fetchDashboardBlendedMer = (from?: string | null, to?: string | null) =>

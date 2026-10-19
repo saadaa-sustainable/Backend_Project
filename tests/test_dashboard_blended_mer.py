@@ -31,6 +31,15 @@ def reset_cache():
 def _session(rows):
     """rows: (day, revenue, meta_spend, google_spend)."""
     db = sqlite3.connect(":memory:")
+    # Postgres GREATEST/LEAST SKIP nulls; sqlite's max()/min() return
+    # NULL if any argument is. The window clamp leans on the Postgres
+    # behaviour -- a source with no rows must widen the window, not
+    # annihilate it -- so the shim reproduces it rather than the SQL
+    # being written down to sqlite's weaker version.
+    db.create_function("greatest", -1,
+                       lambda *a: max([x for x in a if x is not None], default=None))
+    db.create_function("least", -1,
+                       lambda *a: min([x for x in a if x is not None], default=None))
     db.executescript("""
         CREATE TABLE shopify_sales_daily(day TEXT, total_sales NUMERIC, gross_sales NUMERIC);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC);
@@ -83,24 +92,31 @@ async def test_dropping_google_would_flatter_the_ratio():
     db.close()
 
 
-async def test_a_day_with_revenue_and_no_spend_has_no_ratio():
-    """Meta reports a day behind, so today always looks like this. The
-    point must be null, not a vast number."""
+async def test_a_gap_in_the_MIDDLE_yields_no_ratio_for_that_day():
+    """The clamp removes the trailing reporting lag, not a day both
+    platforms straddle. That day's point must be null, not a vast
+    number -- but its revenue still counts toward the window, because
+    it happened."""
     s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0),
-                      ("2026-09-02", 2000.0, None, None)])
-    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
+                      ("2026-09-02", 2000.0, None, None),
+                      ("2026-09-03", 1000.0, 300.0, 50.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-03")
     assert r.points[1].mer is None
     assert r.points[0].mer == 4.0
-    # The window total still includes that revenue -- it happened.
-    assert r.revenue == 3000
+    assert r.revenue == 4000
+    assert r.days_missing_meta == 1
     db.close()
 
 
-async def test_missing_spend_days_are_counted_not_hidden():
+async def test_missing_spend_days_INSIDE_the_window_are_counted_not_hidden():
+    """Both gaps have to be straddled by reporting days, or the clamp
+    simply cuts them off the end -- which is what it is for."""
     s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0),
                       ("2026-09-02", 2000.0, None, 50.0),
-                      ("2026-09-03", 1500.0, 100.0, None)])
-    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-03")
+                      ("2026-09-03", 1500.0, 100.0, None),
+                      ("2026-09-04", 1000.0, 200.0, 50.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-04")
+    assert (r.window_from, r.window_to) == (date(2026, 9, 1), date(2026, 9, 4))
     assert r.days_missing_meta == 1
     assert r.days_missing_google == 1
     db.close()
@@ -130,12 +146,52 @@ async def test_no_spend_at_all_yields_no_ratio_rather_than_zero():
     db.close()
 
 
+async def test_the_window_clamps_to_the_days_both_platforms_cover():
+    """Meta reports a day behind Google. Without the clamp the last day
+    contributes revenue and Google spend against no Meta spend, and the
+    ratio reads high."""
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0),
+                      ("2026-09-02", 1000.0, 200.0, 50.0),
+                      ("2026-09-03", 9000.0, None, 50.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-03")
+    assert r.window_from == date(2026, 9, 1)
+    assert r.window_to == date(2026, 9, 2)
+    assert r.window_clamped is True
+    # The third day is outside the window entirely: its revenue is not
+    # counted against a denominator that cannot cover it.
+    assert r.revenue == 2000
+    assert r.mer == 4.0
+    assert r.days_missing_meta == 0
+    db.close()
+
+
+async def test_revenue_is_cut_to_the_same_window_as_spend():
+    """A numerator covering more days than its denominator is the same
+    error in the other direction."""
+    s, db = _session([("2026-09-01", 5000.0, None, None),
+                      ("2026-09-02", 1000.0, 200.0, 50.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
+    assert r.window_from == date(2026, 9, 2)
+    assert r.revenue == 1000
+    assert r.mer == 4.0
+    db.close()
+
+
+async def test_a_fully_covered_range_is_not_clamped():
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0),
+                      ("2026-09-02", 2000.0, 300.0, 50.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
+    assert r.window_clamped is False
+    assert (r.window_from, r.window_to) == (date(2026, 9, 1), date(2026, 9, 2))
+    db.close()
+
+
 def test_the_numerator_is_total_sales_not_gross_sales():
     """The media plan's "Shopify Gross Sales" row is this warehouse's
     total_sales column -- verified to the rupee for Aug and Sep 2026.
     gross_sales is a larger, different figure living in the same table,
     so the column name alone invites exactly the wrong pick."""
-    assert "SUM(total_sales)" in A._BLENDED_MER_SQL
+    assert "SUM(s.total_sales)" in A._BLENDED_MER_SQL
     assert "gross_sales" not in A._BLENDED_MER_SQL
 
 
@@ -148,5 +204,5 @@ def test_spend_is_summed_per_day_before_joining():
     """insights_daily_by_ad is one row per AD per day. Joining it
     unaggregated would multiply revenue by the number of ads running
     that day -- hundreds of them."""
-    assert re.search(r"SELECT day, SUM\(spend\).*FROM public\.insights_daily_by_ad",
+    assert re.search(r"SELECT i\.day, SUM\(i\.spend\).*FROM public\.insights_daily_by_ad",
                      A._BLENDED_MER_SQL, re.S)
