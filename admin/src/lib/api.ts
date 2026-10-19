@@ -2342,9 +2342,11 @@ export interface BlendedMerResponse {
 
 export const fetchDashboardBlendedMer = (from?: string | null, to?: string | null) =>
   request<BlendedMerResponse>(`/admin/analytics/dashboard/blended-mer${dashboardRange(from, to)}`);
-/** One month of the media plan's Blended MER tab, for the figures this
- *  warehouse can source. Spend is Meta + Google only. */
+/** One PERIOD of the media plan's Blended MER tab -- month, quarter or
+ *  year. Every figure is recomputed from the daily rows at that grain,
+ *  never averaged up from monthly results. */
 export interface MerMonth {
+  /** First day of the period. */
   month: string;
   revenue: number;
   meta_spend: number;
@@ -2369,8 +2371,11 @@ export interface MerMonth {
   partial: boolean;
 }
 
-export const fetchDashboardMerMonthly = (months = 12) =>
-  request<MerMonth[]>(`/admin/analytics/dashboard/mer-monthly?months=${months}`);
+export type MerGrain = "month" | "quarter" | "year";
+
+export const fetchDashboardMerByPeriod = (grain: MerGrain = "month", periods = 12) =>
+  request<MerMonth[]>(
+    `/admin/analytics/dashboard/mer-by-period?grain=${grain}&periods=${periods}`);
 export const fetchDashboardCategoryBreakdown = (from?: string | null, to?: string | null) =>
   request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown${dashboardRange(from, to)}`);
 

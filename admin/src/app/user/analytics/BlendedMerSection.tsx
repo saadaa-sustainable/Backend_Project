@@ -3,8 +3,9 @@
 import { useState } from "react";
 import {
   fetchDashboardBlendedMer,
-  fetchDashboardMerMonthly,
+  fetchDashboardMerByPeriod,
   type BlendedMerResponse,
+  type MerGrain,
   type MerMonth,
 } from "@/lib/api";
 import { useCachedFetch } from "@/lib/useCachedFetch";
@@ -25,13 +26,16 @@ import { FilterCell, FilterRule, SectionHeader } from "./SectionChrome";
  * rearranged their widgets found them at the bottom, under the SKU
  * table.
  *
- * The month table deliberately does NOT follow the picker. It is always
- * the trailing twelve calendar months, because that is the grain the
- * plan reports in and the comparison only works if the columns line up
- * with it.
+ * The period table deliberately does NOT follow the picker. It runs on
+ * whole calendar periods -- month, quarter or year -- because the
+ * comparison with the plan only works if the columns line up with it,
+ * and a quarter cut to an arbitrary range is not a quarter.
  */
 
-const MONTHS = 12;
+/** How much history each grain is worth showing. A year of months, two
+ *  years of quarters, five years of years -- enough to see a trend
+ *  without a column per week of the company's life. */
+const PERIODS: Record<MerGrain, number> = { month: 12, quarter: 8, year: 5 };
 
 export function BlendedMerSection() {
   const [datePreset, setDatePreset] = useState<string>("last30");
@@ -41,14 +45,15 @@ export function BlendedMerSection() {
     return d.toISOString().slice(0, 10);
   });
   const [toDate, setToDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [grain, setGrain] = useState<MerGrain>("month");
 
   const current = useCachedFetch<BlendedMerResponse>(
     `blended-mer|${fromDate}|${toDate}`,
     () => fetchDashboardBlendedMer(fromDate, toDate),
   );
   const monthly = useCachedFetch<MerMonth[]>(
-    `mer-monthly|v1|${MONTHS}`,
-    () => fetchDashboardMerMonthly(MONTHS),
+    `mer-by-period|v1|${grain}`,
+    () => fetchDashboardMerByPeriod(grain, PERIODS[grain]),
   );
 
   const rangeLabel = `${fromDate} – ${toDate}`;
@@ -95,7 +100,7 @@ export function BlendedMerSection() {
             onClick={() => monthly.refetch()}>Retry</button>
         </div>
       ) : monthly.data ? (
-        <MerMonthly months={monthly.data} />
+        <MerMonthly months={monthly.data} grain={grain} onGrain={setGrain} />
       ) : (
         <div className="animate-pulse rounded bg-bg-surface" style={{ minHeight: 260 }}
           role="status" aria-label="Loading the monthly table" />

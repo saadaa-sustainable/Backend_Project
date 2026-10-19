@@ -8523,7 +8523,7 @@ async def get_dashboard_blended_mer(
 #: SPEND IS META + GOOGLE, as the card above it. The plan's own D2C
 #: figures add Kwikchat, so its D2C MER and Blended CAC read lower and
 #: higher respectively; the UI says so rather than implying a match.
-_MER_MONTHLY_SQL = """
+_MER_BY_PERIOD_SQL = """
 WITH bounds AS (
   SELECT GREATEST((SELECT MIN(day) FROM public.insights_daily_by_ad),
                   (SELECT MIN(day) FROM public.google_ads_spend_daily)) AS lo,
@@ -8531,7 +8531,7 @@ WITH bounds AS (
                (SELECT MAX(day) FROM public.google_ads_spend_daily)) AS hi
 ),
 shop AS (
-  SELECT date_trunc('month', s.day)::date AS mo,
+  SELECT date_trunc(:grain, s.day)::date AS mo,
          SUM(s.total_sales)            AS revenue,
          SUM(s.new_customers)          AS new_customers,
          SUM(s.returning_customers)    AS returning_customers,
@@ -8542,20 +8542,20 @@ shop AS (
   GROUP BY 1
 ),
 meta AS (
-  SELECT date_trunc('month', i.day)::date AS mo,
+  SELECT date_trunc(:grain, i.day)::date AS mo,
          SUM(i.spend) AS spend, SUM(i.conv_value) AS claimed
   FROM public.insights_daily_by_ad i, bounds b
   WHERE i.day BETWEEN b.lo AND b.hi
   GROUP BY 1
 ),
 goog AS (
-  SELECT date_trunc('month', g.day)::date AS mo, SUM(g.spend) AS spend
+  SELECT date_trunc(:grain, g.day)::date AS mo, SUM(g.spend) AS spend
   FROM public.google_ads_spend_daily g, bounds b
   WHERE g.day BETWEEN b.lo AND b.hi
   GROUP BY 1
 ),
 kwik AS (
-  SELECT date_trunc('month', k.day)::date AS mo, SUM(k.spend) AS spend,
+  SELECT date_trunc(:grain, k.day)::date AS mo, SUM(k.spend) AS spend,
          bool_or(k.is_estimate) AS is_estimate
   FROM public.kwikchat_spend_daily k, bounds b
   WHERE k.day BETWEEN b.lo AND b.hi
@@ -8580,6 +8580,7 @@ ORDER BY s.mo
 
 
 class MerMonth(BaseModel):
+    #: First day of the period -- month, quarter or year start.
     month: date
     revenue: float
     meta_spend: float
@@ -8614,15 +8615,35 @@ class MerMonth(BaseModel):
     partial: bool
 
 
-@router.get("/dashboard/mer-monthly", response_model=list[MerMonth])
+def _period_is_current(start: date, grain: str, today: date) -> bool:
+    """Whether `start` names the period `today` falls in."""
+    if grain == "year":
+        return start.year == today.year
+    if grain == "quarter":
+        return (start.year, (start.month - 1) // 3) == (today.year, (today.month - 1) // 3)
+    return (start.year, start.month) == (today.year, today.month)
+
+
+@router.get("/dashboard/mer-by-period", response_model=list[MerMonth])
 @cached_analytics(ttl=300.0)
-async def get_dashboard_mer_monthly(
+async def get_dashboard_mer_by_period(
     session: SessionDep,
-    months: int = Query(default=12, ge=1, le=36,
-                        description="How many trailing months to return."),
+    grain: Literal["month", "quarter", "year"] = Query(
+        default="month",
+        description="Period to aggregate into. The plan reports monthly; "
+                    "quarter and year roll the same arithmetic up."),
+    periods: int = Query(default=12, ge=1, le=60,
+                         description="How many trailing periods to return."),
 ) -> list[MerMonth]:
-    """The media plan's Blended MER tab, for what the warehouse holds."""
-    rows = (await session.execute(text(_MER_MONTHLY_SQL))).mappings().all()
+    """The media plan's Blended MER tab, for what the warehouse holds.
+
+    Every figure is recomputed FROM THE DAILY ROWS at the requested
+    grain -- never averaged up from monthly results. A quarter's MER is
+    its revenue over its spend, which is not the mean of three monthly
+    MERs: that would weigh a quiet month as heavily as a loud one.
+    """
+    rows = (await session.execute(
+        text(_MER_BY_PERIOD_SQL), {"grain": grain})).mappings().all()
     today = date.today()
     out: list[MerMonth] = []
     prev_rev = prev_spend = None
@@ -8666,9 +8687,12 @@ async def get_dashboard_mer_monthly(
             contribution_margin_pct=(round(100.0 * cm / rev, 2)
                                      if cm is not None and rev > 0 else None),
             incremental_roas=inc,
-            partial=(r["mo"].year, r["mo"].month) == (today.year, today.month)))
+            # "Still running" depends on the grain: September is finished
+            # when October starts, Q3 is not finished until October, and
+            # 2026 is not finished until 2027.
+            partial=_period_is_current(r["mo"], grain, today)))
         prev_rev, prev_spend = rev, spend
-    return out[-months:]
+    return out[-periods:]
 
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)

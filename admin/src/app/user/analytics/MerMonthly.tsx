@@ -1,7 +1,7 @@
 "use client";
 
-import type { MerMonth } from "@/lib/api";
-import { TableFrame } from "./SectionChrome";
+import type { MerGrain, MerMonth } from "@/lib/api";
+import { Segmented, TableFrame } from "./SectionChrome";
 
 /**
  * The media plan's Blended MER tab, in its own orientation.
@@ -19,8 +19,23 @@ import { TableFrame } from "./SectionChrome";
  * only inside CM, which is where the tab now applies it too.
  */
 
-const MONTH = (iso: string) =>
-  new Date(`${iso}T12:00:00`).toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+/** A period's name, in the shortest form that stays unambiguous at
+ *  that grain. "Q3 26" reads faster than "Jul–Sep 26" and a year needs
+ *  no month at all. */
+function periodLabel(iso: string, grain: MerGrain): string {
+  const d = new Date(`${iso}T12:00:00`);
+  if (grain === "year") return String(d.getFullYear());
+  if (grain === "quarter") {
+    return `Q${Math.floor(d.getMonth() / 3) + 1} ${String(d.getFullYear()).slice(2)}`;
+  }
+  return d.toLocaleDateString("en-IN", { month: "short", year: "2-digit" });
+}
+
+const GRAINS: { value: MerGrain; label: string; title: string }[] = [
+  { value: "month", label: "Month", title: "Calendar months, the grain the media plan reports in" },
+  { value: "quarter", label: "Quarter", title: "Calendar quarters" },
+  { value: "year", label: "Year", title: "Calendar years" },
+];
 
 /** Crore and lakh: the units these figures are discussed in. A
  *  nine-digit number in a table cell is read digit by digit. */
@@ -84,22 +99,36 @@ const ROWS: Row[] = [
     note: "new-customer revenue − ad spend − 18% GST on that spend" },
   { label: "CM %", get: (m) => pct(m.contribution_margin_pct), strong: true },
   { label: "Incremental ROAS", get: (m) => x2(m.incremental_roas), strong: true,
-    note: "Δ Shopify sales ÷ Δ ad spend, against the prior month" },
+    note: "Δ Shopify sales ÷ Δ ad spend, against the prior period" },
 ];
 
-export function MerMonthly({ months }: { months: MerMonth[] }) {
+export function MerMonthly({ months, grain, onGrain }: {
+  months: MerMonth[];
+  grain: MerGrain;
+  onGrain: (g: MerGrain) => void;
+}) {
   if (months.length === 0) {
-    return <p className="py-6 text-sm text-text-secondary">No months to show yet.</p>;
+    return <p className="py-6 text-sm text-text-secondary">Nothing to show for this grain yet.</p>;
   }
   return (
     <section aria-labelledby="dashboard-mer-monthly" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border-primary pb-1.5">
         <h3 id="dashboard-mer-monthly" className="text-sm font-medium text-text-primary">
-          Blended MER · month by month
+          Blended MER · by {grain}
         </h3>
-        <span className="text-[11.5px] text-text-tertiary">
-          {MONTH(months[0].month)} – {MONTH(months[months.length - 1].month)}
-        </span>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-[11.5px] text-text-tertiary">
+            {periodLabel(months[0].month, grain)} – {periodLabel(months[months.length - 1].month, grain)}
+          </span>
+          {/* Each grain is recomputed from the daily rows, not rolled up
+              from the one beside it: a quarter's MER is its revenue over
+              its spend, which is not the mean of three monthly MERs. */}
+          <Segmented
+            options={GRAINS.map((g) => ({ value: g.value, label: g.label, title: g.title }))}
+            value={grain}
+            onChange={(v) => onGrain(v as MerGrain)}
+          />
+        </div>
       </div>
 
       <TableFrame
@@ -121,7 +150,7 @@ export function MerMonthly({ months }: { months: MerMonth[] }) {
               {months.map((m) => (
                 <th key={m.month} scope="col"
                   className="whitespace-nowrap border-l border-border-soft px-2 py-1.5 text-right font-medium">
-                  {MONTH(m.month)}
+                  {periodLabel(m.month, grain)}
                   {/* A running month is informative as long as nobody
                       reads it as a finished one. */}
                   {m.partial && <span className="ml-1 font-normal normal-case text-warning-text">part</span>}
