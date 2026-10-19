@@ -305,6 +305,19 @@ PHASE_INGEST = [
     # ARPU by day and by window, split by device. Cheap: six small
     # Data API calls, no BigQuery.
     ("ga4_arpu",              ["scripts/fetch_ga4_arpu.py", "--days", "35"],  900),
+    # Google Ads spend, per campaign per day. The ONLY non-Meta spend in
+    # the warehouse, and the reason blended MER can be stated honestly:
+    # Google was 9.1% of the 30 days to 2026-10-19 (Rs 11.6L against
+    # Meta's Rs 1.16Cr), so revenue over Meta spend alone reads 3.97x
+    # where the blended figure is 3.61x.
+    #
+    # Reads a MapleMonk BigQuery table that Airbyte refreshes daily.
+    # Unrelated to the bq_inventory pull dropped above: that scanned
+    # 14.1M rows nightly for one column, this reads four columns of a
+    # 1.8 MB table -- 0.001 GiB a run, free in practice. 35 days because
+    # Google restates recent days as conversions land.
+    ("google_ads_spend",      ["scripts/fetch_google_ads_spend.py",
+                               "--days", "35"],                              900),
 ]
 
 PHASE_SILVER = [

@@ -195,7 +195,7 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
     return analyticsCache.get(key, () => fetchResponse<T>(path, init, effectiveTimeoutMs), ANALYTICS_CACHE_TTL_MS);
   }
   const result = await fetchResponse<T>(path, init, effectiveTimeoutMs);
-  if (method !== "GET" && !analyticsRead) clearAnalyticsCache();
+  if (method !== "GET" && !analyticsRead && path !== "/admin/assistant/chat") clearAnalyticsCache();
   return result;
 }
 
@@ -442,28 +442,42 @@ export type ChatRole = "user" | "assistant";
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  sources?: ChatSource[];
+}
+
+export interface ChatSource {
+  label: string;
+  url: string;
+  filters: Record<string, unknown>;
+  basis: string;
+  retrieved_at: string;
+  cache_note: string;
+  link_note: string;
 }
 
 export interface ChatResponse {
   message: string;
+  sources: ChatSource[];
 }
 
-export function sendChatMessage(messages: ChatMessage[], model?: string): Promise<ChatResponse> {
+export function sendChatMessage(
+  messages: ChatMessage[], model?: string, mode: "analytics" | "database" = "analytics",
+): Promise<ChatResponse> {
   return request<ChatResponse>("/admin/assistant/chat", {
     method: "POST",
-    body: JSON.stringify({ messages, model }),
-  });
+    body: JSON.stringify({ messages: messages.map(({ role, content }) => ({ role, content })), model, mode }),
+  }, 65_000);
 }
 
 export interface AssistantModel {
   id: string;
   label: string;
-  provider: "cloudflare" | "anthropic";
+  provider: "cloudflare" | "anthropic" | "chatgpt" | "openai";
   note: string | null;
 }
 
 export function fetchAssistantModels(): Promise<AssistantModel[]> {
-  return request<AssistantModel[]>("/admin/assistant/models");
+  return request<AssistantModel[]>("/admin/assistant/models", undefined, 10_000);
 }
 
 export interface ContextDocument {
@@ -2276,6 +2290,92 @@ export const fetchDashboardSessions = (from?: string | null, to?: string | null)
   request<DashboardSessions>(`/admin/analytics/dashboard/sessions${dashboardRange(from, to)}`);
 export const fetchDashboardSessionTrend = (from?: string | null, to?: string | null) =>
   request<DashboardSessionTrend>(`/admin/analytics/dashboard/session-trend${dashboardRange(from, to)}`);
+/** One day of the MER series. `mer` is null where a day has revenue but
+ *  no spend recorded yet -- Meta reports a day behind. */
+export interface BlendedMerPoint {
+  day: string;
+  revenue: number;
+  meta_spend: number;
+  google_spend: number;
+  kwikchat_spend: number;
+  mer: number | null;
+}
+
+export interface BlendedMerResponse {
+  revenue: number;
+  meta_spend: number;
+  google_spend: number;
+  /** A flat placeholder until real figures arrive. Omitting it made
+   *  every spend-divided ratio read high. */
+  kwikchat_spend: number;
+  /** Days in the window still carrying the estimate. Non-zero means
+   *  the card must say so. */
+  kwikchat_estimated_days: number;
+  total_spend: number;
+  mer: number | null;
+  google_share_of_spend: number | null;
+  points: BlendedMerPoint[];
+  days_missing_meta: number;
+  days_missing_google: number;
+  /** The window actually measured: the days BOTH platforms report,
+   *  inside whatever range was asked for. Often narrower than the
+   *  picker, since Meta's spend lands a day behind Google's. */
+  window_from: string | null;
+  window_to: string | null;
+  window_clamped: boolean;
+
+  /** The media plan's D2C block, over the same window. */
+  new_customers: number;
+  returning_customers: number;
+  sales_first_time: number;
+  sales_returning: number;
+  /** returning / (new + returning). NOT the plan's cell, which divides
+   *  by new + RTO-adjusted-new + returning and so counts the new cohort
+   *  twice — 19.64% there against 32.8% on the same inputs. */
+  returning_customer_pct: number | null;
+  /** returning sales / (first-time + returning). Matches the plan. */
+  returning_revenue_pct: number | null;
+  /** (Meta + Google) ÷ new customers. The plan adds Kwikchat and uses
+   *  an RTO-adjusted denominator, so it reads higher. */
+  blended_cac: number | null;
+}
+
+export const fetchDashboardBlendedMer = (from?: string | null, to?: string | null) =>
+  request<BlendedMerResponse>(`/admin/analytics/dashboard/blended-mer${dashboardRange(from, to)}`);
+/** One PERIOD of the media plan's Blended MER tab -- month, quarter or
+ *  year. Every figure is recomputed from the daily rows at that grain,
+ *  never averaged up from monthly results. */
+export interface MerMonth {
+  /** First day of the period. */
+  month: string;
+  revenue: number;
+  meta_spend: number;
+  google_spend: number;
+  kwikchat_spend: number;
+  kwikchat_estimated: boolean;
+  ad_spend: number;
+  meta_claimed: number;
+  meta_mer: number | null;
+  mer: number | null;
+  a_mer: number | null;
+  blended_cac: number | null;
+  new_customers: number;
+  returning_customers: number;
+  sales_first_time: number;
+  sales_returning: number;
+  returning_customer_pct: number | null;
+  returning_revenue_pct: number | null;
+  contribution_margin: number | null;
+  contribution_margin_pct: number | null;
+  incremental_roas: number | null;
+  partial: boolean;
+}
+
+export type MerGrain = "month" | "quarter" | "year";
+
+export const fetchDashboardMerByPeriod = (grain: MerGrain = "month", periods = 12) =>
+  request<MerMonth[]>(
+    `/admin/analytics/dashboard/mer-by-period?grain=${grain}&periods=${periods}`);
 export const fetchDashboardCategoryBreakdown = (from?: string | null, to?: string | null) =>
   request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown${dashboardRange(from, to)}`);
 

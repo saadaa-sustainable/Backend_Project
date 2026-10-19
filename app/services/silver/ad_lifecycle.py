@@ -527,6 +527,63 @@ UPDATE ad_lifecycle
 """
 
 
+#: WHO the ad is, taken from the roster rather than from its metrics.
+#:
+#: ad_insights is a flatten of the Insights API, and Insights only
+#: returns an ad while it has activity in the requested window. The
+#: envelope fields it carries -- ad_name, ad_status, adset/campaign
+#: names -- are therefore a SNAPSHOT from the ad's last active fetch,
+#: and they freeze the moment the ad stops spending. meta_ads is the
+#: roster: re-fetched in full every night, so it always holds what the
+#: ad is called today.
+#:
+#: Renaming an ad in Ads Manager is routine here -- the nomenclature
+#: carries the creative's asset code, so a re-cut gets renamed in
+#: place. Measured 2026-10-19, 259 ads were carrying a name Meta no
+#: longer uses. Example: 120250820581160422 is ACTIVE and named
+#:
+#:   CTP-BCO+MU+NA+IHP+GEN_BST_CPL001-0555_9:16_01_07_2026
+#:
+#: while ad_insights still held the name from its last spend window
+#: (13-20 Aug 2026):
+#:
+#:   CTP-BCO+MU+NA+IHP+GEN_BST_CM_PL_001-IT-A022
+#:
+#: That matters well beyond the label. ad_asset_map matches the content
+#: register's asset_id against ad_lifecycle.ad_name, so the stale name
+#: hid CPL001-0555 completely -- the ad had NO asset row. 96 of the 259
+#: would gain an asset mapping from this overlay on the primary video
+#: match alone.
+#:
+#: Applied here for the same reason the external overlay is: ad_asset_map
+#: reads ad_lifecycle, and ad_performance_summary is built FROM it, so
+#: one UPDATE at this point fixes the asset joins, the gold table and
+#: every endpoint above them.
+#:
+#: COALESCE so the roster can only ever REPLACE a name with another
+#: name. An ad present in insights but missing from the roster keeps
+#: what it had rather than being blanked.
+#: ad_name ONLY, deliberately.
+#:
+#: The roster disagrees with the external mirror about ad_status on
+#: 11,956 ads, and that column is one the mirror is meant to be
+#: authoritative for -- it drives the F1-F4 flags and the Winner / P0 /
+#: P1 / P2 categories. Widening this overlay to status would silently
+#: re-cut those verdicts for half the table, which is a decision about
+#: whose truth wins, not a rename fix. adset_name and campaign_name are
+#: left alone for the same reason. The mirror is stale on names too
+#: (it holds the same August snapshot for 120250820581160422), so for
+#: ad_name there is no competing source to defer to.
+_ROSTER_IDENTITY_OVERLAY = """
+UPDATE ad_lifecycle
+SET ad_name = m.ad_name
+FROM public.meta_ads m
+WHERE m.ad_id = ad_lifecycle.ad_id
+  AND m.ad_name IS NOT NULL
+  AND m.ad_name IS DISTINCT FROM ad_lifecycle.ad_name
+"""
+
+
 async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
     await ensure_ad_lifecycle_table(session)
     await session.execute(text(_TRUNCATE))
@@ -541,8 +598,16 @@ async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
         overlaid = (await session.execute(text(_EXTERNAL_OVERLAY_UPDATE))).rowcount or 0
         added = (await session.execute(text(_EXTERNAL_OVERLAY_INSERT))).rowcount or 0
 
+    # LAST, so it wins over anything the insights flatten or the external
+    # mirror put in this column -- both carry the same frozen snapshot,
+    # and the roster is the only source that tracks a rename.
+    renamed = (await session.execute(text(_ROSTER_IDENTITY_OVERLAY))).rowcount or 0
+
     awaited = (await session.execute(text(_RESULT_AWAITED_FIX))).rowcount or 0
     await session.commit()
+
+    if renamed:
+        logger.info("ad_lifecycle_roster_identity_overlay", ads=renamed)
 
     if awaited:
         logger.info("ad_lifecycle_result_awaited_reassigned", ads=awaited)

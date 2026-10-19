@@ -8212,6 +8212,488 @@ def _dashboard_date_bounds(date_from: str | None, date_to: str | None) -> tuple[
     return df, dt
 
 
+# ----------------------------------------------------------------------
+# MER (Meta + Google)
+# ----------------------------------------------------------------------
+#: Store revenue over paid spend, with NO attribution anywhere in it.
+#:
+#: Every other efficiency figure on this dashboard divides an ATTRIBUTED
+#: numerator by spend, and attribution on this store is partial by
+#: construction: GA4 sees 76% of orders, Shopify's own journey data is
+#: empty for 96% (GoKwik owns the checkout), and roughly half of ad ids
+#: never resolve to a named ad. MER needs none of that. Two totals, both
+#: measured directly, neither depending on a join holding up.
+#:
+#: WHAT THE TWO SIDES ARE
+#:
+#:   numerator    shopify_sales_daily.total_sales
+#:   denominator  insights_daily_by_ad.spend  (Meta)
+#:              + google_ads_spend_daily.spend (Google)
+#:
+#: total_sales, not gross_sales, because that is the column the media
+#: plan's own "Shopify Gross Sales" row holds -- verified to the rupee
+#: for Aug and Sep 2026 (Rs 4,66,64,711 and Rs 4,70,14,114). gross_sales
+#: in this warehouse is a different, larger figure (Rs 5,68,42,195 for
+#: Sep) and using it would silently inflate every reading by ~21%.
+#:
+#: WHAT THIS IS NOT
+#:
+#: The media plan tracks three MERs. This is NONE of them exactly:
+#:
+#:   TOTAL MER  all-channel revenue / all marketing cost      3.60 Sep 26
+#:   D2C MER    Shopify / (Meta + Google + Kwikchat)          3.22 Sep 26
+#:   this       Shopify / (Meta + Google)                     3.58 Sep 26
+#:
+#: Kwikchat was Rs 14.3L in September, 8.5% of D2C spend, and leaving it
+#: out lifts the ratio about 11%. The warehouse holds no Kwikchat spend,
+#: nor Amazon/Myntra/Zepto ads, content, influencer or tech cost, and no
+#: marketplace revenue -- so neither of the plan's figures can be
+#: reproduced here yet. The UI says Meta + Google on its face for that
+#: reason: a reader comparing it with the monthly deck must be able to
+#: see why the two differ without being told.
+#: CLAMPED TO THE DAYS BOTH PLATFORMS COVER, and revenue to the same
+#: window.
+#:
+#: The two spend tables do not end on the same day. Meta's insights
+#: arrive a day behind while Google's land the same morning, so a range
+#: ending today picks up revenue and Google spend for a day Meta has
+#: not reported. That is a denominator missing one of its two parts
+#: against a full numerator, and the ratio reads high -- on 2026-10-19
+#: it was the difference between a real 3.55x and a day showing no Meta
+#: spend at all.
+#:
+#: So the window is the INTERSECTION: the later of the two first days,
+#: the earlier of the two last days, inside whatever range was asked
+#: for. Revenue is cut to the same window, because a numerator covering
+#: more days than its denominator is the same error in the other
+#: direction. The response hands back the window it actually used.
+#:
+#: GREATEST and LEAST skip NULLs in Postgres, so a bound coming back
+#: empty widens rather than annihilates the window.
+_BLENDED_MER_SQL = """
+WITH bounds AS (
+  SELECT GREATEST((SELECT MIN(day) FROM public.insights_daily_by_ad),
+                  (SELECT MIN(day) FROM public.google_ads_spend_daily)
+                  {clamp_lo}) AS lo,
+         LEAST((SELECT MAX(day) FROM public.insights_daily_by_ad),
+               (SELECT MAX(day) FROM public.google_ads_spend_daily)
+               {clamp_hi}) AS hi
+),
+days AS (
+  SELECT s.day FROM public.shopify_sales_daily s, bounds b
+  WHERE s.day BETWEEN b.lo AND b.hi
+  GROUP BY s.day
+),
+rev AS (
+  -- The D2C block of the media plan, same grain and same window as the
+  -- ratio above it. Every column here is Shopify's own, so the figures
+  -- reconcile with the plan to the rupee rather than being rebuilt from
+  -- orders.
+  SELECT s.day,
+         SUM(s.total_sales)            AS revenue,
+         SUM(s.new_customers)          AS new_customers,
+         SUM(s.returning_customers)    AS returning_customers,
+         SUM(s.total_sales_first_time) AS sales_first_time,
+         SUM(s.total_sales_returning)  AS sales_returning
+  FROM public.shopify_sales_daily s, bounds b
+  WHERE s.day BETWEEN b.lo AND b.hi
+  GROUP BY s.day
+),
+meta AS (
+  SELECT i.day, SUM(i.spend) AS spend
+  FROM public.insights_daily_by_ad i, bounds b
+  WHERE i.day BETWEEN b.lo AND b.hi
+  GROUP BY i.day
+),
+goog AS (
+  SELECT g.day, SUM(g.spend) AS spend
+  FROM public.google_ads_spend_daily g, bounds b
+  WHERE g.day BETWEEN b.lo AND b.hi
+  GROUP BY g.day
+),
+-- Kwikchat deliberately does NOT constrain the window above. It is a
+-- flat placeholder, so letting it clamp the range would be the tail
+-- wagging the dog; the window stays the days Meta and Google both
+-- report, and Kwikchat contributes whatever it has inside that.
+kwik AS (
+  SELECT k.day, SUM(k.spend) AS spend,
+         bool_or(k.is_estimate) AS is_estimate
+  FROM public.kwikchat_spend_daily k, bounds b
+  WHERE k.day BETWEEN b.lo AND b.hi
+  GROUP BY k.day
+)
+SELECT d.day,
+       COALESCE(rev.revenue, 0)             AS revenue,
+       COALESCE(rev.new_customers, 0)       AS new_customers,
+       COALESCE(rev.returning_customers, 0) AS returning_customers,
+       COALESCE(rev.sales_first_time, 0)    AS sales_first_time,
+       COALESCE(rev.sales_returning, 0)     AS sales_returning,
+       COALESCE(meta.spend, 0)   AS meta_spend,
+       COALESCE(goog.spend, 0)   AS google_spend,
+       COALESCE(kwik.spend, 0)   AS kwikchat_spend,
+       COALESCE(kwik.is_estimate, false) AS kwikchat_is_estimate
+FROM days d
+     LEFT JOIN rev  ON rev.day  = d.day
+     LEFT JOIN meta ON meta.day = d.day
+     LEFT JOIN goog ON goog.day = d.day
+     LEFT JOIN kwik ON kwik.day = d.day
+ORDER BY d.day
+"""
+
+
+class BlendedMerPoint(BaseModel):
+    day: date
+    revenue: float
+    meta_spend: float
+    google_spend: float
+    kwikchat_spend: float
+    #: None, not 0, on a day with revenue but no spend yet. Meta reports
+    #: a day behind, so today's row would otherwise read as an enormous
+    #: ratio rather than an absent one.
+    mer: float | None
+
+
+class BlendedMerResponse(BaseModel):
+    revenue: float
+    meta_spend: float
+    google_spend: float
+    #: A flat placeholder until the real figures arrive, so every ratio
+    #: that divides by spend stops reading high. Omitting it was not
+    #: neutral: Sep 2026 gives MER 3.58x without and 3.35x with, against
+    #: the media plan's own 3.22x.
+    kwikchat_spend: float
+    #: Days in the window whose Kwikchat figure is still the estimate.
+    #: Non-zero means the card must say so -- an assumption a reader
+    #: cannot see is worse than one they can.
+    kwikchat_estimated_days: int
+    total_spend: float
+    mer: float | None
+    #: Share of spend each platform carries, so a reader can see at a
+    #: glance how much of the denominator Google is -- it was 9.1% over
+    #: the 30 days to 2026-10-19, which is the whole reason this figure
+    #: moved from 3.97x to 3.61x when Google was ingested.
+    google_share_of_spend: float | None
+    points: list[BlendedMerPoint]
+    #: Days inside the window that carry revenue but no spend from one
+    #: of the two platforms. After the clamp these are GAPS IN THE
+    #: MIDDLE, not the trailing reporting lag -- that is cut off by the
+    #: window itself. Stated rather than smoothed over: they push the
+    #: ratio up.
+    days_missing_meta: int
+    days_missing_google: int
+    #: The window actually measured: the days BOTH platforms cover,
+    #: inside whatever was asked for. Echoed back because it is often
+    #: narrower than the range on the picker -- Meta reports a day
+    #: behind Google, so "to today" almost always means "to yesterday".
+    window_from: date | None
+    window_to: date | None
+    #: True when the clamp moved either end, so the UI can say which
+    #: days it is actually describing instead of implying the picker's.
+    window_clamped: bool
+
+    # --- the media plan's D2C block, same window -------------------
+    new_customers: int
+    returning_customers: int
+    sales_first_time: float
+    sales_returning: float
+    #: Returning as a share of customers who bought in the window.
+    #:
+    #: returning / (new + returning). The media plan's own cell reads
+    #: W31/SUM(W29:W31), which spans "NEW CUSTOMERS ACQUIRED", "New New
+    #: Customers after cancelation and return and RTO" AND "RETURNING
+    #: CUSTOMERS" -- and rows 29 and 30 are the same cohort counted
+    #: twice, the second adjusted for RTO. That halves the figure: Sep
+    #: 2026 reads 19.6% there against 32.8% here on the same inputs.
+    #: This is the undoubled one.
+    returning_customer_pct: float | None
+    #: returning sales / (first-time + returning). Matches the plan
+    #: exactly -- 41.35% for Sep 2026, 39.93% for Aug.
+    returning_revenue_pct: float | None
+    #: Spend per new customer, on the SAME two platforms as the ratio
+    #: above. The plan divides Meta+Google+Kwikchat by an RTO-adjusted
+    #: new-customer count and gets Rs 588.52 for Sep; this reads lower
+    #: because the warehouse holds neither Kwikchat spend nor the RTO
+    #: adjustment.
+    blended_cac: float | None
+
+
+@router.get("/dashboard/blended-mer", response_model=BlendedMerResponse)
+@cached_analytics(ttl=300.0)
+async def get_dashboard_blended_mer(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> BlendedMerResponse:
+    """Shopify revenue over Meta + Google spend, with no attribution."""
+    df, dt = _dashboard_date_bounds(date_from, date_to)
+    params: dict[str, object] = {}
+    # The requested range is one more bound among the coverage bounds,
+    # not a separate filter -- GREATEST/LEAST pick whichever is tighter.
+    clamp_lo = clamp_hi = ""
+    if df and dt:
+        clamp_lo, clamp_hi = ", :df", ", :dt"
+        params = {"df": df, "dt": dt}
+    sql = _BLENDED_MER_SQL.format(clamp_lo=clamp_lo, clamp_hi=clamp_hi)
+    rows = (await session.execute(text(sql), params)).mappings().all()
+
+    points: list[BlendedMerPoint] = []
+    revenue = meta_total = google_total = kwik_total = 0.0
+    kwik_estimated = 0
+    new_c = ret_c = 0
+    sales_first = sales_ret = 0.0
+    missing_meta = missing_google = 0
+    for r in rows:
+        rv = float(r["revenue"] or 0)
+        new_c += int(r["new_customers"] or 0)
+        ret_c += int(r["returning_customers"] or 0)
+        sales_first += float(r["sales_first_time"] or 0)
+        sales_ret += float(r["sales_returning"] or 0)
+        ms = float(r["meta_spend"] or 0)
+        gs = float(r["google_spend"] or 0)
+        ks = float(r["kwikchat_spend"] or 0)
+        if r["kwikchat_is_estimate"]:
+            kwik_estimated += 1
+        kwik_total += ks
+        revenue += rv
+        meta_total += ms
+        google_total += gs
+        if rv > 0 and ms == 0:
+            missing_meta += 1
+        if rv > 0 and gs == 0:
+            missing_google += 1
+        spend = ms + gs + ks
+        points.append(BlendedMerPoint(
+            day=r["day"], revenue=rv, meta_spend=ms, google_spend=gs,
+            kwikchat_spend=ks,
+            mer=round(rv / spend, 3) if spend > 0 else None))
+
+    total_spend = meta_total + google_total + kwik_total
+    return BlendedMerResponse(
+        revenue=round(revenue, 2),
+        meta_spend=round(meta_total, 2),
+        google_spend=round(google_total, 2),
+        kwikchat_spend=round(kwik_total, 2),
+        kwikchat_estimated_days=kwik_estimated,
+        total_spend=round(total_spend, 2),
+        mer=round(revenue / total_spend, 3) if total_spend > 0 else None,
+        google_share_of_spend=(round(100.0 * google_total / total_spend, 1)
+                               if total_spend > 0 else None),
+        points=points,
+        days_missing_meta=missing_meta,
+        days_missing_google=missing_google,
+        window_from=points[0].day if points else None,
+        window_to=points[-1].day if points else None,
+        window_clamped=bool(points) and bool(df and dt)
+                       and (points[0].day != df or points[-1].day != dt),
+        new_customers=new_c,
+        returning_customers=ret_c,
+        sales_first_time=round(sales_first, 2),
+        sales_returning=round(sales_ret, 2),
+        returning_customer_pct=(round(100.0 * ret_c / (new_c + ret_c), 2)
+                                if (new_c + ret_c) else None),
+        returning_revenue_pct=(round(100.0 * sales_ret / (sales_first + sales_ret), 2)
+                               if (sales_first + sales_ret) else None),
+        blended_cac=(round(total_spend / new_c, 2) if new_c else None))
+
+# ----------------------------------------------------------------------
+# MER by month (the media plan's own layout)
+# ----------------------------------------------------------------------
+#: The Blended MER + CAC tab, month by month, for the figures this
+#: warehouse can source. Metrics down the rows, months across the
+#: columns -- the plan's orientation, kept so the two can be read side
+#: by side.
+#:
+#: FORMULAS TRACK THE TAB AS OF 2026-10-19, which changed that morning:
+#:
+#:   Returning Customer %  was W31/SUM(W29:W31), counting the new
+#:                         cohort twice; now W32/SUM(W30,W32). The
+#:                         corrected shape is what this already used.
+#:   Ad spend + GST@18%    was SUM(W2:W4)*1.18; now SUM(W2:W4). GST
+#:                         left the A-MER denominator, so A-MER rose
+#:                         from 1.60 to 1.89 for Sep 2026.
+#:   CM                    was W55-W54; now W56-W55-(0.18*W55). The
+#:                         18% moved here.
+#:   CM %                  new row, CM / Shopify gross sales.
+#:
+#: The tab's "Ad spend + GST@18%" label is now stale -- it no longer
+#: adds GST -- so this calls the same quantity "ad spend" and applies
+#: the 18% only inside contribution margin, which is where the tab now
+#: applies it too.
+#:
+#: SPEND IS META + GOOGLE, as the card above it. The plan's own D2C
+#: figures add Kwikchat, so its D2C MER and Blended CAC read lower and
+#: higher respectively; the UI says so rather than implying a match.
+_MER_BY_PERIOD_SQL = """
+WITH bounds AS (
+  SELECT GREATEST((SELECT MIN(day) FROM public.insights_daily_by_ad),
+                  (SELECT MIN(day) FROM public.google_ads_spend_daily)) AS lo,
+         LEAST((SELECT MAX(day) FROM public.insights_daily_by_ad),
+               (SELECT MAX(day) FROM public.google_ads_spend_daily)) AS hi
+),
+shop AS (
+  SELECT date_trunc(:grain, s.day)::date AS mo,
+         SUM(s.total_sales)            AS revenue,
+         SUM(s.new_customers)          AS new_customers,
+         SUM(s.returning_customers)    AS returning_customers,
+         SUM(s.total_sales_first_time) AS sales_first_time,
+         SUM(s.total_sales_returning)  AS sales_returning
+  FROM public.shopify_sales_daily s, bounds b
+  WHERE s.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+),
+meta AS (
+  SELECT date_trunc(:grain, i.day)::date AS mo,
+         SUM(i.spend) AS spend, SUM(i.conv_value) AS claimed
+  FROM public.insights_daily_by_ad i, bounds b
+  WHERE i.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+),
+goog AS (
+  SELECT date_trunc(:grain, g.day)::date AS mo, SUM(g.spend) AS spend
+  FROM public.google_ads_spend_daily g, bounds b
+  WHERE g.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+),
+kwik AS (
+  SELECT date_trunc(:grain, k.day)::date AS mo, SUM(k.spend) AS spend,
+         bool_or(k.is_estimate) AS is_estimate
+  FROM public.kwikchat_spend_daily k, bounds b
+  WHERE k.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+)
+SELECT s.mo,
+       COALESCE(s.revenue, 0)             AS revenue,
+       COALESCE(s.new_customers, 0)       AS new_customers,
+       COALESCE(s.returning_customers, 0) AS returning_customers,
+       COALESCE(s.sales_first_time, 0)    AS sales_first_time,
+       COALESCE(s.sales_returning, 0)     AS sales_returning,
+       COALESCE(m.spend, 0)               AS meta_spend,
+       COALESCE(m.claimed, 0)             AS meta_claimed,
+       COALESCE(g.spend, 0)               AS google_spend,
+       COALESCE(k.spend, 0)               AS kwikchat_spend,
+       COALESCE(k.is_estimate, false)     AS kwikchat_is_estimate
+FROM shop s LEFT JOIN meta m ON m.mo = s.mo
+            LEFT JOIN goog g ON g.mo = s.mo
+            LEFT JOIN kwik k ON k.mo = s.mo
+ORDER BY s.mo
+"""
+
+
+class MerMonth(BaseModel):
+    #: First day of the period -- month, quarter or year start.
+    month: date
+    revenue: float
+    meta_spend: float
+    google_spend: float
+    kwikchat_spend: float
+    #: True where any day of the month still carries the placeholder.
+    kwikchat_estimated: bool
+    ad_spend: float
+    #: Meta's own claimed purchase value. Matches the plan to the rupee
+    #: (Aug 35,806,763 / Sep 37,231,279), unlike Google's, which runs
+    #: 12-44% above the plan's and so is left out entirely.
+    meta_claimed: float
+    meta_mer: float | None
+    mer: float | None
+    a_mer: float | None
+    blended_cac: float | None
+    new_customers: int
+    returning_customers: int
+    sales_first_time: float
+    sales_returning: float
+    returning_customer_pct: float | None
+    returning_revenue_pct: float | None
+    #: Net Sales (new-customer revenue) - ad spend - 18% GST on it.
+    contribution_margin: float | None
+    contribution_margin_pct: float | None
+    #: (revenue - prior month revenue) / (spend - prior month spend).
+    #: Null for the first month, and where spend did not move.
+    incremental_roas: float | None
+    #: The month is still running, or one of the two spend sources has
+    #: not reported all of it. Flagged rather than dropped: a part-month
+    #: is informative as long as nobody reads it as a full one.
+    partial: bool
+
+
+def _period_is_current(start: date, grain: str, today: date) -> bool:
+    """Whether `start` names the period `today` falls in."""
+    if grain == "year":
+        return start.year == today.year
+    if grain == "quarter":
+        return (start.year, (start.month - 1) // 3) == (today.year, (today.month - 1) // 3)
+    return (start.year, start.month) == (today.year, today.month)
+
+
+@router.get("/dashboard/mer-by-period", response_model=list[MerMonth])
+@cached_analytics(ttl=300.0)
+async def get_dashboard_mer_by_period(
+    session: SessionDep,
+    grain: Literal["month", "quarter", "year"] = Query(
+        default="month",
+        description="Period to aggregate into. The plan reports monthly; "
+                    "quarter and year roll the same arithmetic up."),
+    periods: int = Query(default=12, ge=1, le=60,
+                         description="How many trailing periods to return."),
+) -> list[MerMonth]:
+    """The media plan's Blended MER tab, for what the warehouse holds.
+
+    Every figure is recomputed FROM THE DAILY ROWS at the requested
+    grain -- never averaged up from monthly results. A quarter's MER is
+    its revenue over its spend, which is not the mean of three monthly
+    MERs: that would weigh a quiet month as heavily as a loud one.
+    """
+    rows = (await session.execute(
+        text(_MER_BY_PERIOD_SQL), {"grain": grain})).mappings().all()
+    today = date.today()
+    out: list[MerMonth] = []
+    prev_rev = prev_spend = None
+    for r in rows:
+        rev = float(r["revenue"] or 0)
+        ms = float(r["meta_spend"] or 0)
+        gs = float(r["google_spend"] or 0)
+        ks = float(r["kwikchat_spend"] or 0)
+        spend = ms + gs + ks
+        new_c = int(r["new_customers"] or 0)
+        ret_c = int(r["returning_customers"] or 0)
+        s_first = float(r["sales_first_time"] or 0)
+        s_ret = float(r["sales_returning"] or 0)
+        claimed = float(r["meta_claimed"] or 0)
+        # GST sits ONLY here, matching the tab after its 2026-10-19
+        # change: the A-MER denominator is raw spend, contribution
+        # margin carries the 18%.
+        cm = s_first - spend - 0.18 * spend if spend > 0 else None
+        inc = None
+        if prev_rev is not None and prev_spend is not None and spend != prev_spend:
+            inc = round((rev - prev_rev) / (spend - prev_spend), 2)
+        out.append(MerMonth(
+            month=r["mo"],
+            revenue=round(rev, 2),
+            meta_spend=round(ms, 2), google_spend=round(gs, 2),
+            kwikchat_spend=round(ks, 2),
+            kwikchat_estimated=bool(r["kwikchat_is_estimate"]),
+            ad_spend=round(spend, 2),
+            meta_claimed=round(claimed, 2),
+            meta_mer=round(claimed / ms, 2) if ms > 0 else None,
+            mer=round(rev / spend, 2) if spend > 0 else None,
+            a_mer=round(s_first / spend, 2) if spend > 0 else None,
+            blended_cac=round(spend / new_c, 2) if new_c else None,
+            new_customers=new_c, returning_customers=ret_c,
+            sales_first_time=round(s_first, 2), sales_returning=round(s_ret, 2),
+            returning_customer_pct=(round(100.0 * ret_c / (new_c + ret_c), 2)
+                                    if (new_c + ret_c) else None),
+            returning_revenue_pct=(round(100.0 * s_ret / (s_first + s_ret), 2)
+                                   if (s_first + s_ret) else None),
+            contribution_margin=round(cm, 2) if cm is not None else None,
+            contribution_margin_pct=(round(100.0 * cm / rev, 2)
+                                     if cm is not None and rev > 0 else None),
+            incremental_roas=inc,
+            # "Still running" depends on the grain: September is finished
+            # when October starts, Q3 is not finished until October, and
+            # 2026 is not finished until 2027.
+            partial=_period_is_current(r["mo"], grain, today)))
+        prev_rev, prev_spend = rev, spend
+    return out[-periods:]
+
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
 async def get_dashboard_channel_breakdown(

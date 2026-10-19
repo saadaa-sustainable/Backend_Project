@@ -23,6 +23,9 @@ const Cpis = dynamic(() => import("./Cpis").then((m) => m.Cpis), { loading: TabL
 const ComparativeAnalysis = dynamic(
   () => import("./ComparativeAnalysis").then((m) => m.ComparativeAnalysis),
   { loading: TabLoading });
+const BlendedMerSection = dynamic(
+  () => import("./BlendedMerSection").then((m) => m.BlendedMerSection),
+  { loading: TabLoading });
 const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), { loading: TabLoading });
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
 const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
@@ -43,6 +46,7 @@ const AssetAnalysis = dynamic(() => import("./AssetAnalysis").then((m) => m.Asse
 const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = {
   dashboard: { label: "Dashboard", render: () => <Dashboard /> },
   comparative: { label: "Comparative Analysis", render: () => <ComparativeAnalysis /> },
+  "blended-mer": { label: "Blended MER", render: () => <BlendedMerSection /> },
   "creative-testing": { label: "Creative Testing", render: () => <CreativeTesting /> },
   "asset-analysis": { label: "Asset Analysis", render: () => <AssetAnalysis /> },
   "ads-analyse": { label: "Ads Analyse", render: () => <AdsAnalyse /> },
