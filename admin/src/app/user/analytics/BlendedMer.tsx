@@ -50,7 +50,7 @@ export function BlendedMer({ data, rangeLabel }: {
     <section aria-labelledby="dashboard-blended-mer" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border-primary pb-1.5">
         <h3 id="dashboard-blended-mer" className="text-sm font-medium text-text-primary">
-          MER · Meta + Google
+          MER &amp; customer mix
         </h3>
         {/* The window MEASURED, not the one on the picker. Meta reports
             a day behind Google, so "to today" almost always means "to
@@ -119,6 +119,60 @@ export function BlendedMer({ data, rangeLabel }: {
         </p>
       )}
 
+      {/* The media plan's D2C block, same window as the ratio above.
+          Every figure here is Shopify's own column, so it reconciles
+          with the plan to the rupee -- which is why the two that do
+          NOT are called out rather than quietly shown. */}
+      <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-border-soft pt-3 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="min-w-0">
+          <FieldLabel>New customers</FieldLabel>
+          <p className="mt-0.5 font-mono text-[19px] tabular-nums text-text-primary">
+            {data.new_customers.toLocaleString("en-IN")}
+          </p>
+          <p className="mt-1 text-[11.5px] text-text-tertiary">
+            {data.blended_cac === null ? "—" : `${money(data.blended_cac)} each`}
+          </p>
+        </div>
+
+        <div className="min-w-0">
+          <FieldLabel>Returning customers</FieldLabel>
+          <p className="mt-0.5 font-mono text-[19px] tabular-nums text-text-primary">
+            {data.returning_customers.toLocaleString("en-IN")}
+          </p>
+          <p className="mt-1 text-[11.5px] text-text-tertiary">
+            {data.returning_customer_pct === null ? "—" : `${data.returning_customer_pct}% of buyers`}
+          </p>
+        </div>
+
+        <div className="min-w-0">
+          <FieldLabel>Sales · first-time</FieldLabel>
+          <p className="mt-0.5 font-mono text-[19px] tabular-nums text-text-primary">
+            {compact(data.sales_first_time)}
+          </p>
+          <p className="mt-1 text-[11.5px] text-text-tertiary">
+            {data.returning_revenue_pct === null ? "—" : `${(100 - data.returning_revenue_pct).toFixed(2)}% of revenue`}
+          </p>
+        </div>
+
+        <div className="min-w-0">
+          <FieldLabel>Sales · returning</FieldLabel>
+          <p className="mt-0.5 font-mono text-[19px] tabular-nums text-text-primary">
+            {compact(data.sales_returning)}
+          </p>
+          <p className="mt-1 text-[11.5px] text-text-tertiary">
+            {data.returning_revenue_pct === null ? "—" : `${data.returning_revenue_pct}% of revenue`}
+          </p>
+        </div>
+
+        <div className="min-w-0">
+          <FieldLabel>Blended CAC</FieldLabel>
+          <p className="mt-0.5 font-mono text-[19px] tabular-nums text-text-primary">
+            {data.blended_cac === null ? "—" : money(data.blended_cac)}
+          </p>
+          <p className="mt-1 text-[11.5px] text-text-tertiary">Meta + Google ÷ new customers</p>
+        </div>
+      </div>
+
       {gaps > 0 && (
         <p className="border-l-2 border-warning-text pl-2 text-[11.5px] text-warning-text">
           {gaps === 1
@@ -128,8 +182,20 @@ export function BlendedMer({ data, rangeLabel }: {
         </p>
       )}
 
+      {/* Three figures in the plan's D2C block are NOT here, and
+          saying which is cheaper than someone finding out by
+          disagreeing with the deck in a meeting. */}
       <p className="text-[11.5px] text-text-tertiary">
-        No attribution in this figure: it divides every Shopify order by every rupee of Meta and
+        Returning customers reads Shopify&apos;s own count, which runs above the plan&apos;s manually
+        entered figure ({data.returning_customers.toLocaleString("en-IN")} against 12,107 for Sep).
+        Returning-customer % is <b className="font-medium">not</b> the plan&apos;s: its cell divides by
+        new + RTO-adjusted-new + returning, counting the new cohort twice and roughly halving the
+        result. Over-revenue reporting and attribution overlap are absent entirely — both need
+        Kwikchat&apos;s claimed purchase value, which the warehouse does not hold.
+      </p>
+
+      <p className="text-[11.5px] text-text-tertiary">
+        No attribution in the ratio: it divides every Shopify order by every rupee of Meta and
         Google spend, so it does not depend on GA4 coverage or on an ad id resolving.
         It is <b className="font-medium">not</b> the media plan&apos;s D2C MER, which also carries
         Kwikchat spend and so reads lower, nor its Total MER across every channel — the warehouse

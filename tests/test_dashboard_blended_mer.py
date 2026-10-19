@@ -41,14 +41,22 @@ def _session(rows):
     db.create_function("least", -1,
                        lambda *a: min([x for x in a if x is not None], default=None))
     db.executescript("""
-        CREATE TABLE shopify_sales_daily(day TEXT, total_sales NUMERIC, gross_sales NUMERIC);
+        CREATE TABLE shopify_sales_daily(day TEXT, total_sales NUMERIC, gross_sales NUMERIC,
+            new_customers INTEGER, returning_customers INTEGER,
+            total_sales_first_time NUMERIC, total_sales_returning NUMERIC);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC);
         CREATE TABLE google_ads_spend_daily(day TEXT, campaign_id TEXT, spend NUMERIC);
     """)
-    for day, rev, meta, goog in rows:
+    for row in rows:
+        day, rev, meta, goog = row[:4]
+        # Customer columns default to a 2:1 new/returning split and a
+        # 60/40 revenue split unless a test states its own.
+        new_c, ret_c, s_first, s_ret = (row[4:] if len(row) > 4
+                                        else (20, 10, rev * 0.6, rev * 0.4))
         # gross_sales deliberately inflated, so a regression that reads
         # the wrong column fails loudly instead of plausibly.
-        db.execute("INSERT INTO shopify_sales_daily VALUES (?,?,?)", (day, rev, rev * 1.21))
+        db.execute("INSERT INTO shopify_sales_daily VALUES (?,?,?,?,?,?,?)",
+                   (day, rev, rev * 1.21, new_c, ret_c, s_first, s_ret))
         if meta is not None:
             db.execute("INSERT INTO insights_daily_by_ad VALUES ('a',?,?)", (day, meta))
         if goog is not None:
@@ -183,6 +191,61 @@ async def test_a_fully_covered_range_is_not_clamped():
     r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
     assert r.window_clamped is False
     assert (r.window_from, r.window_to) == (date(2026, 9, 1), date(2026, 9, 2))
+    db.close()
+
+
+async def test_returning_revenue_pct_matches_the_media_plan():
+    """returning / (first-time + returning) -- the one D2C ratio whose
+    formula the plan and this endpoint agree on exactly."""
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0, 20, 10, 600.0, 400.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-01")
+    assert r.returning_revenue_pct == 40.0
+    assert r.sales_first_time == 600
+    assert r.sales_returning == 400
+    db.close()
+
+
+async def test_returning_customer_pct_does_not_double_count_the_new_cohort():
+    """The plan's cell is W31/SUM(W29:W31), spanning NEW CUSTOMERS, the
+    RTO-adjusted repeat of that same cohort, and RETURNING -- so the new
+    customers land in the denominator twice and the figure comes out
+    near half. This divides by new + returning only."""
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0, 30, 10, 600.0, 400.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-01")
+    assert r.returning_customer_pct == 25.0           # 10 / (30 + 10)
+    doubled = round(100 * 10 / (30 + 30 + 10), 2)     # the plan's shape
+    assert doubled == 14.29
+    assert r.returning_customer_pct != doubled
+    db.close()
+
+
+async def test_blended_cac_is_spend_over_new_customers():
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0, 25, 10, 600.0, 400.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-01")
+    assert r.blended_cac == 10.0      # (200 + 50) / 25
+    assert r.new_customers == 25
+    assert r.returning_customers == 10
+    db.close()
+
+
+async def test_customer_metrics_respect_the_clamped_window():
+    """They are summed from the same rows the ratio uses, so a day cut
+    off the end must not contribute customers either."""
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0, 20, 10, 600.0, 400.0),
+                      ("2026-09-02", 9000.0, None, 50.0, 999, 999, 5000.0, 4000.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-02")
+    assert r.window_to == date(2026, 9, 1)
+    assert r.new_customers == 20
+    assert r.returning_customers == 10
+    db.close()
+
+
+async def test_no_customers_yields_no_cac_rather_than_a_division_error():
+    s, db = _session([("2026-09-01", 1000.0, 200.0, 50.0, 0, 0, 0.0, 0.0)])
+    r = await A.get_dashboard_blended_mer(s, "2026-09-01", "2026-09-01")
+    assert r.blended_cac is None
+    assert r.returning_customer_pct is None
+    assert r.returning_revenue_pct is None
     db.close()
 
 

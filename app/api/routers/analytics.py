@@ -8285,7 +8285,16 @@ days AS (
   GROUP BY s.day
 ),
 rev AS (
-  SELECT s.day, SUM(s.total_sales) AS revenue
+  -- The D2C block of the media plan, same grain and same window as the
+  -- ratio above it. Every column here is Shopify's own, so the figures
+  -- reconcile with the plan to the rupee rather than being rebuilt from
+  -- orders.
+  SELECT s.day,
+         SUM(s.total_sales)            AS revenue,
+         SUM(s.new_customers)          AS new_customers,
+         SUM(s.returning_customers)    AS returning_customers,
+         SUM(s.total_sales_first_time) AS sales_first_time,
+         SUM(s.total_sales_returning)  AS sales_returning
   FROM public.shopify_sales_daily s, bounds b
   WHERE s.day BETWEEN b.lo AND b.hi
   GROUP BY s.day
@@ -8303,7 +8312,11 @@ goog AS (
   GROUP BY g.day
 )
 SELECT d.day,
-       COALESCE(rev.revenue, 0)  AS revenue,
+       COALESCE(rev.revenue, 0)             AS revenue,
+       COALESCE(rev.new_customers, 0)       AS new_customers,
+       COALESCE(rev.returning_customers, 0) AS returning_customers,
+       COALESCE(rev.sales_first_time, 0)    AS sales_first_time,
+       COALESCE(rev.sales_returning, 0)     AS sales_returning,
        COALESCE(meta.spend, 0)   AS meta_spend,
        COALESCE(goog.spend, 0)   AS google_spend
 FROM days d
@@ -8354,6 +8367,31 @@ class BlendedMerResponse(BaseModel):
     #: days it is actually describing instead of implying the picker's.
     window_clamped: bool
 
+    # --- the media plan's D2C block, same window -------------------
+    new_customers: int
+    returning_customers: int
+    sales_first_time: float
+    sales_returning: float
+    #: Returning as a share of customers who bought in the window.
+    #:
+    #: returning / (new + returning). The media plan's own cell reads
+    #: W31/SUM(W29:W31), which spans "NEW CUSTOMERS ACQUIRED", "New New
+    #: Customers after cancelation and return and RTO" AND "RETURNING
+    #: CUSTOMERS" -- and rows 29 and 30 are the same cohort counted
+    #: twice, the second adjusted for RTO. That halves the figure: Sep
+    #: 2026 reads 19.6% there against 32.8% here on the same inputs.
+    #: This is the undoubled one.
+    returning_customer_pct: float | None
+    #: returning sales / (first-time + returning). Matches the plan
+    #: exactly -- 41.35% for Sep 2026, 39.93% for Aug.
+    returning_revenue_pct: float | None
+    #: Spend per new customer, on the SAME two platforms as the ratio
+    #: above. The plan divides Meta+Google+Kwikchat by an RTO-adjusted
+    #: new-customer count and gets Rs 588.52 for Sep; this reads lower
+    #: because the warehouse holds neither Kwikchat spend nor the RTO
+    #: adjustment.
+    blended_cac: float | None
+
 
 @router.get("/dashboard/blended-mer", response_model=BlendedMerResponse)
 @cached_analytics(ttl=300.0)
@@ -8376,9 +8414,15 @@ async def get_dashboard_blended_mer(
 
     points: list[BlendedMerPoint] = []
     revenue = meta_total = google_total = 0.0
+    new_c = ret_c = 0
+    sales_first = sales_ret = 0.0
     missing_meta = missing_google = 0
     for r in rows:
         rv = float(r["revenue"] or 0)
+        new_c += int(r["new_customers"] or 0)
+        ret_c += int(r["returning_customers"] or 0)
+        sales_first += float(r["sales_first_time"] or 0)
+        sales_ret += float(r["sales_returning"] or 0)
         ms = float(r["meta_spend"] or 0)
         gs = float(r["google_spend"] or 0)
         revenue += rv
@@ -8408,7 +8452,16 @@ async def get_dashboard_blended_mer(
         window_from=points[0].day if points else None,
         window_to=points[-1].day if points else None,
         window_clamped=bool(points) and bool(df and dt)
-                       and (points[0].day != df or points[-1].day != dt))
+                       and (points[0].day != df or points[-1].day != dt),
+        new_customers=new_c,
+        returning_customers=ret_c,
+        sales_first_time=round(sales_first, 2),
+        sales_returning=round(sales_ret, 2),
+        returning_customer_pct=(round(100.0 * ret_c / (new_c + ret_c), 2)
+                                if (new_c + ret_c) else None),
+        returning_revenue_pct=(round(100.0 * sales_ret / (sales_first + sales_ret), 2)
+                               if (sales_first + sales_ret) else None),
+        blended_cac=(round(total_spend / new_c, 2) if new_c else None))
 
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)

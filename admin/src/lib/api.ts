@@ -2316,6 +2316,21 @@ export interface BlendedMerResponse {
   window_from: string | null;
   window_to: string | null;
   window_clamped: boolean;
+
+  /** The media plan's D2C block, over the same window. */
+  new_customers: number;
+  returning_customers: number;
+  sales_first_time: number;
+  sales_returning: number;
+  /** returning / (new + returning). NOT the plan's cell, which divides
+   *  by new + RTO-adjusted-new + returning and so counts the new cohort
+   *  twice — 19.64% there against 32.8% on the same inputs. */
+  returning_customer_pct: number | null;
+  /** returning sales / (first-time + returning). Matches the plan. */
+  returning_revenue_pct: number | null;
+  /** (Meta + Google) ÷ new customers. The plan adds Kwikchat and uses
+   *  an RTO-adjusted denominator, so it reads higher. */
+  blended_cac: number | null;
 }
 
 export const fetchDashboardBlendedMer = (from?: string | null, to?: string | null) =>
