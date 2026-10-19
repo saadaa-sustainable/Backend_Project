@@ -8,21 +8,23 @@ import { FieldLabel, Segmented, TableFrame, filterControlClass } from "./Section
  * The media plan's Blended MER tab: one period against the one before
  * it, with the full run behind it.
  *
- * The comparison is the point. A single month's MER says little alone
- * -- 3.35x is good or bad only against what it was last month -- so the
- * table is the selected period, the one before it, and the change
- * between them, at whichever grain is chosen. September answers to
- * August, Q3 to Q2, 2026 to 2025.
+ * The RUN is the default: every period on screen, in the plan's own
+ * orientation -- metrics down the rows, periods across the columns.
+ * That is what a reader wants first, the whole shape.
  *
- * Where the prior period does not exist the table says so once, in a
- * sentence, rather than showing a dash on every row. The warehouse
- * starts on 2026-01-01, so the YEAR comparison has nothing to answer to
- * and will keep saying so until 2027.
+ * COMPARE is opt-in, behind its own button. It answers a narrower
+ * question, about one period in particular: September against August,
+ * Q3 against Q2, 2026 against 2025. A single month's MER says little
+ * alone -- 3.35x is good or bad only against what it was last month --
+ * but that is a question asked OF the run, not instead of it.
  *
- * The run stays, folded away: the two read differently. The comparison
- * answers "did it move", the run answers "is this where it has been".
- * Both are recomputed from the daily rows at the chosen grain, never
- * rolled up from each other.
+ * Where the prior period does not exist the comparison says so once,
+ * in a sentence, rather than showing a dash on every row. The
+ * warehouse starts on 2026-01-01, so the YEAR comparison has nothing
+ * to answer to and will keep saying so until 2027.
+ *
+ * Both views are recomputed from the daily rows at the chosen grain,
+ * never rolled up from each other.
  *
  * Formulas track the tab as it stood on 2026-10-19, the morning it
  * changed: returning-customer % stopped double-counting the new cohort,
@@ -168,6 +170,9 @@ export function MerMonthly({ months, grain, onGrain }: {
   // the selection lands on the latest of the NEW grain rather than
   // carrying a stale month position into a list of quarters.
   const [picked, setPicked] = useState<number | null>(null);
+  // The run is the default view. A comparison is a question asked OF
+  // it, about one period in particular, so it waits to be asked.
+  const [comparing, setComparing] = useState(false);
 
   if (months.length === 0) {
     return <p className="py-6 text-sm text-text-secondary">Nothing to show for this grain yet.</p>;
@@ -180,21 +185,47 @@ export function MerMonthly({ months, grain, onGrain }: {
     <section aria-labelledby="dashboard-mer-monthly" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2 border-b border-border-primary pb-1.5">
         <h3 id="dashboard-mer-monthly" className="text-sm font-medium text-text-primary">
-          Blended MER · {periodLabel(now.month, grain)} vs previous {WORD[grain]}
+          {comparing
+            ? `Blended MER · ${periodLabel(now.month, grain)} vs previous ${WORD[grain]}`
+            : `Blended MER · by ${WORD[grain]}`}
         </h3>
         <div className="flex flex-wrap items-center gap-3">
-          <select
-            aria-label="Period to compare"
-            value={idx}
-            onChange={(e) => setPicked(Number(e.target.value))}
-            className={`${filterControlClass} rounded-md border border-border-primary px-2 py-1`}
+          {/* The picker belongs to the comparison and appears with it:
+              in the run every period is already on screen, so there is
+              nothing to select. */}
+          {comparing && (
+            <select
+              aria-label="Period to compare"
+              value={idx}
+              onChange={(e) => setPicked(Number(e.target.value))}
+              className={`${filterControlClass} rounded-md border border-border-primary px-2 py-1`}
+            >
+              {months.map((m, i) => (
+                <option key={m.month} value={i}>
+                  {periodLabel(m.month, grain)}{m.partial ? " (part)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          {/* Opt in. The run is what a reader wants first -- the whole
+              shape, every period -- and a comparison is a question they
+              ask of it afterwards, about one period in particular. */}
+          <button
+            type="button"
+            aria-pressed={comparing}
+            onClick={() => setComparing((v) => !v)}
+            disabled={months.length < 2}
+            title={months.length < 2
+              ? `Only one ${WORD[grain]} of data — nothing to compare against`
+              : `Compare one ${WORD[grain]} with the one before it`}
+            className={`rounded-md border px-3 py-1.5 text-[12.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              comparing
+                ? "border-text-primary bg-text-primary font-medium text-bg-white"
+                : "border-border-primary bg-bg-white text-text-secondary hover:text-text-primary"
+            }`}
           >
-            {months.map((m, i) => (
-              <option key={m.month} value={i}>
-                {periodLabel(m.month, grain)}{m.partial ? " (part)" : ""}
-              </option>
-            ))}
-          </select>
+            Compare
+          </button>
           <Segmented
             options={GRAINS.map((g) => ({ value: g.value, label: g.label, title: g.title }))}
             value={grain}
@@ -203,7 +234,7 @@ export function MerMonthly({ months, grain, onGrain }: {
         </div>
       </div>
 
-      {before === null ? (
+      {comparing && before === null ? (
         /* Said once, plainly, rather than a dash on every row. */
         <p className="border-l-2 border-warning-text pl-2 text-[12px] text-warning-text">
           No data available for the previous {WORD[grain]} — there is nothing before{" "}
@@ -213,7 +244,7 @@ export function MerMonthly({ months, grain, onGrain }: {
             ? "A year-on-year comparison will not be possible until 2027."
             : `Pick a later ${WORD[grain]}, or compare by month.`}
         </p>
-      ) : (
+      ) : comparing && before !== null ? (
         <TableFrame>
           <table className="w-full min-w-[460px] border-collapse text-[12.5px]">
             <thead>
@@ -263,61 +294,59 @@ export function MerMonthly({ months, grain, onGrain }: {
             </tbody>
           </table>
         </TableFrame>
-      )}
-
-      {/* The run behind the comparison, folded away: "did it move"
-          above, "is this where it has been" here. */}
-      {months.length > 1 && (
-        <details className="group">
-          <summary className="cursor-pointer list-none">
-            <FieldLabel>
-              Every {WORD[grain]} ({months.length})
-              <span className="ml-1 group-open:hidden">▸</span>
-              <span className="ml-1 hidden group-open:inline">▾</span>
-            </FieldLabel>
-          </summary>
-          <div className="mt-2">
-            <TableFrame
-              footer={
-                <span className="text-[11.5px] text-text-tertiary">
-                  Spend is Meta + Google + Kwikchat, the plan&apos;s three D2C channels. Kwikchat is
-                  a flat placeholder (marked *) until real figures land. Each {WORD[grain]} is
-                  recomputed from the daily rows, never averaged from the one beside it.
-                </span>
-              }
-            >
-              <table className="w-full min-w-[720px] border-collapse text-[12px]">
-                <thead>
-                  <tr className="border-b border-border-primary text-[11px] uppercase tracking-wide text-text-tertiary">
-                    <th scope="col" className="w-full py-1.5 pr-3 text-left font-medium">Metric</th>
+      ) : (
+        /* The default: the whole run, every period on screen. */
+        <TableFrame
+          footer={
+            <span className="text-[11.5px] text-text-tertiary">
+              Spend is Meta + Google + Kwikchat, the plan&apos;s three D2C channels. Kwikchat is a
+              flat placeholder (marked *) until real figures land. Each {WORD[grain]} is recomputed
+              from the daily rows, never averaged from the one beside it.
+            </span>
+          }
+        >
+          <table className="w-full min-w-[720px] border-collapse text-[12px]">
+            <thead>
+              <tr className="border-b border-border-primary text-[11px] uppercase tracking-wide text-text-tertiary">
+                <th scope="col" className="w-full py-1.5 pr-3 text-left font-medium">Metric</th>
+                {months.map((m) => (
+                  <th key={m.month} scope="col"
+                    className="whitespace-nowrap border-l border-border-soft px-2 py-1.5 text-right font-medium">
+                    {periodLabel(m.month, grain)}
+                    {m.partial && <span className="ml-1 font-normal normal-case text-warning-text">part</span>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {ROWS.map((r) =>
+                r.head ? (
+                  <tr key={r.label}>
+                    <th scope="colgroup" colSpan={months.length + 1}
+                      className="pb-1 pt-3 text-left text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                      {r.label}
+                    </th>
+                  </tr>
+                ) : (
+                  <tr key={r.label} className="border-b border-border-soft last:border-0 hover:bg-bg-surface/60">
+                    <td className="py-1.5 pr-3 text-text-primary" title={r.note}>
+                      {r.label}
+                      {r.note && <span className="ml-1 text-text-tertiary" aria-hidden="true">·</span>}
+                    </td>
                     {months.map((m) => (
-                      <th key={m.month} scope="col"
-                        className="whitespace-nowrap border-l border-border-soft px-2 py-1.5 text-right font-medium">
-                        {periodLabel(m.month, grain)}
-                        {m.partial && <span className="ml-1 font-normal normal-case text-warning-text">part</span>}
-                      </th>
+                      <td key={m.month}
+                        className={`whitespace-nowrap border-l border-border-soft px-2 py-1.5 text-right font-mono tabular-nums ${
+                          r.strong ? "text-text-primary" : "text-text-secondary"}`}>
+                        {FORMAT[r.kind!](r.value!(m))}
+                        {r.star?.(m) && <span className="text-warning-text"> *</span>}
+                      </td>
                     ))}
                   </tr>
-                </thead>
-                <tbody>
-                  {ROWS.filter((r) => !r.head).map((r) => (
-                    <tr key={r.label} className="border-b border-border-soft last:border-0 hover:bg-bg-surface/60">
-                      <td className="py-1.5 pr-3 text-text-primary" title={r.note}>{r.label}</td>
-                      {months.map((m) => (
-                        <td key={m.month}
-                          className={`whitespace-nowrap border-l border-border-soft px-2 py-1.5 text-right font-mono tabular-nums ${
-                            r.strong ? "text-text-primary" : "text-text-secondary"}`}>
-                          {FORMAT[r.kind!](r.value!(m))}
-                          {r.star?.(m) && <span className="text-warning-text"> *</span>}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </TableFrame>
-          </div>
-        </details>
+                ),
+              )}
+            </tbody>
+          </table>
+        </TableFrame>
       )}
     </section>
   );
