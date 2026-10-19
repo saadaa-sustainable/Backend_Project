@@ -8212,6 +8212,158 @@ def _dashboard_date_bounds(date_from: str | None, date_to: str | None) -> tuple[
     return df, dt
 
 
+# ----------------------------------------------------------------------
+# MER (Meta + Google)
+# ----------------------------------------------------------------------
+#: Store revenue over paid spend, with NO attribution anywhere in it.
+#:
+#: Every other efficiency figure on this dashboard divides an ATTRIBUTED
+#: numerator by spend, and attribution on this store is partial by
+#: construction: GA4 sees 76% of orders, Shopify's own journey data is
+#: empty for 96% (GoKwik owns the checkout), and roughly half of ad ids
+#: never resolve to a named ad. MER needs none of that. Two totals, both
+#: measured directly, neither depending on a join holding up.
+#:
+#: WHAT THE TWO SIDES ARE
+#:
+#:   numerator    shopify_sales_daily.total_sales
+#:   denominator  insights_daily_by_ad.spend  (Meta)
+#:              + google_ads_spend_daily.spend (Google)
+#:
+#: total_sales, not gross_sales, because that is the column the media
+#: plan's own "Shopify Gross Sales" row holds -- verified to the rupee
+#: for Aug and Sep 2026 (Rs 4,66,64,711 and Rs 4,70,14,114). gross_sales
+#: in this warehouse is a different, larger figure (Rs 5,68,42,195 for
+#: Sep) and using it would silently inflate every reading by ~21%.
+#:
+#: WHAT THIS IS NOT
+#:
+#: The media plan tracks three MERs. This is NONE of them exactly:
+#:
+#:   TOTAL MER  all-channel revenue / all marketing cost      3.60 Sep 26
+#:   D2C MER    Shopify / (Meta + Google + Kwikchat)          3.22 Sep 26
+#:   this       Shopify / (Meta + Google)                     3.58 Sep 26
+#:
+#: Kwikchat was Rs 14.3L in September, 8.5% of D2C spend, and leaving it
+#: out lifts the ratio about 11%. The warehouse holds no Kwikchat spend,
+#: nor Amazon/Myntra/Zepto ads, content, influencer or tech cost, and no
+#: marketplace revenue -- so neither of the plan's figures can be
+#: reproduced here yet. The UI says Meta + Google on its face for that
+#: reason: a reader comparing it with the monthly deck must be able to
+#: see why the two differ without being told.
+_BLENDED_MER_SQL = """
+WITH days AS (
+  SELECT day FROM public.shopify_sales_daily
+  {where_rev}
+),
+rev AS (
+  SELECT day, SUM(total_sales) AS revenue
+  FROM public.shopify_sales_daily {where_rev}
+  GROUP BY day
+),
+meta AS (
+  SELECT day, SUM(spend) AS spend
+  FROM public.insights_daily_by_ad {where_spend}
+  GROUP BY day
+),
+goog AS (
+  SELECT day, SUM(spend) AS spend
+  FROM public.google_ads_spend_daily {where_spend}
+  GROUP BY day
+)
+SELECT d.day,
+       COALESCE(rev.revenue, 0)  AS revenue,
+       COALESCE(meta.spend, 0)   AS meta_spend,
+       COALESCE(goog.spend, 0)   AS google_spend
+FROM days d
+     LEFT JOIN rev  ON rev.day  = d.day
+     LEFT JOIN meta ON meta.day = d.day
+     LEFT JOIN goog ON goog.day = d.day
+ORDER BY d.day
+"""
+
+
+class BlendedMerPoint(BaseModel):
+    day: date
+    revenue: float
+    meta_spend: float
+    google_spend: float
+    #: None, not 0, on a day with revenue but no spend yet. Meta reports
+    #: a day behind, so today's row would otherwise read as an enormous
+    #: ratio rather than an absent one.
+    mer: float | None
+
+
+class BlendedMerResponse(BaseModel):
+    revenue: float
+    meta_spend: float
+    google_spend: float
+    total_spend: float
+    mer: float | None
+    #: Share of spend each platform carries, so a reader can see at a
+    #: glance how much of the denominator Google is -- it was 9.1% over
+    #: the 30 days to 2026-10-19, which is the whole reason this figure
+    #: moved from 3.97x to 3.61x when Google was ingested.
+    google_share_of_spend: float | None
+    points: list[BlendedMerPoint]
+    #: Days inside the window that carry revenue but no spend from one
+    #: of the two platforms. Stated rather than smoothed over: those
+    #: days push the ratio up and a reader should know how many there
+    #: are before reading a trend.
+    days_missing_meta: int
+    days_missing_google: int
+
+
+@router.get("/dashboard/blended-mer", response_model=BlendedMerResponse)
+@cached_analytics(ttl=300.0)
+async def get_dashboard_blended_mer(
+    session: SessionDep,
+    date_from: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+    date_to: str | None = Query(None, description="YYYY-MM-DD, inclusive"),
+) -> BlendedMerResponse:
+    """Shopify revenue over Meta + Google spend, with no attribution."""
+    df, dt = _dashboard_date_bounds(date_from, date_to)
+    params: dict[str, object] = {}
+    where_rev = where_spend = ""
+    if df and dt:
+        where_rev = "WHERE day BETWEEN :df AND :dt"
+        where_spend = "WHERE day BETWEEN :df AND :dt"
+        params = {"df": df, "dt": dt}
+    sql = _BLENDED_MER_SQL.format(where_rev=where_rev, where_spend=where_spend)
+    rows = (await session.execute(text(sql), params)).mappings().all()
+
+    points: list[BlendedMerPoint] = []
+    revenue = meta_total = google_total = 0.0
+    missing_meta = missing_google = 0
+    for r in rows:
+        rv = float(r["revenue"] or 0)
+        ms = float(r["meta_spend"] or 0)
+        gs = float(r["google_spend"] or 0)
+        revenue += rv
+        meta_total += ms
+        google_total += gs
+        if rv > 0 and ms == 0:
+            missing_meta += 1
+        if rv > 0 and gs == 0:
+            missing_google += 1
+        spend = ms + gs
+        points.append(BlendedMerPoint(
+            day=r["day"], revenue=rv, meta_spend=ms, google_spend=gs,
+            mer=round(rv / spend, 3) if spend > 0 else None))
+
+    total_spend = meta_total + google_total
+    return BlendedMerResponse(
+        revenue=round(revenue, 2),
+        meta_spend=round(meta_total, 2),
+        google_spend=round(google_total, 2),
+        total_spend=round(total_spend, 2),
+        mer=round(revenue / total_spend, 3) if total_spend > 0 else None,
+        google_share_of_spend=(round(100.0 * google_total / total_spend, 1)
+                               if total_spend > 0 else None),
+        points=points,
+        days_missing_meta=missing_meta,
+        days_missing_google=missing_google)
+
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
 async def get_dashboard_channel_breakdown(

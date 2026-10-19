@@ -2,12 +2,14 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import {
+  BlendedMerResponse,
   BreakdownItem,
   DashboardKpis,
   DashboardSessions,
   DashboardSessionTrend,
   TopCpisSku,
   TopLandingPage,
+  fetchDashboardBlendedMer,
   fetchDashboardCategoryBreakdown,
   fetchDashboardChannelBreakdown,
   fetchDashboardKpis,
@@ -23,10 +25,11 @@ import { BarChart } from "./charts/BarChart";
 import { SessionTrendChart } from "./charts/SessionTrendChart";
 import { DateRangePicker, resolvePreset, type DateRange, type PresetKey } from "@/components/DateRangePicker";
 import { SectionHeader } from "./SectionChrome";
+import { BlendedMer } from "./BlendedMer";
 
 const STORAGE_KEY = "analytics-dashboard-widget-order";
 const RANGE_KEY = "analytics-dashboard-date-range";
-const DEFAULT_ORDER = ["kpis", "session-performance", "category", "channel", "landing-pages", "cpis-skus"];
+const DEFAULT_ORDER = ["kpis", "blended-mer", "session-performance", "category", "channel", "landing-pages", "cpis-skus"];
 
 function formatCurrency(n: number): string {
   return `₹${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
@@ -107,6 +110,12 @@ function loadOrder(): string[] {
       if (!saved.includes("session-performance") && saved.includes("kpis")) {
         saved.splice(saved.indexOf("kpis") + 1, 0, "session-performance");
       }
+      // Same again for MER: a reader who has already arranged their
+      // dashboard should get it beside the KPI strip it belongs with,
+      // not appended below the SKU table.
+      if (!saved.includes("blended-mer") && saved.includes("kpis")) {
+        saved.splice(saved.indexOf("kpis") + 1, 0, "blended-mer");
+      }
       return [...saved, ...DEFAULT_ORDER.filter((id) => !saved.includes(id))];
     }
     return DEFAULT_ORDER;
@@ -169,6 +178,8 @@ function DashboardContent() {
   const rangeKey = `v2|${from && to ? `${from}|${to}` : "lifetime"}`;
   const kpis     = useCachedFetch<DashboardKpis>(`dashboard/kpis|${rangeKey}`,
                                                    () => fetchDashboardKpis(from, to));
+  const blendedMer = useCachedFetch<BlendedMerResponse>(`dashboard/blended-mer|${rangeKey}`,
+                                                   () => fetchDashboardBlendedMer(from, to));
   const sessions = useCachedFetch<DashboardSessions>(`dashboard/sessions|${rangeKey}`,
                                                    () => fetchDashboardSessions(from, to));
   const sessionTrend = useCachedFetch<DashboardSessionTrend>(`dashboard/session-trend|${rangeKey}`,
@@ -304,6 +315,21 @@ function DashboardContent() {
         </div>
       ) : (
         <WidgetSkeleton heightPx={80} />
+      ),
+    },
+    {
+      id: "blended-mer",
+      span: 3,
+      content: blendedMer.error ? (
+        <div role="alert" className="flex flex-wrap items-center gap-3 text-sm text-error-text">
+          <span>Could not load MER.</span>
+          <button type="button" className="underline underline-offset-2"
+            onClick={() => blendedMer.refetch()}>Retry</button>
+        </div>
+      ) : blendedMer.data ? (
+        <BlendedMer data={blendedMer.data} rangeLabel={rangeLabel} />
+      ) : (
+        <WidgetSkeleton heightPx={150} />
       ),
     },
     {

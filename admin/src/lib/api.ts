@@ -195,7 +195,7 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs?: number):
     return analyticsCache.get(key, () => fetchResponse<T>(path, init, effectiveTimeoutMs), ANALYTICS_CACHE_TTL_MS);
   }
   const result = await fetchResponse<T>(path, init, effectiveTimeoutMs);
-  if (method !== "GET" && !analyticsRead) clearAnalyticsCache();
+  if (method !== "GET" && !analyticsRead && path !== "/admin/assistant/chat") clearAnalyticsCache();
   return result;
 }
 
@@ -442,28 +442,42 @@ export type ChatRole = "user" | "assistant";
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  sources?: ChatSource[];
+}
+
+export interface ChatSource {
+  label: string;
+  url: string;
+  filters: Record<string, unknown>;
+  basis: string;
+  retrieved_at: string;
+  cache_note: string;
+  link_note: string;
 }
 
 export interface ChatResponse {
   message: string;
+  sources: ChatSource[];
 }
 
-export function sendChatMessage(messages: ChatMessage[], model?: string): Promise<ChatResponse> {
+export function sendChatMessage(
+  messages: ChatMessage[], model?: string, mode: "analytics" | "database" = "analytics",
+): Promise<ChatResponse> {
   return request<ChatResponse>("/admin/assistant/chat", {
     method: "POST",
-    body: JSON.stringify({ messages, model }),
-  });
+    body: JSON.stringify({ messages: messages.map(({ role, content }) => ({ role, content })), model, mode }),
+  }, 65_000);
 }
 
 export interface AssistantModel {
   id: string;
   label: string;
-  provider: "cloudflare" | "anthropic";
+  provider: "cloudflare" | "anthropic" | "chatgpt" | "openai";
   note: string | null;
 }
 
 export function fetchAssistantModels(): Promise<AssistantModel[]> {
-  return request<AssistantModel[]>("/admin/assistant/models");
+  return request<AssistantModel[]>("/admin/assistant/models", undefined, 10_000);
 }
 
 export interface ContextDocument {
@@ -2276,6 +2290,30 @@ export const fetchDashboardSessions = (from?: string | null, to?: string | null)
   request<DashboardSessions>(`/admin/analytics/dashboard/sessions${dashboardRange(from, to)}`);
 export const fetchDashboardSessionTrend = (from?: string | null, to?: string | null) =>
   request<DashboardSessionTrend>(`/admin/analytics/dashboard/session-trend${dashboardRange(from, to)}`);
+/** One day of the MER series. `mer` is null where a day has revenue but
+ *  no spend recorded yet -- Meta reports a day behind. */
+export interface BlendedMerPoint {
+  day: string;
+  revenue: number;
+  meta_spend: number;
+  google_spend: number;
+  mer: number | null;
+}
+
+export interface BlendedMerResponse {
+  revenue: number;
+  meta_spend: number;
+  google_spend: number;
+  total_spend: number;
+  mer: number | null;
+  google_share_of_spend: number | null;
+  points: BlendedMerPoint[];
+  days_missing_meta: number;
+  days_missing_google: number;
+}
+
+export const fetchDashboardBlendedMer = (from?: string | null, to?: string | null) =>
+  request<BlendedMerResponse>(`/admin/analytics/dashboard/blended-mer${dashboardRange(from, to)}`);
 export const fetchDashboardCategoryBreakdown = (from?: string | null, to?: string | null) =>
   request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown${dashboardRange(from, to)}`);
 
