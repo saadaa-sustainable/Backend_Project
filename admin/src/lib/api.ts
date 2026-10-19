@@ -2335,6 +2335,33 @@ export interface BlendedMerResponse {
 
 export const fetchDashboardBlendedMer = (from?: string | null, to?: string | null) =>
   request<BlendedMerResponse>(`/admin/analytics/dashboard/blended-mer${dashboardRange(from, to)}`);
+/** One month of the media plan's Blended MER tab, for the figures this
+ *  warehouse can source. Spend is Meta + Google only. */
+export interface MerMonth {
+  month: string;
+  revenue: number;
+  meta_spend: number;
+  google_spend: number;
+  ad_spend: number;
+  meta_claimed: number;
+  meta_mer: number | null;
+  mer: number | null;
+  a_mer: number | null;
+  blended_cac: number | null;
+  new_customers: number;
+  returning_customers: number;
+  sales_first_time: number;
+  sales_returning: number;
+  returning_customer_pct: number | null;
+  returning_revenue_pct: number | null;
+  contribution_margin: number | null;
+  contribution_margin_pct: number | null;
+  incremental_roas: number | null;
+  partial: boolean;
+}
+
+export const fetchDashboardMerMonthly = (months = 12) =>
+  request<MerMonth[]>(`/admin/analytics/dashboard/mer-monthly?months=${months}`);
 export const fetchDashboardCategoryBreakdown = (from?: string | null, to?: string | null) =>
   request<BreakdownItem[]>(`/admin/analytics/dashboard/category-breakdown${dashboardRange(from, to)}`);
 

@@ -8463,6 +8463,164 @@ async def get_dashboard_blended_mer(
                                if (sales_first + sales_ret) else None),
         blended_cac=(round(total_spend / new_c, 2) if new_c else None))
 
+# ----------------------------------------------------------------------
+# MER by month (the media plan's own layout)
+# ----------------------------------------------------------------------
+#: The Blended MER + CAC tab, month by month, for the figures this
+#: warehouse can source. Metrics down the rows, months across the
+#: columns -- the plan's orientation, kept so the two can be read side
+#: by side.
+#:
+#: FORMULAS TRACK THE TAB AS OF 2026-10-19, which changed that morning:
+#:
+#:   Returning Customer %  was W31/SUM(W29:W31), counting the new
+#:                         cohort twice; now W32/SUM(W30,W32). The
+#:                         corrected shape is what this already used.
+#:   Ad spend + GST@18%    was SUM(W2:W4)*1.18; now SUM(W2:W4). GST
+#:                         left the A-MER denominator, so A-MER rose
+#:                         from 1.60 to 1.89 for Sep 2026.
+#:   CM                    was W55-W54; now W56-W55-(0.18*W55). The
+#:                         18% moved here.
+#:   CM %                  new row, CM / Shopify gross sales.
+#:
+#: The tab's "Ad spend + GST@18%" label is now stale -- it no longer
+#: adds GST -- so this calls the same quantity "ad spend" and applies
+#: the 18% only inside contribution margin, which is where the tab now
+#: applies it too.
+#:
+#: SPEND IS META + GOOGLE, as the card above it. The plan's own D2C
+#: figures add Kwikchat, so its D2C MER and Blended CAC read lower and
+#: higher respectively; the UI says so rather than implying a match.
+_MER_MONTHLY_SQL = """
+WITH bounds AS (
+  SELECT GREATEST((SELECT MIN(day) FROM public.insights_daily_by_ad),
+                  (SELECT MIN(day) FROM public.google_ads_spend_daily)) AS lo,
+         LEAST((SELECT MAX(day) FROM public.insights_daily_by_ad),
+               (SELECT MAX(day) FROM public.google_ads_spend_daily)) AS hi
+),
+shop AS (
+  SELECT date_trunc('month', s.day)::date AS mo,
+         SUM(s.total_sales)            AS revenue,
+         SUM(s.new_customers)          AS new_customers,
+         SUM(s.returning_customers)    AS returning_customers,
+         SUM(s.total_sales_first_time) AS sales_first_time,
+         SUM(s.total_sales_returning)  AS sales_returning
+  FROM public.shopify_sales_daily s, bounds b
+  WHERE s.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+),
+meta AS (
+  SELECT date_trunc('month', i.day)::date AS mo,
+         SUM(i.spend) AS spend, SUM(i.conv_value) AS claimed
+  FROM public.insights_daily_by_ad i, bounds b
+  WHERE i.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+),
+goog AS (
+  SELECT date_trunc('month', g.day)::date AS mo, SUM(g.spend) AS spend
+  FROM public.google_ads_spend_daily g, bounds b
+  WHERE g.day BETWEEN b.lo AND b.hi
+  GROUP BY 1
+)
+SELECT s.mo,
+       COALESCE(s.revenue, 0)             AS revenue,
+       COALESCE(s.new_customers, 0)       AS new_customers,
+       COALESCE(s.returning_customers, 0) AS returning_customers,
+       COALESCE(s.sales_first_time, 0)    AS sales_first_time,
+       COALESCE(s.sales_returning, 0)     AS sales_returning,
+       COALESCE(m.spend, 0)               AS meta_spend,
+       COALESCE(m.claimed, 0)             AS meta_claimed,
+       COALESCE(g.spend, 0)               AS google_spend
+FROM shop s LEFT JOIN meta m ON m.mo = s.mo
+            LEFT JOIN goog g ON g.mo = s.mo
+ORDER BY s.mo
+"""
+
+
+class MerMonth(BaseModel):
+    month: date
+    revenue: float
+    meta_spend: float
+    google_spend: float
+    ad_spend: float
+    #: Meta's own claimed purchase value. Matches the plan to the rupee
+    #: (Aug 35,806,763 / Sep 37,231,279), unlike Google's, which runs
+    #: 12-44% above the plan's and so is left out entirely.
+    meta_claimed: float
+    meta_mer: float | None
+    mer: float | None
+    a_mer: float | None
+    blended_cac: float | None
+    new_customers: int
+    returning_customers: int
+    sales_first_time: float
+    sales_returning: float
+    returning_customer_pct: float | None
+    returning_revenue_pct: float | None
+    #: Net Sales (new-customer revenue) - ad spend - 18% GST on it.
+    contribution_margin: float | None
+    contribution_margin_pct: float | None
+    #: (revenue - prior month revenue) / (spend - prior month spend).
+    #: Null for the first month, and where spend did not move.
+    incremental_roas: float | None
+    #: The month is still running, or one of the two spend sources has
+    #: not reported all of it. Flagged rather than dropped: a part-month
+    #: is informative as long as nobody reads it as a full one.
+    partial: bool
+
+
+@router.get("/dashboard/mer-monthly", response_model=list[MerMonth])
+@cached_analytics(ttl=300.0)
+async def get_dashboard_mer_monthly(
+    session: SessionDep,
+    months: int = Query(default=12, ge=1, le=36,
+                        description="How many trailing months to return."),
+) -> list[MerMonth]:
+    """The media plan's Blended MER tab, for what the warehouse holds."""
+    rows = (await session.execute(text(_MER_MONTHLY_SQL))).mappings().all()
+    today = date.today()
+    out: list[MerMonth] = []
+    prev_rev = prev_spend = None
+    for r in rows:
+        rev = float(r["revenue"] or 0)
+        ms = float(r["meta_spend"] or 0)
+        gs = float(r["google_spend"] or 0)
+        spend = ms + gs
+        new_c = int(r["new_customers"] or 0)
+        ret_c = int(r["returning_customers"] or 0)
+        s_first = float(r["sales_first_time"] or 0)
+        s_ret = float(r["sales_returning"] or 0)
+        claimed = float(r["meta_claimed"] or 0)
+        # GST sits ONLY here, matching the tab after its 2026-10-19
+        # change: the A-MER denominator is raw spend, contribution
+        # margin carries the 18%.
+        cm = s_first - spend - 0.18 * spend if spend > 0 else None
+        inc = None
+        if prev_rev is not None and prev_spend is not None and spend != prev_spend:
+            inc = round((rev - prev_rev) / (spend - prev_spend), 2)
+        out.append(MerMonth(
+            month=r["mo"],
+            revenue=round(rev, 2),
+            meta_spend=round(ms, 2), google_spend=round(gs, 2), ad_spend=round(spend, 2),
+            meta_claimed=round(claimed, 2),
+            meta_mer=round(claimed / ms, 2) if ms > 0 else None,
+            mer=round(rev / spend, 2) if spend > 0 else None,
+            a_mer=round(s_first / spend, 2) if spend > 0 else None,
+            blended_cac=round(spend / new_c, 2) if new_c else None,
+            new_customers=new_c, returning_customers=ret_c,
+            sales_first_time=round(s_first, 2), sales_returning=round(s_ret, 2),
+            returning_customer_pct=(round(100.0 * ret_c / (new_c + ret_c), 2)
+                                    if (new_c + ret_c) else None),
+            returning_revenue_pct=(round(100.0 * s_ret / (s_first + s_ret), 2)
+                                   if (s_first + s_ret) else None),
+            contribution_margin=round(cm, 2) if cm is not None else None,
+            contribution_margin_pct=(round(100.0 * cm / rev, 2)
+                                     if cm is not None and rev > 0 else None),
+            incremental_roas=inc,
+            partial=(r["mo"].year, r["mo"].month) == (today.year, today.month)))
+        prev_rev, prev_spend = rev, spend
+    return out[-months:]
+
 @router.get("/dashboard/channel-breakdown", response_model=list[BreakdownItem])
 @cached_analytics(ttl=60.0)
 async def get_dashboard_channel_breakdown(
