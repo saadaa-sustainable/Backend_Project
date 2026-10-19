@@ -884,8 +884,20 @@ const ROLLUP_COLUMNS: RollupColDef[] = [
     ) },
   // The four inputs the verdict is computed from, on by default so the
   // call can be audited without opening the column picker.
+  //
+  // Spend sits BEFORE each ratio, and both are on by default. A ratio
+  // without its denominator is unreadable for a budget decision: 5x on
+  // Rs 2,000 is noise and 5x on Rs 2,00,000 is a scaling call, and the
+  // ROAS column alone cannot tell them apart. These were shipped hidden
+  // in the Rolling groups while the ratios computed FROM them were
+  // visible here -- so the one number the decision needs most was the
+  // one behind the column picker.
+  { key: "d3_spend_v", header: "3D Spend", group: "Identity", defaultVisible: true, align: "right",
+    render: (r) => <span className="num">₹{money(r.d3_spend)}</span> },
   { key: "d3_lc_roas_v", header: "3D ROAS", group: "Identity", defaultVisible: true, align: "right",
     render: (r) => <span className="num">{num2(r.d3_lc_roas)}</span> },
+  { key: "d7_spend_v", header: "7D Spend", group: "Identity", defaultVisible: true, align: "right",
+    render: (r) => <span className="num">₹{money(r.d7_spend)}</span> },
   { key: "d7_lc_roas_v", header: "7D ROAS", group: "Identity", defaultVisible: true, align: "right",
     render: (r) => <span className="num">{num2(r.d7_lc_roas)}</span> },
   // The two values the Pause/Monitor/Report split is decided on, so
