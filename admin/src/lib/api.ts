@@ -2356,6 +2356,10 @@ export interface MerMonth {
   ad_spend: number;
   meta_claimed: number;
   meta_mer: number | null;
+  google_claimed: number;
+  google_mer: number | null;
+  platform_claimed: number;
+  platform_mer: number | null;
   mer: number | null;
   a_mer: number | null;
   blended_cac: number | null;

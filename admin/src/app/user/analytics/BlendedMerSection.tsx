@@ -52,7 +52,12 @@ export function BlendedMerSection() {
     () => fetchDashboardBlendedMer(fromDate, toDate),
   );
   const monthly = useCachedFetch<MerMonth[]>(
-    `mer-by-period|v1|${grain}`,
+    // v2: the Platform block gained google_claimed / google_mer /
+    // platform_claimed / platform_mer on 2026-10-21. The key must change
+    // whenever the shape does -- sessionStorage survives the deploy, and
+    // a reader holding the v1 payload would render undefined into every
+    // new row.
+    `mer-by-period|v2|${grain}`,
     () => fetchDashboardMerByPeriod(grain, PERIODS[grain]),
   );
 

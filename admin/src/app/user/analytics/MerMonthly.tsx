@@ -51,25 +51,36 @@ const GRAINS: { value: MerGrain; label: string; title: string }[] = [
 
 const WORD: Record<MerGrain, string> = { month: "month", quarter: "quarter", year: "year" };
 
-function compact(n: number | null): string {
-  if (n === null) return "—";
+/** `== null` catches undefined as well as null, and that is the point.
+ *
+ * These read fields straight off a cached API payload. When a row is
+ * added server-side, a reader whose sessionStorage still holds the
+ * PREVIOUS shape gets `undefined` for it -- and a `=== null` guard let
+ * that through to `.toLocaleString`, which took the whole table down
+ * with "Cannot read properties of undefined". A missing field must
+ * render as an em dash, exactly like a null one; the cache key below
+ * stops it happening, this stops it being fatal when it does. */
+type Num = number | null | undefined;
+
+function compact(n: Num): string {
+  if (n == null) return "—";
   const a = Math.abs(n);
   if (a >= 1e7) return `${(n / 1e7).toFixed(2)} Cr`;
   if (a >= 1e5) return `${(n / 1e5).toFixed(2)} L`;
   return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
-const num = (n: number | null) => (n === null ? "—" : n.toLocaleString("en-IN"));
-const x2 = (n: number | null) => (n === null ? "—" : `${n.toFixed(2)}×`);
-const pct = (n: number | null) => (n === null ? "—" : `${n.toFixed(2)}%`);
-const rupees = (n: number | null) =>
-  n === null ? "—" : n.toLocaleString("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
+const num = (n: Num) => (n == null ? "—" : n.toLocaleString("en-IN"));
+const x2 = (n: Num) => (n == null ? "—" : `${n.toFixed(2)}×`);
+const pct = (n: Num) => (n == null ? "—" : `${n.toFixed(2)}%`);
+const rupees = (n: Num) =>
+  n == null ? "—" : n.toLocaleString("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
 
 /** How a row's change is expressed. A percent change OF a percent is
  *  true but unreadable, and a ratio moving 3.10x to 3.30x reads more
  *  clearly as +0.20x than as +6.5%. */
 type Kind = "money" | "count" | "rupees" | "pct" | "ratio";
 
-const FORMAT: Record<Kind, (n: number | null) => string> = {
+const FORMAT: Record<Kind, (n: Num) => string> = {
   money: compact, count: num, rupees, pct, ratio: x2,
 };
 
@@ -84,8 +95,12 @@ type Better = "up" | "down" | "neutral";
 
 interface Row {
   label: string;
-  /** Absent on a heading row, which groups what follows. */
-  value?: (m: MerMonth) => number | null;
+  /** Absent on a heading row, which groups what follows.
+   *
+   *  Returns Num, not `number | null`: on a stale cached payload a
+   *  field added server-side is undefined, and typing that away would
+   *  only hide it from the compiler, not from the browser. */
+  value?: (m: MerMonth) => Num;
   kind?: Kind;
   better?: Better;
   head?: boolean;
@@ -108,6 +123,21 @@ const ROWS: Row[] = [
   { label: "Meta purchase value", value: (m) => m.meta_claimed, kind: "money", better: "neutral",
     note: "Meta's own attributed revenue. Matches the plan to the rupee." },
   { label: "Meta MER", value: (m) => m.meta_mer, kind: "ratio", strong: true },
+  { label: "Google purchase value", value: (m) => m.google_claimed, kind: "money", better: "neutral",
+    note: "Google's metrics.conversions_value — primary conversion actions only, verified "
+        + "against the Google Ads API to the rupee on every settled day. Not "
+        + "all_conversions_value, which reads 65× higher." },
+  { label: "Google MER", value: (m) => m.google_mer, kind: "ratio", strong: true,
+    note: "Google's claimed return on its own spend. Runs far above Meta's (5.7–12.6× vs "
+        + "2.9–3.5× across May–Oct 2026) — Search, Shopping and PMax capturing high-intent "
+        + "demand, not an error." },
+  { label: "Platform claimed total", value: (m) => m.platform_claimed, kind: "money",
+    better: "neutral", note: "Meta + Google attributed revenue." },
+  { label: "Platform MER", value: (m) => m.platform_mer, kind: "ratio", strong: true,
+    note: "Platform-reported: what the platforms say they returned, over the spend of the "
+        + "platforms that said it (Meta + Google — Kwikchat claims nothing, so it is not in "
+        + "the denominator). Read beside MER, not instead of it: against Shopify's own "
+        + "revenue this ran −8.5% (Oct), −3.8% (Sep), −0.1% (Aug) and +14.0% (May 2026)." },
 
   { label: "D2C", head: true },
   { label: "Shopify sales", value: (m) => m.revenue, kind: "money" },
@@ -137,8 +167,11 @@ const ROWS: Row[] = [
 /** Change between two periods, in the unit that reads clearest for the
  *  kind of figure. Null where it cannot be stated: a percent change
  *  needs a non-zero base, and 0 → 40 is not "+∞%", it is new. */
-function change(now: number | null, before: number | null, kind: Kind) {
-  if (now === null || before === null) return null;
+function change(now: Num, before: Num, kind: Kind) {
+  // `== null` for the same reason as the formatters above: a field a
+  // cached payload has never heard of is undefined, and comparing two
+  // periods where one side is missing is not a change of zero.
+  if (now == null || before == null) return null;
   const d = now - before;
   if (kind === "pct") return { text: `${d >= 0 ? "+" : ""}${d.toFixed(2)}pp`, up: d };
   if (kind === "ratio") return { text: `${d >= 0 ? "+" : ""}${d.toFixed(2)}×`, up: d };
@@ -148,7 +181,7 @@ function change(now: number | null, before: number | null, kind: Kind) {
 }
 
 function ChangeCell({ now, before, kind, better = "up" }: {
-  now: number | null; before: number | null; kind: Kind; better?: Better;
+  now: Num; before: Num; kind: Kind; better?: Better;
 }) {
   const c = change(now, before, kind);
   if (c === null) return <span className="text-text-tertiary">—</span>;
