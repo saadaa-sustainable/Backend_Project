@@ -76,6 +76,8 @@ exports/shots/
 # covers the repo ROOT -- a key saved one directory down would have been
 # committed. These match anywhere in the tree.
 secrets/
+.assistant-auth/
+*.auth.sqlite*
 *service-account*.json
 *service_account*.json
 *-key.json
@@ -95,3 +97,14 @@ docs/query-audit-*/
 admin/public/asset-analysis-data.json
 admin/public/asset-analysis-detail.json
 admin/public/asset-analysis.html
+
+# Ad-level performance exports under docs/. Same reason as exports/
+# above: this repo is PUBLIC and these carry real ad names, campaign
+# names, spend and SKUs. docs/ had no such rule, so an .xlsx written
+# here was committable -- docs/underperforming_ads_by_sku.xlsx is
+# 359 ads of spend and conversion data. Markdown in docs/ stays tracked.
+docs/*.xlsx
+docs/*.csv
+
+# Local MCP OAuth store (clients + pending codes; never a key or token).
+var/
