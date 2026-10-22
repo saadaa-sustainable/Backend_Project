@@ -1,101 +1,162 @@
-"""Ad name -> master SKU matching must be bounded on non-alphanumerics.
+"""Ad name -> master SKU matching: colour-tolerant, longest match wins.
 
 The CPIS section matches an ad to a SKU by looking for the SKU code in
-the ad's NAME. Two rules have been tried and both failed, in opposite
-directions:
+the ad's NAME. Three rules have been tried; the first two were wrong in
+opposite directions.
 
-  * bare substring (still used by `cpis_by_sku`, see
-    docs/cpis-attribution.md section D) matches `SDFS` inside
-    `SDFSK_GRWM_DEC23`, charging Rs 4.36 Cr to SKUs never advertised.
+  1. BARE SUBSTRING -- still used by `cpis_by_sku`, see
+     docs/cpis-attribution.md section D. Matches `SDFS` inside
+     `SDFSK_GRWM_DEC23`, charging Rs 4.36 Cr to SKUs never advertised.
 
-  * `\\y<sku>\\y` avoided that, but Postgres treats `_` as a WORD
-    character, so it ALSO rejected `SDFSK_GRWM_DEC23` for `SDFSK` -- the
-    ad that SKU is plainly named after. Measured 2026-10-22 over the 30
-    days to 2026-10-21 that cost Rs 33,45,795 of matched spend:
-    Rs 60,80,028 found against Rs 94,25,823 available.
+  2. `\\y<sku>\\y` -- avoided that, but Postgres treats `_` as a WORD
+     character, so it ALSO rejected `SDFSK_GRWM_DEC23` for `SDFSK`.
+     Measured 2026-10-22 over the 30 days to 2026-10-21, that cost
+     Rs 33,45,795 of matched spend.
 
-Bounding explicitly on `[^A-Za-z0-9]` keeps the collision guard and
-recovers the underscore case. These tests pin both halves so neither
-regression can come back silently.
+  3. `[^A-Za-z0-9]` bounds, SKU may carry a 0-2 letter COLOUR CODE, and
+     when several SKUs match the same ad only the LONGEST of a nested
+     family is credited. This is what ships.
 
-The regex is duplicated across five sites in analytics.py (three in SQL,
-two built in Python). PATTERN below must stay identical to them.
+Why step 3 needs both halves, measured on the same window:
+
+    SMFSK, bounded only              Rs    93,924   (46% of truth)
+    SMFSK, + colour code             Rs 2,04,081   matches Meta exactly
+    SDFS,  + colour code, no longest Rs 6,20,266   ALL of SDFSK's spend
+    SDFS,  + colour code + longest   Rs         0   correct
+
+Colour tolerance alone misattributes about Rs 12.8 L across the seven
+nested SKU families, because `SDFS` + `K` is itself a legal colour code.
+The longest-match rule is what makes it safe.
+
+PATTERN and resolve() below mirror the SQL in analytics.py -- the
+`matched` CTE, `name_ads_join`, the `asset_sku` join, and the two
+`_re.escape`-built regexes behind /cpis/{sku}/ads and the spend-trend
+sparkline. All five must agree or a row disagrees with its own
+drilldown.
 """
 import re
 
 import pytest
 
-#: Must match analytics.py's `name_ads_join`, the `matched` CTE, the
-#: `asset_sku` join, and the two `_re.escape`-built regexes.
-PATTERN = r"(^|[^A-Za-z0-9])%s([^A-Za-z0-9]|$)"
+#: Mirrors the SQL. Brace-free on purpose: `{0,2}` inside an f-string
+#: would be read as a replacement field, and site 1 is an f-string.
+PATTERN = r"(^|[^A-Za-z0-9])%s[A-Z]?[A-Z]?([^A-Za-z0-9]|$)"
 
-
-def matches(ad_name: str, sku: str) -> bool:
-    return re.search(PATTERN % re.escape(sku), ad_name, re.IGNORECASE) is not None
-
-
-@pytest.mark.parametrize("ad_name,sku", [
-    # The underscore case the \y form lost. This is the whole point.
-    ("SDFSK_GRWM_DEC23", "SDFSK"),
-    ("SDCP_OFF_FL_916_ITE-Feb-25", "SDCP"),
-    ("CLP-SDAMK+MU+NA+IHP+SDVSK_VRP", "SDVSK"),
-    # Separators the \y form already handled; must keep working.
-    ("SDFSK+SDFLK", "SDFSK"),
-    ("SDFSK+SDFLK", "SDFLK"),
-    ("SDCP-Oct-Reel", "SDCP"),
-    # Boundaries at the very start and end of the string.
-    ("SDCP", "SDCP"),
-    ("Reel-SDCP", "SDCP"),
-    ("SDCP-Reel", "SDCP"),
-    # Case-insensitive, as `~*` is.
-    ("sdcp_oct_reel", "SDCP"),
-])
-def test_bounded_sku_matches(ad_name, sku):
-    assert matches(ad_name, sku)
-
-
-@pytest.mark.parametrize("ad_name,sku,why", [
-    # THE COLLISION GUARD. `SDFS` and `SDFSK` are both real master SKUs
-    # and the first is a prefix of the second, so a bare substring match
-    # credits SDFS for every SDFSK ad.
-    ("SDFSK_GRWM_DEC23", "SDFS", "SDFS is a prefix of SDFSK"),
-    ("SDFSKBL_GRWM_DEC23", "SDFS", "prefix, with a colour code too"),
-    ("SDCPBL-Reel", "SDCP", "colour code: deliberately not matched"),
-    ("SMCPBL-Reel-Oct", "SMCP", "colour code: deliberately not matched"),
-    ("Nothing-Here", "SDCP", "absent"),
-    ("XSDCPX", "SDCP", "embedded in a longer token"),
-])
-def test_unbounded_sku_does_not_match(ad_name, sku, why):
-    assert not matches(ad_name, sku), why
-
-
-#: Every master SKU in `cpis_sku_context` that is a substring of another
-#: master SKU there, with the SKUs it hides inside. Measured against the
-#: live catalogue on 2026-10-22 -- these are the only pairs a prefix
-#: collision can occur between, and `cpis_sku_context` is the SKU
-#: universe the /cpis-utm endpoint pages over.
-NESTED_SKUS = {
-    "SDAS": ("SDASK", "SDASP"),
-    "SDCP": ("SDCPT",),
-    "SDCS": ("SDCSP", "SDCSS"),
-    "SDFP": ("SDFPK",),
-    "SDFS": ("SDFSK",),
-    "SDT":  ("SDTJ",),
-    "SMLS": ("SMLSS",),
+#: Every master SKU involved in a nesting relationship in the live
+#: catalogue on 2026-10-22, plus the SKUs used in the examples below.
+#: Not the whole catalogue -- nesting is the only thing that makes
+#: resolution non-trivial.
+CATALOGUE = {
+    "SDAS", "SDASK", "SDASP",
+    "SDCP", "SDCPT",
+    "SDCS", "SDCSP", "SDCSS",
+    "SDFP", "SDFPK",
+    "SDFS", "SDFSK",
+    "SDT", "SDTJ",
+    "SMLS", "SMLSS",
+    "SMFSK", "SMCP", "SDFLK", "SDPL", "SDAFD",
 }
 
 
-@pytest.mark.parametrize("shorter,longer", [
-    (short, long_) for short, longs in NESTED_SKUS.items() for long_ in longs
+def candidates(ad_name: str, skus=CATALOGUE) -> set[str]:
+    """Every SKU whose code appears in the name, colour code allowed."""
+    return {s for s in skus
+            if re.search(PATTERN % re.escape(s), ad_name, re.IGNORECASE)}
+
+
+def resolve(ad_name: str, skus=CATALOGUE) -> set[str]:
+    """Candidates minus any that a LONGER matching SKU contains.
+
+    The Python twin of the SQL `NOT EXISTS (... length(o) > length(sku)
+    AND position(sku in o) > 0 AND <o also matches> ...)`.
+    """
+    found = candidates(ad_name, skus)
+    return {s for s in found
+            if not any(o != s and len(o) > len(s) and s in o for o in found)}
+
+
+# ---------------------------------------------------------------- colour
+
+@pytest.mark.parametrize("ad_name,sku", [
+    # The case the user caught: SMFSK's biggest ads carry a colour code.
+    ("PDP-SMFSKEC_IFAD_THESTORYOF RAVI_12/04/2025_H0", "SMFSK"),
+    ("SMFSKEC_VRP_RV_1PA-SIF-1997-P1", "SMFSK"),
+    # Colour code mid-name, slash-separated.
+    ("SMFSKRT/SMCPBE_VRP_GR_1PA-SIF-1391", "SMFSK"),
+    ("SMFSKRT/SMCPBE_VRP_GR_1PA-SIF-1391", "SMCP"),
+    # Plain colour codes.
+    ("SDCPBL-Reel-Oct", "SDCP"),
+    ("SMCPBL-Reel-Oct", "SMCP"),
 ])
-def test_nested_master_sku_pairs_never_collide(shorter, longer):
-    """An ad named after the LONGER SKU must never credit the shorter one."""
-    for name in (f"{longer}_GRWM_DEC23", f"{longer}-Reel-Oct", f"CLP+{longer}_V2"):
-        assert matches(name, longer), f"{longer} should match {name}"
-        assert not matches(name, shorter), f"{shorter} must NOT match {name}"
+def test_colour_code_after_sku_matches(ad_name, sku):
+    assert sku in resolve(ad_name)
 
 
-def test_bare_substring_would_have_collided():
-    """Documents what the old cpis_by_sku rule does, so the contrast is testable."""
-    assert "sdfs" in "SDFSK_GRWM_DEC23".lower()      # the bug
-    assert not matches("SDFSK_GRWM_DEC23", "SDFS")   # and the fix
+@pytest.mark.parametrize("ad_name,sku", [
+    # The underscore case rule 2 lost.
+    ("SDFSK_GRWM_DEC23", "SDFSK"),
+    ("SDCP_OFF_FL_916_ITE-Feb-25", "SDCP"),
+    ("CLP-SDAMK+MU+NA+IHP+SDFLK_VRP", "SDFLK"),
+    # Separators rule 2 already handled.
+    ("SDFSK+SDFLK", "SDFSK"),
+    ("SDFSK+SDFLK", "SDFLK"),
+    # String edges.
+    ("SDCP", "SDCP"),
+    ("Reel-SDCP", "SDCP"),
+    # Case-insensitive, as `~*` is.
+    ("sdcp_oct_reel", "SDCP"),
+])
+def test_bounded_sku_still_matches(ad_name, sku):
+    assert sku in resolve(ad_name)
+
+
+# ------------------------------------------------------- longest match
+
+@pytest.mark.parametrize("ad_name,winner,loser", [
+    ("SDFSK_GRWM_DEC23", "SDFSK", "SDFS"),
+    ("SDFSKBL_GRWM_DEC23", "SDFSK", "SDFS"),
+    ("SDCPT_OFF_916", "SDCPT", "SDCP"),
+    ("SDASK-Reel-Oct", "SDASK", "SDAS"),
+    ("SDASP_V2", "SDASP", "SDAS"),
+    ("SDCSP+MU", "SDCSP", "SDCS"),
+    ("SDCSS_X", "SDCSS", "SDCS"),
+    ("SDFPK_Y", "SDFPK", "SDFP"),
+    ("SDTJ_Z", "SDTJ", "SDT"),
+    ("SMLSS_Q", "SMLSS", "SMLS"),
+])
+def test_longest_sku_wins_within_a_nested_family(ad_name, winner, loser):
+    got = resolve(ad_name)
+    assert winner in got
+    assert loser not in got, (
+        f"{loser} must not be credited for an ad named after {winner}")
+
+
+def test_colour_tolerance_without_longest_match_would_collide():
+    """Documents WHY the NOT EXISTS guard exists, not just that it does."""
+    # SDFS is a legitimate candidate -- `SDFS` + colour `K` -- and that
+    # is exactly the trap. Only the longest-match pass removes it.
+    assert "SDFS" in candidates("SDFSK_GRWM_DEC23")
+    assert "SDFS" not in resolve("SDFSK_GRWM_DEC23")
+
+
+def test_multi_sku_ads_keep_every_unrelated_sku():
+    """Longest-match must not collapse genuinely different SKUs."""
+    assert resolve("SMFSKRT/SMCPBE_VRP") == {"SMFSK", "SMCP"}
+    assert resolve("SDFSK+SDFLK") == {"SDFSK", "SDFLK"}
+
+
+# ------------------------------------------------------------ negatives
+
+@pytest.mark.parametrize("ad_name,sku,why", [
+    ("Nothing-Here", "SDCP", "absent"),
+    ("XSDCPX", "SDCP", "embedded, no leading boundary"),
+    ("SDCPABCD_Y", "SDCP", "more than two trailing letters"),
+    ("SDCP123_Y", "SDCP", "digits are not a colour code"),
+])
+def test_non_matches(ad_name, sku, why):
+    assert sku not in resolve(ad_name), why
+
+
+def test_pattern_is_brace_free():
+    """`{0,2}` inside an f-string is a replacement field. Site 1 is an f-string."""
+    assert "{" not in PATTERN.replace("%s", "")

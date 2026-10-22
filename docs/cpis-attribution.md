@@ -201,16 +201,31 @@ A **word-boundary** regex, not a bare substring — so this does NOT have
 the collision that `cpis_by_sku` has (section D). `\ySDFS\y` will not
 match an ad named `SDFSK...`, because `K` is a word character.
 
-> **FIXED 2026-10-22.** The predicate is now bounded on
-> `[^A-Za-z0-9]` instead of `\y`, at all five sites that match an ad
-> name to a SKU: the `matched` CTE, `name_ads_join`, the `asset_sku`
-> join, and the two `_re.escape`-built regexes behind
-> `/cpis/{sku}/ads` and the spend-trend sparkline. Coverage went
-> 52.5% → 81.4% of Meta spend (+₹33,45,795 over the 30 days to
-> 2026-10-21); 53 of 100 SKUs gained spend and **none lost any**, since
-> the new rule is a strict superset. Pinned by
-> `tests/test_cpis_ad_name_match.py`. The text below is the diagnosis
+> **FIXED 2026-10-22, in two passes.** The text below is the diagnosis
 > that led to it.
+>
+> **Pass 1** replaced `\y` with `[^A-Za-z0-9]` bounds at all five sites
+> that match an ad name to a SKU. Coverage 52.5% → 81.4% of Meta spend
+> (+₹33,45,795 over the 30 days to 2026-10-21).
+>
+> **Pass 2** added a 0–2 letter **colour code** after the SKU, plus a
+> **longest-match** rule. Pass 1 still read SMFSK at ₹93,924 against
+> Meta's ₹2,04,081 — 46% — because its largest ads are
+> `PDP-SMFSKEC_...` and `SMFSKRT/...`. Colour tolerance alone would have
+> been worse than the bug: `SDFS` + `K` is a legal colour, so SDFS would
+> have absorbed all ₹6,20,266 of SDFSK's spend, ₹12.8 L misattributed
+> across the seven nested families. So when several SKUs match one ad,
+> only the longest of a nested family is credited; unrelated SKUs on a
+> genuine multi-SKU ad all survive.
+>
+> Built as a CTE (`name_cand` → `name_match`), **not** a correlated
+> `NOT EXISTS` in the join: the correlated form re-runs the regex per
+> candidate row and measured **83,661 blocks** against this shape's
+> **14,034** (10,026 before colour codes).
+>
+> Verified against the running endpoint, not just unit tests: SMFSK
+> reads ₹2,04,081, SDFS ₹0, SDCPT ₹63,461. Pinned by
+> `tests/test_cpis_ad_name_match.py`.
 
 **`_` is also a word character in Postgres**, and that broke it in
 the other direction. Verified:
