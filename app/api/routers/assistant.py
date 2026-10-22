@@ -20,6 +20,11 @@ Conversation history is sent by the frontend on every request (stateless
 backend, same pattern as the rest of this admin panel -- no server-side
 session store).
 
+The user dashboard now defaults to an analytics mode with only the three
+bounded tools in assistant_analytics.py, using existing dashboard handlers.
+The admin schema/document workflow remains available in database mode. Mode
+selects a toolset; it is not an authentication or authorization boundary.
+
 Requires ``CLOUDFLARE_API_TOKEN``/``CLOUDFLARE_ACCOUNT_ID`` in ``.env``;
 the endpoint reports 503 with a clear message rather than failing app
 startup when unset, since nothing else in the admin panel depends on it.
@@ -27,6 +32,7 @@ startup when unset, since nothing else in the admin panel depends on it.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import decimal
 import io
@@ -34,24 +40,41 @@ import json
 import re
 import uuid
 from functools import lru_cache
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
+from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pptx import Presentation
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import text
 
 from app.api.routers import admin as admin_routes
 from app.config import get_settings
 from app.database.session import get_engine
+from app.services.assistant_analytics import (
+    ANALYTICS_SYSTEM_PROMPT,
+    ANALYTICS_TOOLS,
+    execute_analytics_tool,
+)
 
-router = APIRouter(prefix="/admin/assistant", tags=["admin", "assistant"])
+def _legacy_assistant_access():
+    from app.services.chatgpt_auth import settings
+    from app.services.assistant_api_auth import settings as api_settings
+    if settings().oauth_enabled or api_settings().enabled:
+        raise HTTPException(403, "Use the authenticated assistant. Legacy shared-provider access is disabled.")
+
+
+router = APIRouter(prefix="/admin/assistant", tags=["admin", "assistant"],
+                   dependencies=[Depends(_legacy_assistant_access)])
 
 _MAX_TOOL_ITERATIONS = 8
 _QUERY_ROW_LIMIT = 200
 _CONTEXT_DOC_CHAR_LIMIT = 20_000
+_CHAT_TIMEOUT_SECONDS = 60
+ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[tuple[str, bool]]]
 
 _SYSTEM_PROMPT = """You are the data assistant embedded in an internal admin panel for a \
 Bronze/Silver/Gold data platform that ingests Meta Ads, Shopify, and Instagram data into \
@@ -241,7 +264,7 @@ def _jsonable(value: Any) -> Any:
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(min_length=1, max_length=12_000)
 
 
 class ModelInfo(NamedTuple):
@@ -299,16 +322,34 @@ ASSISTANT_MODELS: dict[str, ModelInfo] = {
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage] = Field(min_length=1)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=40)
+    mode: Literal["analytics", "database"] = "analytics"
     #: Optional -- omit to use ASSISTANT_MODEL from .env (AssistantSettings.model).
     #: Must be one of ASSISTANT_MODELS' keys; validated in assistant_chat,
     #: not left as a free-form string an admin/frontend bug could point at
     #: an unverified or tool-calling-incapable model.
     model: str | None = None
 
+    @model_validator(mode="after")
+    def check_history_size(self) -> ChatRequest:
+        if sum(len(m.content) for m in self.messages) > 48_000:
+            raise ValueError("Conversation is too long. Start a new conversation.")
+        return self
+
+
+class ChatSource(BaseModel):
+    label: str
+    url: str
+    filters: dict[str, Any]
+    basis: str
+    retrieved_at: str
+    cache_note: str
+    link_note: str
+
 
 class ChatResponse(BaseModel):
     message: str
+    sources: list[ChatSource] = Field(default_factory=list)
 
 
 class ContextDocumentOut(BaseModel):
@@ -336,10 +377,10 @@ def _get_anthropic_client() -> anthropic.AsyncAnthropic | None:
     api_key = get_settings().assistant.anthropic_api_key
     if not api_key:
         return None
-    return anthropic.AsyncAnthropic(api_key=api_key)
+    return anthropic.AsyncAnthropic(api_key=api_key, max_retries=0, timeout=45.0)
 
 
-def _tools_for_anthropic() -> list[dict[str, Any]]:
+def _tools_for_anthropic(tools: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Anthropic's tool schema is shaped differently from OpenAI's --
     {"name", "description", "input_schema"} at the top level, not nested
     under a "function" key -- so _TOOLS (built for the Cloudflare
@@ -349,7 +390,7 @@ def _tools_for_anthropic() -> list[dict[str, Any]]:
     stay identical either way."""
     return [
         {"name": t["function"]["name"], "description": t["function"]["description"], "input_schema": t["function"]["parameters"]}
-        for t in _TOOLS
+        for t in (tools if tools is not None else _TOOLS)
     ]
 
 
@@ -438,19 +479,25 @@ def _parse_tool_call_arguments(raw: Any) -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
         return {}
 
 
-async def _run_chat_turn(client: httpx.AsyncClient, model: str, messages: list[dict[str, Any]]) -> str:
+async def _run_chat_turn(
+    client: httpx.AsyncClient, model: str, messages: list[dict[str, Any]],
+    *, tools: list[dict[str, Any]] | None = None, execute: ToolExecutor | None = None,
+) -> str:
+    selected_tools = tools if tools is not None else _TOOLS
+    run_tool = execute or _execute_tool
     for _ in range(_MAX_TOOL_ITERATIONS):
         response = await client.post(
             "/v1/chat/completions",
-            json={"model": model, "messages": messages, "tools": _TOOLS, "tool_choice": "auto"},
+            json={"model": model, "messages": messages, "tools": selected_tools, "tool_choice": "auto"},
         )
         if response.status_code != 200:
-            raise HTTPException(502, f"Cloudflare Workers AI error ({response.status_code}): {response.text[:500]}")
+            raise HTTPException(502, f"Cloudflare Workers AI returned HTTP {response.status_code}. The request was stopped.")
 
         data = response.json()
         choice = data["choices"][0]
@@ -474,7 +521,7 @@ async def _run_chat_turn(client: httpx.AsyncClient, model: str, messages: list[d
         for i, tc in enumerate(tool_calls):
             fn = tc["function"]
             args = _parse_tool_call_arguments(fn.get("arguments"))
-            content, is_error = await _execute_tool(fn["name"], args)
+            content, is_error = await run_tool(fn["name"], args)
             messages.append(
                 {
                     "role": "tool",
@@ -490,7 +537,8 @@ async def _run_chat_turn(client: httpx.AsyncClient, model: str, messages: list[d
 
 
 async def _run_chat_turn_anthropic(
-    client: anthropic.AsyncAnthropic, model: str, system_prompt: str, messages: list[dict[str, Any]]
+    client: anthropic.AsyncAnthropic, model: str, system_prompt: str, messages: list[dict[str, Any]],
+    *, tools: list[dict[str, Any]] | None = None, execute: ToolExecutor | None = None,
 ) -> str:
     """Anthropic's Messages API shapes tool use as content BLOCKS on an
     assistant message (type: "tool_use") and expects the reply as a
@@ -500,11 +548,12 @@ async def _run_chat_turn_anthropic(
     are identical. `system` is a separate top-level param here, not a
     message in the list (see assistant_chat, which builds `messages`
     without a leading system entry when this path is used)."""
-    tools = _tools_for_anthropic()
+    provider_tools = _tools_for_anthropic(tools)
+    run_tool = execute or _execute_tool
     for _ in range(_MAX_TOOL_ITERATIONS):
         response = await client.messages.create(
             model=model, max_tokens=1536, system=system_prompt,
-            tools=tools, messages=messages,  # type: ignore[arg-type]
+            tools=provider_tools, messages=messages,  # type: ignore[arg-type]
         )
         if response.stop_reason != "tool_use":
             return "".join(block.text for block in response.content if block.type == "text")
@@ -514,7 +563,7 @@ async def _run_chat_turn_anthropic(
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            content, is_error = await _execute_tool(block.name, block.input)
+            content, is_error = await run_tool(block.name, block.input)
             result: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.id, "content": content}
             if is_error:
                 result["is_error"] = True
@@ -529,43 +578,75 @@ async def _run_chat_turn_anthropic(
 
 @router.post("/chat", response_model=ChatResponse)
 async def assistant_chat(body: ChatRequest) -> ChatResponse:
-    if body.model is not None and body.model not in ASSISTANT_MODELS:
-        raise HTTPException(
-            400, f"Unknown model '{body.model}'. Choose one of: {', '.join(ASSISTANT_MODELS)}."
-        )
+    try:
+        async with asyncio.timeout(_CHAT_TIMEOUT_SECONDS):
+            return await _complete_chat(body)
+    except TimeoutError as exc:
+        raise HTTPException(504, "The assistant exceeded 60 seconds. The request was stopped; try a smaller question.") from exc
+
+
+async def _complete_chat(body: ChatRequest) -> ChatResponse:
     model = body.model or get_settings().assistant.model
-    provider = ASSISTANT_MODELS[model].provider if model in ASSISTANT_MODELS else "cloudflare"
+    if model not in ASSISTANT_MODELS:
+        raise HTTPException(400 if body.model else 503, "The selected assistant model is not configured. Choose a model from the list.")
+    provider = ASSISTANT_MODELS[model].provider
+    tools = ANALYTICS_TOOLS if body.mode == "analytics" else _TOOLS
+    prompt = ANALYTICS_SYSTEM_PROMPT if body.mode == "analytics" else _SYSTEM_PROMPT
+    today = datetime.datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    prompt += f"\nToday's date in Asia/Kolkata is {today}."
+    allowed_tools = {t["function"]["name"] for t in tools}
+    sources: dict[str, ChatSource] = {}
+    tool_calls = 0
+
+    async def execute(name: str, args: dict[str, Any]) -> tuple[str, bool]:
+        nonlocal tool_calls
+        tool_calls += 1
+        if tool_calls > 10:
+            raise HTTPException(422, "This question needs too many data requests. Split it into smaller questions.")
+        if name not in allowed_tools:
+            return "That tool is not available in this conversation. Use the provided analytics tools.", True
+        if body.mode == "analytics":
+            content, is_error = await execute_analytics_tool(name, args)
+            if not is_error:
+                source = ChatSource.model_validate(json.loads(content)["source"])
+                identity = json.dumps([source.url, source.filters], sort_keys=True)
+                sources[identity] = source
+            return content, is_error
+        try:
+            async with asyncio.timeout(10):
+                content, is_error = await _execute_tool(name, args)
+        except TimeoutError as exc:
+            raise HTTPException(504, "The database tool exceeded 10 seconds. The request was stopped.") from exc
+        if is_error:
+            raise HTTPException(503, "The database tool could not complete the request. The assistant stopped without retrying.")
+        return content, False
 
     if provider == "anthropic":
-        anthropic_client = _get_anthropic_client()
-        if anthropic_client is None:
-            raise HTTPException(
-                503, "ANTHROPIC_API_KEY is not set in .env -- add it and restart the server to use Claude models."
-            )
+        client = _get_anthropic_client()
+        if client is None:
+            raise HTTPException(503, "ANTHROPIC_API_KEY is not configured on the backend.")
         messages: list[dict[str, Any]] = [{"role": m.role, "content": m.content} for m in body.messages]
         try:
-            final_text = await _run_chat_turn_anthropic(anthropic_client, model, _SYSTEM_PROMPT, messages)
+            final_text = await _run_chat_turn_anthropic(
+                client, model, prompt, messages, tools=tools, execute=execute,
+            )
         except anthropic.APIStatusError as exc:
-            raise HTTPException(502, f"Anthropic API error: {exc.message}") from exc
+            raise HTTPException(502, f"Anthropic returned HTTP {exc.status_code}. The request was stopped.") from exc
         except anthropic.APIConnectionError as exc:
-            raise HTTPException(503, f"Could not reach the Anthropic API: {exc}") from exc
-        return ChatResponse(message=final_text)
-
-    cf_client = _get_http_client()
-    if cf_client is None:
-        raise HTTPException(
-            503,
-            "CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not set in .env -- add them and "
-            "restart the server to enable the assistant.",
-        )
-    cf_messages: list[dict[str, Any]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
-    cf_messages.extend({"role": m.role, "content": m.content} for m in body.messages)
-    try:
-        final_text = await _run_chat_turn(cf_client, model, cf_messages)
-    except httpx.HTTPError as exc:
-        raise HTTPException(503, f"Could not reach Cloudflare Workers AI: {exc}") from exc
-
-    return ChatResponse(message=final_text)
+            raise HTTPException(503, "Could not reach Anthropic. The request was stopped without retrying.") from exc
+    else:
+        client = _get_http_client()
+        if client is None:
+            raise HTTPException(503, "CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not configured on the backend.")
+        messages = [{"role": "system", "content": prompt}]
+        messages.extend({"role": m.role, "content": m.content} for m in body.messages)
+        try:
+            final_text = await _run_chat_turn(client, model, messages, tools=tools, execute=execute)
+        except httpx.HTTPError as exc:
+            raise HTTPException(503, "Could not reach Cloudflare Workers AI. The request was stopped without retrying.") from exc
+    if not final_text.strip():
+        raise HTTPException(502, "The model returned no answer. The request was stopped.")
+    return ChatResponse(message=final_text, sources=list(sources.values()))
 
 
 class AssistantModelOut(BaseModel):

@@ -6,7 +6,7 @@ greenlet==3.5.4
 asyncpg==0.29.0
 psycopg2-binary==2.9.12
 alembic==1.13.3
-pydantic==2.9.2
+pydantic==2.11.10
 pydantic-settings==2.5.2
 apscheduler==3.10.4
 python-dotenv==1.0.1
@@ -16,6 +16,11 @@ structlog==24.4.0
 python-pptx==1.0.2
 python-multipart==0.0.12
 anthropic==0.120.2
+PyJWT[crypto]==2.15.1
+cryptography==50.0.2
+mcp==1.30.0
+# Keep the MCP transport compatible with the existing FastAPI/Starlette stack.
+sse-starlette==2.4.1
 
 # Google APIs.
 # google-cloud-bigquery was MISSING, and that is why the `bq_inventory`
