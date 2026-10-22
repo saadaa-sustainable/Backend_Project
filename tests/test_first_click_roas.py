@@ -52,3 +52,31 @@ def test_revenue_pair_is_still_full_credit_on_both_sides():
     sql = analytics._first_click_sql("ad")
     assert "FILTER (WHERE side = 'first')" in sql
     assert "FILTER (WHERE side = 'last')" in sql
+
+
+# ── header sorting ────────────────────────────────────────────────────
+#
+# The table is a TOP-N from the server, so reversing the direction changes
+# WHICH rows come back, not just their order. That is the point: ascending
+# on first-click ROAS surfaces ads with real spend that opened nothing --
+# verified live, five rows at Rs 1,124-4,222 of spend and 0.00x.
+
+def test_direction_is_validated_by_a_literal():
+    """An unvalidated direction would be string-interpolated into ORDER BY."""
+    import inspect
+
+    sig = inspect.signature(analytics.get_first_click)
+    assert "direction" in sig.parameters
+    annotation = sig.parameters["direction"].annotation
+    assert "Literal" in str(annotation), annotation
+    assert "'desc'" in str(annotation) and "'asc'" in str(annotation), annotation
+
+
+def test_every_sortable_column_is_a_real_output_column():
+    """A header cannot offer a sort the inner SELECT does not produce."""
+    for grain in ("ad", "adset", "source"):
+        sql = analytics._first_click_sql(grain)
+        for key in analytics._FIRST_CLICK_SORTS.values():
+            # spend and the two ROAS columns are aliased even at source
+            # grain (as NULL), so every key must appear at every grain.
+            assert key in sql, f"{key} missing from {grain} SQL"

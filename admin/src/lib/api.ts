@@ -1230,6 +1230,8 @@ export interface FirstClickParams {
   from_date?: string;
   to_date?: string;
   sort?: string;
+  /** Sort direction. NULLs stay last either way, so a dash never leads. */
+  direction?: "asc" | "desc";
   limit?: number;
 }
 
@@ -1239,6 +1241,7 @@ export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstCli
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
   if (params.sort) qs.set("sort", params.sort);
+  if (params.direction) qs.set("direction", params.direction);
   if (params.limit) qs.set("limit", String(params.limit));
   const s = qs.toString();
   return request<FirstClickResponse>(`/admin/analytics/first-click${s ? `?${s}` : ""}`);

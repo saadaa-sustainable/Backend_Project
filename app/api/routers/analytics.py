@@ -2767,6 +2767,11 @@ async def get_first_click(
     to_date: date | None = Query(default=None, description="End of the window (defaults to today)."),
     grain: str = Query(default="source", description="Key the journey's two ends on: " + ", ".join(_FIRST_CLICK_GRAINS)),
     sort: str = Query(default="first_click_revenue", description="One of " + ", ".join(_FIRST_CLICK_SORTS)),
+    direction: Literal["desc", "asc"] = Query(
+        default="desc",
+        description="Sort direction. NULLs stay last either way, so a dash "
+                    "never leads the table.",
+    ),
     limit: int = Query(default=200, ge=1, le=5000,
                       description="Rows per page. The ad grain has ~2,300 entities "
                                   "in a 30-day window, so the old cap of 200 hid most "
@@ -2792,8 +2797,15 @@ async def get_first_click(
     # report the page size, which is what hid 2,283 of 2,333 ads behind
     # a limit of 50 and read as "these are all the ads there are".
     rows_result = await session.execute(
+        # NULLS LAST on BOTH directions, not just DESC. Ascending puts the
+        # weakest rows first, which is the point of reversing -- but the
+        # column is full of honest NULLs (source grain, ads Meta never
+        # billed, ROAS under the spend floor), and Postgres sorts NULLs
+        # first on ASC by default. That would hand the page to rows with
+        # no number at all and bury the answer under dashes.
         text(f"SELECT *, COUNT(*) OVER ()::int AS _total FROM ({_first_click_sql(grain)}) t "
-             f"ORDER BY {_FIRST_CLICK_SORTS[sort]} DESC NULLS LAST LIMIT :limit"),
+             f"ORDER BY {_FIRST_CLICK_SORTS[sort]} {'ASC' if direction == 'asc' else 'DESC'}"
+             f" NULLS LAST LIMIT :limit"),
         {**params, "limit": limit},
     )
     raw = [dict(r._mapping) for r in rows_result]

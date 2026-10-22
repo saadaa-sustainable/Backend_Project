@@ -78,6 +78,18 @@ function rupees(n: number) {
 export function FirstClick() {
   const [grain, setGrain] = useState("ad");
   const [sort, setSort] = useState("first_click_revenue");
+  // Header clicks sort server-side, not in the page. That matters because
+  // the table is a TOP-N: reversing the direction changes which rows come
+  // back, not just their order. Ascending is how you find the ads opening
+  // least, and client-side sorting could only ever reorder the 200 the
+  // server already picked as the highest.
+  const [direction, setDirection] = useState<"asc" | "desc">("desc");
+  // First click on a column sorts it descending -- the common question is
+  // "which is biggest". Clicking the same one again reverses it.
+  const toggleSort = (key: string) => {
+    if (sort === key) setDirection((d) => (d === "desc" ? "asc" : "desc"));
+    else { setSort(key); setDirection("desc"); }
+  };
   // Source grain has no spend, so a spend sort there would order every row
   // by NULL and look like the control had broken. Fall back instead.
   useEffect(() => {
@@ -106,8 +118,8 @@ export function FirstClick() {
   const [error, setError] = useState<string | null>(null);
 
   const filters = useMemo(
-    () => ({ grain, sort, from_date: fromDate, to_date: toDate, limit }),
-    [grain, sort, fromDate, toDate, limit],
+    () => ({ grain, sort, direction, from_date: fromDate, to_date: toDate, limit }),
+    [grain, sort, direction, fromDate, toDate, limit],
   );
 
   useEffect(() => {
@@ -216,7 +228,7 @@ export function FirstClick() {
           <select
             id="fc-sort"
             value={sort}
-            onChange={(e) => setSort(e.target.value)}
+            onChange={(e) => { setSort(e.target.value); setDirection("desc"); }}
             className={filterControlClass}
           >
             {SORT_OPTIONS.filter(
@@ -371,27 +383,46 @@ export function FirstClick() {
                       // rendered as a column of dashes: a "source" like META or
                       // affiliate is not a billable entity, so there is no number
                       // being withheld -- the question does not apply.
-                      ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report."] as const]),
-                      ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split."],
-                      ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across."],
+                      ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report.", "spend"] as const]),
+                      ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split.", "first_click_revenue"],
+                      ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across.", "last_click_revenue"],
                       // Both ROAS columns share the spend denominator, so they
                       // are dropped at source grain for the same reason spend
                       // is: there is no billable entity to divide by.
                       ...(grain === "source" ? [] : [
-                        ["First-click ROAS", "First-click revenue over this ad's own spend in the window. A dash means Meta billed it under ₹1,000 here, where the quotient stops being a rate. Runs high for an ad winding down: the revenue comes from journeys it opened up to weeks earlier while its spend falls away — so compare it with this row's last-click ROAS, not another row's."] as const,
-                        ["Last-click ROAS", "Last-click revenue over the same spend — what every rupee it CLOSED returned. The closing click sits near the order, so this one lines up with the window far better than first-click ROAS does."] as const,
+                        ["First-click ROAS", "First-click revenue over this ad's own spend in the window. A dash means Meta billed it under ₹1,000 here, where the quotient stops being a rate. Runs high for an ad winding down: the revenue comes from journeys it opened up to weeks earlier while its spend falls away — so compare it with this row's last-click ROAS, not another row's.", "first_click_roas"] as const,
+                        ["Last-click ROAS", "Last-click revenue over the same spend — what every rupee it CLOSED returned. The closing click sits near the order, so this one lines up with the window far better than first-click ROAS does.", "last_click_roas"] as const,
                       ]),
-                      ["Days to convert", "Average days from first session to order, over the orders this one started."],
-                      ["Sessions", "Average sessions before the order, over the orders this one started."],
-                    ] as const).map(([label, title]) => (
-                      <th
-                        key={label}
-                        title={title}
-                        className="sticky top-0 z-20 h-9 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
-                      >
-                        {label}
-                      </th>
-                    ))}
+                      ["Days to convert", "Average days from first session to order, over the orders this one started.", "avg_days_to_convert"],
+                      ["Sessions", "Average sessions before the order, over the orders this one started.", "avg_sessions"],
+                    ] as const).map(([label, title, key]) => {
+                      const active = sort === key;
+                      return (
+                        <th
+                          key={label}
+                          // Native title stays the explanation. The sort hint
+                          // goes on the button so a hover does not replace the
+                          // column's meaning with a UI instruction.
+                          title={title}
+                          aria-sort={active ? (direction === "desc" ? "descending" : "ascending") : "none"}
+                          className={`sticky top-0 z-20 h-9 whitespace-nowrap border-b border-border-primary px-0 py-0 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] ${active ? "bg-bg-surface text-text-primary" : "bg-bg-muted text-text-tertiary"}`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleSort(key)}
+                            aria-label={`Sort by ${label}, ${active && direction === "desc" ? "ascending" : "descending"}`}
+                            className="flex h-9 w-full items-center justify-end gap-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] hover:text-text-primary"
+                          >
+                            {label}
+                            {/* Reserve the caret's width on every header so the
+                                row does not shift when the active column moves. */}
+                            <span aria-hidden="true" className={`w-2 text-[8px] ${active ? "opacity-100" : "opacity-0"}`}>
+                              {direction === "desc" ? "\u25bc" : "\u25b2"}
+                            </span>
+                          </button>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
