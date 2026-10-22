@@ -90,6 +90,46 @@ export function FirstClick() {
     if (sort === key) setDirection((d) => (d === "desc" ? "asc" : "desc"));
     else { setSort(key); setDirection("desc"); }
   };
+
+  // Width of the first column, draggable from its right edge.
+  //
+  // An ad name here is not a label, it is the ad's spec sheet:
+  // `CLP-SDAMK+MU+NA+IHP+SDVSK_VRP_CI_CCL001-1066-02/10/26` carries the
+  // placement, the SKUs, the format, the creative code and the date.
+  // Truncated at 300px it reads as `CLP-SDAMK+MU+NA+IHP+SDVSK_VRP_CI`,
+  // which is the same opening for dozens of different ads -- so the one
+  // thing that tells two rows apart is the part that gets cut off.
+  // Hence a handle rather than a bigger fixed width: the names are long
+  // enough that any width wide enough to read them would crowd out the
+  // numbers for everyone who does not need them.
+  const LABEL_MIN = 160;
+  const LABEL_MAX = 900;
+  const LABEL_DEFAULT = 300;
+  const [labelWidth, setLabelWidth] = useState(LABEL_DEFAULT);
+
+  // Pointer events, not mouse: one path covers trackpad, mouse and touch.
+  // Capture on the handle so a fast drag that leaves the element still
+  // tracks, instead of sticking at the last position inside it.
+  const startLabelResize = (e: React.PointerEvent<HTMLSpanElement>) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    const startX = e.clientX;
+    const startWidth = labelWidth;
+    handle.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      const next = startWidth + (ev.clientX - startX);
+      setLabelWidth(Math.min(LABEL_MAX, Math.max(LABEL_MIN, next)));
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  };
   // Source grain has no spend, so a spend sort there would order every row
   // by NULL and look like the control had broken. Fall back instead.
   useEffect(() => {
@@ -367,8 +407,31 @@ export function FirstClick() {
               <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
                 <thead>
                   <tr>
-                    <th className="sticky left-0 top-0 z-30 h-9 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
-                      {grainNoun}
+                    <th
+                      style={{ width: labelWidth, minWidth: labelWidth, maxWidth: labelWidth }}
+                      className="sticky left-0 top-0 z-30 h-9 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-0 py-0 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
+                    >
+                      {/* `relative` has to live on an inner div: the th is
+                          already `sticky`, and an element can only hold one
+                          position value. */}
+                      <div
+                        style={{ width: labelWidth }}
+                        className="relative flex h-9 items-center overflow-hidden px-3"
+                      >
+                        <span className="truncate">{grainNoun}</span>
+                        <span className="ml-1 text-[9px] font-normal normal-case text-text-tertiary">
+                          {labelWidth !== LABEL_DEFAULT ? `${labelWidth}px` : ""}
+                        </span>
+                        <span
+                          role="separator"
+                          aria-orientation="vertical"
+                          aria-label="Drag to resize the name column"
+                          title="Drag to widen — the end of an ad name is the part that tells two rows apart. Double-click to reset."
+                          onPointerDown={startLabelResize}
+                          onDoubleClick={() => setLabelWidth(LABEL_DEFAULT)}
+                          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize bg-transparent hover:bg-border-primary"
+                        />
+                      </div>
                     </th>
                     {grain !== "source" && (
                       <th
@@ -435,10 +498,15 @@ export function FirstClick() {
                     return (
                       <tr key={`${r.source}-${r.channel}`} className="hover:bg-bg-surface">
                         <td
-                          className="sticky left-0 z-10 max-w-[300px] truncate border-b border-r border-border-soft bg-bg-white px-3 py-1.5 text-xs text-text-primary"
+                          style={{ width: labelWidth, minWidth: labelWidth, maxWidth: labelWidth }}
+                          className="sticky left-0 z-10 border-b border-r border-border-soft bg-bg-white px-3 py-1.5 text-xs text-text-primary"
                           title={r.label === r.source ? r.source : `${r.label}  ·  ${r.source}`}
                         >
-                          {r.label}
+                          {/* Definite width here, not just on the td -- see the
+                              header's note on table-auto. */}
+                          <div style={{ width: labelWidth - 24 }} className="truncate">
+                            {r.label}
+                          </div>
                         </td>
                         {grain !== "source" && (
                           <td className="border-b border-border-soft px-3 py-1.5 text-xs text-text-secondary">
