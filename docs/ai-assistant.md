@@ -23,6 +23,7 @@ description and in every result's `source.basis`.
 | `get_first_click_attribution` | First Click | both ends of the GA4 journey, ROAS pair |
 | `get_last_click_attribution` | Last Click UTM | orders resolved to ad / ad set / campaign |
 | `get_blended_mer` | Blended MER | revenue over Meta + Google + Kwikchat spend |
+| `get_landing_page_performance` | Landing Page Analysis | GA4 + Shopify sessions, funnel rates, last-click orders |
 | `get_refresh_status` | -- | cron runs, step outcomes, schedules |
 | `get_data_freshness` | -- | latest available date per dataset |
 | `get_table_info` | -- | public schema metadata |
@@ -38,6 +39,10 @@ wrong produces confident nonsense rather than an error:
   states which basis produced it.
 * **First Click's two revenue columns each carry the order's FULL value** and
   overlap. A column may be totalled down the page; a row must never be added across.
+* **Landing Page Analysis carries two session counts that disagree.** `ga4_sessions`
+  and `shopify_sessions` count differently; neither corrects the other and they must
+  not be added. Its `source` filter narrows ONLY the last-click order and revenue
+  columns, so a filtered row mixes one channel's orders with every channel's sessions.
 
 Adding a section means one input model, one registry entry and one dispatch branch
 in `app/services/assistant_analytics.py`. The MCP server exposes whatever the
@@ -168,6 +173,7 @@ response = httpx.post(
             'allowed_tools': ['get_dashboard_metrics', 'get_ad_performance', 'get_asset_performance',
                               'get_sku_economics', 'get_first_click_attribution',
                               'get_last_click_attribution', 'get_blended_mer',
+                              'get_landing_page_performance',
                               'get_refresh_status', 'get_data_freshness', 'get_table_info'],
             'require_approval': 'never',  # Explicitly approved read-only tools only.
         }],
