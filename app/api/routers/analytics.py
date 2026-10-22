@@ -4673,7 +4673,7 @@ async def get_cpis(
         SELECT c.master_sku, al.ad_id
         FROM candidates c
         JOIN ad_lifecycle al
-          ON al.ad_name ~* ('\\y' || c.master_sku || '\\y')
+          ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || c.master_sku || '([^A-Za-z0-9]|$)')
       ),
       windowed_ad AS (
         SELECT m.master_sku, m.ad_id,
@@ -4795,7 +4795,12 @@ async def get_cpis_matched_ads(session: SessionDep, master_sku: str) -> CpisMatc
     # metachars still present after the allowlist (period is the only
     # one that matters -- and it's in the allowlist because real SKUs
     # like "SD.CP" exist).
-    regex = r"\y" + _re.escape(master_sku) + r"\y"
+    # Bounded on non-alphanumerics, NOT \y..\y: `_` is a word
+    # character in Postgres, so the word-boundary form missed every
+    # ad named `<SKU>_...`. Must stay identical to the predicate in
+    # get_cpis_utm, or this list disagrees with the row it opened.
+    regex = (r"(^|[^A-Za-z0-9])" + _re.escape(master_sku)
+             + r"([^A-Za-z0-9]|$)")
 
     rows_result = await session.execute(
         text(
@@ -5400,7 +5405,7 @@ async def get_cpis_utm(
     # branches produce complete rows. Custom-range perf is comparable
     # to pre-computed once the underlying indexes are warm.
     utm_sku_ads_guard = ""
-    name_ads_join = "ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')"
+    name_ads_join = "ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || p.master_sku || '([^A-Za-z0-9]|$)')"
 
     # Two data paths:
     #   1. Custom date range given (from_date + to_date) -> sum from
@@ -5646,9 +5651,24 @@ async def get_cpis_utm(
          AND idba.day   = usa.day
         GROUP BY usa.master_sku
       ),
-      -- Ads whose ad_name contains this master_sku as a whole word (same
-      -- \\y..\\y word-boundary regex the legacy CPIS drilldown uses --
-      -- avoids "BR" matching every ad with "BR" anywhere).
+      -- Ads whose ad_name contains this master_sku as a bounded token.
+      --
+      -- NOT \\y..\\y. Postgres treats `_` as a WORD character, so
+      -- \\ySDFSK\\y does not match `SDFSK_GRWM_DEC23` -- an ad plainly
+      -- named for that SKU. Measured 2026-10-22 over the 30 days to
+      -- 2026-10-21, that cost Rs 33,45,795 of matched spend: the old rule
+      -- found Rs 60,80,028 (52.5% of Meta spend) where this one finds
+      -- Rs 94,25,823 (81.4%).
+      --
+      -- The explicit [^A-Za-z0-9] bounds keep the reason \\y was chosen:
+      -- `SDFS` still does NOT match `SDFSK_GRWM_DEC23`, because `K` is
+      -- alphanumeric. That collision is what `cpis_by_sku`'s bare
+      -- substring matcher gets wrong, to the tune of Rs 4.36 Cr.
+      --
+      -- Still missed on purpose: a colour code straight after the SKU,
+      -- as in `SMCPBL-Reel-Oct` for master SMCP. Allowing [A-Z]{0,2}
+      -- there would recover only Rs 1,95,624 and would re-open the
+      -- SDFS/SDFSK collision, since `SDFS` + `K` is a legal colour.
       --
       -- 2026-08-31 fix: metrics are now WINDOWED via insights_windowed
       -- above -- SUMs are of ONLY the daily insight rows that fall
@@ -5789,7 +5809,7 @@ async def get_cpis_utm(
           FROM asset_media am
           JOIN public.ad_asset_map map ON map.asset_id = am.aid
           JOIN ad_lifecycle al ON al.ad_id = map.ad_id
-          JOIN page p ON al.ad_name ~* ('\\y' || p.master_sku || '\\y')
+          JOIN page p ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || p.master_sku || '([^A-Za-z0-9]|$)')
       ),
       tested_idle_by_sku AS (
         SELECT sk.master_sku,
@@ -6473,7 +6493,12 @@ async def get_cpis_utm_spend_trend(
     """
     if not _SKU_ALLOWED_PATTERN.match(master_sku):
         raise HTTPException(status_code=400, detail="Invalid master_sku")
-    regex = r"\y" + _re.escape(master_sku) + r"\y"
+    # Bounded on non-alphanumerics, NOT \y..\y: `_` is a word
+    # character in Postgres, so the word-boundary form missed every
+    # ad named `<SKU>_...`. Must stay identical to the predicate in
+    # get_cpis_utm, or this list disagrees with the row it opened.
+    regex = (r"(^|[^A-Za-z0-9])" + _re.escape(master_sku)
+             + r"([^A-Za-z0-9]|$)")
 
     # Window bounds -- reuse cpis_by_sku_utm's stored dates so the range
     # matches what the main endpoint's row values were computed over.
