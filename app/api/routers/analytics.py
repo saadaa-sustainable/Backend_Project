@@ -4665,15 +4665,35 @@ async def get_cpis(
         FROM cpis_by_sku c
         {where_sql}
       ),
-      -- Expand each SKU to the ads whose NAME carries its code, by
-      -- word-boundary regex (same rule as /cpis/{{sku}}/ads). An ad
-      -- naming two SKUs joins to both, which is why this column is not
-      -- additive across rows -- see the docstring.
+      -- Expand each SKU to the ads whose NAME carries its code. Same
+      -- rule as get_cpis_utm and /cpis/{{sku}}/ads -- bounded on
+      -- non-alphanumerics, a 0-2 letter colour code allowed, and the
+      -- longest SKU of a nested family wins. See get_cpis_utm's
+      -- name_cand comment for the measurements behind each half.
+      --
+      -- An ad naming two UNRELATED SKUs still joins to both, which is
+      -- why this column is not additive across rows -- see the
+      -- docstring.
+      name_cand AS (
+        SELECT s.master_sku, al.ad_id
+          FROM public.cpis_sku_context s
+          JOIN ad_lifecycle al
+            ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || s.master_sku
+                              || '[A-Z]?[A-Z]?([^A-Za-z0-9]|$)')
+      ),
+      name_match AS (
+        SELECT c.master_sku, c.ad_id
+          FROM name_cand c
+         WHERE NOT EXISTS (
+                 SELECT 1 FROM name_cand o
+                  WHERE o.ad_id = c.ad_id
+                    AND length(o.master_sku) > length(c.master_sku)
+                    AND position(c.master_sku in o.master_sku) > 0)
+      ),
       matched AS (
-        SELECT c.master_sku, al.ad_id
+        SELECT c.master_sku, nm.ad_id
         FROM candidates c
-        JOIN ad_lifecycle al
-          ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || c.master_sku || '([^A-Za-z0-9]|$)')
+        JOIN name_match nm ON nm.master_sku = c.master_sku
       ),
       windowed_ad AS (
         SELECT m.master_sku, m.ad_id,
@@ -4800,11 +4820,25 @@ async def get_cpis_matched_ads(session: SessionDep, master_sku: str) -> CpisMatc
     # ad named `<SKU>_...`. Must stay identical to the predicate in
     # get_cpis_utm, or this list disagrees with the row it opened.
     regex = (r"(^|[^A-Za-z0-9])" + _re.escape(master_sku)
-             + r"([^A-Za-z0-9]|$)")
+             + r"[A-Z]?[A-Z]?([^A-Za-z0-9]|$)")
 
     rows_result = await session.execute(
         text(
             """
+            WITH cand AS (
+              SELECT ad_id, ad_name FROM ad_lifecycle WHERE ad_name ~* :regex
+            ),
+            losers AS (
+              -- Ads where a LONGER SKU containing this one also matches:
+              -- `SDFS` must not claim an ad named `SDFSK_...`.
+              SELECT DISTINCT c.ad_id
+                FROM cand c
+                JOIN public.cpis_sku_context o
+                  ON length(o.master_sku) > length(:sku)
+                 AND position(:sku in o.master_sku) > 0
+                 AND c.ad_name ~* ('(^|[^A-Za-z0-9])' || o.master_sku
+                                   || '[A-Z]?[A-Z]?([^A-Za-z0-9]|$)')
+            )
             SELECT
               ad_id,
               ad_name,
@@ -4821,12 +4855,13 @@ async def get_cpis_matched_ads(session: SessionDep, master_sku: str) -> CpisMatc
               ctr
             FROM ad_lifecycle
             WHERE ad_name ~* :regex
+              AND ad_id NOT IN (SELECT ad_id FROM losers)
             ORDER BY
               CASE ad_effective_status WHEN 'ACTIVE' THEN 0 ELSE 1 END,
               spend DESC NULLS LAST
             """
         ),
-        {"regex": regex},
+        {"regex": regex, "sku": master_sku},
     )
     ads = [CpisMatchedAdRow(**dict(r._mapping)) for r in rows_result]
     return CpisMatchedAdsResponse(master_sku=master_sku, ads=ads, matched_count=len(ads))
@@ -5405,7 +5440,6 @@ async def get_cpis_utm(
     # branches produce complete rows. Custom-range perf is comparable
     # to pre-computed once the underlying indexes are warm.
     utm_sku_ads_guard = ""
-    name_ads_join = "ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || p.master_sku || '([^A-Za-z0-9]|$)')"
 
     # Two data paths:
     #   1. Custom date range given (from_date + to_date) -> sum from
@@ -5651,25 +5685,55 @@ async def get_cpis_utm(
          AND idba.day   = usa.day
         GROUP BY usa.master_sku
       ),
-      -- Ads whose ad_name contains this master_sku as a bounded token.
+      -- WHICH ADS CARRY A SKU'S CODE IN THEIR NAME.
       --
-      -- NOT \\y..\\y. Postgres treats `_` as a WORD character, so
-      -- \\ySDFSK\\y does not match `SDFSK_GRWM_DEC23` -- an ad plainly
+      -- Three rules have been tried here. The first two were wrong in
+      -- opposite directions, so the shape below is deliberate.
+      --
+      -- NOT a bare substring: `SDFS` appears inside `SDFSK_GRWM_DEC23`,
+      -- and crediting it there is what `cpis_by_sku` still does, worth
+      -- Rs 4.36 Cr of spend charged to SKUs never advertised.
+      --
+      -- NOT \\y..\\y either. Postgres treats `_` as a WORD character,
+      -- so \\ySDFSK\\y did not match `SDFSK_GRWM_DEC23` -- an ad plainly
       -- named for that SKU. Measured 2026-10-22 over the 30 days to
-      -- 2026-10-21, that cost Rs 33,45,795 of matched spend: the old rule
-      -- found Rs 60,80,028 (52.5% of Meta spend) where this one finds
-      -- Rs 94,25,823 (81.4%).
+      -- 2026-10-21 that cost Rs 33,45,795: Rs 60,80,028 found against
+      -- Rs 94,25,823 available.
       --
-      -- The explicit [^A-Za-z0-9] bounds keep the reason \\y was chosen:
-      -- `SDFS` still does NOT match `SDFSK_GRWM_DEC23`, because `K` is
-      -- alphanumeric. That collision is what `cpis_by_sku`'s bare
-      -- substring matcher gets wrong, to the tune of Rs 4.36 Cr.
+      -- So: bounded on [^A-Za-z0-9], and the SKU may carry a 0-2 letter
+      -- COLOUR CODE. SMFSK's largest ads are `PDP-SMFSKEC_...` and
+      -- `SMFSKRT/...`; without the colour code SMFSK read Rs 93,924
+      -- against Meta's Rs 2,04,081 -- 46% of the truth.
       --
-      -- Still missed on purpose: a colour code straight after the SKU,
-      -- as in `SMCPBL-Reel-Oct` for master SMCP. Allowing [A-Z]{0,2}
-      -- there would recover only Rs 1,95,624 and would re-open the
-      -- SDFS/SDFSK collision, since `SDFS` + `K` is a legal colour.
+      -- Colour tolerance ALONE is unsafe, because `SDFS` + `K` is itself
+      -- a legal colour code. Measured across the seven nested families
+      -- it would misattribute Rs 12.8 L, Rs 6,20,266 of it SDFSK's
+      -- entire spend landing on SDFS. Hence name_match: when several
+      -- SKUs match one ad, only the longest of a nested family is
+      -- credited. Unrelated SKUs on a multi-SKU ad all survive.
       --
+      -- Built as a CTE, NOT as a correlated NOT EXISTS in the join. The
+      -- correlated form re-runs the regex per candidate row and cost
+      -- 83,661 blocks against this shape's 14,034 -- measured, and
+      -- 10,026 for the version before colour codes.
+      name_cand AS (
+        -- The WHOLE catalogue, not just this page: longest-match has to
+        -- see a longer SKU even when the page does not show it.
+        SELECT s.master_sku, al.ad_id
+          FROM public.cpis_sku_context s
+          JOIN ad_lifecycle al
+            ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || s.master_sku
+                              || '[A-Z]?[A-Z]?([^A-Za-z0-9]|$)')
+      ),
+      name_match AS (
+        SELECT c.master_sku, c.ad_id
+          FROM name_cand c
+         WHERE NOT EXISTS (
+                 SELECT 1 FROM name_cand o
+                  WHERE o.ad_id = c.ad_id
+                    AND length(o.master_sku) > length(c.master_sku)
+                    AND position(c.master_sku in o.master_sku) > 0)
+      ),
       -- 2026-08-31 fix: metrics are now WINDOWED via insights_windowed
       -- above -- SUMs are of ONLY the daily insight rows that fall
       -- inside the picked window. Matches Creative Testing / Ads
@@ -5692,7 +5756,8 @@ async def get_cpis_utm(
                  WHERE al.ad_effective_status = 'ACTIVE'
                ), 0)                                             AS active_windowed_spend
         FROM page p
-        LEFT JOIN ad_lifecycle al {name_ads_join}
+        LEFT JOIN name_match nm ON nm.master_sku = p.master_sku
+        LEFT JOIN ad_lifecycle al ON al.ad_id = nm.ad_id
         LEFT JOIN insights_windowed iw
           ON iw.ad_id = al.ad_id
         GROUP BY p.master_sku
@@ -5809,7 +5874,8 @@ async def get_cpis_utm(
           FROM asset_media am
           JOIN public.ad_asset_map map ON map.asset_id = am.aid
           JOIN ad_lifecycle al ON al.ad_id = map.ad_id
-          JOIN page p ON al.ad_name ~* ('(^|[^A-Za-z0-9])' || p.master_sku || '([^A-Za-z0-9]|$)')
+          JOIN name_match nm ON nm.ad_id = al.ad_id
+          JOIN page p ON p.master_sku = nm.master_sku
       ),
       tested_idle_by_sku AS (
         SELECT sk.master_sku,
@@ -6498,7 +6564,7 @@ async def get_cpis_utm_spend_trend(
     # ad named `<SKU>_...`. Must stay identical to the predicate in
     # get_cpis_utm, or this list disagrees with the row it opened.
     regex = (r"(^|[^A-Za-z0-9])" + _re.escape(master_sku)
-             + r"([^A-Za-z0-9]|$)")
+             + r"[A-Z]?[A-Z]?([^A-Za-z0-9]|$)")
 
     # Window bounds -- reuse cpis_by_sku_utm's stored dates so the range
     # matches what the main endpoint's row values were computed over.
@@ -6517,8 +6583,22 @@ async def get_cpis_utm_spend_trend(
     prev_lo = date.fromordinal(lo.toordinal() - (hi - lo).days - 1)
 
     sql = """
-    WITH ads AS (
-      SELECT ad_id FROM ad_lifecycle WHERE ad_name ~* :regex
+    WITH cand AS (
+      SELECT ad_id, ad_name FROM ad_lifecycle WHERE ad_name ~* :regex
+    ),
+    losers AS (
+      -- See get_cpis_matched_ads: the longest SKU of a nested family wins.
+      SELECT DISTINCT c.ad_id
+        FROM cand c
+        JOIN public.cpis_sku_context o
+          ON length(o.master_sku) > length(:sku)
+         AND position(:sku in o.master_sku) > 0
+         AND c.ad_name ~* ('(^|[^A-Za-z0-9])' || o.master_sku
+                           || '[A-Z]?[A-Z]?([^A-Za-z0-9]|$)')
+    ),
+    ads AS (
+      SELECT ad_id FROM cand
+       WHERE ad_id NOT IN (SELECT ad_id FROM losers)
     ),
     daily AS (
       SELECT
@@ -6538,7 +6618,7 @@ async def get_cpis_utm_spend_trend(
     """
     row = (
         await session.execute(
-            text(sql), {"regex": regex, "lo": lo, "hi": hi, "prev_lo": prev_lo}
+            text(sql), {"regex": regex, "sku": master_sku, "lo": lo, "hi": hi, "prev_lo": prev_lo}
         )
     ).first()
     if row is None:
