@@ -138,6 +138,41 @@ class MerInput(ToolInput):
     periods: int = Field(default=12, ge=1, le=60, description="How many completed periods back.")
 
 
+class LandingPageInput(ToolInput):
+    search: str | None = Field(default=None, max_length=200, description="Case-insensitive substring over the landing page path.")
+    page_type: Literal["collections", "products", "home", "pages", "other"] | None = None
+    gender: Literal["men", "women", "other"] | None = None
+    #: The exact channel labels the endpoint groups by, spelling and all.
+    #: A free string here let a model send "meta" and get an infrastructure
+    #: error back instead of a correctable one -- the schema is the only
+    #: place that can tell it the vocabulary.
+    source: Literal["Meta", "Google", "Organic (IG)", "Retention", "Brand Collab",
+                    "AI", "Organic (Direct)", "Loyalty", "Other"] | None = Field(
+        default=None,
+        description="Narrow ONLY the last-click order and revenue columns to one "
+                    "channel. Session columns stay unfiltered. Omit for all channels.",
+    )
+    sort: Literal[
+        "ga4_sessions", "ga4_purchases", "ga4_pdp_views", "ga4_add_to_carts", "ga4_checkouts",
+        "ga4_bounce_rate", "shopify_sessions", "shopify_atc_rate", "shopify_bounce_rate",
+        "sessions_delta", "sessions_delta_pct", "bounce_rate_delta", "conversion_rate",
+        "pdp_to_atc_rate", "pdp_to_checkout_rate", "atc_to_checkout_rate",
+        "checkout_to_purchase_rate", "pdp_to_purchase_rate",
+        "last_click_orders", "last_click_revenue", "last_click_aov", "last_click_rev_per_session",
+    ] = "ga4_sessions"
+    date_from: date | None = Field(default=None, description="Inclusive YYYY-MM-DD. Defaults to 30 days back.")
+    date_to: date | None = Field(default=None, description="Inclusive YYYY-MM-DD. Defaults to today.")
+    limit: int = Field(default=25, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def check_range(self) -> LandingPageInput:
+        if (self.date_from is None) != (self.date_to is None):
+            raise ValueError("Provide both date_from and date_to, or neither.")
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("date_from must not be after date_to.")
+        return self
+
+
 class AssetsInput(ToolInput):
     account_name: str | None = Field(default=None, max_length=200)
     status: Literal["active", "inactive"] | None = None
@@ -222,6 +257,24 @@ _TOOL_SPECS = {
         "the same spend -- the two answer different questions and will not agree. "
         "Kwikchat spend is a labelled flat estimate, not measured. The newest period is partial "
         "whenever the window has not closed; say so rather than comparing it to full periods.",
+    ),
+    "get_landing_page_performance": (
+        LandingPageInput,
+        "Read the Landing Page Analysis section: per landing page, GA4 sessions, PDP views, "
+        "add-to-carts, checkouts, purchases and bounce rate, beside Shopify sessions and the "
+        "last-click orders and revenue those pages earned, plus funnel step rates and "
+        "period-over-period session and bounce deltas. "
+        "TWO SESSION COUNTS SIT SIDE BY SIDE AND DO NOT AGREE: ga4_sessions comes from GA4, "
+        "shopify_sessions from Shopify, and they count differently. Never present one as a "
+        "correction of the other, and never add them. sessions_delta compares the selected "
+        "window with the preceding window of equal length. "
+        "gender partitions the whole set -- men, women and other sum to the unfiltered total -- "
+        "and is read from the page slug, or for product pages from Shopify's own product tags. "
+        "`source` narrows ONLY the last-click order and revenue columns to one channel; the GA4 "
+        "and Shopify session columns stay unfiltered, so a filtered row mixes one channel's "
+        "orders with every channel's sessions. "
+        "GA4 sees about 76% of orders, so these are a subset of Shopify's totals: compare pages "
+        "against each other rather than reading any column as a store total.",
     ),
 }
 ANALYTICS_TOOLS = [
@@ -380,6 +433,27 @@ async def _read(name: str, params: BaseModel, session: Any) -> dict[str, Any]:
             "data": data,
             "returned_rows": len(data["rows"]), "total_matching": data.get("total"),
             "truncated": (data.get("total") or 0) > len(data["rows"]),
+        }
+    if name == "get_landing_page_performance":
+        assert isinstance(params, LandingPageInput)
+        result = await analytics.get_landing_pages(
+            session=session, search=params.search, page_type=params.page_type,
+            gender=params.gender, sort=params.sort, source=params.source,
+            from_date=params.date_from, to_date=params.date_to,
+            limit=params.limit, offset=0,
+        )
+        data = result.model_dump(mode="json")
+        return {
+            "source": _source("landing-page-analysis", "Landing Page Analysis", filters,
+                              "GA4 and Shopify sessions over the selected dates; last-click "
+                              + (f"orders narrowed to {params.source}" if params.source
+                                 else "orders across every channel")),
+            "data": data,
+            "returned_rows": len(data.get("rows", [])),
+            "total_matching": data.get("total"),
+            "truncated": (data.get("total") or 0) > len(data.get("rows", [])),
+            "model_note": "ga4_sessions and shopify_sessions count differently and will not "
+                          "agree; neither corrects the other and they must not be added.",
         }
     if name == "get_blended_mer":
         assert isinstance(params, MerInput)

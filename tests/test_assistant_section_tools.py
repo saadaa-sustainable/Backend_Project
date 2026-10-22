@@ -17,6 +17,7 @@ NEW_TOOLS = {
     "get_first_click_attribution",
     "get_last_click_attribution",
     "get_blended_mer",
+    "get_landing_page_performance",
 }
 
 
@@ -122,3 +123,53 @@ def test_validation_errors_come_back_structured():
         tools.execute_analytics_tool("get_blended_mer", {"periods": 999}, read_only=True))
     assert failed
     assert json.loads(out)["validation_errors"][0]["field"] == ["periods"]
+
+
+# ── landing pages ─────────────────────────────────────────────────────
+#
+# The channel vocabulary is the interesting case. It was a free string at
+# first, so a model could send "meta" and get a 503 from the endpoint --
+# an infrastructure error it cannot act on -- instead of a validation
+# error listing what is allowed. The schema is the only place that can
+# teach it the spelling.
+
+@pytest.mark.parametrize("channel", [
+    "Meta", "Google", "Organic (IG)", "Retention", "Brand Collab",
+    "AI", "Organic (Direct)", "Loyalty", "Other",
+])
+def test_landing_page_accepts_every_real_channel(channel):
+    spec("get_landing_page_performance")[0].model_validate({"source": channel})
+
+
+@pytest.mark.parametrize("channel", ["meta", "google", "META", "facebook", "Organic"])
+def test_landing_page_refuses_a_guessed_channel(channel):
+    """Refused by the SCHEMA, so the model is told the vocabulary."""
+    with pytest.raises(Exception):
+        spec("get_landing_page_performance")[0].model_validate({"source": channel})
+
+
+def test_landing_page_channels_match_the_endpoint_exactly():
+    """If the dashboard adds a channel, this fails rather than drifting silently."""
+    from app.api.routers.analytics import _CHANNEL_ORDER
+
+    field = spec("get_landing_page_performance")[0].model_fields["source"]
+    declared = set(getattr(field.annotation, "__args__", ())[0].__args__)
+    assert declared == set(_CHANNEL_ORDER)
+
+
+@pytest.mark.parametrize("page_type", ["collections", "products", "home", "pages", "other"])
+def test_landing_page_accepts_every_section(page_type):
+    spec("get_landing_page_performance")[0].model_validate({"page_type": page_type})
+
+
+def test_landing_page_description_separates_the_two_session_counts():
+    """GA4 and Shopify sessions disagree by construction; neither corrects the other."""
+    text = spec("get_landing_page_performance")[1]
+    assert "ga4_sessions" in text and "shopify_sessions" in text
+    assert "never add them" in text.lower()
+
+
+def test_landing_page_description_scopes_the_source_filter():
+    """`source` narrows only the order columns -- a filtered row mixes grains."""
+    text = spec("get_landing_page_performance")[1].lower()
+    assert "only the last-click" in text and "unfiltered" in text
