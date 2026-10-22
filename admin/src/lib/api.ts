@@ -1202,6 +1202,12 @@ export interface FirstClickRow {
   first_click_revenue: number;
   /** Full value of every order this entity CLOSED. Overlaps the above. */
   last_click_revenue: number;
+  /** Each side's revenue over this entity's own window spend. Null wherever
+   *  `spend` is null or zero — a dash, never an infinite return on no cost.
+   *  In the same ratio as the revenue pair, so read a column down, not a
+   *  row across. */
+  first_click_roas: number | null;
+  last_click_roas: number | null;
   /** Null when the source only ever appears as a closer in this window. */
   avg_days_to_convert: number | null;
   avg_sessions: number | null;
@@ -1224,6 +1230,8 @@ export interface FirstClickParams {
   from_date?: string;
   to_date?: string;
   sort?: string;
+  /** Sort direction. NULLs stay last either way, so a dash never leads. */
+  direction?: "asc" | "desc";
   limit?: number;
 }
 
@@ -1233,6 +1241,7 @@ export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstCli
   if (params.from_date) qs.set("from_date", params.from_date);
   if (params.to_date) qs.set("to_date", params.to_date);
   if (params.sort) qs.set("sort", params.sort);
+  if (params.direction) qs.set("direction", params.direction);
   if (params.limit) qs.set("limit", String(params.limit));
   const s = qs.toString();
   return request<FirstClickResponse>(`/admin/analytics/first-click${s ? `?${s}` : ""}`);

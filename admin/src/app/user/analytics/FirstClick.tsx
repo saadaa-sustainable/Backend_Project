@@ -54,6 +54,8 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: "spend", label: "Spend" },  // hidden at source grain, see below
   { value: "first_click_revenue", label: "First-click revenue" },
   { value: "last_click_revenue", label: "Last-click revenue" },
+  { value: "first_click_roas", label: "First-click ROAS" },  // hidden at source grain
+  { value: "last_click_roas", label: "Last-click ROAS" },    // hidden at source grain
   { value: "avg_days_to_convert", label: "Days to convert" },
   { value: "avg_sessions", label: "Sessions" },
 ];
@@ -76,10 +78,65 @@ function rupees(n: number) {
 export function FirstClick() {
   const [grain, setGrain] = useState("ad");
   const [sort, setSort] = useState("first_click_revenue");
+  // Header clicks sort server-side, not in the page. That matters because
+  // the table is a TOP-N: reversing the direction changes which rows come
+  // back, not just their order. Ascending is how you find the ads opening
+  // least, and client-side sorting could only ever reorder the 200 the
+  // server already picked as the highest.
+  const [direction, setDirection] = useState<"asc" | "desc">("desc");
+  // First click on a column sorts it descending -- the common question is
+  // "which is biggest". Clicking the same one again reverses it.
+  const toggleSort = (key: string) => {
+    if (sort === key) setDirection((d) => (d === "desc" ? "asc" : "desc"));
+    else { setSort(key); setDirection("desc"); }
+  };
+
+  // Width of the first column, draggable from its right edge.
+  //
+  // An ad name here is not a label, it is the ad's spec sheet:
+  // `CLP-SDAMK+MU+NA+IHP+SDVSK_VRP_CI_CCL001-1066-02/10/26` carries the
+  // placement, the SKUs, the format, the creative code and the date.
+  // Truncated at 300px it reads as `CLP-SDAMK+MU+NA+IHP+SDVSK_VRP_CI`,
+  // which is the same opening for dozens of different ads -- so the one
+  // thing that tells two rows apart is the part that gets cut off.
+  // Hence a handle rather than a bigger fixed width: the names are long
+  // enough that any width wide enough to read them would crowd out the
+  // numbers for everyone who does not need them.
+  const LABEL_MIN = 160;
+  const LABEL_MAX = 900;
+  const LABEL_DEFAULT = 300;
+  const [labelWidth, setLabelWidth] = useState(LABEL_DEFAULT);
+
+  // Pointer events, not mouse: one path covers trackpad, mouse and touch.
+  // Capture on the handle so a fast drag that leaves the element still
+  // tracks, instead of sticking at the last position inside it.
+  const startLabelResize = (e: React.PointerEvent<HTMLSpanElement>) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    const startX = e.clientX;
+    const startWidth = labelWidth;
+    handle.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      const next = startWidth + (ev.clientX - startX);
+      setLabelWidth(Math.min(LABEL_MAX, Math.max(LABEL_MIN, next)));
+    };
+    const onUp = () => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  };
   // Source grain has no spend, so a spend sort there would order every row
   // by NULL and look like the control had broken. Fall back instead.
   useEffect(() => {
-    if (grain === "source" && sort === "spend") setSort("first_click_revenue");
+    // Source grain has no Meta spend, so spend and both ROAS columns are
+    // absent there -- sorting on any of them would order every row by null.
+    if (grain === "source" && ["spend", "first_click_roas", "last_click_roas"].includes(sort))
+      setSort("first_click_revenue");
   }, [grain, sort]);
   const [datePreset, setDatePreset] = useState<string>("last30");
   const [fromDate, setFromDate] = useState<string>(() => {
@@ -101,8 +158,8 @@ export function FirstClick() {
   const [error, setError] = useState<string | null>(null);
 
   const filters = useMemo(
-    () => ({ grain, sort, from_date: fromDate, to_date: toDate, limit }),
-    [grain, sort, fromDate, toDate, limit],
+    () => ({ grain, sort, direction, from_date: fromDate, to_date: toDate, limit }),
+    [grain, sort, direction, fromDate, toDate, limit],
   );
 
   useEffect(() => {
@@ -211,10 +268,13 @@ export function FirstClick() {
           <select
             id="fc-sort"
             value={sort}
-            onChange={(e) => setSort(e.target.value)}
+            onChange={(e) => { setSort(e.target.value); setDirection("desc"); }}
             className={filterControlClass}
           >
-            {SORT_OPTIONS.filter((o) => !(grain === "source" && o.value === "spend")).map((o) => (
+            {SORT_OPTIONS.filter(
+              (o) => !(grain === "source"
+                       && ["spend", "first_click_roas", "last_click_roas"].includes(o.value)),
+            ).map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
@@ -347,8 +407,31 @@ export function FirstClick() {
               <table className="w-full min-w-max table-auto border-separate border-spacing-0 text-left text-sm">
                 <thead>
                   <tr>
-                    <th className="sticky left-0 top-0 z-30 h-9 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-3 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
-                      {grainNoun}
+                    <th
+                      style={{ width: labelWidth, minWidth: labelWidth, maxWidth: labelWidth }}
+                      className="sticky left-0 top-0 z-30 h-9 whitespace-nowrap border-b border-r border-border-primary bg-bg-muted px-0 py-0 text-left align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
+                    >
+                      {/* `relative` has to live on an inner div: the th is
+                          already `sticky`, and an element can only hold one
+                          position value. */}
+                      <div
+                        style={{ width: labelWidth }}
+                        className="relative flex h-9 items-center overflow-hidden px-3"
+                      >
+                        <span className="truncate">{grainNoun}</span>
+                        <span className="ml-1 text-[9px] font-normal normal-case text-text-tertiary">
+                          {labelWidth !== LABEL_DEFAULT ? `${labelWidth}px` : ""}
+                        </span>
+                        <span
+                          role="separator"
+                          aria-orientation="vertical"
+                          aria-label="Drag to resize the name column"
+                          title="Drag to widen — the end of an ad name is the part that tells two rows apart. Double-click to reset."
+                          onPointerDown={startLabelResize}
+                          onDoubleClick={() => setLabelWidth(LABEL_DEFAULT)}
+                          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize bg-transparent hover:bg-border-primary"
+                        />
+                      </div>
                     </th>
                     {grain !== "source" && (
                       <th
@@ -363,20 +446,46 @@ export function FirstClick() {
                       // rendered as a column of dashes: a "source" like META or
                       // affiliate is not a billable entity, so there is no number
                       // being withheld -- the question does not apply.
-                      ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report."] as const]),
-                      ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split."],
-                      ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across."],
-                      ["Days to convert", "Average days from first session to order, over the orders this one started."],
-                      ["Sessions", "Average sessions before the order, over the orders this one started."],
-                    ] as const).map(([label, title]) => (
-                      <th
-                        key={label}
-                        title={title}
-                        className="sticky top-0 z-20 h-9 whitespace-nowrap border-b border-border-primary bg-bg-muted px-3 py-2 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
-                      >
-                        {label}
-                      </th>
-                    ))}
+                      ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report.", "spend"] as const]),
+                      ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split.", "first_click_revenue"],
+                      ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across.", "last_click_revenue"],
+                      // Both ROAS columns share the spend denominator, so they
+                      // are dropped at source grain for the same reason spend
+                      // is: there is no billable entity to divide by.
+                      ...(grain === "source" ? [] : [
+                        ["First-click ROAS", "First-click revenue over this ad's own spend in the window. A dash means Meta billed it under ₹1,000 here, where the quotient stops being a rate. Runs high for an ad winding down: the revenue comes from journeys it opened up to weeks earlier while its spend falls away — so compare it with this row's last-click ROAS, not another row's.", "first_click_roas"] as const,
+                        ["Last-click ROAS", "Last-click revenue over the same spend — what every rupee it CLOSED returned. The closing click sits near the order, so this one lines up with the window far better than first-click ROAS does.", "last_click_roas"] as const,
+                      ]),
+                      ["Days to convert", "Average days from first session to order, over the orders this one started.", "avg_days_to_convert"],
+                      ["Sessions", "Average sessions before the order, over the orders this one started.", "avg_sessions"],
+                    ] as const).map(([label, title, key]) => {
+                      const active = sort === key;
+                      return (
+                        <th
+                          key={label}
+                          // Native title stays the explanation. The sort hint
+                          // goes on the button so a hover does not replace the
+                          // column's meaning with a UI instruction.
+                          title={title}
+                          aria-sort={active ? (direction === "desc" ? "descending" : "ascending") : "none"}
+                          className={`sticky top-0 z-20 h-9 whitespace-nowrap border-b border-border-primary px-0 py-0 text-right align-middle text-[10px] font-semibold uppercase tracking-[0.08em] ${active ? "bg-bg-surface text-text-primary" : "bg-bg-muted text-text-tertiary"}`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleSort(key)}
+                            aria-label={`Sort by ${label}, ${active && direction === "desc" ? "ascending" : "descending"}`}
+                            className="flex h-9 w-full items-center justify-end gap-1 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] hover:text-text-primary"
+                          >
+                            {label}
+                            {/* Reserve the caret's width on every header so the
+                                row does not shift when the active column moves. */}
+                            <span aria-hidden="true" className={`w-2 text-[8px] ${active ? "opacity-100" : "opacity-0"}`}>
+                              {direction === "desc" ? "\u25bc" : "\u25b2"}
+                            </span>
+                          </button>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
@@ -389,10 +498,15 @@ export function FirstClick() {
                     return (
                       <tr key={`${r.source}-${r.channel}`} className="hover:bg-bg-surface">
                         <td
-                          className="sticky left-0 z-10 max-w-[300px] truncate border-b border-r border-border-soft bg-bg-white px-3 py-1.5 text-xs text-text-primary"
+                          style={{ width: labelWidth, minWidth: labelWidth, maxWidth: labelWidth }}
+                          className="sticky left-0 z-10 border-b border-r border-border-soft bg-bg-white px-3 py-1.5 text-xs text-text-primary"
                           title={r.label === r.source ? r.source : `${r.label}  ·  ${r.source}`}
                         >
-                          {r.label}
+                          {/* Definite width here, not just on the td -- see the
+                              header's note on table-auto. */}
+                          <div style={{ width: labelWidth - 24 }} className="truncate">
+                            {r.label}
+                          </div>
                         </td>
                         {grain !== "source" && (
                           <td className="border-b border-border-soft px-3 py-1.5 text-xs text-text-secondary">
@@ -413,6 +527,28 @@ export function FirstClick() {
                           {num(r.first_click_revenue)}
                         </td>
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.last_click_revenue)}</td>
+                        {grain !== "source" && (
+                          <td
+                            className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${unbilled > 0 ? "font-semibold text-warning-text" : "text-text-primary"}`}
+                            title={r.first_click_roas == null
+                              ? "Under ₹1,000 of spend in this window — too little to divide by"
+                              : unbilled > 0
+                                ? "Revenue from journeys opened earlier; compare with last-click ROAS beside it"
+                                : undefined}
+                          >
+                            {num(r.first_click_roas, 2)}
+                          </td>
+                        )}
+                        {grain !== "source" && (
+                          <td
+                            className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary"
+                            title={r.last_click_roas == null
+                              ? "Under ₹1,000 of spend in this window — too little to divide by"
+                              : undefined}
+                          >
+                            {num(r.last_click_roas, 2)}
+                          </td>
+                        )}
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_days_to_convert, 1)}</td>
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_sessions, 1)}</td>
                       </tr>
