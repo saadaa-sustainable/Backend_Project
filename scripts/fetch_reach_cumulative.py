@@ -473,12 +473,43 @@ _WRITE_CHUNK = 500
 
 
 def _existing_windows(db: _Db, level: str) -> set[tuple[date, date]]:
-    """(since, until) pairs already stored for this level."""
+    """(since, until) pairs already stored for this level AND FINAL.
+
+    "Final" means measured strictly after the window's own end date. A
+    row measured ON that date is PROVISIONAL -- Meta was still counting
+    the last day when it answered -- and re-running must replace it
+    rather than skip it.
+
+    Measured 2026-10-21 against Meta, campaign level, cumulative rows:
+
+        measured      as-of        campaigns   exact   worst error
+        same day      2026-10-04          62      46        24.19%
+        same day      2026-10-12          63      52        13.58%
+        +1 day        2026-09-20          52      52         0.00%
+        +2 days       2026-09-19          50      50         0.00%
+        +7 days       2026-09-14          50      50         0.00%
+        +30 days      2026-09-10          47      47         0.00%
+        +90 days      2026-07-15          32      32         0.00%
+
+    So one day's grace is the whole of it: a provisional row is worth
+    re-fetching and a final one can never change. That is what makes
+    this cheap -- of the ~8 preset anchors only the newest one or two are
+    ever provisional, so a nightly run re-measures those and skips the
+    rest, instead of either re-fetching all 8 (3x the requests, against
+    a development_access token whose hourly budget is the binding
+    constraint) or trusting a stale one forever (the bug that made the
+    7-day reach columns read ~14% high).
+    """
     def _go(conn):
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT epoch_date, as_of_date FROM public.ad_reach_cumulative "
-                "WHERE level = %s", (level,))
+                "SELECT epoch_date, as_of_date FROM public.ad_reach_cumulative "
+                " WHERE level = %s "
+                " GROUP BY epoch_date, as_of_date "
+                # EVERY row for the pair must be final. One account
+                # fetched a day early would otherwise mark the whole
+                # snapshot settled while half of it was still accruing.
+                "HAVING min(fetched_at)::date > as_of_date", (level,))
             return {(r[0], r[1]) for r in cur.fetchall()}
     return db.run(_go)
 

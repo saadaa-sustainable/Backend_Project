@@ -56,14 +56,19 @@ def _session(rows):
             new_customers INTEGER, returning_customers INTEGER,
             total_sales_first_time NUMERIC, total_sales_returning NUMERIC);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC, conv_value NUMERIC);
-        CREATE TABLE google_ads_spend_daily(day TEXT, campaign_id TEXT, spend NUMERIC);
+        CREATE TABLE google_ads_spend_daily(day TEXT, campaign_id TEXT, spend NUMERIC,
+            conv_value NUMERIC);
         CREATE TABLE kwikchat_spend_daily(day TEXT, spend NUMERIC, is_estimate INTEGER);
     """)
     for day, rev, meta, goog, kwik, new_c in rows:
         db.execute("INSERT INTO shopify_sales_daily VALUES (?,?,?,?,?,?,?)",
                    (day, rev, rev * 1.21, new_c, 0, rev, 0.0))
         db.execute("INSERT INTO insights_daily_by_ad VALUES ('a',?,?,?)", (day, meta, meta * 3))
-        db.execute("INSERT INTO google_ads_spend_daily VALUES (?,'c',?)", (day, goog))
+        # Google claims 4x its spend, Meta 3x (above). Different
+        # multipliers on purpose: a single one would let a Platform MER
+        # that silently used only one platform's claim still pass.
+        db.execute("INSERT INTO google_ads_spend_daily VALUES (?,'c',?,?)",
+                   (day, goog, goog * 4))
         if kwik is not None:
             db.execute("INSERT INTO kwikchat_spend_daily VALUES (?,?,1)", (day, kwik))
 
@@ -154,6 +159,66 @@ async def test_kwikchat_rolls_up_and_keeps_its_estimate_flag():
     assert q[0].kwikchat_spend == 100
     assert q[0].kwikchat_estimated is True
     assert q[0].ad_spend == 300
+    db.close()
+
+
+#: One month, both platforms spending, plus Kwikchat. Meta claims 3x its
+#: spend and Google 4x, so every figure below is checkable by hand.
+BOTH_PLATFORMS = [("2026-01-15", 10_000.0, 1_000.0, 500.0, 250.0, 100)]
+
+
+async def test_google_claim_is_reported_not_dropped():
+    """Google's claimed value was excluded from this block until
+    2026-10-21 for diverging from the media plan. It is Google's own
+    figure to the rupee, so the block now reports it -- a Platform
+    section naming only Meta implied Google claimed nothing."""
+    s, db = _session(BOTH_PLATFORMS)
+    m = await A.get_dashboard_mer_by_period(s, grain="month", periods=12)
+    assert m[0].google_claimed == 2_000.0        # 500 spend x 4
+    assert m[0].google_mer == 4.0
+    assert m[0].meta_claimed == 3_000.0          # 1,000 spend x 3
+    assert m[0].meta_mer == 3.0
+    db.close()
+
+
+async def test_platform_mer_divides_by_only_the_platforms_that_claim():
+    """Kwikchat spends but claims nothing, so putting it in the
+    denominator would drag Platform MER down for a reason unrelated to
+    what the platforms reported. The honest denominator is Meta + Google.
+    """
+    s, db = _session(BOTH_PLATFORMS)
+    m = await A.get_dashboard_mer_by_period(s, grain="month", periods=12)
+    row = m[0]
+    assert row.platform_claimed == 5_000.0               # 3,000 + 2,000
+    assert row.ad_spend == 1_750.0                       # incl. 250 Kwikchat
+    assert row.platform_mer == round(5_000 / 1_500, 2)   # excl. Kwikchat
+    # The trap: dividing by ad_spend instead.
+    assert row.platform_mer != round(5_000 / 1_750, 2)
+    db.close()
+
+
+async def test_platform_mer_and_true_mer_are_different_questions():
+    """Platform MER is what the platforms claim; MER is what Shopify
+    banked. They disagree in both directions in real data (-8.5% in Oct
+    2026, +14.0% in May), so neither may be derived from the other."""
+    s, db = _session(BOTH_PLATFORMS)
+    m = await A.get_dashboard_mer_by_period(s, grain="month", periods=12)
+    row = m[0]
+    assert row.mer == round(10_000 / 1_750, 2)        # Shopify / ALL spend
+    assert row.platform_mer == round(5_000 / 1_500, 2)
+    assert row.mer != row.platform_mer
+    db.close()
+
+
+async def test_a_platform_that_did_not_run_has_no_mer_rather_than_zero():
+    """Google spent nothing in QUARTER, and 0/0 is not 0.0 -- a zero
+    would render as a real ratio of zero return."""
+    s, db = _session(QUARTER)
+    m = await A.get_dashboard_mer_by_period(s, grain="month", periods=12)
+    assert all(p.google_claimed == 0 for p in m)
+    assert all(p.google_mer is None for p in m)
+    # Meta still claims, so Platform MER is Meta's alone, not None.
+    assert m[0].platform_mer == m[0].meta_mer
     db.close()
 
 

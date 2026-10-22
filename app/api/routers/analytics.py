@@ -35,6 +35,7 @@ from app.services.ad_efficiency import calculate_efficiency_scores, get_efficien
 from app.services.analytics_cache import cached_analytics
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
 from app.services.gold.cpis import match_ads_to_sku
+from app.services.reach_anchors import window_anchors
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
 
@@ -815,6 +816,29 @@ async def _reach_epoch(session: AsyncSession) -> date | None:
     ))).scalar_one_or_none()
 
 
+@cached_analytics(ttl=60.0, max_entries=4)
+async def _reach_spend_bound(session: AsyncSession, table: str) -> date | None:
+    """Newest day `table` holds spend for -- the latest day reach may anchor on.
+
+    The reach snapshots and the daily spend tables are filled by
+    DIFFERENT steps of the nightly, so they routinely end on different
+    days: measured 2026-10-21, `ad_reach_cumulative` held 21 Oct while
+    `insights_daily_by_ad` and `insights_daily_by_campaign` both stopped
+    at 20 Oct. Anchoring reach on the requested `to_date` then put two
+    different spans on one row -- Latest / Prev / Incr. Reach describing
+    22 Sep..21 Oct while spend, ROAS and the rolling 3/7D columns beside
+    them described 22 Sep..20 Oct.
+
+    `Cost / 1k Incr.` is where that actually lies: it divided the spend
+    of 29 days by the reach of 30, so it read cheap. Clamping here is
+    the cheaper half of the fix -- the larger error was snapshot vintage,
+    see --refetch in scripts/refresh_all_daily.py.
+    """
+    row = (await session.execute(
+        text(f"SELECT MAX(day) FROM public.{table}"))).first()
+    return row[0] if row else None
+
+
 async def _reach_interval_spend(
     session: AsyncSession, *, ad_ids: list[str], after: date, until: date,
     table: str = "insights_daily_by_ad", id_col: str = "ad_id",
@@ -1424,11 +1448,19 @@ async def warm_ads_analyse_cache() -> None:
         _logging.getLogger(__name__).exception("last_click_utm_warmer_failed")
 
     # And /landing-pages default (no filters, sort by sessions).
+    #
+    # "ga4_sessions", not "sessions" -- the latter has never been a key
+    # in _LANDING_PAGE_SORT_COLUMNS, so from 2026-09-15 this warmer threw
+    # 400 on every run and the except below swallowed it. The endpoint
+    # cached nothing and the first real reader paid the full query, while
+    # the nightly reported success. Warming a key the UI does not send is
+    # just as useless, so this tracks LandingPageAnalysis.tsx's own
+    # default sort, which is also the endpoint's.
     try:
         async with session_scope() as session:
             await get_landing_pages(
                 session=session,
-                search=None, sort="sessions", limit=50, offset=0,
+                search=None, sort="ga4_sessions", limit=50, offset=0,
             )
     except Exception:
         import logging as _logging
@@ -1922,6 +1954,12 @@ async def get_ads_analyse(
         # 1k had no spend to divide. A window the user picked is honoured
         # as given -- they asked for that end date.
         anchor = to_date or (date.today() - timedelta(days=1))
+        # ... and a window the user picked is honoured only as far as the
+        # spend table reaches. Past that the row would pair a reach span
+        # that includes a day with a spend span that cannot.
+        spend_bound = await _reach_spend_bound(session, "insights_daily_by_ad")
+        if spend_bound is not None and anchor > spend_bound:
+            anchor = spend_bound
         # Read before the lookups, not after: it now scopes them. Both
         # queries must be pinned to the epoch or an exact-window row
         # answers in place of a cumulative snapshot.
@@ -1941,12 +1979,28 @@ async def get_ads_analyse(
         # on the Lifetime preset: 300 of 300 ads had a blank Prev Reach
         # and an Incr. Reach identical to Latest Reach.
         if from_date and epoch and from_date > epoch:
+            prev_day = from_date - timedelta(days=1)
             latest_map = await _reach_anchor(
                 session, level="ad", entity_ids=ad_ids, anchor=anchor,
                 epoch=epoch)
             prev_map = await _reach_anchor(
                 session, level="ad", entity_ids=ad_ids,
-                anchor=from_date - timedelta(days=1), epoch=epoch)
+                anchor=prev_day, epoch=epoch)
+            # The nearest-snapshot pair above is the FLOOR, not the
+            # answer. Only the ~8 preset as-of dates are stored, so a
+            # CUSTOM range silently resolves to whatever snapshot came
+            # before it: a 1 Oct..10 Oct range landed on the 30 Sep
+            # snapshot at both ends and read 0 new people where the true
+            # figure was 158,263. window_anchors measures the two dates
+            # the range actually needs, on one shared vintage, and
+            # returns None when it cannot -- which leaves the floor in
+            # place rather than blanking the column.
+            exact = await window_anchors(
+                session, level="ad", entity_ids=ad_ids,
+                prev_day=prev_day, latest_day=anchor, epoch=epoch)
+            for entity_id, (lo, hi) in (exact or {}).items():
+                prev_map[entity_id] = (lo, prev_day)
+                latest_map[entity_id] = (hi, anchor)
         else:
             latest_map, prev_map = await _reach_recent_two(
                 session, level="ad", entity_ids=ad_ids, anchor=anchor,
@@ -8549,7 +8603,17 @@ meta AS (
   GROUP BY 1
 ),
 goog AS (
-  SELECT date_trunc(:grain, g.day)::date AS mo, SUM(g.spend) AS spend
+  -- conv_value is Google's `metrics.conversions_value`, the PRIMARY
+  -- conversion actions only. Verified against the Google Ads API on
+  -- 2026-10-21: exact to the rupee on every settled day, +0.56% over 30
+  -- days, all of it the last 8 days still attributing.
+  --
+  -- It is emphatically NOT `all_conversions_value`, which over the same
+  -- 30 days reads Rs 456,427,216 against Rs 7,053,096 -- 65x, because it
+  -- counts every secondary action. Picking that field would put a
+  -- fictional number in the Platform MER row.
+  SELECT date_trunc(:grain, g.day)::date AS mo, SUM(g.spend) AS spend,
+         SUM(g.conv_value) AS claimed
   FROM public.google_ads_spend_daily g, bounds b
   WHERE g.day BETWEEN b.lo AND b.hi
   GROUP BY 1
@@ -8570,6 +8634,7 @@ SELECT s.mo,
        COALESCE(m.spend, 0)               AS meta_spend,
        COALESCE(m.claimed, 0)             AS meta_claimed,
        COALESCE(g.spend, 0)               AS google_spend,
+       COALESCE(g.claimed, 0)             AS google_claimed,
        COALESCE(k.spend, 0)               AS kwikchat_spend,
        COALESCE(k.is_estimate, false)     AS kwikchat_is_estimate
 FROM shop s LEFT JOIN meta m ON m.mo = s.mo
@@ -8594,6 +8659,38 @@ class MerMonth(BaseModel):
     #: 12-44% above the plan's and so is left out entirely.
     meta_claimed: float
     meta_mer: float | None
+    #: Google's own claimed conversion value, on the same basis as
+    #: Meta's. It was left out of this block until 2026-10-21 because it
+    #: ran 12-44% above the media plan's Google figure -- but the plan is
+    #: not the authority here. Checked straight against the Google Ads
+    #: API, our number is Google's to the rupee, so the divergence is the
+    #: plan's own (a different conversion-action set), and excluding a
+    #: correct figure made the Platform block read as if Meta were the
+    #: only platform claiming anything.
+    google_claimed: float
+    #: Google's claimed return on its own spend. Runs far above Meta's
+    #: -- 5.72x to 12.56x against Meta's 2.88x to 3.49x across May-Oct
+    #: 2026 -- which is what Search, Shopping and PMax capturing
+    #: high-intent demand looks like, not an error.
+    google_mer: float | None
+    #: meta_claimed + google_claimed.
+    platform_claimed: float
+    #: PLATFORM-REPORTED MER: what the ad platforms between them say they
+    #: returned, over the spend of the platforms that said it.
+    #:
+    #: The denominator is meta + google spend, NOT `ad_spend`. Kwikchat
+    #: claims nothing, so including its spend would divide a
+    #: two-platform numerator by three platforms' spend and read low for
+    #: a reason that has nothing to do with the platforms' claims.
+    #:
+    #: Read it beside `mer`, never instead of it. The two disagree in
+    #: both directions -- measured against Shopify's own revenue,
+    #: platform-claimed ran -8.5% (Oct), -3.8% (Sep), -0.1% (Aug),
+    #: +0.6% (Jul), +3.6% (Jun) and +14.0% (May 2026). Recent months
+    #: UNDER-claim because attribution windows are still filling; older
+    #: ones over-claim because two platforms bill themselves for the same
+    #: order. `mer` is the number that reconciles with the bank.
+    platform_mer: float | None
     mer: float | None
     a_mer: float | None
     blended_cac: float | None
@@ -8658,6 +8755,7 @@ async def get_dashboard_mer_by_period(
         s_first = float(r["sales_first_time"] or 0)
         s_ret = float(r["sales_returning"] or 0)
         claimed = float(r["meta_claimed"] or 0)
+        g_claimed = float(r["google_claimed"] or 0)
         # GST sits ONLY here, matching the tab after its 2026-10-19
         # change: the A-MER denominator is raw spend, contribution
         # margin carries the 18%.
@@ -8674,6 +8772,11 @@ async def get_dashboard_mer_by_period(
             ad_spend=round(spend, 2),
             meta_claimed=round(claimed, 2),
             meta_mer=round(claimed / ms, 2) if ms > 0 else None,
+            google_claimed=round(g_claimed, 2),
+            google_mer=round(g_claimed / gs, 2) if gs > 0 else None,
+            platform_claimed=round(claimed + g_claimed, 2),
+            platform_mer=(round((claimed + g_claimed) / (ms + gs), 2)
+                          if (ms + gs) > 0 else None),
             mer=round(rev / spend, 2) if spend > 0 else None,
             a_mer=round(s_first / spend, 2) if spend > 0 else None,
             blended_cac=round(spend / new_c, 2) if new_c else None,
@@ -10733,13 +10836,28 @@ async def get_ads_analyse_rollup(
         # it this branch was unconditional and a Lifetime window --
         # which opens at the epoch -- left Prev Reach blank on every
         # row, collapsing Incr. Reach onto Latest Reach.
+        # Clamped to the last day `daily_table` has, for the reason in
+        # _reach_spend_bound: `last_date` is already that MAX(day), and
+        # it is what the rolling 3/7/14/28D columns on this same row
+        # anchor on, so this also stops the two halves of the row
+        # disagreeing about which day "latest" means.
+        reach_anchor_day = min(params["to_date"], params["last_date"])
         if epoch and params["from_date"] > epoch:
+            prev_day = params["from_date"] - timedelta(days=1)
             latest_map = await _reach_anchor(
                 session, level=level, entity_ids=entity_ids,
-                anchor=params["to_date"], epoch=epoch)
+                anchor=reach_anchor_day, epoch=epoch)
             prev_map = await _reach_anchor(
                 session, level=level, entity_ids=entity_ids,
-                anchor=params["from_date"] - timedelta(days=1), epoch=epoch)
+                anchor=prev_day, epoch=epoch)
+            # Exact anchors for a custom range -- see the ad table above
+            # for why the nearest-snapshot pair is only a floor.
+            exact = await window_anchors(
+                session, level=level, entity_ids=entity_ids,
+                prev_day=prev_day, latest_day=reach_anchor_day, epoch=epoch)
+            for entity_id, (lo, hi) in (exact or {}).items():
+                prev_map[entity_id] = (lo, prev_day)
+                latest_map[entity_id] = (hi, reach_anchor_day)
         else:
             # Each entity's two newest snapshots: what it added most
             # recently, a question a window opening at the epoch can
@@ -10747,7 +10865,7 @@ async def get_ads_analyse_rollup(
             # cell says which days it describes.
             latest_map, prev_map = await _reach_recent_two(
                 session, level=level, entity_ids=entity_ids,
-                anchor=params["to_date"], epoch=epoch)
+                anchor=reach_anchor_day, epoch=epoch)
 
         for r in rows:
             latest = latest_map.get(r.entity_id)
