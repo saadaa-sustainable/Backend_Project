@@ -2491,6 +2491,7 @@ def _first_click_sql(grain: str) -> str:
     zero would claim the orders were free.
     """
     first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    roas_min = _ROAS_MIN_SPEND
     # Source is never NULL after the COALESCE above; every id grain can
     # be, when an order's journey never touched a paid click at that end.
     not_null = "" if grain == "source" else (
@@ -2580,6 +2581,28 @@ WITH j AS (
 SELECT e.entity AS source, {label} AS label, e.channel AS channel,
        {spend_col} AS spend,
        e.first_click_revenue, e.last_click_revenue,
+       -- Each ROAS divides its OWN side's revenue by the entity's
+       -- window spend, so the pair reads "what every rupee this ad
+       -- OPENED returned on what Meta billed it" against the same for
+       -- CLOSED. Spend is the same denominator in both, because it is
+       -- the entity's cost and not an attribution-side figure -- see
+       -- the spend comment above.
+       --
+       -- The two are therefore in the same ratio as the revenue pair,
+       -- and like it they must not be added or averaged together. An
+       -- ad whose first-click ROAS runs well ahead of its last-click
+       -- ROAS is doing work that last click bills to someone else.
+       --
+       -- NULL, not 0, below _ROAS_MIN_SPEND: source grain carries no
+       -- Meta spend at all, an entity Meta never billed (kwikengage,
+       -- affiliate, google tokens) would show an infinite return on a
+       -- cost of zero, and a few hundred rupees of spend makes a
+       -- quotient that is noise rather than a rate. See that constant
+       -- for the measured distribution behind the threshold.
+       CASE WHEN {spend_col} >= {roas_min}
+            THEN e.first_click_revenue / {spend_col} END AS first_click_roas,
+       CASE WHEN {spend_col} >= {roas_min}
+            THEN e.last_click_revenue  / {spend_col} END AS last_click_roas,
        e.avg_days_to_convert, e.avg_sessions
   FROM agg e
 {join}{spend_join}"""
@@ -2612,6 +2635,18 @@ class FirstClickRow(BaseModel):
     spend: float | None
     first_click_revenue: float
     last_click_revenue: float
+    #: Each side's revenue over the entity's own window spend. None at
+    #: source grain, and None below _ROAS_MIN_SPEND -- a dash, never an
+    #: infinite return on a cost of nothing. In the same ratio as the
+    #: revenue pair, so the same rule applies: read a column down, never
+    #: a row across.
+    #:
+    #: first_click_roas runs HIGH for an ad winding down: its revenue
+    #: comes from journeys it opened up to weeks earlier while its
+    #: in-window spend falls away. Compare it with this row's
+    #: last_click_roas, not with another row's.
+    first_click_roas: float | None
+    last_click_roas: float | None
     #: NULL when the source introduced nothing in the window -- it only
     #: ever appears as a closer. Averaged over the orders it STARTED,
     #: because a journey's length belongs to whoever began it.
@@ -2683,10 +2718,42 @@ def _parse_text_filter(raw: str | None, key_prefix: str) -> tuple[list[str], dic
     return clauses, params
 
 
+#: Minimum window spend before a ROAS is shown at all.
+#:
+#: Not a round number picked for tidiness -- it is where the figure stops
+#: being a rate. Measured 2026-10-22 at ad grain over the 30 days to
+#: 2026-10-21, median first-click ROAS by window spend:
+#:
+#:     spend < Rs 1       5 rows    no revenue
+#:     Rs 1 - 100         6 rows    median  812.0   max 46,672
+#:     Rs 100 - 1k        6 rows    median   20.6   max    100
+#:     Rs 1k - 10k       80 rows    median    2.3   max     19
+#:     over Rs 10k      219 rows    median    1.6   max     11
+#:
+#: Below a thousand rupees the denominator is noise and the quotient is
+#: meaningless; above it the distribution is sane. Only 17 of 316 rows
+#: fall below the line, but sorted by ROAS they would occupy the whole
+#: first page -- the top row was an ad with Rs 1.48 of window spend
+#: reading 46,672x.
+#:
+#: WHY THE DENOMINATOR GOES SMALL IN THE FIRST PLACE is worth stating,
+#: because it is not only tiny-budget ads. First-click revenue is
+#: credited to whichever ad OPENED the journey, and the average journey
+#: takes 13 days; a retired ad keeps collecting conversions it opened
+#: while its in-window spend falls to nothing. That Rs 1.48 ad had spent
+#: Rs 4,37,651 between January and September. So first-click ROAS pairs
+#: revenue from journeys opened earlier with spend billed now, and runs
+#: high for anything winding down. Read it as a direction, not a rate,
+#: and compare it against the same row's last-click ROAS rather than
+#: against another row's.
+_ROAS_MIN_SPEND = 1000
+
 _FIRST_CLICK_SORTS = {
     "spend": "spend",
     "first_click_revenue": "first_click_revenue",
     "last_click_revenue": "last_click_revenue",
+    "first_click_roas": "first_click_roas",
+    "last_click_roas": "last_click_roas",
     "avg_days_to_convert": "avg_days_to_convert",
     "avg_sessions": "avg_sessions",
 }

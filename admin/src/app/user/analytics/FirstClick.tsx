@@ -54,6 +54,8 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: "spend", label: "Spend" },  // hidden at source grain, see below
   { value: "first_click_revenue", label: "First-click revenue" },
   { value: "last_click_revenue", label: "Last-click revenue" },
+  { value: "first_click_roas", label: "First-click ROAS" },  // hidden at source grain
+  { value: "last_click_roas", label: "Last-click ROAS" },    // hidden at source grain
   { value: "avg_days_to_convert", label: "Days to convert" },
   { value: "avg_sessions", label: "Sessions" },
 ];
@@ -79,7 +81,10 @@ export function FirstClick() {
   // Source grain has no spend, so a spend sort there would order every row
   // by NULL and look like the control had broken. Fall back instead.
   useEffect(() => {
-    if (grain === "source" && sort === "spend") setSort("first_click_revenue");
+    // Source grain has no Meta spend, so spend and both ROAS columns are
+    // absent there -- sorting on any of them would order every row by null.
+    if (grain === "source" && ["spend", "first_click_roas", "last_click_roas"].includes(sort))
+      setSort("first_click_revenue");
   }, [grain, sort]);
   const [datePreset, setDatePreset] = useState<string>("last30");
   const [fromDate, setFromDate] = useState<string>(() => {
@@ -214,7 +219,10 @@ export function FirstClick() {
             onChange={(e) => setSort(e.target.value)}
             className={filterControlClass}
           >
-            {SORT_OPTIONS.filter((o) => !(grain === "source" && o.value === "spend")).map((o) => (
+            {SORT_OPTIONS.filter(
+              (o) => !(grain === "source"
+                       && ["spend", "first_click_roas", "last_click_roas"].includes(o.value)),
+            ).map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
@@ -366,6 +374,13 @@ export function FirstClick() {
                       ...(grain === "source" ? [] : [["Spend", "Meta spend for this ad over the selected date range. A dash means Meta never billed this id — kwikengage, affiliate and google tokens share the same GA4 field and have no Meta spend to report."] as const]),
                       ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split."],
                       ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across."],
+                      // Both ROAS columns share the spend denominator, so they
+                      // are dropped at source grain for the same reason spend
+                      // is: there is no billable entity to divide by.
+                      ...(grain === "source" ? [] : [
+                        ["First-click ROAS", "First-click revenue over this ad's own spend in the window. A dash means Meta billed it under ₹1,000 here, where the quotient stops being a rate. Runs high for an ad winding down: the revenue comes from journeys it opened up to weeks earlier while its spend falls away — so compare it with this row's last-click ROAS, not another row's."] as const,
+                        ["Last-click ROAS", "Last-click revenue over the same spend — what every rupee it CLOSED returned. The closing click sits near the order, so this one lines up with the window far better than first-click ROAS does."] as const,
+                      ]),
                       ["Days to convert", "Average days from first session to order, over the orders this one started."],
                       ["Sessions", "Average sessions before the order, over the orders this one started."],
                     ] as const).map(([label, title]) => (
@@ -413,6 +428,28 @@ export function FirstClick() {
                           {num(r.first_click_revenue)}
                         </td>
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.last_click_revenue)}</td>
+                        {grain !== "source" && (
+                          <td
+                            className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${unbilled > 0 ? "font-semibold text-warning-text" : "text-text-primary"}`}
+                            title={r.first_click_roas == null
+                              ? "Under ₹1,000 of spend in this window — too little to divide by"
+                              : unbilled > 0
+                                ? "Revenue from journeys opened earlier; compare with last-click ROAS beside it"
+                                : undefined}
+                          >
+                            {num(r.first_click_roas, 2)}
+                          </td>
+                        )}
+                        {grain !== "source" && (
+                          <td
+                            className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary"
+                            title={r.last_click_roas == null
+                              ? "Under ₹1,000 of spend in this window — too little to divide by"
+                              : undefined}
+                          >
+                            {num(r.last_click_roas, 2)}
+                          </td>
+                        )}
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_days_to_convert, 1)}</td>
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_sessions, 1)}</td>
                       </tr>
