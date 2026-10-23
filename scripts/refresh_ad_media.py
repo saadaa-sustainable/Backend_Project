@@ -7,7 +7,14 @@ one row per Meta ad_id:
       -> asset_feed_spec (via creative_id)
           -> image (via images[0].hash)              first-image thumbnail
           -> video (via videos[0].video_id)          video source + poster
-        raw_payload.link_urls[0].website_url         landing page
+    adcreative     (via parent_ids.ad_id)            landing page
+
+The landing page comes from `adcreative` -- the per-ad creative fetched by
+scripts/backfill_ad_landing_urls.py -- and falls back to
+asset_feed_spec.link_urls[0].website_url, which is the only place it used
+to look. That fallback alone covered 8.6% of creatives (5,110 of 59,226);
+everything else is a Degrees-of-Freedom spec whose URL lives in
+object_story_spec, a field Meta will not serve on a bulk page.
 
 Output: public.ad_media (PK ad_id) -- ready to LEFT JOIN into /ads-analyse
 so the frontend can render an inline thumbnail preview + landing-URL
@@ -72,6 +79,16 @@ CREATE TABLE IF NOT EXISTS public.ad_media (
 ALTER TABLE public.ad_media
     ADD COLUMN IF NOT EXISTS effective_object_story_id text;
 
+-- Additive change (2026-10-23): which Meta field the landing page came
+-- from. Worth storing because the sources are not equally trustworthy --
+-- object_story_spec.link_data.link is the URL the ad resolved to, while
+-- asset_feed_spec.link_urls[0] is merely the FIRST of several candidates
+-- a Degrees-of-Freedom ad may rotate through. A NULL url with a NULL
+-- source means Meta had nothing; see scripts/backfill_ad_landing_urls.py
+-- for the one case that is a permission gap rather than missing data.
+ALTER TABLE public.ad_media
+    ADD COLUMN IF NOT EXISTS landing_page_source text;
+
 CREATE INDEX IF NOT EXISTS ix_ad_media_landing
     ON public.ad_media (landing_page_url);
 """
@@ -117,11 +134,36 @@ ad_story_id AS (
     WHERE object_type = 'ad'
       AND raw_payload->'creative' ? 'effective_object_story_id'
     ORDER BY meta_id, ingested_at DESC
+),
+-- The landing page, from the creative fetched per-ad by
+-- scripts/backfill_ad_landing_urls.py. This is the PRIMARY source now,
+-- with the asset_feed_spec chain below as fallback, because
+-- asset_feed_spec.link_urls only ever covered 8.6% of creatives (5,110
+-- of 59,226): the rest are optimization_type=DEGREES_OF_FREEDOM specs
+-- carrying only bodies/titles/descriptions, whose URL lives in
+-- object_story_spec -- a field Meta refuses to serve on a bulk /ads or
+-- /adcreatives page at all. See that script's docstring.
+--
+-- Keyed on parent_ids->>'ad_id', NOT on meta_id: one creative is shared
+-- by many ads, so these rows are one per (ad, creative) and would not
+-- survive the `dedup` CTE's DISTINCT ON (object_type, meta_id).
+ad_landing AS (
+    SELECT DISTINCT ON (parent_ids->>'ad_id')
+        parent_ids->>'ad_id'                 AS ad_id,
+        raw_payload->>'landing_page_url'     AS landing_page_url,
+        raw_payload->>'landing_page_source'  AS landing_page_source,
+        raw_payload->'asset_feed_spec'->'link_urls'->0->>'display_url'
+                                             AS link_display_url
+    FROM raw_dump_meta
+    WHERE object_type = 'adcreative'
+      AND parent_ids->>'ad_id' IS NOT NULL
+      AND raw_payload->>'landing_page_url' IS NOT NULL
+    ORDER BY parent_ids->>'ad_id', ingested_at DESC
 )
 INSERT INTO public.ad_media (
     ad_id, creative_id, thumbnail_url, video_url, video_id,
     landing_page_url, link_display_url, is_video,
-    effective_object_story_id
+    effective_object_story_id, landing_page_source
 )
 SELECT
     ad.meta_id AS ad_id,
@@ -134,8 +176,14 @@ SELECT
     ) AS thumbnail_url,
     vid.raw_payload->>'source' AS video_url,
     afs.raw_payload->'videos'->0->>'video_id' AS video_id,
-    afs.raw_payload->'link_urls'->0->>'website_url' AS landing_page_url,
-    afs.raw_payload->'link_urls'->0->>'display_url' AS link_display_url,
+    COALESCE(
+        alp.landing_page_url,
+        afs.raw_payload->'link_urls'->0->>'website_url'
+    ) AS landing_page_url,
+    COALESCE(
+        alp.link_display_url,
+        afs.raw_payload->'link_urls'->0->>'display_url'
+    ) AS link_display_url,
     (afs.raw_payload->'videos'->0 IS NOT NULL) AS is_video,
     -- Prefer the field from the latest ingest (via ad.raw_payload), fall
     -- back to any historical ingest (via ad_story_id) if the latest
@@ -143,9 +191,15 @@ SELECT
     COALESCE(
         ad.raw_payload->'creative'->>'effective_object_story_id',
         asi.eos_id
-    ) AS effective_object_story_id
+    ) AS effective_object_story_id,
+    COALESCE(
+        alp.landing_page_source,
+        CASE WHEN afs.raw_payload->'link_urls'->0->>'website_url' IS NOT NULL
+             THEN 'asset_feed_spec.link_urls[0].website_url' END
+    ) AS landing_page_source
 FROM dedup ad
 LEFT JOIN ad_story_id asi ON asi.meta_id = ad.meta_id
+LEFT JOIN ad_landing alp ON alp.ad_id = ad.meta_id
 LEFT JOIN dedup afs
     ON afs.object_type = 'asset_feed_spec'
    AND afs.meta_id = ad.raw_payload->'creative'->>'id'
@@ -186,6 +240,11 @@ def main() -> None:
                 FROM public.ad_media
             """)
             n, has_thumb, has_landing, is_video, has_story = cur.fetchone()
+            cur.execute("""
+                SELECT COALESCE(landing_page_source, '(none)'), COUNT(*)
+                FROM public.ad_media GROUP BY 1 ORDER BY 2 DESC
+            """)
+            by_source = cur.fetchall()
     finally:
         conn.close()
 
@@ -204,6 +263,9 @@ def main() -> None:
     print(f"    with landing URL : {has_landing:,}  ({has_landing*100/n:.0f}%)")
     print(f"    video ads        : {is_video:,}  ({is_video*100/n:.0f}%)")
     print(f"    with FB story_id : {has_story:,}  ({has_story*100/n:.0f}%)  -- iframe-embeddable")
+    print("    landing URL by source:")
+    for source, count in by_source:
+        print(f"        {count:7,}  {source}")
 
 
 if __name__ == "__main__":

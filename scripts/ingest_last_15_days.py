@@ -103,7 +103,47 @@ AD_FIELDS = [
     # the newest snapshot for all 20,189 ads, none of them carrying
     # `creative`, and ad_media rebuilt to ZERO rows -- every thumbnail in
     # the dashboard gone, silently, in one night.
-    "creative{id,effective_object_story_id}",
+    # Landing-page URLs come from here and nowhere else. Two consumers
+    # read these keys off the NEWEST bronze `ad` snapshot:
+    #   app/services/gold/landing_page.py:232 -> link_url ->
+    #     object_story_spec.link_data.link -> object_url -> template_url
+    #   scripts/refresh_ad_media.py           -> landing_page_url
+    # Requesting only {id,effective_object_story_id} starved both: every
+    # ad created after the asset_feed_specs sync froze on 2026-09-26 had
+    # no landing page at all (1.0% coverage for September, 1.5% for
+    # October, against 18.8% for August), and
+    # landing_page_ad_breakdown_30d rebuilt to ZERO rows.
+    #
+    # asset_feed_spec alone cannot cover this: only 5,110 of 59,226
+    # creatives (8.6%) carry `link_urls`. The rest are
+    # optimization_type=DEGREES_OF_FREEDOM specs holding just
+    # bodies/titles/descriptions, and their URL lives in
+    # object_story_spec.link_data.link.
+    # Two fields are deliberately NOT requested here:
+    #
+    # degrees_of_freedom_spec -- carries no URL and is the largest
+    # sub-object in the expansion. With it in the list Meta answered /ads
+    # with HTTP 500 error_code 1 ("reduce the amount of data you're asking
+    # for") on all four retries. See AD_PAGE_SIZE below for the other half
+    # of that fix.
+    #
+    # object_story_spec and asset_feed_spec -- NEITHER can be requested on
+    # a bulk /ads page. Meta cross-validates the two for any
+    # Degrees-of-Freedom ad and rejects the ENTIRE page when they disagree:
+    # code 100 / subcode 2446211, "For a Degrees of freedom enabled ad, the
+    # first value of Asset Feed Spec field should match the corresponding
+    # field in Object Story Spec." Confirmed live -- account 1 has one such
+    # ad, and asking for object_story_spec in any form (even narrowed to
+    # object_story_spec{link_data{link}}) fails at page 8 of the roster and
+    # takes all 23,735 ads down with it. /adcreatives fails the same way at
+    # page 9.
+    #
+    # The landing page therefore cannot come from this call. It is fetched
+    # per creative by scripts/backfill_ad_landing_urls.py, which bisects
+    # around the poisoned ads instead of losing the account.
+    "creative{id,name,object_story_id,effective_object_story_id,"
+    "url_tags,object_url,link_url,template_url,call_to_action_type,"
+    "object_type,instagram_permalink_url}",
 ]
 #: Metric fields are identical at every level; only the identity columns
 #: differ. Meta rejects a breakdown field that is below the requested
@@ -169,6 +209,14 @@ _ACCOUNT_NAME_PATTERN = re.compile(r"^META_ACCOUNT_(\d+)_NAME$")
 #: this endpoint wants: a 1-2 day fetch returns in seconds.
 #: See --chunk-days, which is the knob that actually matters here.
 PAGE_SIZE = 250
+#: The ad roster needs its own, much smaller page size. Its `creative`
+#: expansion makes a single ad row an order of magnitude bigger than a
+#: campaign or ad set row, and this endpoint fails on total response SIZE,
+#: not row count: at PAGE_SIZE=250 Meta returned HTTP 500 error_code 1
+#: ("reduce the amount of data you're asking for") on all four retries,
+#: taking the whole roster step to 0 rows. Campaigns and ad sets are
+#: unaffected and stay on PAGE_SIZE.
+AD_PAGE_SIZE = 50
 REQUEST_TIMEOUT_SECONDS = 60.0
 MAX_RETRIES = 4
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
@@ -324,9 +372,10 @@ async def _get_with_retry(
 
 
 async def _paginate(
-    client: httpx.AsyncClient, path: str, params: dict[str, Any]
+    client: httpx.AsyncClient, path: str, params: dict[str, Any],
+    *, page_size: int = PAGE_SIZE,
 ) -> list[dict[str, Any]]:
-    request_params = {**params, "limit": PAGE_SIZE}
+    request_params = {**params, "limit": page_size}
     next_target: str | None = path
     next_params: dict[str, Any] | None = request_params
     items: list[dict[str, Any]] = []
@@ -494,7 +543,8 @@ async def _fetch_ads(client: httpx.AsyncClient, base_url: str, account: AccountC
     t0 = time.monotonic()
     result = FetchResult(account=account, object_type="ad", api_endpoint="ads", request_params={k: v for k, v in params.items() if k != "access_token"})
     try:
-        result.items = await _paginate(client, f"{base_url}/act_{account.account_id}/ads", params)
+        result.items = await _paginate(client, f"{base_url}/act_{account.account_id}/ads",
+                                       params, page_size=AD_PAGE_SIZE)
     except RuntimeError as exc:
         result.error = str(exc)
     result.duration_seconds = time.monotonic() - t0

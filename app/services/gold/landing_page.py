@@ -218,6 +218,27 @@ WITH latest AS (
 SELECT meta_id AS ad_id, raw_payload FROM latest
 """
 
+#: The per-ad creative, fetched by scripts/backfill_ad_landing_urls.py.
+#: This is the primary source: `object_story_spec` cannot be requested on
+#: a bulk /ads page at all (Meta rejects the whole page for any
+#: Degrees-of-Freedom ad, code 100 / subcode 2446211), so the roster rows
+#: _SELECT_LATEST_AD_ROWS reads can never carry it. Without this table
+#: landing_page_ad_breakdown_30d rebuilt to ZERO rows.
+#:
+#: Keyed on parent_ids->>'ad_id', not meta_id -- one creative is shared by
+#: many ads, so there is one row per (ad, creative).
+_SELECT_LATEST_AD_CREATIVES = """
+WITH latest AS (
+    SELECT DISTINCT ON (parent_ids ->> 'ad_id')
+           parent_ids ->> 'ad_id' AS ad_id, raw_payload
+    FROM raw_dump_meta
+    WHERE object_type = 'adcreative'
+      AND parent_ids ->> 'ad_id' IS NOT NULL
+    ORDER BY parent_ids ->> 'ad_id', extracted_at DESC
+)
+SELECT ad_id, raw_payload FROM latest
+"""
+
 
 @dataclass
 class _AdLinkInfo:
@@ -227,10 +248,31 @@ class _AdLinkInfo:
 
 
 def _resolve_ad_link(raw_payload: dict) -> _AdLinkInfo:
-    creative = raw_payload.get("creative") or {}
+    """Resolve one ad's destination URL.
+
+    Accepts either shape: a roster `ad` row (URL fields under `creative`)
+    or an `adcreative` row (the creative itself, at the top level).
+
+    The video_data branch is not optional. 20.2% of readable creatives on
+    account 1 carry their URL ONLY at
+    object_story_spec.video_data.call_to_action.value.link, and this
+    function used to stop at link_data -- so every video ad was invisible
+    to the Landing Page tab even when bronze held its URL all along.
+    """
+    creative = raw_payload.get("creative") or raw_payload
+    story = creative.get("object_story_spec") or {}
+    feed = creative.get("asset_feed_spec") or {}
+    link_urls = feed.get("link_urls") or []
     ad_link = (
-        creative.get("link_url")
-        or (creative.get("object_story_spec") or {}).get("link_data", {}).get("link")
+        # Precomputed by the backfill, when that is the row we were given.
+        raw_payload.get("landing_page_url")
+        or creative.get("link_url")
+        or (story.get("link_data") or {}).get("link")
+        or (((story.get("video_data") or {}).get("call_to_action") or {})
+            .get("value") or {}).get("link")
+        or (story.get("photo_data") or {}).get("url")
+        or (story.get("template_data") or {}).get("link")
+        or ((link_urls[0] or {}).get("website_url") if link_urls else None)
         or creative.get("object_url")
         or creative.get("template_url")
     )
@@ -245,12 +287,21 @@ def _resolve_ad_link(raw_payload: dict) -> _AdLinkInfo:
 
 
 async def _load_ad_link_index(session: AsyncSession) -> dict[str, _AdLinkInfo]:
-    rows = (await session.execute(text(_SELECT_LATEST_AD_ROWS))).mappings().all()
+    """ad_id -> link info, creative rows first and roster rows as fallback.
+
+    Order matters: the roster pass runs second but only fills ad_ids the
+    creative pass left empty, so a fresh per-ad creative always wins over
+    whatever the last roster snapshot happened to carry.
+    """
     index: dict[str, _AdLinkInfo] = {}
-    for row in rows:
-        info = _resolve_ad_link(row["raw_payload"])
-        if info.normalized_path:
-            index[row["ad_id"]] = info
+    for sql in (_SELECT_LATEST_AD_CREATIVES, _SELECT_LATEST_AD_ROWS):
+        rows = (await session.execute(text(sql))).mappings().all()
+        for row in rows:
+            if row["ad_id"] in index:
+                continue
+            info = _resolve_ad_link(row["raw_payload"])
+            if info.normalized_path:
+                index[row["ad_id"]] = info
     return index
 
 
