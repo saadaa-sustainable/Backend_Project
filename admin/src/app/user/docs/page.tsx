@@ -97,7 +97,6 @@ export default async function DocsPage() {
                   {children}
                 </h3>
               ),
-              p: ({ children }) => <p className="my-3">{children}</p>,
               a: ({ href, children }) => (
                 <a href={href} className="text-text-link underline underline-offset-2">
                   {children}
@@ -106,6 +105,33 @@ export default async function DocsPage() {
               ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-6">{children}</ul>,
               ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-6">{children}</ol>,
               hr: () => <hr className="my-9 border-border-soft" />,
+              // Markdown paths are relative to docs/, which prebuild copies
+              // to public/docs/. The page lives at /user/docs, so a bare
+              // relative src would resolve against /user/ and 404.
+              img: ({ src, alt }) => (
+                <figure className="my-5">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={typeof src === "string" && !/^(https?:|\/)/.test(src) ? `/docs/${src}` : (src as string)}
+                    alt={alt ?? ""}
+                    className="w-full rounded-md border border-border-primary"
+                  />
+                  {alt ? (
+                    <figcaption className="mt-1.5 text-[12.5px] italic text-text-tertiary">{alt}</figcaption>
+                  ) : null}
+                </figure>
+              ),
+              // react-markdown wraps a lone image in <p>; a <figure> inside a
+              // <p> is invalid and React will warn. Unwrap that case.
+              p: ({ children }) => {
+                const only = Array.isArray(children) ? children.filter((c) => c !== "\n") : [children];
+                const isFigure =
+                  only.length === 1 &&
+                  typeof only[0] === "object" &&
+                  (only[0] as { type?: unknown })?.type !== undefined &&
+                  (only[0] as { props?: { alt?: unknown } })?.props?.alt !== undefined;
+                return isFigure ? <>{children}</> : <p className="my-3">{children}</p>;
+              },
               // A quoted block in this document is always a caution, never a
               // citation -- so it reads as one.
               blockquote: ({ children }) => (

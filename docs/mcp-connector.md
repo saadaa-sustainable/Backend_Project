@@ -84,6 +84,14 @@ after changing these.
    **Allow access**.
 6. Claude returns to the connector list with the connector enabled.
 
+![Step 5 — the authorization page this connector sends you to. The three bullets are the actual grant: read-only, dashboard sections only, one hour.](img/connect-authorize.png)
+
+> **Steps 1–4 happen inside Claude's own settings**, which this document
+> cannot picture — it is screenshotted from this deployment, and Claude's
+> interface is not ours to capture. The wording above matches what Claude
+> shows at the time of writing; if its labels have moved, look for
+> "connectors" and "custom".
+
 After an hour the connector asks again. That is deliberate: there is no
 long-lived token sitting in a third party.
 
@@ -270,6 +278,29 @@ covering neither.
 
 `get_table_info` returns **metadata only** — never rows, personal data, exact
 counts or arbitrary SQL results.
+
+### What those sections look like
+
+Every tool reads the section pictured below — the same query, the same
+definitions, the same caches. Asking the connector for "the CPIS section" and
+opening CPIS in the dashboard give the same numbers, because they are the same
+numbers.
+
+![Dashboard — `get_dashboard_metrics`. KPI totals, Meta-driven Shopify sessions and the daily session trend.](img/section-dashboard.png)
+
+![Ads Analyse — `get_ad_performance`. Ranked rows plus full filtered totals; the ranked list is never the whole population.](img/section-ads-analyse.png)
+
+![CPIS — `get_sku_economics`. Note Gross Margin % reads 65% and Contribution ₹494 on every row: those are the flat model constants, not per-SKU costs.](img/section-cpis.png)
+
+![First Click — `get_first_click_attribution`. First-click and last-click revenue sit side by side and each carries the order's full value.](img/section-first-click.png)
+
+![Last Click UTM — `get_last_click_attribution`. Individual orders with their resolved ad, ad set or campaign, and the tier counts.](img/section-last-click.png)
+
+![Blended MER — `get_blended_mer`. Store revenue against Meta, Google and Kwikchat spend, with each platform's own claimed revenue beside it.](img/section-blended-mer.png)
+
+![Landing Page Analysis — `get_landing_page_performance`. Carries two session sources, GA4's and Shopify's, which do not agree.](img/section-landing-page.png)
+
+![Asset Analysis — `get_asset_performance`. A lifetime rollup: "was a winner" and "is winning" are different columns.](img/section-asset-analysis.png)
 
 ---
 
