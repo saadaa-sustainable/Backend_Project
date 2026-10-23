@@ -140,6 +140,11 @@ errors, see §6.
 
 ## 4. How to prompt it well
 
+**[Start a conversation with the connector →](https://claude.ai/new?q=List%20the%20analytics%20tools%20you%20can%20use%20for%20SAADAA%2C%20and%20tell%20me%20the%20latest%20date%20each%20dataset%20has%20data%20for.)**
+That link opens Claude with a check prompt already typed; press send. Every
+example below carries its own **Ask Claude** link, which fills the composer
+without sending, so you can edit the dates before you run it.
+
 This is the part that decides whether you get an answer or a guess.
 
 ### The rule
@@ -294,6 +299,8 @@ trend. One section per call.
 
 > Give me the dashboard KPIs for 1–21 October 2026, then the session trend for
 > the same range, and show cost per session against revenue per session.
+>
+> [Ask Claude →](https://claude.ai/new?q=Give%20me%20the%20dashboard%20KPIs%20for%201%E2%80%9321%20October%202026%2C%20then%20the%20session%20trend%20for%20the%20same%20range%2C%20and%20show%20cost%20per%20session%20against%20revenue%20per%20session.)
 
 **The insight is in the ratio, not the totals.** Spend and revenue both rise
 with scale and tell you little. Cost per session against revenue per session
@@ -312,6 +319,8 @@ whole filtered population beside a ranked list.
 
 > For 1–21 October 2026, Ads Analyse by campaign sorted by spend, using Shopify
 > ROAS. State the row limit and give the full totals separately.
+>
+> [Ask Claude →](https://claude.ai/new?q=For%201%E2%80%9321%20October%202026%2C%20Ads%20Analyse%20by%20campaign%20sorted%20by%20spend%2C%20using%20Shopify%20ROAS.%20State%20the%20row%20limit%20and%20give%20the%20full%20totals%20separately.)
 
 **Two traps and both change the answer.** Dates are *delivery* dates, not
 creation dates — a campaign built in June and run in October belongs to October.
@@ -328,6 +337,8 @@ has to come from the returned totals. Ask for both.
 
 > Show assets that are inactive now but were ever winners, sorted by lifetime
 > spend. Confirm these are lifetime figures.
+>
+> [Ask Claude →](https://claude.ai/new?q=Show%20assets%20that%20are%20inactive%20now%20but%20were%20ever%20winners%2C%20sorted%20by%20lifetime%20spend.%20Confirm%20these%20are%20lifetime%20figures.)
 
 **This is the only section with no date range at all.** Everything is lifetime,
 so "best performing asset" and "asset performing best right now" are different
@@ -346,6 +357,8 @@ revenue, cost per unit sold, ROAS, ACoS and headroom.
 
 > CPIS, 30-day window, SKUs with negative headroom. Show selling price,
 > contribution margin, CPIS, ACoS and attributed units, equal-split allocation.
+>
+> [Ask Claude →](https://claude.ai/new?q=CPIS%2C%2030-day%20window%2C%20SKUs%20with%20negative%20headroom.%20Show%20selling%20price%2C%20contribution%20margin%2C%20CPIS%2C%20ACoS%20and%20attributed%20units%2C%20equal-split%20allocation.)
 
 **Do not ask it which SKU has the worst margin.** Look at the screenshot: Gross
 Margin % reads 65% and Contribution ₹494 on every row. Those are flat model
@@ -366,6 +379,8 @@ source / ad / ad set grain.
 
 > First Click, 1–21 October 2026, ad grain, the ten ads whose first-click
 > revenue most exceeds their last-click revenue. Do not add the columns.
+>
+> [Ask Claude →](https://claude.ai/new?q=First%20Click%2C%201%E2%80%9321%20October%202026%2C%20ad%20grain%2C%20the%20ten%20ads%20whose%20first-click%20revenue%20most%20exceeds%20their%20last-click%20revenue.%20Do%20not%20add%20the%20columns.)
 
 **The gap between the two columns is the whole point.** Both carry the order's
 *full* value — an order opened by X and closed by Y adds its whole value to
@@ -385,6 +400,8 @@ plus channel and tier counts.
 
 > Last Click UTM for the last 14 days: the tier counts, then the unmatched
 > orders only, sorted by order value.
+>
+> [Ask Claude →](https://claude.ai/new?q=Last%20Click%20UTM%20for%20the%20last%2014%20days%3A%20the%20tier%20counts%2C%20then%20the%20unmatched%20orders%20only%2C%20sorted%20by%20order%20value.)
 
 **Read the tiers before you read the totals.** They run in descending
 confidence — `ad_direct`, `adset_scoped`, `campaign_only`, `campaign_scoped`,
@@ -404,6 +421,8 @@ quarter or year, with the platforms' own claimed revenue beside it.
 
 > Blended MER by month for the last 6 completed months, with Platform MER
 > beside it. Say which spend sources are included.
+>
+> [Ask Claude →](https://claude.ai/new?q=Blended%20MER%20by%20month%20for%20the%20last%206%20completed%20months%2C%20with%20Platform%20MER%20beside%20it.%20Say%20which%20spend%20sources%20are%20included.)
 
 **The two MER columns disagree on purpose, and the gap is the finding.** Blended
 MER divides *total store revenue* by total ad spend and takes no platform's word
@@ -425,6 +444,8 @@ revenue those pages earned.
 > Landing Page Analysis, 1–21 October 2026, top 20 pages by GA4 sessions with
 > add-to-cart and purchase rates. Say which session count is GA4's and which is
 > Shopify's.
+>
+> [Ask Claude →](https://claude.ai/new?q=Landing%20Page%20Analysis%2C%201%E2%80%9321%20October%202026%2C%20top%2020%20pages%20by%20GA4%20sessions%20with%20add-to-cart%20and%20purchase%20rates.%20Say%20which%20session%20count%20is%20GA4%27s%20and%20which%20is%20Shopify%27s.)
 
 **Always name which session count you mean.** The section carries two that do
 not agree, so a "conversion rate" means two different things depending on the
@@ -443,6 +464,8 @@ workflow schedules, and the backend process scheduler.
 
 > Use get_refresh_status for last night's run. List the steps that failed, and
 > say whether a "running" record proves the job is still live.
+>
+> [Ask Claude →](https://claude.ai/new?q=Use%20get_refresh_status%20for%20last%20night%27s%20run.%20List%20the%20steps%20that%20failed%2C%20and%20say%20whether%20a%20%22running%22%20record%20proves%20the%20job%20is%20still%20live.)
 
 **A `running` record is not proof anything is running**, and a successful cron
 is not proof the data is complete. The tool returns both facts; a vague
@@ -459,6 +482,8 @@ orders, SKU daily, sessions, sales — measured against yesterday in IST.
 
 > What is the latest date each dataset has, and how far behind yesterday is
 > each one?
+>
+> [Ask Claude →](https://claude.ai/new?q=What%20is%20the%20latest%20date%20each%20dataset%20has%2C%20and%20how%20far%20behind%20yesterday%20is%20each%20one%3F)
 
 **A latest date is not proof that day is complete.** It says a row exists, not
 that every row arrived. Treat it as a ceiling on what any other answer can
@@ -475,6 +500,8 @@ table's columns and types.
 
 > Which tables have "cpis" in the name, and what columns does cpis_by_sku_utm
 > have?
+>
+> [Ask Claude →](https://claude.ai/new?q=Which%20tables%20have%20%22cpis%22%20in%20the%20name%2C%20and%20what%20columns%20does%20cpis_by_sku_utm%20have%3F)
 
 **Metadata only — never rows, never customer records, never arbitrary SQL.**
 Row counts are *estimates* from the planner, so do not quote them as counts.

@@ -24,6 +24,20 @@ const DOC = {
   blurb: "Connecting the read-only MCP connector, and how to prompt it so the answers are defensible.",
 };
 
+/** Opens a new Claude conversation with a prompt already in the composer.
+ *
+ *  `?q=` fills the box, it does not send -- verified 2026-10-23. That is the
+ *  behaviour we want here: the starter prompt names a date range the reader
+ *  will usually need to change first.
+ *
+ *  The connector still has to be attached to their account. This link is a
+ *  shortcut to the conversation, never a substitute for section 3. */
+const CLAUDE_NEW =
+  "https://claude.ai/new?q=" +
+  encodeURIComponent(
+    "List the analytics tools you can use for SAADAA, and tell me the latest date each dataset has data for.",
+  );
+
 /** Heading text -> the slug ReactMarkdown would not give us otherwise. */
 function slug(children: React.ReactNode): string {
   return String(children)
@@ -59,13 +73,23 @@ export default async function DocsPage() {
             <h1 className="text-2xl font-semibold tracking-tight text-text-primary">{DOC.title}</h1>
             <p className="mt-1.5 max-w-2xl text-sm text-text-secondary">{DOC.blurb}</p>
           </div>
-          <a
-            href={DOC.pdf}
-            download
-            className="shrink-0 rounded-md border border-border-primary bg-bg-white px-3.5 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-bg-muted"
-          >
-            ↓ Download PDF
-          </a>
+          <div className="flex shrink-0 items-center gap-2">
+            <a
+              href={DOC.pdf}
+              download
+              className="rounded-md border border-border-primary bg-bg-white px-3.5 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-bg-muted"
+            >
+              ↓ Download PDF
+            </a>
+            <a
+              href={CLAUDE_NEW}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-md bg-text-primary px-3.5 py-2 text-sm font-medium text-bg-white transition-opacity hover:opacity-90"
+            >
+              Open in Claude →
+            </a>
+          </div>
         </div>
       </header>
 
