@@ -52,6 +52,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: "TOOLS",
     items: [
       { href: "/user/assistant", label: "AI Assistant", icon: "✳", iconBg: "bg-[#DB2777]" },
+      { href: "/user/docs", label: "Documentation", icon: "❏", iconBg: "bg-[#475569]" },
     ],
   },
 ];

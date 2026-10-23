@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "predev": "mkdir -p public/docs && cp ../docs/mcp-connector.md ../docs/mcp-connector.pdf public/docs/",
+    "prebuild": "mkdir -p public/docs && cp ../docs/mcp-connector.md ../docs/mcp-connector.pdf public/docs/"
   },
   "dependencies": {
     "next": "16.3.0",
