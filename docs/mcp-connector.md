@@ -260,49 +260,212 @@ covering neither.
 
 ---
 
-## 5. What each tool answers
+## 5. The eleven tools, one at a time
 
-| Tool | Dashboard section | Ask it for |
-|---|---|---|
-| `get_dashboard_metrics` | Dashboard | KPI totals, Meta-driven session totals, session trend |
-| `get_ad_performance` | Ads Analyse | spend, impressions, revenue by ad/campaign, with totals |
-| `get_asset_performance` | Asset Analysis | lifetime creative rollup, winners and lapsed winners |
-| `get_sku_economics` | CPIS | per-SKU spend, units, CPIS, ROAS, ACoS, headroom |
-| `get_first_click_attribution` | First Click | both ends of the journey, by source / ad / ad set |
-| `get_last_click_attribution` | Last Click UTM | individual orders with resolved ad, tier counts |
-| `get_blended_mer` | Blended MER | revenue against Meta + Google + Kwikchat by period |
-| `get_landing_page_performance` | Landing Page Analysis | per-page funnel, GA4 and Shopify sessions |
-| `get_refresh_status` | — | cron runs, step outcomes, schedules |
-| `get_data_freshness` | — | latest available date per dataset |
-| `get_table_info` | — | table and column metadata only |
+Each tool reads the section pictured beside it — the same query, the same
+definitions, the same caches. Asking the connector for a section and opening it
+in the dashboard give the same numbers, because they are the same numbers.
 
-`get_table_info` returns **metadata only** — never rows, personal data, exact
-counts or arbitrary SQL results.
-
-### What those sections look like
-
-Every tool reads the section pictured below — the same query, the same
-definitions, the same caches. Asking the connector for "the CPIS section" and
-opening CPIS in the dashboard give the same numbers, because they are the same
-numbers.
-
-![Dashboard — `get_dashboard_metrics`. KPI totals, Meta-driven Shopify sessions and the daily session trend.](img/section-dashboard.png)
-
-![Ads Analyse — `get_ad_performance`. Ranked rows plus full filtered totals; the ranked list is never the whole population.](img/section-ads-analyse.png)
-
-![CPIS — `get_sku_economics`. Note Gross Margin % reads 65% and Contribution ₹494 on every row: those are the flat model constants, not per-SKU costs.](img/section-cpis.png)
-
-![First Click — `get_first_click_attribution`. First-click and last-click revenue sit side by side and each carries the order's full value.](img/section-first-click.png)
-
-![Last Click UTM — `get_last_click_attribution`. Individual orders with their resolved ad, ad set or campaign, and the tier counts.](img/section-last-click.png)
-
-![Blended MER — `get_blended_mer`. Store revenue against Meta, Google and Kwikchat spend, with each platform's own claimed revenue beside it.](img/section-blended-mer.png)
-
-![Landing Page Analysis — `get_landing_page_performance`. Carries two session sources, GA4's and Shopify's, which do not agree.](img/section-landing-page.png)
-
-![Asset Analysis — `get_asset_performance`. A lifetime rollup: "was a winner" and "is winning" are different columns.](img/section-asset-analysis.png)
+For each: what it reads, a prompt that works, and the thing that turns a number
+into an insight.
 
 ---
+
+### `get_dashboard_metrics` — Dashboard
+
+![The Dashboard section: KPI totals, Meta-driven Shopify sessions, and the daily session trend.](img/section-dashboard.png)
+
+**Reads** KPI totals, Meta-driven Shopify session totals, or the daily session
+trend. One section per call.
+
+> Give me the dashboard KPIs for 1–21 October 2026, then the session trend for
+> the same range, and show cost per session against revenue per session.
+
+**The insight is in the ratio, not the totals.** Spend and revenue both rise
+with scale and tell you little. Cost per session against revenue per session
+tells you whether traffic is getting more or less expensive to convert. Use
+`section=session_trend` for those — its dates are aligned, so the two series
+are comparable day by day.
+
+---
+
+### `get_ad_performance` — Ads Analyse
+
+![Ads Analyse: ranked rows plus full filtered totals.](img/section-ads-analyse.png)
+
+**Reads** spend, impressions and revenue per ad or campaign, with totals for the
+whole filtered population beside a ranked list.
+
+> For 1–21 October 2026, Ads Analyse by campaign sorted by spend, using Shopify
+> ROAS. State the row limit and give the full totals separately.
+
+**Two traps and both change the answer.** Dates are *delivery* dates, not
+creation dates — a campaign built in June and run in October belongs to October.
+And the rows are a ranked list, never the population: a claim about "all ads"
+has to come from the returned totals. Ask for both.
+
+---
+
+### `get_asset_performance` — Asset Analysis
+
+![Asset Analysis: a lifetime creative rollup, with winners and lapsed winners.](img/section-asset-analysis.png)
+
+**Reads** the lifetime creative rollup — spend, ROAS, iterations, last tested.
+
+> Show assets that are inactive now but were ever winners, sorted by lifetime
+> spend. Confirm these are lifetime figures.
+
+**This is the only section with no date range at all.** Everything is lifetime,
+so "best performing asset" and "asset performing best right now" are different
+questions. `only=ever_won` finds proven creative sitting idle; `only=won_fell`
+finds creative that stopped working. The second list is usually the more useful
+one — it is where fatigue shows up.
+
+---
+
+### `get_sku_economics` — CPIS
+
+![CPIS: per-SKU spend, units, CPIS, ROAS, ACoS and headroom. Note Gross Margin % reads 65% and Contribution ₹494 on every row.](img/section-cpis.png)
+
+**Reads** per master SKU: ad spend allocated from UTM-attributed orders, units,
+revenue, cost per unit sold, ROAS, ACoS and headroom.
+
+> CPIS, 30-day window, SKUs with negative headroom. Show selling price,
+> contribution margin, CPIS, ACoS and attributed units, equal-split allocation.
+
+**Do not ask it which SKU has the worst margin.** Look at the screenshot: Gross
+Margin % reads 65% and Contribution ₹494 on every row. Those are flat model
+constants — selling price × 0.35 for COGS, × 0.55 for contribution — identical
+in percentage terms for every SKU. All the real variation sits in **CPIS**,
+**ACoS** and **headroom**, which is why headroom is the column to ask for.
+Since contribution margin is a flat 55%, **an ACoS above 55% means headroom is
+negative** — that single comparison is most of the analysis.
+
+---
+
+### `get_first_click_attribution` — First Click
+
+![First Click: both ends of each journey, by source, ad or ad set.](img/section-first-click.png)
+
+**Reads** each entity seen from both ends of the customer journey, from GA4, at
+source / ad / ad set grain.
+
+> First Click, 1–21 October 2026, ad grain, the ten ads whose first-click
+> revenue most exceeds their last-click revenue. Do not add the columns.
+
+**The gap between the two columns is the whole point.** Both carry the order's
+*full* value — an order opened by X and closed by Y adds its whole value to
+both — so a row must never be summed across. An entity whose first-click
+revenue runs well above its last-click revenue is doing work that last-click
+reporting credits to somebody else. That is the argument for keeping a
+prospecting campaign that looks mediocre on last click.
+
+---
+
+### `get_last_click_attribution` — Last Click UTM
+
+![Last Click UTM: individual orders with their resolved ad, ad set or campaign, and tier counts.](img/section-last-click.png)
+
+**Reads** individual orders with the ad, ad set or campaign they resolved to,
+plus channel and tier counts.
+
+> Last Click UTM for the last 14 days: the tier counts, then the unmatched
+> orders only, sorted by order value.
+
+**Read the tiers before you read the totals.** They run in descending
+confidence — `ad_direct`, `adset_scoped`, `campaign_only`, `campaign_scoped`,
+`edit_name_match`, `ad_name_match`, `adset_name_miss`, `unmatched`. A channel
+whose orders sit mostly in `unmatched` is not a channel that failed; it is a
+channel whose tagging failed. Those are different problems with different fixes,
+and only the tier split distinguishes them.
+
+---
+
+### `get_blended_mer` — Blended MER
+
+![Blended MER: store revenue against Meta, Google and Kwikchat spend, with each platform's claimed revenue beside it.](img/section-blended-mer.png)
+
+**Reads** store revenue against Meta, Google and Kwikchat spend by month,
+quarter or year, with the platforms' own claimed revenue beside it.
+
+> Blended MER by month for the last 6 completed months, with Platform MER
+> beside it. Say which spend sources are included.
+
+**The two MER columns disagree on purpose, and the gap is the finding.** Blended
+MER divides *total store revenue* by total ad spend and takes no platform's word
+for anything. Platform MER divides what the platforms *claim* they caused by the
+same spend. When Platform MER runs far above Blended, the platforms are
+collectively claiming more than the store actually earned. Note that Kwikchat
+spend is a flat estimate, not measured.
+
+---
+
+### `get_landing_page_performance` — Landing Page Analysis
+
+![Landing Page Analysis: per-page funnel with GA4 and Shopify sessions side by side.](img/section-landing-page.png)
+
+**Reads** per landing page: GA4 sessions, PDP views, add-to-carts, checkouts,
+purchases, bounce rate, beside Shopify sessions and the last-click orders and
+revenue those pages earned.
+
+> Landing Page Analysis, 1–21 October 2026, top 20 pages by GA4 sessions with
+> add-to-cart and purchase rates. Say which session count is GA4's and which is
+> Shopify's.
+
+**Always name which session count you mean.** The section carries two that do
+not agree, so a "conversion rate" means two different things depending on the
+denominator. The useful read is the funnel *step* rates — where a page loses
+people — rather than the end-to-end rate, which mixes traffic quality with page
+quality.
+
+---
+
+### `get_refresh_status` — pipeline runs
+
+![Fetch Status: recent ingestion runs, their steps and outcomes.](img/section-fetch-status.png)
+
+**Reads** recent cron-run records with step outcomes, the checked-out GitHub
+workflow schedules, and the backend process scheduler.
+
+> Use get_refresh_status for last night's run. List the steps that failed, and
+> say whether a "running" record proves the job is still live.
+
+**A `running` record is not proof anything is running**, and a successful cron
+is not proof the data is complete. The tool returns both facts; a vague
+question invites one confident sentence that covers neither. Pair it with
+`get_data_freshness` — a green run with a stale date is the failure mode worth
+catching.
+
+---
+
+### `get_data_freshness` — latest available dates
+
+**Reads** the latest available reporting date per dataset — Meta ads, Shopify
+orders, SKU daily, sessions, sales — measured against yesterday in IST.
+
+> What is the latest date each dataset has, and how far behind yesterday is
+> each one?
+
+**A latest date is not proof that day is complete.** It says a row exists, not
+that every row arrived. Treat it as a ceiling on what any other answer can
+cover: if orders stop at the 20th, nothing you ask about the 21st is real.
+
+---
+
+### `get_table_info` — schema metadata
+
+![Schema Browser: tables, columns and the formula behind a computed column.](img/section-schema-browser.png)
+
+**Reads** the list of public tables and views with estimated row counts, or one
+table's columns and types.
+
+> Which tables have "cpis" in the name, and what columns does cpis_by_sku_utm
+> have?
+
+**Metadata only — never rows, never customer records, never arbitrary SQL.**
+Row counts are *estimates* from the planner, so do not quote them as counts.
+Its real use is settling an argument about where a number comes from before
+anyone argues about the number.
 
 ## 6. Limits, failures and revocation
 
