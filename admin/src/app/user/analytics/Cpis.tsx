@@ -327,7 +327,8 @@ function CpisView() {
   // Attribution mode toggle:
   //   equal          - ad_spend / cost_per_order / cost_per_unit_sold / roas
   //   value_weighted - ad_spend_vw / cost_per_order_vw / cost_per_unit_sold_vw / roas_vw
-  // Both columns come from the same /cpis-utm response -- no refetch on toggle.
+  // Value-weighted has its own daily ad/ad-set population; request the mode
+  // so units, revenue, sorting and KPI totals stay aligned with its spend.
   const [attributionMode, setAttributionMode] =
     useState<"equal" | "value_weighted">("equal");
   // Spend-source toggle (2026-09-02):
@@ -425,12 +426,12 @@ function CpisView() {
   const filters = useMemo(
     () =>
       fromDate && toDate
-        ? { from_date: fromDate, to_date: toDate, search: debouncedSearch || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort }
-        : { window: window_, search: debouncedSearch || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort },
-    [fromDate, toDate, window_, debouncedSearch, onlyMatched, includeArchived, sort],
+        ? { attribution_mode: attributionMode, from_date: fromDate, to_date: toDate, search: debouncedSearch || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort }
+        : { attribution_mode: attributionMode, window: window_, search: debouncedSearch || undefined, only_matched: onlyMatched, include_archived: includeArchived, sort },
+    [fromDate, toDate, window_, debouncedSearch, onlyMatched, includeArchived, sort, attributionMode],
   );
   const filtersKey = JSON.stringify(filters);
-  const rangeKey = JSON.stringify(fromDate && toDate ? [fromDate, toDate] : [window_]);
+  const rangeKey = JSON.stringify([attributionMode, ...(fromDate && toDate ? [fromDate, toDate] : [window_])]);
   const loading = !freshnessReady || settledKey !== filtersKey;
   const loadingMore = loadingMoreKey === filtersKey;
   const error = requestError?.key === filtersKey ? requestError.message : null;
@@ -457,6 +458,7 @@ function CpisView() {
         // account, not per SKU, so it does not belong in the paginated
         // response and must not make the table wait on it.
         fetchCpisDailySeries({
+          attribution_mode: attributionMode,
           window: filters.window,
           from_date: filters.from_date,
           to_date: filters.to_date,
@@ -481,7 +483,7 @@ function CpisView() {
       cancelled = true;
       requestVersionRef.current += 1;
     };
-  }, [filters, filtersKey, rangeKey, freshnessReady]);
+  }, [filters, filtersKey, rangeKey, freshnessReady, attributionMode]);
 
   async function loadMore() {
     if (loading || loadingMore || showingPreviousResults) return;
@@ -536,9 +538,7 @@ function CpisView() {
           "cpis-match", reachable from the ? on this title. It was four
           lines of standing text above the controls, read once. */}
       <SectionHeader title="CPIS" helpId="cpis-match">
-        {/* Attribution mode and spend source are not filters: neither
-            refetches, both swap which cells the response's own columns
-            render into. They belong beside the title, with the view. */}
+        {/* Attribution mode selects its own population and cached response. */}
         <div className="flex items-center gap-1.5">
           <FieldLabel className="!inline">Spend</FieldLabel>
           <Segmented
@@ -551,11 +551,13 @@ function CpisView() {
                   + "Because of that, DO NOT ADD THESE UP — the total would be more than "
                   + "you actually spent. Use this to look at one product's own ads." },
               { value: "utm_id", label: "Its share of spend",
-                title: "This product's slice of the money behind the orders it sold in.\n\n"
+                title: attributionMode === "value_weighted"
+                  ? "Each day's ad or ad-set spend is split by product revenue. A SKU generating 74.07% of the entity's revenue receives 74.07% of its spend. CPIS is that spend divided by the SKU's units. Spend with no eligible revenue stays unattributed."
+                  : "This product's slice of the money behind the orders it sold in.\n\n"
                   + "Say an ad cost ₹1,000 and led to 10 orders. That is ₹100 per "
                   + "order. If one of those orders came to ₹600 and this product was "
                   + "₹300 of it — half — then this product takes ₹50.\n\n"
-                  + "Every rupee is counted once, so these DO ADD UP to your real Meta spend. "
+                  + "Each allocated rupee is counted once. Spend without eligible sales remains unattributed. "
                   + "Use this to decide how to split the budget." },
             ]}
             value={spendMatchMode}
@@ -569,7 +571,7 @@ function CpisView() {
               { value: "equal", label: "Equal / order",
                 title: "Ad spend split equally across all orders the ad drove, then within each order by line-item revenue" },
               { value: "value_weighted", label: "Value-weighted",
-                title: "Ad spend split proportional to each order's total value — larger baskets absorb more spend" },
+                title: "Each day's ad or ad-set spend × this SKU's product revenue ÷ total product revenue attributed to that entity that day. CPIS = allocated spend ÷ units sold. Date ranges sum daily allocations." },
             ]}
             value={attributionMode}
             onChange={(v) => setAttributionMode(v as typeof attributionMode)}
@@ -722,7 +724,7 @@ function CpisView() {
             attributedSpend={attributedSpend}
             untetheredSpend={untetheredSpend}
             untetheredParts={untetheredParts}
-            dayMatched={Boolean(fromDate && toDate)}
+            dayMatched={attributionMode === "value_weighted" || Boolean(fromDate && toDate)}
             /* The day the spend figure actually reaches, not the day
                the user asked for. Meta lands insights in arrears, so a
                window ending today is summed only to yesterday, and
@@ -951,7 +953,7 @@ function CpisView() {
                 <th className="border-l border-border-soft px-3 py-3 text-right" title={
                   attributionMode === "equal"
                     ? "Equal-per-order allocation: ad spend split evenly across orders driven, then within-order by line-item revenue"
-                    : "Value-weighted allocation: ad spend split proportional to each order's total revenue"
+                    : "Daily revenue share: ad/ad-set spend × this SKU's product revenue ÷ total product revenue for the same entity and day"
                 }>
                   Ad Spend
                   <span className="ml-1 text-[10px] text-text-tertiary">
@@ -1835,7 +1837,11 @@ function CpisKpiStrip({
   const untetheredInfo = (() => {
     if (!isFractional || untetheredSpend === null || metaTotalSpend === null) return undefined;
     const { adUnknown, lag, noConversion } = untetheredParts;
-    if (adUnknown === null || lag === null || noConversion === null) return undefined;
+    if (adUnknown === null || lag === null || noConversion === null) {
+      return `${fmtINRCompact(attributedSpend ?? 0)} allocated by same-day product revenue. `
+        + `${fmtINRCompact(untetheredSpend)} remains unallocated. `
+        + "Spend with no eligible same-day revenue is not charged to another day or SKU.";
+    }
     const pct = (n: number) =>
       metaTotalSpend > 0 ? `${((n / metaTotalSpend) * 100).toFixed(0)}%` : "";
     const lines = [

@@ -1780,6 +1780,7 @@ export type CpisAttributionMode = "equal" | "value_weighted";
 export interface CpisUtmResponse {
   rows: CpisUtmRow[];
   total: number;
+  attribution_mode: "equal" | "value_weighted";
   // Reconciliation totals for the picked window (added 2026-09-03).
   // The KPI strip surfaces these so the "Ad spend" tile reflects the
   // true Meta window total, not just the paginated-row sum:
@@ -1812,6 +1813,7 @@ export interface CpisUtmResponse {
 
 export interface CpisUtmParams {
   window?: CpisUtmWindow;
+  attribution_mode?: "equal" | "value_weighted";
   // Custom date range. When both are set, overrides `window` and pulls
   // a summed row set from cpis_by_sku_daily on the fly.
   from_date?: string;    // YYYY-MM-DD
@@ -1847,6 +1849,7 @@ export interface CpisDailySeriesResponse {
 
 export function fetchCpisDailySeries(params: {
   window?: string; from_date?: string; to_date?: string;
+  attribution_mode?: "equal" | "value_weighted";
 } = {}): Promise<CpisDailySeriesResponse> {
   const qs = new URLSearchParams();
   if (params.from_date && params.to_date) {
@@ -1855,12 +1858,14 @@ export function fetchCpisDailySeries(params: {
   } else if (params.window) {
     qs.set("window", params.window);
   }
+  if (params.attribution_mode) qs.set("attribution_mode", params.attribution_mode);
   return request<CpisDailySeriesResponse>(
     `/admin/analytics/cpis-utm/daily-series?${qs}`);
 }
 
 export function fetchCpisUtm(params: CpisUtmParams = {}): Promise<CpisUtmResponse> {
   const qs = new URLSearchParams();
+  if (params.attribution_mode) qs.set("attribution_mode", params.attribution_mode);
   if (params.from_date && params.to_date) {
     qs.set("from_date", params.from_date);
     qs.set("to_date",   params.to_date);

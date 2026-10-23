@@ -1,5 +1,55 @@
 # CPIS attribution: every type, how it works, and what it is worth
 
+## Value-Weighted revision — 2026-10-23
+
+The current Value-Weighted mode uses **daily product revenue share**, replacing
+the window-level weighting described in the historical audit below. Equal /
+Order retains its existing rules and source tables.
+
+For each IST day and resolved UTM ad (`utm_content`) or ad set (`utm_term`):
+
+```
+SKU revenue = sum(quantity × original unit price) from its matched order lines
+SKU spend   = entity's spend that day × SKU revenue / entity's product revenue that day
+SKU CPIS    = sum(SKU daily spend) / sum(SKU units in the selected dates)
+```
+
+₹10,000 spend with X revenue ₹10,000 (10 units) and Y revenue ₹3,500 (5 units)
+allocates ₹7,407.41 to X and ₹2,592.59 to Y. Their CPIS values are ₹740.74
+and ₹518.52 respectively. Percentages are never rounded before allocation.
+
+An eligible order without a resolvable ad triggers **ad-set fallback for that
+ad set on that day**. Its resolved child-ad orders join the same pool, and
+child-ad spend is not also charged. Other days remain independent. Different
+ad sets, days and accounts' entity IDs never share a denominator. Unmapped
+orders and VOIDED orders remain excluded. Revenue retains the existing gross
+line-item definition; discounts, tax and shipping do not change the weights.
+Zero-revenue pools remain unallocated; there is no equal-order fallback.
+
+`app/services/gold/cpis_value_weighted.py` owns the calculation.
+`scripts/refresh_cpis_value_weighted.py` materializes
+`public.cpis_value_weighted_daily`, keyed by day/entity/master SKU. Both
+preset and custom date ranges aggregate this same table. Units, orders,
+revenue, halo, sorting, filters, exports, KPI allocated spend and the daily
+order chart use this mode's population. The API selects it with
+`attribution_mode=value_weighted`; its normal attribution columns and `_vw`
+aliases describe this selected population. Equal-mode responses leave the
+superseded `_vw` aliases null instead of returning the old formula.
+
+Apply `supabase/migrations/20261023101754_cpis_daily_revenue_weighting.sql`,
+then run `.venv/bin/python scripts/refresh_cpis_value_weighted.py` once.
+The daily refresh chain includes `cpis_value_weighted` after Meta/Shopify and
+the existing CPIS refreshes. This takes effect in scheduled runs after merge
+to `master`. `--since` / `--until` support scoped rebuilds; rows outside the
+requested interval are preserved. A failed refresh rolls back the entire
+replacement and leaves the prior snapshot intact.
+
+The source table has RLS enabled and no browser/Data API read policies. The
+existing backend database connection serves the analytics API. API and browser
+cache keys include attribution mode, dates and filters.
+
+### Historical audit (before the revision)
+
 Validated against live data on **2026-10-22**. Every number below was
 measured, not assumed. The reference window is the 30 days to
 2026-10-21.

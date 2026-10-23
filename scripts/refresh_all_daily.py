@@ -439,6 +439,24 @@ PHASE_SILVER = [
     # newest orders from every SKU row.
     ("silver_cpis_sku_ad",    ["scripts/refresh_cpis_sku_ad_daily.py"],      900),
     ("silver_cpis_utm",       ["scripts/refresh_cpis_utm.py"],              1200),
+    # Daily revenue-share allocation, independent of Equal / Order. Rebuild
+    # after both Meta and Shopify; API presets/custom dates use this same grain.
+    ("cpis_value_weighted",   ["scripts/refresh_cpis_value_weighted.py"],   1200),
+    # cpis_by_sku -- the table /cpis serves. Fourth instance of the
+    # registry-only bug: it had a FlattenJob entry and no pipeline step,
+    # so only the in-process scheduler (off on Render) could run it.
+    # Measured 2026-10-22 its computed_at was 2026-08-28, 55 days stale,
+    # while ad_lifecycle (03:30 that morning) and shopify_inventory
+    # (through 2026-10-20) were both current.
+    #
+    # Last of the CPIS steps because it reads ad_lifecycle and
+    # shopify_inventory, and cheap -- ~300 rows, one TRUNCATE + insert.
+    #
+    # NOTE: this table CORRELATES ads to SKUs by substring on the ad
+    # name, so refreshing it makes its numbers current, not correct --
+    # see docs/cpis-attribution.md section D for the Rs 4.36 Cr
+    # nested-substring collision it still contains.
+    ("silver_cpis_by_sku",    ["scripts/refresh_cpis_by_sku.py"],            600),
     ("silver_ad_product",     ["scripts/refresh_ad_product_daily.py"],       600),
     ("silver_ad_media",       ["scripts/refresh_ad_media.py"],               900),
     # Gold: three landing-page tables (sessions_daily / analysis_30d /
@@ -478,7 +496,7 @@ PHASE_SILVER = [
 #: after silver when you only care about inventory.
 SHOPIFY_INGEST_STEPS = ["shopify_daily"]
 SHOPIFY_SILVER_STEPS = ["silver_shopify", "silver_shopify_attribution", "cpis_sku_context"]
-SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm"]
+SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm", "cpis_value_weighted", "silver_cpis_by_sku"]
 
 
 def _steps_by_label(labels: list[str]) -> list[tuple[str, list[str], int]]:
@@ -583,6 +601,14 @@ def main() -> int:
     with CronRun(project="backend_project") as run:
         for name, cmd, timeout in steps:
             with run.step(name, timeout=timeout) as step:
+                if name == "cpis_value_weighted":
+                    failed_sources = [source for source in (
+                        "silver_shopify", "silver_insights_daily", "silver_insights_entity",
+                        "ad_lifecycle", "silver_cpis_utm", "cpis_sku_context",
+                    ) if source in run.steps and run.steps[source]["status"] != "ok"]
+                    if failed_sources:
+                        step.skip(f"{', '.join(failed_sources)} did not finish; preserving CPIS")
+                        continue
                 dependency = {
                     "silver_shopify_attribution": "silver_shopify",
                     "gold_ad_performance": "silver_shopify_attribution",

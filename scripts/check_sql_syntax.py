@@ -52,6 +52,7 @@ os.environ.setdefault("DATABASE_URL_SYNC", "postgresql://user@localhost/db")
 
 #: module path -> the names of the SQL constants it executes.
 SQL_SOURCES: dict[str, tuple[str, ...]] = {
+    "app/services/gold/cpis_value_weighted.py": ("LINES_SQL", "SPEND_SQL", "RANGE_AGG_SQL", "TOTALS_SQL"),
     "scripts/refresh_cpis_sku_context.py":      ("DDL", "REFRESH"),
     "scripts/refresh_ad_history_milestones.py": ("DDL", "REFRESH"),
     "scripts/refresh_insights_daily_by_ad.py":  ("DDL", "REBUILD_SQL", "STAGE_SQL",

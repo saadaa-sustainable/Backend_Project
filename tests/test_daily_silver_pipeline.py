@@ -81,3 +81,23 @@ def test_conflicting_modes_fail_before_any_work(monkeypatch, flags):
     monkeypatch.setattr(sys, "argv", ["refresh_all_daily.py", *flags])
     with pytest.raises(SystemExit):
         daily.main()
+
+
+@pytest.mark.parametrize("flags", [[], ["--only-silver"], ["--only-shopify"], ["--only-shopify-silver"]])
+def test_all_refresh_paths_include_value_weighted_after_sources(monkeypatch, flags):
+    run = FakeRun()
+    monkeypatch.setattr(daily, "CronRun", lambda **kwargs: run)
+    monkeypatch.setattr(sys, "argv", ["refresh_all_daily.py", *flags])
+    assert daily.main() == 0
+    names = list(run.steps)
+    assert names.index("cpis_value_weighted") > names.index("silver_shopify")
+    assert names.index("cpis_value_weighted") > names.index("silver_cpis_utm")
+
+
+@pytest.mark.parametrize("source", ["silver_shopify", "silver_insights_daily", "silver_insights_entity", "ad_lifecycle"])
+def test_source_failure_preserves_weighted_snapshot(monkeypatch, source):
+    run = FakeRun(failures={source})
+    monkeypatch.setattr(daily, "CronRun", lambda **kwargs: run)
+    monkeypatch.setattr(sys, "argv", ["refresh_all_daily.py", "--only-silver"])
+    assert daily.main() == 1
+    assert run.steps["cpis_value_weighted"]["status"] == "skipped"

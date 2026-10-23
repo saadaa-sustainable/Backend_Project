@@ -35,6 +35,7 @@ from app.services.ad_efficiency import calculate_efficiency_scores, get_efficien
 from app.services.analytics_cache import cached_analytics
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
 from app.services.gold.cpis import match_ads_to_sku
+from app.services.gold.cpis_value_weighted import RANGE_AGG_SQL, TOTALS_SQL
 from app.services.reach_anchors import window_anchors
 
 router = APIRouter(prefix="/admin/analytics", tags=["analytics"])
@@ -5218,7 +5219,9 @@ class CpisUtmRow(BaseModel):
     # the "attribution mode" toggle:
     #   ad_spend / cost_per_order / cost_per_unit_sold / roas          -- equal per order
     #   ad_spend_vw / cost_per_order_vw / cost_per_unit_sold_vw / roas_vw -- value-weighted per order
-    # Both reconcile to the same total Meta ad-spend for UTM-attributed ads.
+    # Value-weighted requests use the daily revenue-share source for ALL
+    # attribution metrics, including units/orders. The legacy _vw fields are
+    # only populated in that mode, never with the superseded window formula.
     attributed_orders: int | None
     attributed_units: int | None
     attributed_revenue: float | None
@@ -5424,6 +5427,7 @@ async def _get_cpis_reconciliation(
 class CpisUtmResponse(BaseModel):
     rows: list[CpisUtmRow]
     total: int
+    attribution_mode: Literal["equal", "value_weighted"] = "equal"
     # Meta-side totals for the picked window, so the KPI strip can show
     # honest reconciliation:
     #   meta_total_spend    total ad spend in the window (from silver
@@ -5477,6 +5481,7 @@ async def get_cpis_utm(
     sort: Literal["ad_spend", "attributed_orders", "attributed_units", "attributed_revenue", "cost_per_order", "cost_per_unit_sold", "roas"] = Query(default="attributed_units"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    attribution_mode: Literal["equal", "value_weighted"] = Query(default="equal"),
 ) -> CpisUtmResponse:
     """CPIS per master SKU where every metric is UTM-attributed:
     order.utm_content = ad_id (Meta stamps this on every click), order
@@ -5528,7 +5533,59 @@ async def get_cpis_utm(
     # Always bind window (the master_sku_returns LEFT JOIN uses it,
     # regardless of custom-range vs pre-computed path).
     params: dict[str, object] = {"limit": limit, "offset": offset, "window": window}
-    if from_date and to_date:
+    if attribution_mode == "value_weighted":
+        if bool(from_date) != bool(to_date):
+            raise HTTPException(status_code=422, detail="Both from_date and to_date are required")
+        if not (from_date and to_date):
+            bounds = (await session.execute(text(
+                "SELECT MIN(window_from), MAX(window_to) FROM cpis_by_sku_utm "
+                "WHERE window_key = :window"
+            ), {"window": window})).first()
+            from_date, to_date = bounds if bounds else (None, None)
+        if not (from_date and to_date):
+            raise HTTPException(status_code=503, detail="CPIS date windows have not been refreshed")
+        if from_date > to_date:
+            raise HTTPException(status_code=422, detail="from_date must be on or before to_date")
+        params.update(from_date=from_date, to_date=to_date)
+        clauses = ["(ctx.is_live OR c.master_sku IS NOT NULL)"]
+        if include_archived:
+            clauses = ["true"]
+        if search:
+            clauses.append("ctx.master_sku ILIKE :search")
+            params["search"] = f"%{search}%"
+        if only_matched:
+            clauses.append("COALESCE(c.attributed_orders, 0) > 0")
+        universe_sql = (
+            "FROM public.cpis_sku_context ctx LEFT JOIN vw c USING (master_sku) WHERE "
+            + " AND ".join(clauses)
+        )
+        page_cte = f"""
+          bounds AS (SELECT CAST(:from_date AS date) AS lo, CAST(:to_date AS date) AS hi),
+          vw AS ({RANGE_AGG_SQL}),
+          page AS (
+            SELECT ctx.master_sku, CAST(:window AS text) AS window_key,
+                   CAST(:from_date AS date) AS window_from, CAST(:to_date AS date) AS window_to,
+                   COALESCE(c.attributed_orders, 0) AS attributed_orders,
+                   COALESCE(c.attributed_units, 0) AS attributed_units,
+                   COALESCE(c.attributed_revenue, 0) AS attributed_revenue,
+                   COALESCE(c.order_revenue, 0) AS order_revenue,
+                   COALESCE(c.order_units, 0) AS order_units,
+                   COALESCE(c.matched_ad_count, 0) AS matched_ad_count,
+                   COALESCE(c.ad_spend, 0) AS ad_spend,
+                   c.cost_per_order, c.cost_per_unit_sold, c.roas,
+                   COALESCE(c.ad_spend_vw, 0) AS ad_spend_vw,
+                   c.cost_per_order_vw, c.cost_per_unit_sold_vw, c.roas_vw,
+                   COALESCE(c.halo_orders, 0) AS halo_orders,
+                   COALESCE(c.halo_units, 0) AS halo_units,
+                   COALESCE(c.halo_revenue, 0) AS halo_revenue,
+                   0::numeric AS halo_spend, NULL::numeric AS primary_weight
+            {universe_sql}
+            ORDER BY c.{sort_column} DESC NULLS LAST, ctx.master_sku
+            LIMIT :limit OFFSET :offset
+          ),
+        """
+        count_sql = f"WITH vw AS ({RANGE_AGG_SQL}) SELECT COUNT(*) {universe_sql}"
+    elif from_date and to_date:
         params["from_date"] = from_date
         params["to_date"]   = to_date
         page_where = "WHERE day BETWEEN :from_date AND :to_date"
@@ -6316,6 +6373,9 @@ async def get_cpis_utm(
         # branches (cpis_by_sku_utm for presets, cpis_by_sku_daily
         # summed for custom ranges) build their columns separately, and
         # a formula duplicated across both is a formula that drifts.
+        if attribution_mode == "equal":
+            for field in ("ad_spend_vw", "cost_per_order_vw", "cost_per_unit_sold_vw", "roas_vw"):
+                row_dict[field] = None
         _rev = row_dict.get("attributed_revenue") or 0.0
         _be = row_dict.get("contribution_margin")
         for _suffix in ("", "_vw"):
@@ -6370,28 +6430,32 @@ async def get_cpis_utm(
     if wf and wt:
         # The reconciliation strip is independent of pagination/search.
         # Cache its complete, original population by allocation mode + dates.
-        rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
+        if attribution_mode == "value_weighted":
+            rec = dict((await session.execute(text(TOTALS_SQL), {"wf": wf, "wt": wt}))
+                       .mappings().one())
+        else:
+            rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
         meta_total_spend = float(rec["meta_total_spend"] or 0)
         spend_through = rec["spend_through"]
         attributed_orders_distinct = rec["attributed_orders_distinct"]
         attributed_spend = float(rec["attributed_spend"] or 0)
         untethered_spend = max(0.0, meta_total_spend - attributed_spend)
-        untethered_ad_unknown = min(float(rec["ad_unknown"] or 0), untethered_spend)
-        untethered_no_conversion = min(
-            float(rec["no_conversion"] or 0), untethered_spend - untethered_ad_unknown
-        )
-        # Lag by subtraction, so the three always sum to untethered_spend
-        # whichever attribution rule the active view used. The pre-computed
-        # windows already count an ad's spend when it converted anywhere in
-        # the window, so lag comes out at zero there; the custom-range view
-        # is same-day only, so it does not.
-        untethered_lag = max(
-            0.0, untethered_spend - untethered_ad_unknown - untethered_no_conversion
-        )
+        if attribution_mode == "equal":
+            untethered_ad_unknown = min(float(rec["ad_unknown"] or 0), untethered_spend)
+            untethered_no_conversion = min(
+                float(rec["no_conversion"] or 0), untethered_spend - untethered_ad_unknown
+            )
+            # Preserve Equal / Order's existing reconciliation. These reasons
+            # cannot be reused for the new ad-set/day population; VW reports
+            # the unallocated total without inventing a breakdown.
+            untethered_lag = max(
+                0.0, untethered_spend - untethered_ad_unknown - untethered_no_conversion
+            )
 
     return CpisUtmResponse(
         rows=rows,
         total=total,
+        attribution_mode=attribution_mode,
         meta_total_spend=meta_total_spend,
         attributed_spend=attributed_spend,
         untethered_spend=untethered_spend,
@@ -6488,6 +6552,7 @@ async def get_cpis_utm_daily_series(
     window: str = Query(default="30d"),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    attribution_mode: Literal["equal", "value_weighted"] = Query(default="equal"),
 ) -> CpisDailySeriesResponse:
     """Daily ad spend beside the orders it is credited with.
 
@@ -6536,7 +6601,20 @@ async def get_cpis_utm_daily_series(
         return CpisDailySeriesResponse(window_from=None, window_to=None,
                                        points=[], max_spend=0.0, max_orders=0)
 
-    rows = (await session.execute(text("""
+    orders_sql = """
+          SELECT day, COALESCE(SUM(attributed_orders), 0) AS attributed_orders
+            FROM public.cpis_by_sku_daily
+           WHERE day BETWEEN :wf AND :wt GROUP BY day
+    """
+    if attribution_mode == "value_weighted":
+        orders_sql = """
+          SELECT day, SUM(orders) AS attributed_orders FROM (
+            SELECT day, entity_id, MAX(entity_orders) AS orders
+            FROM public.cpis_value_weighted_daily
+            WHERE day BETWEEN :wf AND :wt GROUP BY day, entity_id
+          ) entities GROUP BY day
+        """
+    rows = (await session.execute(text(f"""
         WITH days AS (
           -- CAST(), not :wf::date -- SQLAlchemy's bind-parameter
           -- scanner does not see a name followed by '::' and left
@@ -6554,10 +6632,7 @@ async def get_cpis_utm_daily_series(
            GROUP BY day
         ),
         orders AS (
-          SELECT day, COALESCE(SUM(attributed_orders), 0) AS attributed_orders
-            FROM public.cpis_by_sku_daily
-           WHERE day BETWEEN :wf AND :wt
-           GROUP BY day
+          {orders_sql}
         )
         SELECT d.day,
                COALESCE(s.ad_spend, 0)::float        AS ad_spend,
