@@ -108,3 +108,6 @@ docs/*.csv
 
 # Local MCP OAuth store (clients + pending codes; never a key or token).
 var/
+
+# Copied in by admin/package.json prebuild from docs/ -- generated, not source.
+admin/public/docs/
