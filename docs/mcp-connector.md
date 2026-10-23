@@ -73,31 +73,45 @@ after changing these.
 
 ### The connector route (recommended)
 
-1. In Claude, open **Settings → Connectors → Add custom connector**.
-2. Paste the URL: `https://YOUR_HOST/mcp`
-3. Claude discovers the OAuth metadata and registers itself automatically.
-   You are not asked for a client ID or secret — there is none to copy.
-4. Claude opens a page headed **"Connect SAADAA Analytics"**. It names the
-   application asking, and states that access is read-only, dashboard-sections
-   only, and lasts one hour.
-5. Paste your `sda_…` access key into **Your assistant access key** and press
-   **Allow access**.
-6. Claude returns to the connector list with the connector enabled.
+A walkthrough in five steps. Screenshots taken 2026-10-23.
 
-![Step 5 — the authorization page this connector sends you to. The three bullets are the actual grant: read-only, dashboard sections only, one hour.](img/connect-authorize.png)
+**Step 1 — Open Settings → Customize → Connectors.**
 
-> **Steps 1–4 happen inside Claude's own settings**, which this document
-> cannot picture — it is screenshotted from this deployment, and Claude's
-> interface is not ours to capture. The wording above matches what Claude
-> shows at the time of writing; if its labels have moved, look for
-> "connectors" and "custom".
+Note the path. Connectors used to sit directly under Settings and have since
+moved under **Customize**. Once added, a custom connector appears in this same
+list, tagged `Custom`.
 
-After an hour the connector asks again. That is deliberate: there is no
-long-lived token sitting in a third party.
+![Step 1 — Settings → Customize → Connectors. The + Add button is top right.](img/connect-1-connectors-list.png)
 
-> **The page asks for your access key, not a password.** There is no account to
-> log into. If you do not have a key, ask your administrator — do not reuse
-> someone else's.
+**Step 2 — Press + Add, then "Add custom connector".**
+
+**Step 3 — Name it, paste the URL, press Continue.**
+
+The **Name** is only the label shown in the list above, so call it whatever
+your team will recognise. The **MCP server URL** is the one field that matters:
+
+```text
+https://YOUR_HOST/mcp
+```
+
+![Steps 2–3 — the Add custom connector dialog.](img/connect-2-add-dialog.png)
+
+**Step 4 — Claude registers itself.**
+
+It discovers the OAuth metadata and completes registration on its own. You are
+not asked for a client ID or secret, because there is none to copy.
+
+**Step 5 — Paste your access key and allow access.**
+
+Claude opens a page headed **"Connect SAADAA Analytics"**. Paste your `sda_…`
+key into **Your assistant access key** and press **Allow access**. Claude
+returns to the connector list with the connector enabled.
+
+![Step 5 — the authorization page. The three bullets are the actual grant: read-only, dashboard sections only, one hour.](img/connect-authorize.png)
+
+> Claude's own interface changes from time to time. If these labels have moved,
+> look for "connectors" and "custom" — the URL you paste and the key you then
+> supply do not change.
 
 ### The bearer-header route
 
