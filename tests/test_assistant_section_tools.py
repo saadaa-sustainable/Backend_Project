@@ -56,7 +56,7 @@ def test_sku_economics_rejects_broken_ranges(args):
         spec("get_sku_economics")[0].model_validate(args)
 
 
-@pytest.mark.parametrize("sort", ["spend", "first_click_roas", "last_click_roas"])
+@pytest.mark.parametrize("sort", ["spend", "first_click_spend", "last_click_spend", "first_click_roas", "last_click_roas"])
 def test_first_click_source_grain_refuses_spend_sorts(sort):
     """Source grain has no Meta spend, so those columns are all NULL there.
 
@@ -69,9 +69,10 @@ def test_first_click_source_grain_refuses_spend_sorts(sort):
 
 
 @pytest.mark.parametrize("grain", ["ad", "adset"])
-def test_first_click_id_grains_allow_spend_sorts(grain):
+@pytest.mark.parametrize("sort", ["first_click_spend", "last_click_spend", "first_click_roas"])
+def test_first_click_id_grains_allow_spend_sorts(grain, sort):
     spec("get_first_click_attribution")[0].model_validate(
-        {"grain": grain, "sort": "first_click_roas"})
+        {"grain": grain, "sort": sort})
 
 
 def test_last_click_matched_flags_are_exclusive():

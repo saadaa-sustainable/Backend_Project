@@ -2504,10 +2504,10 @@ def _first_click_sql(grain: str) -> str:
         "ad":       ("ad_lifecycle",         "ad_id",       "ad_name"),
         "adset":    ("public.meta_adsets",   "adset_id",    "adset_name"),
     }
-    # Spend is the ENTITY's cost over the selected window, not an
-    # attribution-side figure: it is what Meta billed for this ad in
-    # these dates, full stop. So it is one number per row that sits
-    # beside both revenue columns rather than splitting between them.
+    # Aggregate the entity's actual spend over the selected window ONCE.
+    # Each attribution side includes it only if the entity appears at that
+    # end of an order in the same window. Repeated orders must not multiply
+    # spend. Both sides can include the same cost; they are not additive.
     #
     # Pre-aggregated before the join. Joining insights_daily_by_* raw
     # would fan every entity out by its number of active days and
@@ -2540,6 +2540,12 @@ def _first_click_sql(grain: str) -> str:
         tbl, key, col = names[grain]
         label = f"COALESCE(NULLIF(btrim(n.{col}), ''), e.entity)"
         join = f"  LEFT JOIN {tbl} n ON n.{key} = e.entity\n"
+    side_spend = {
+        side: ("NULL::numeric" if grain == "source" else
+               f"CASE WHEN {spend_col} IS NULL THEN NULL "
+               f"WHEN e.{side}_orders > 0 THEN {spend_col} ELSE 0 END")
+        for side in ("first", "last")
+    }
     return f"""
 WITH j AS (
   SELECT {first_k} AS first_k, {last_k} AS last_k,
@@ -2570,6 +2576,8 @@ WITH j AS (
          -- column down the page is valid and summing a ROW across is not.
          COALESCE(SUM(revenue) FILTER (WHERE side = 'first'), 0)         AS first_click_revenue,
          COALESCE(SUM(revenue) FILTER (WHERE side = 'last'),  0)         AS last_click_revenue,
+         COUNT(*) FILTER (WHERE side = 'first')                        AS first_orders,
+         COUNT(*) FILTER (WHERE side = 'last')                         AS last_orders,
          -- Rounded to one place: the inputs are whole days and whole
          -- sessions, so more precision would imply a resolution the
          -- source does not have. Averaged over orders this entity
@@ -2581,6 +2589,8 @@ WITH j AS (
 )
 SELECT e.entity AS source, {label} AS label, e.channel AS channel,
        {spend_col} AS spend,
+       {side_spend['first']} AS first_click_spend,
+       {side_spend['last']} AS last_click_spend,
        e.first_click_revenue, e.last_click_revenue,
        -- Each ROAS divides its OWN side's revenue by the entity's
        -- window spend, so the pair reads "what every rupee this ad
@@ -2600,9 +2610,9 @@ SELECT e.entity AS source, {label} AS label, e.channel AS channel,
        -- cost of zero, and a few hundred rupees of spend makes a
        -- quotient that is noise rather than a rate. See that constant
        -- for the measured distribution behind the threshold.
-       CASE WHEN {spend_col} >= {roas_min}
+       CASE WHEN {spend_col} >= {roas_min} AND e.first_orders > 0
             THEN e.first_click_revenue / {spend_col} END AS first_click_roas,
-       CASE WHEN {spend_col} >= {roas_min}
+       CASE WHEN {spend_col} >= {roas_min} AND e.last_orders > 0
             THEN e.last_click_revenue  / {spend_col} END AS last_click_roas,
        e.avg_days_to_convert, e.avg_sessions
   FROM agg e
@@ -2634,11 +2644,16 @@ class FirstClickRow(BaseModel):
     #: source grain, and None for an entity Meta never billed -- a dash
     #: in the UI, deliberately not a zero.
     spend: float | None
+    #: The entity's selected-window spend, counted once per attribution side
+    #: where it appears. Zero if this side has no orders and spend is known;
+    #: None if spend is unavailable or at source grain. The pair overlaps.
+    first_click_spend: float | None
+    last_click_spend: float | None
     first_click_revenue: float
     last_click_revenue: float
     #: Each side's revenue over the entity's own window spend. None at
-    #: source grain, and None below _ROAS_MIN_SPEND -- a dash, never an
-    #: infinite return on a cost of nothing. In the same ratio as the
+    #: source grain, without orders on that side, and below _ROAS_MIN_SPEND.
+    #: A dash, never an infinite return on a cost of nothing. In the same ratio as the
     #: revenue pair, so the same rule applies: read a column down, never
     #: a row across.
     #:
@@ -2751,6 +2766,8 @@ _ROAS_MIN_SPEND = 1000
 
 _FIRST_CLICK_SORTS = {
     "spend": "spend",
+    "first_click_spend": "first_click_spend",
+    "last_click_spend": "last_click_spend",
     "first_click_revenue": "first_click_revenue",
     "last_click_revenue": "last_click_revenue",
     "first_click_roas": "first_click_roas",
