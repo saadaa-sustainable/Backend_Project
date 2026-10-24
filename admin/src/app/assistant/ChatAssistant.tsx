@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { AssistantModelSelector } from "./AssistantModelSelector";
 import {
   ApiError,
   AssistantModel,
@@ -71,10 +72,11 @@ export function ChatAssistant({ allowUpload = true, transport, onBusyChange, onA
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [models, setModels] = useState<AssistantModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelAttempt, setModelAttempt] = useState(0);
   const [selectedModel, setSelectedModel] = useState<string>("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const modelRequestRef = useRef<{ load: () => Promise<AssistantModel[]>; result: Promise<AssistantModel[]> } | null>(null);
+  const modelRequestRef = useRef<{ load: () => Promise<AssistantModel[]>; attempt: number; result: Promise<AssistantModel[]> } | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -82,7 +84,7 @@ export function ChatAssistant({ allowUpload = true, transport, onBusyChange, onA
 
   useEffect(() => {
     let cancelled = false;
-    if (allowUpload) {
+    if (allowUpload && modelAttempt === 0) {
       fetchContextDocuments()
         .then((res) => { if (!cancelled) setDocuments(res); })
         .catch(() => {
@@ -90,14 +92,15 @@ export function ChatAssistant({ allowUpload = true, transport, onBusyChange, onA
         });
     }
     const loadModels = transport?.models ?? fetchAssistantModels;
-    if (!modelRequestRef.current || modelRequestRef.current.load !== loadModels) {
-      modelRequestRef.current = { load: loadModels, result: loadModels() };
+    if (!modelRequestRef.current || modelRequestRef.current.load !== loadModels || modelRequestRef.current.attempt !== modelAttempt) {
+      modelRequestRef.current = { load: loadModels, attempt: modelAttempt, result: loadModels() };
     }
     modelRequestRef.current.result
       .then((res) => {
         if (cancelled) return;
         setModels(res);
-        setSelectedModel((prev) => prev || res[0]?.id || "");
+        setSelectedModel((prev) => res.some(m => m.id === prev && m.available !== false)
+          ? prev : res.find(m => m.available !== false)?.id || "");
       })
       .catch((err) => {
         if (!cancelled) {
@@ -109,7 +112,14 @@ export function ChatAssistant({ allowUpload = true, transport, onBusyChange, onA
         if (!cancelled) setModelsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [allowUpload, transport, onAccessError]);
+  }, [allowUpload, transport, onAccessError, modelAttempt]);
+
+  function refreshModels() {
+    if (loading || modelsLoading) return;
+    setModelsLoading(true);
+    setSetupError(null);
+    setModelAttempt(attempt => attempt + 1);
+  }
 
   async function handleSend() {
     const text = input.trim();
@@ -166,48 +176,10 @@ export function ChatAssistant({ allowUpload = true, transport, onBusyChange, onA
             New conversation
           </button>
         </div>
-        {models.length > 0 && (
-          <div className="border-b border-border-primary px-4 py-2.5">
-            <div className="flex items-center gap-2">
-              <label htmlFor={modelId} className="text-xs font-medium text-text-secondary">Model</label>
-              <select
-                id={modelId}
-                disabled={loading}
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="rounded-md border border-border-primary bg-white px-2 py-1 text-xs text-text-primary focus:border-accent-yellow focus:outline-none"
-              >
-                {models.filter(m => m.provider === "chatgpt" || m.provider === "openai").map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                {!transport && <>
-                <optgroup label="Cloudflare Workers AI">
-                  {models
-                    .filter((m) => m.provider === "cloudflare")
-                    .map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}
-                      </option>
-                    ))}
-                </optgroup>
-                <optgroup label="Claude (extra cost — use sparingly)">
-                  {models
-                    .filter((m) => m.provider === "anthropic")
-                    .map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}
-                      </option>
-                    ))}
-                </optgroup>
-                </>}
-              </select>
-            </div>
-            {(() => {
-              const note = models.find((m) => m.id === selectedModel)?.note;
-              return note ? (
-                <p className="mt-1.5 text-[11px] text-warning-text">⚠ {note}</p>
-              ) : null;
-            })()}
-          </div>
-        )}
+        {models.length > 0 && <AssistantModelSelector id={modelId} models={models}
+          selected={selectedModel} disabled={loading || modelsLoading}
+          refreshing={modelsLoading} onRefresh={refreshModels}
+          onSelect={model => { setSelectedModel(model); setError(null); }} />}
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {messages.length === 0 && (
             <p className="text-sm text-text-secondary">

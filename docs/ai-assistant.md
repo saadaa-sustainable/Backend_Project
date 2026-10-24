@@ -1,7 +1,7 @@
 # Dashboard AI assistant
 
 The dashboard offers two independent connections: **ChatGPT account** (the
-existing hosted OAuth flow) and **API chat** (team-billed OpenAI API chat).
+existing hosted OAuth flow) and **API chat** (team-billed OpenAI or Anthropic API chat).
 API chat is selected by default and opens directly without user sign-in or an access key.
 The separate ChatGPT account flow still requires its own authentication.
 The backend also exposes a standard, authenticated **Streamable HTTP MCP server
@@ -51,6 +51,17 @@ sync in three places.
 Changing connections preserves each conversation while the page stays open.
 There is no automatic switch between billing accounts.
 
+Within API chat, the **Model** selector groups GPT and Claude separately.
+Changing the model preserves the conversation and sends subsequent questions,
+conversation history and relevant tool results to the selected provider.
+The selector is disabled while an answer is running. Claude models remain visible
+but disabled until the backend's Anthropic key is configured. Key presence means
+configured, not that billing or access to every listed model has been verified.
+Use **Refresh models** after a local `.env` key or model-list change. This reloads
+the catalog without clearing the conversation or contacting either provider.
+The backend invalidates its settings cache when `.env` changes, including key
+rotation and removal. Hosted environment-variable changes still require a restart.
+
 API/MCP access works independently of ChatGPT OAuth provisioning. It is disabled
 until an administrator configures the credentials below. No analytics schema
 changes or database migrations are required.
@@ -70,6 +81,54 @@ ASSISTANT_API_ENABLED=true
 ASSISTANT_API_REQUIRE_USER_AUTH=false
 ```
 
+To use your Anthropic API credits, add a key from the
+[Claude Console](https://platform.claude.com/settings/keys) to the same private backend environment:
+
+```dotenv
+ASSISTANT_API_ANTHROPIC_KEY=YOUR_PRIVATE_ANTHROPIC_KEY
+```
+
+For a personal or service-account key that is not scoped to one workspace, also set:
+
+```dotenv
+ASSISTANT_API_ANTHROPIC_WORKSPACE_ID=YOUR_WORKSPACE_ID
+```
+
+Copy the `wrkspc_…` ID from [Claude Console → Workspaces](https://platform.claude.com/settings/workspaces).
+Both chat requests and the provider verification script send it in the
+`anthropic-workspace-id` header. Anthropic requires this header for unscoped keys;
+a key scoped to a workspace can omit it. See [Anthropic authentication](https://platform.claude.com/docs/en/manage-claude/authentication).
+An HTTP 400 asking for a workspace means this setting is missing; it does not
+establish that the API key or credits are invalid. Unknown provider errors are
+reported with their HTTP status, without exposing response bodies or credentials.
+
+After changing the local `.env`, reload the assistant or click **Refresh models**.
+Restart FastAPI after changing hosted environment variables.
+No database migration or user-auth change is needed. With this key configured,
+the selector offers **Claude Sonnet 5.5**, **Claude Haiku 5.5**, and **Claude Opus
+5.5**, using the IDs in the [official Claude model catalog](https://platform.claude.com/docs/en/models/overview).
+The existing `ASSISTANT_API_MODEL` remains the default GPT choice when its key is
+configured. An Anthropic-only configuration is also supported; the first enabled
+Claude model becomes the default.
+
+Optional administrator allowlists use JSON arrays:
+
+```dotenv
+ASSISTANT_API_ANTHROPIC_MODELS='["claude-sonnet-5-5","claude-haiku-5-5","claude-opus-5-5"]'
+ASSISTANT_API_OPENAI_MODELS='["gpt-6-luna","gpt-6.1-sol","gpt-6-astra"]'
+```
+
+The default GPT choices are Luna, Sol, and Astra from the
+[official OpenAI catalog](https://developers.openai.com/api/docs/models).
+Override `ASSISTANT_API_OPENAI_MODELS` with Responses/tool-compatible GPT IDs
+available to your OpenAI project, or `[]` to offer only `ASSISTANT_API_MODEL`.
+The existing `ASSISTANT_API_MODEL` is always included and stays the default.
+Clients cannot submit arbitrary model IDs outside these allowlists.
+Claude calls go directly to Anthropic's Messages API using its own key; GPT calls
+continue to use OpenAI. Both use the same read-only MCP tool catalog, source links,
+timeouts, request limits and authorization checks. Provider errors and data-tool
+errors stop the turn without retrying or switching provider.
+
 Keep these values on the FastAPI backend, outside the frontend and chat.
 API keys are loaded
 server-side as described in [OpenAI's authentication documentation](https://developers.openai.com/api/reference/overview).
@@ -79,6 +138,9 @@ After adding the key, list available models if needed, then check the selected o
 ```sh
 .venv/bin/python scripts/check_assistant_provider.py --list-models
 .venv/bin/python scripts/check_assistant_provider.py
+.venv/bin/python scripts/check_assistant_provider.py --provider anthropic
+# Check another configured Claude model without generating an answer:
+.venv/bin/python scripts/check_assistant_provider.py --provider anthropic --model claude-haiku-5-5
 ```
 
 This check makes one model-read request, without inference, database access or
@@ -100,8 +162,12 @@ Set these on the **FastAPI backend**, as private environment variables:
 | `ASSISTANT_API_REQUIRE_USER_AUTH` | `false` for direct dashboard chat (default); `true` restores the access-key form |
 | `ASSISTANT_API_SIGNING_KEY` | Optional for direct chat; required for external MCP/access-key mode, at least 32 random characters |
 | `ASSISTANT_API_ACCESS_KEY_HASHES` | Optional for direct chat; required for external MCP/access-key mode, JSON label-to-hash mapping |
-| `ASSISTANT_API_OPENAI_KEY` | Team OpenAI project API key; needed for dashboard chat only |
-| `ASSISTANT_API_MODEL` | Exact Responses API model ID available to that project; needed for dashboard chat only |
+| `ASSISTANT_API_OPENAI_KEY` | Team OpenAI project API key; enables GPT choices |
+| `ASSISTANT_API_MODEL` | Default Responses API model ID available to that OpenAI project |
+| `ASSISTANT_API_OPENAI_MODELS` | Optional JSON array of additional approved GPT IDs |
+| `ASSISTANT_API_ANTHROPIC_KEY` | Team Anthropic API key; enables Claude choices and uses that account's credits |
+| `ASSISTANT_API_ANTHROPIC_WORKSPACE_ID` | `wrkspc_…` ID; required for an Anthropic key that is not scoped to a workspace |
+| `ASSISTANT_API_ANTHROPIC_MODELS` | Optional JSON array overriding the Claude model list above |
 
 Set `ASSISTANT_API_PUBLIC_ORIGIN` to the **same value on the Next.js frontend
 server**. Set its `ASSISTANT_BACKEND_URL` to your FastAPI origin. These are

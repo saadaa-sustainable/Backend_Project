@@ -10,6 +10,7 @@ import uuid
 from collections import deque
 from contextlib import contextmanager
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import jwt
@@ -34,6 +35,13 @@ class APISettings(BaseSettings):
     signing_key: SecretStr = SecretStr("")
     openai_key: SecretStr = SecretStr("")
     model: str = ""
+    # Explicit administrator allowlists, never arbitrary client-selected billing.
+    openai_models: tuple[str, ...] = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra")
+    anthropic_key: SecretStr = SecretStr("")
+    anthropic_workspace_id: str = ""
+    anthropic_models: tuple[str, ...] = (
+        "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5",
+    )
     #: Clients and pending authorization codes for the connector OAuth flow.
     #: Never holds an access key or a token -- see app/services/mcp_oauth.py.
     #: Losing this file costs a re-add of the connector, nothing more.
@@ -66,14 +74,60 @@ class APISettings(BaseSettings):
         except (ValueError, TypeError) as exc:
             raise HTTPException(503, "API and MCP access has not been configured by the administrator.") from exc
 
-    def require_model(self) -> None:
-        if not self.openai_key.get_secret_value() or not self.model.strip():
-            raise HTTPException(503, "The administrator needs to configure the OpenAI API key and model for chat.")
+    def models(self) -> list[dict]:
+        """Public catalog: show setup state without leaking credentials or calling providers."""
+        labels = {"gpt-6-luna": "GPT-6 Luna", "gpt-6.1-sol": "GPT-6.1 Sol", "gpt-6-astra": "GPT-6 Astra",
+                  "claude-sonnet-5-5": "Claude Sonnet 5.5",
+                  "claude-haiku-5-5": "Claude Haiku 5.5", "claude-opus-5-5": "Claude Opus 5.5"}
+        catalog = []
+        seen = set()
+        for provider, ids, key in (
+            ("openai", (self.model, *self.openai_models), self.openai_key),
+            ("anthropic", self.anthropic_models, self.anthropic_key),
+        ):
+            for model_id in ids:
+                model_id = model_id.strip()
+                if not model_id:
+                    continue
+                if model_id in seen:
+                    continue
+                seen.add(model_id)
+                available = bool(key.get_secret_value().strip())
+                name = "Anthropic" if provider == "anthropic" else "OpenAI"
+                catalog.append({"id": model_id, "label": labels.get(model_id, model_id),
+                                "provider": provider, "available": available,
+                                "note": (f"Uses the team's {name} API account."
+                                         if available else f"{name} has not been connected by your administrator.")})
+        return catalog
+
+    def require_model(self, model_id: str | None = None) -> dict:
+        catalog = self.models()
+        if model_id:
+            selected = next((m for m in catalog if m["id"] == model_id), None)
+            if selected is None:
+                raise HTTPException(400, "Choose one of the configured API models.")
+        else:
+            selected = next((m for m in catalog if m["available"]), None)
+        if selected is None or not selected["available"]:
+            raise HTTPException(503, "The administrator needs to configure the selected provider's API key and model for chat.")
+        return selected
 
 
-@lru_cache
+@lru_cache(maxsize=1)
+def _cached_settings(env_path: Path, signature: tuple | None) -> APISettings:
+    return APISettings(_env_file=env_path)
+
+
 def settings() -> APISettings:
-    return APISettings()
+    # Adding/rotating a key in .env must not leave the model catalog disabled
+    # until a process restart. Reuse settings until the file actually changes.
+    env_path = Path(".env").resolve()
+    try:
+        stat = env_path.stat()
+        signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino)
+    except FileNotFoundError:
+        signature = None
+    return _cached_settings(env_path, signature)
 
 
 def identity(digest: str) -> dict:

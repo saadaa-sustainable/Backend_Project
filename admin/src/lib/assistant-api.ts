@@ -5,6 +5,7 @@ export interface AssistantAPIStatus {
   connected: boolean;
   chat_enabled: boolean;
   auth_required: boolean;
+  anthropic_configured?: boolean;
   message?: string;
   user?: { name: string };
   mcp_url?: string;

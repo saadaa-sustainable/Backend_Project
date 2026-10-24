@@ -57,6 +57,24 @@ test('API connection failure stops after one request', async () => {
   } finally { globalThis.fetch = original; }
 });
 
+test('switching Claude to GPT sends the selected model and preserves conversation history', async () => {
+  const original = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return Response.json({ message: 'Answer', sources: [] });
+  };
+  try {
+    const first = [{ role: 'user', content: 'Spend?' }];
+    await api.assistantAPITransport.send(first, 'claude-sonnet-5-5');
+    const followup = [...first, { role: 'assistant', content: 'Spend was ₹50.' }, { role: 'user', content: 'Explain that' }];
+    await api.assistantAPITransport.send(followup, 'configured-gpt');
+    assert.equal(bodies[0].model, 'claude-sonnet-5-5');
+    assert.equal(bodies[1].model, 'configured-gpt');
+    assert.deepEqual(bodies[1].messages, followup);
+  } finally { globalThis.fetch = original; }
+});
+
 test('API proxy denies cross-origin, unknown routes and oversized bodies without forwarding', async () => {
   const original = globalThis.fetch;
   globalThis.fetch = () => assert.fail('Must not reach backend');
