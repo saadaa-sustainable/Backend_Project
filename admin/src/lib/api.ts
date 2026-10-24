@@ -1199,12 +1199,18 @@ export interface FirstClickRow {
    *  grain, and null for an entity Meta never billed — rendered as a dash,
    *  deliberately not a zero. */
   spend: number | null;
+  /** Selected-window Meta spend counted once if this entity opened an order.
+   *  Zero when absent on this side and spend is known; null when unavailable. */
+  first_click_spend: number | null;
+  /** Same window spend when this entity closed an order. Overlaps first-click
+   *  spend for entities at both ends; do not add these columns together. */
+  last_click_spend: number | null;
   /** Full value of every order this entity OPENED. */
   first_click_revenue: number;
   /** Full value of every order this entity CLOSED. Overlaps the above. */
   last_click_revenue: number;
-  /** Each side's revenue over this entity's own window spend. Null wherever
-   *  `spend` is null or zero — a dash, never an infinite return on no cost.
+  /** Each side's revenue over the shared selected-window `spend`. Null without orders on
+   *  that side or below ₹1,000 of spend — a dash, not a rate on tiny spend.
    *  In the same ratio as the revenue pair, so read a column down, not a
    *  row across. */
   first_click_roas: number | null;

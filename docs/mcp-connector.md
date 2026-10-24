@@ -377,6 +377,14 @@ negative** — that single comparison is most of the analysis.
 **Reads** each entity seen from both ends of the customer journey, from GA4, at
 source / ad / ad set grain.
 
+At ad and ad set grain, the single **Ad spend** column uses the matched
+entity's Meta spend over the selected date range, counted once regardless
+of how many orders it opened or closed. The range also filters order dates;
+an order's first touch may have happened earlier. First-click ROAS and
+last-click ROAS divide their respective revenue by this same spend.
+Missing spend is shown as a dash; source-level spend is not available.
+Each ROAS remains blank without orders on that side or below ₹1,000 of spend.
+
 > First Click, 1–21 October 2026, ad grain, the ten ads whose first-click
 > revenue most exceeds their last-click revenue. Do not add the columns.
 >

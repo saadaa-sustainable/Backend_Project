@@ -98,7 +98,7 @@ class FirstClickInput(ToolInput):
     date_from: date | None = Field(default=None, description="Inclusive YYYY-MM-DD. Defaults to 30 days back.")
     date_to: date | None = Field(default=None, description="Inclusive YYYY-MM-DD. Defaults to today.")
     grain: Literal["source", "ad", "adset"] = "source"
-    sort: Literal["spend", "first_click_revenue", "last_click_revenue",
+    sort: Literal["spend", "first_click_spend", "last_click_spend", "first_click_revenue", "last_click_revenue",
                   "first_click_roas", "last_click_roas",
                   "avg_days_to_convert", "avg_sessions"] = "first_click_revenue"
     direction: Literal["desc", "asc"] = "desc"
@@ -108,7 +108,7 @@ class FirstClickInput(ToolInput):
     def check_range(self) -> FirstClickInput:
         if (self.date_from is None) != (self.date_to is None):
             raise ValueError("Provide both date_from and date_to, or neither.")
-        if self.grain == "source" and self.sort in {"spend", "first_click_roas", "last_click_roas"}:
+        if self.grain == "source" and self.sort in {"spend", "first_click_spend", "last_click_spend", "first_click_roas", "last_click_roas"}:
             raise ValueError("Source grain carries no Meta spend, so spend and both ROAS sorts are unavailable there.")
         return self
 
@@ -228,6 +228,11 @@ _TOOL_SPECS = {
         "first_click_revenue and last_click_revenue EACH carry the order's FULL value -- an order "
         "opened by X and closed by Y adds its whole value to both. Read a column down the page; "
         "NEVER add a row across, and never present their sum. "
+        "The dashboard shows one Ad spend column: use the spend field, which counts each "
+        "matched entity's selected-window Meta spend once, regardless of order count. "
+        "Both ROAS columns use this shared spend denominator. Do not present the legacy "
+        "first_click_spend and last_click_spend fields as additional costs. "
+        "The window filters order dates and spend dates, not first-touch dates. "
         "Source grain has no Meta spend, so spend and both ROAS columns are null there. "
         "first_click_roas and last_click_roas are null below Rs 1,000 of window spend, where the "
         "quotient stops being a rate. first_click_roas runs HIGH for an ad winding down: its "
