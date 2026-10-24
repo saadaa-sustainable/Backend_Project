@@ -13,8 +13,28 @@ from scripts.check_assistant_provider import check
 def isolated_provider_environment(monkeypatch):
     # Other application tests can load .env; provider fixtures must stay independent.
     for name in list(os.environ):
-        if name.startswith("ASSISTANT_API_"):
+        if name.startswith("ASSISTANT_API_") or name == "ADMIN_APP_ORIGIN":
             monkeypatch.delenv(name)
+
+
+def test_dashboard_origin_uses_admin_origin_when_assistant_override_is_absent(monkeypatch):
+    monkeypatch.setenv("ADMIN_APP_ORIGIN", " https://dashboard.onrender.com/ ")
+    settings = APISettings(_env_file=None, enabled=True)
+    assert settings.public_origin == "https://dashboard.onrender.com"
+    assert settings.require_configured() == {}
+
+
+def test_explicit_dashboard_origin_takes_precedence(monkeypatch):
+    monkeypatch.setenv("ADMIN_APP_ORIGIN", "https://dashboard.onrender.com")
+    monkeypatch.setenv("ASSISTANT_API_PUBLIC_ORIGIN", "https://dashboard.example/")
+    assert APISettings(_env_file=None).public_origin == "https://dashboard.example"
+    assert APISettings(_env_file=None, public_origin="https://fixture.example").public_origin == "https://fixture.example"
+
+
+def test_dashboard_origin_fallback_reads_dotenv(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ADMIN_APP_ORIGIN=https://dashboard.onrender.com\n")
+    assert APISettings(_env_file=env).public_origin == "https://dashboard.onrender.com"
 
 
 def config(**overrides):

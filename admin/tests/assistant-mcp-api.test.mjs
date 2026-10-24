@@ -14,6 +14,76 @@ const api = await load('../src/lib/assistant-api.ts');
 const proxy = await load('../src/app/api/assistant/api/[action]/route.ts');
 const context = action => ({ params: Promise.resolve({ action }) });
 
+test('Render HTTPS origin works behind an internal HTTP proxy without an explicit override', async t => {
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    assert.equal(init.headers.get('Origin'), 'https://dashboard.onrender.com');
+    return Response.json({ message: 'Disconnected' });
+  });
+  const previous = { ...process.env };
+  try {
+    delete process.env.ASSISTANT_API_PUBLIC_ORIGIN;
+    process.env.RENDER_EXTERNAL_URL = 'https://dashboard.onrender.com';
+    process.env.NODE_ENV = 'production';
+    const response = await proxy.POST(new Request('http://localhost:10000/api/assistant/api/disconnect', {
+      method: 'POST', headers: { Origin: 'https://dashboard.onrender.com' }, body: '{}',
+    }), context('disconnect'));
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.getSetCookie().some(value => value.includes('; Secure')));
+  } finally { process.env = previous; }
+});
+
+test('explicit custom origin wins over Render default and tolerates pasted whitespace and slash', async t => {
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    assert.equal(init.headers.get('Origin'), 'https://dashboard.example');
+    return Response.json({ message: 'Answer' });
+  });
+  const previous = { ...process.env };
+  try {
+    process.env.ASSISTANT_API_PUBLIC_ORIGIN = ' https://dashboard.example/ ';
+    process.env.RENDER_EXTERNAL_URL = 'https://dashboard.onrender.com';
+    const response = await proxy.POST(new Request('http://localhost:10000/test', {
+      method: 'POST', headers: { Origin: 'https://dashboard.example' }, body: '{}',
+    }), context('chat'));
+    assert.equal(response.status, 200);
+  } finally { process.env = previous; }
+});
+
+test('production origin checks reject missing, null and spoofed origins without forwarding', async t => {
+  t.mock.method(globalThis, 'fetch', () => assert.fail('Must not reach backend'));
+  const previous = { ...process.env };
+  try {
+    delete process.env.ASSISTANT_API_PUBLIC_ORIGIN;
+    process.env.RENDER_EXTERNAL_URL = 'https://dashboard.onrender.com';
+    process.env.NODE_ENV = 'production';
+    for (const origin of [undefined, 'null', 'https://attacker.example', 'https://dashboard.onrender.com.attacker.example']) {
+      const headers = { Host: 'attacker.example', 'X-Forwarded-Host': 'attacker.example', 'X-Forwarded-Proto': 'https' };
+      if (origin !== undefined) headers.Origin = origin;
+      const response = await proxy.POST(new Request('https://attacker.example/test', {
+        method: 'POST', headers, body: '{}',
+      }), context('chat'));
+      assert.equal(response.status, 403);
+    }
+  } finally { process.env = previous; }
+});
+
+test('missing or malformed production origin reports configuration error without forwarding', async t => {
+  t.mock.method(globalThis, 'fetch', () => assert.fail('Must not reach backend'));
+  const previous = { ...process.env };
+  try {
+    delete process.env.RENDER_EXTERNAL_URL;
+    process.env.NODE_ENV = 'production';
+    for (const origin of [undefined, '', 'https://dashboard.example/user/assistant', 'http://dashboard.example', 'https://user:password@dashboard.example', 'https://dashboard.example?redirect=1']) {
+      if (origin === undefined) delete process.env.ASSISTANT_API_PUBLIC_ORIGIN;
+      else process.env.ASSISTANT_API_PUBLIC_ORIGIN = origin;
+      const response = await proxy.POST(new Request('https://dashboard.example/test', {
+        method: 'POST', headers: { Origin: 'https://dashboard.example' }, body: '{}',
+      }), context('chat'));
+      assert.equal(response.status, 503);
+      assert.match((await response.json()).detail, /ASSISTANT_API_PUBLIC_ORIGIN/);
+    }
+  } finally { process.env = previous; }
+});
+
 test('both chat proxies and browsers leave headroom beyond the 240-second backend turn', async () => {
   const chatgpt = await load('../src/lib/chatgpt.ts');
   const chatgptProxy = await load('../src/app/api/assistant/chatgpt/[action]/route.ts');

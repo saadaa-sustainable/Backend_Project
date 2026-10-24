@@ -124,6 +124,9 @@ services:
       # can hit /admin/analytics/* from a different origin.
       - key: ADMIN_APP_ORIGIN
         sync: false
+      # Must match the browser-facing admin URL on BOTH services.
+      - key: ASSISTANT_API_PUBLIC_ORIGIN
+        value: https://backend-project-admin.onrender.com
 
   # ------------------------------------------------------------------
   # Admin panel (Next.js 15). Same repo, deployed from the `admin/`
@@ -159,6 +162,8 @@ services:
       # https://backend-project-mlk9.onrender.com
       - key: NEXT_PUBLIC_API_BASE_URL
         sync: false
+      - key: ASSISTANT_API_PUBLIC_ORIGIN
+        value: https://backend-project-admin.onrender.com
       # Node 20 has full Next.js 15 support and pre-built binaries for
       # every native module in package.json. Node 22 also works but
       # 20 is Render's default LTS.

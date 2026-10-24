@@ -174,6 +174,18 @@ server**. Set its `ASSISTANT_BACKEND_URL` to your FastAPI origin. These are
 server-only values; never use `NEXT_PUBLIC_*` for credentials. API/MCP-only mode
 does not need a persistent auth disk or any `CHATGPT_*` values.
 
+The Render blueprint sets the same dashboard origin on both services. If you use
+a custom domain, change both values together. When this setting is absent, the
+frontend uses Render's `RENDER_EXTERNAL_URL` and the backend uses its existing
+`ADMIN_APP_ORIGIN`. These are trusted server settings; request headers cannot
+choose an allowed origin. Local development still defaults to `http://localhost:3000`.
+
+If the deployed chat says **“This action must start from the dashboard.”**, set
+`ASSISTANT_API_PUBLIC_ORIGIN=https://backend-project-admin.onrender.com` on both
+Render services and redeploy them (substitute your custom dashboard origin if
+applicable). Use only the origin, without `/user/assistant` or another path.
+A successful status/model-list GET does not verify the POST origin check.
+
 Deploy both services and open `/user/assistant`. API chat is immediately usable
 when the provider key/model are configured; no connect/disconnect step is needed.
 The provider key stays on FastAPI. A random HttpOnly visitor cookie groups request
