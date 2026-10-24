@@ -1209,7 +1209,7 @@ export interface FirstClickRow {
   first_click_revenue: number;
   /** Full value of every order this entity CLOSED. Overlaps the above. */
   last_click_revenue: number;
-  /** Each side's revenue over its matching spend. Null without orders on
+  /** Each side's revenue over the shared selected-window `spend`. Null without orders on
    *  that side or below ₹1,000 of spend — a dash, not a rate on tiny spend.
    *  In the same ratio as the revenue pair, so read a column down, not a
    *  row across. */

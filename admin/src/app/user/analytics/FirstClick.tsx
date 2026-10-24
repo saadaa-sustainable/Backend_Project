@@ -51,8 +51,7 @@ const GRAIN_OPTIONS: { value: string; label: string }[] = [
 ];
 
 const SORT_OPTIONS: { value: string; label: string }[] = [
-  { value: "first_click_spend", label: "First-click spend" },
-  { value: "last_click_spend", label: "Last-click spend" },
+  { value: "spend", label: "Ad spend" },
   { value: "first_click_revenue", label: "First-click revenue" },
   { value: "last_click_revenue", label: "Last-click revenue" },
   { value: "first_click_roas", label: "First-click ROAS" },  // hidden at source grain
@@ -66,7 +65,7 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
  *  stay legible at one glance, and they are the twelve whose two ends
  *  disagree most — which is the only question the chart is asked. */
 const DIVERGING_ROWS = 12;
-const SPEND_SORTS = ["spend", "first_click_spend", "last_click_spend", "first_click_roas", "last_click_roas"];
+const SPEND_SORTS = ["spend", "first_click_roas", "last_click_roas"];
 
 function num(n: number | null | undefined, digits = 0) {
   if (n === null || n === undefined) return "—";
@@ -229,6 +228,9 @@ export function FirstClick() {
             </span>
             <ExportButton
               rows={rows as unknown as Record<string, unknown>[]}
+              columns={Object.keys(rows[0] ?? {})
+                .filter((key) => key !== "first_click_spend" && key !== "last_click_spend")
+                .map((key) => ({ key }))}
               filename="first_vs_last_click"
               disabled={loading || !rows.length}
             />
@@ -401,7 +403,7 @@ export function FirstClick() {
               </span>
             </div>
             {grain !== "source" && <p className="text-[11.5px] text-text-tertiary">
-              Spend uses the selected date range, counted once per matched {grainNoun.toLowerCase()} on each side. The two spend columns overlap.
+              Ad spend covers the selected date range, counted once per matched {grainNoun.toLowerCase()}. Both ROAS columns use this spend.
             </p>}
             {/* Hairlines and a sticky first column, no container: the
                 box this replaces carried a rounded border AND a shadow,
@@ -450,8 +452,7 @@ export function FirstClick() {
                       // affiliate is not a billable entity, so there is no number
                       // being withheld -- the question does not apply.
                       ...(grain === "source" ? [] : [
-                        ["First-click spend", "This ad or ad set's Meta spend over the selected date range, counted once if it opened an order in that range. Zero means no first-click orders or zero recorded spend; a dash means spend is unavailable. Overlaps last-click spend.", "first_click_spend"] as const,
-                        ["Last-click spend", "This ad or ad set's Meta spend over the selected date range, counted once if it closed an order in that range. Zero means no last-click orders or zero recorded spend; a dash means spend is unavailable. Overlaps first-click spend.", "last_click_spend"] as const,
+                        ["Ad spend", "This ad or ad set's total Meta spend over the selected date range, counted once regardless of how many orders it opened or closed. Both ROAS columns use this amount. A dash means spend is unavailable.", "spend"] as const,
                       ]),
                       ["First-click revenue", "Full value of every order this one OPENED — the first session of the journey came from here. Not a fractional split.", "first_click_revenue"],
                       ["Last-click revenue", "Full value of every order this one CLOSED. Deliberately overlaps the column before it: the same order's value appears under both its opener and its closer, so do not add the two across.", "last_click_revenue"],
@@ -459,8 +460,8 @@ export function FirstClick() {
                       // are dropped at source grain for the same reason spend
                       // is: there is no billable entity to divide by.
                       ...(grain === "source" ? [] : [
-                        ["First-click ROAS", "First-click revenue divided by first-click spend. A dash means spend is unavailable, below ₹1,000, or there are no first-click orders. The first touch can predate this order window.", "first_click_roas"] as const,
-                        ["Last-click ROAS", "Last-click revenue divided by last-click spend. A dash means spend is unavailable, below ₹1,000, or there are no last-click orders.", "last_click_roas"] as const,
+                        ["First-click ROAS", "First-click revenue divided by Ad spend for the selected date range. A dash means spend is unavailable, below ₹1,000, or there are no first-click orders. The first touch can predate this order window.", "first_click_roas"] as const,
+                        ["Last-click ROAS", "Last-click revenue divided by the same Ad spend. A dash means spend is unavailable, below ₹1,000, or there are no last-click orders.", "last_click_roas"] as const,
                       ]),
                       ["Days to convert", "Average days from first session to order, over the orders this one started.", "avg_days_to_convert"],
                       ["Sessions", "Average sessions before the order, over the orders this one started.", "avg_sessions"],
@@ -519,13 +520,13 @@ export function FirstClick() {
                             {r.channel}
                           </td>
                         )}
-                        {grain !== "source" && (["first_click_spend", "last_click_spend"] as const).map((key) => (
-                          <td key={key} className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
-                            {r[key] == null
+                        {grain !== "source" && (
+                          <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
+                            {r.spend == null
                               ? <span className="text-text-tertiary" title="Meta spend is unavailable for this entity in the selected date range">—</span>
-                              : num(r[key])}
+                              : num(r.spend)}
                           </td>
-                        ))}
+                        )}
                         <td
                           className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${unbilled > 0 ? "font-semibold text-warning-text" : "text-text-primary"}`}
                           title={unbilled > 0 ? `₹${num(unbilled)} more opened than closed — credit last click gives to another ad` : undefined}
