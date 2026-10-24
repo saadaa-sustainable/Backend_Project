@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
+import anthropic
 import pytest
 from fastapi import FastAPI, HTTPException
 from mcp import ClientSession
@@ -38,7 +39,8 @@ SOURCE = {"label": "Ads Analyse", "url": "/user/analytics#ads-analyse", "filters
 def config(monkeypatch):
     value = auth.APISettings(_env_file=None, enabled=True, require_user_auth=True, public_origin="https://dashboard.example",
         mcp_url="https://api.example/mcp", signing_key="fixture-" * 8,
-        access_key_hashes=json.dumps({"Team member": DIGEST}), openai_key="PROVIDER_SECRET", model="fixture-model")
+        access_key_hashes=json.dumps({"Team member": DIGEST}), openai_key="PROVIDER_SECRET", model="fixture-model",
+        anthropic_key="", anthropic_workspace_id="", openai_models=())
     monkeypatch.setattr(auth, "settings", lambda: value)
     monkeypatch.setattr(assistant_api, "chat_limits", auth.Limits())
     return value
@@ -341,3 +343,145 @@ def test_limits_release_slots_even_on_failure():
     with pytest.raises(HTTPException):
         with limits.admit("a", per_minute=2, concurrent=1):
             pass
+
+
+def claude_response(content, stop="end_turn", model="claude-sonnet-5-5"):
+    return {"id": "msg_fixture", "type": "message", "role": "assistant", "model": model,
+            "content": content, "stop_reason": stop, "stop_sequence": None,
+            "usage": {"input_tokens": 20, "output_tokens": 10}}
+
+
+def mock_claude(monkeypatch, handler):
+    monkeypatch.setattr(assistant_api, "anthropic_client", lambda key, workspace_id="": anthropic.AsyncAnthropic(
+        api_key=key, max_retries=0,
+        default_headers=assistant_api.workspace_headers(workspace_id),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ))
+    monkeypatch.setattr(assistant_api, "provider_client", lambda: pytest.fail("Must not fall back to GPT"))
+
+
+async def test_catalog_lists_both_providers_and_disables_missing_keys(app, config):
+    async with client(app, headers=bearer()) as http:
+        data = (await http.get("/admin/assistant/api/models")).json()
+        assert data[0]["provider"] == "openai" and data[0]["available"] is True
+        assert {m["id"] for m in data if m["provider"] == "anthropic"} == set(config.anthropic_models)
+        assert all(not m["available"] for m in data if m["provider"] == "anthropic")
+        response = await http.post("/admin/assistant/api/chat", json={
+            "model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "Spend?"}],
+        })
+        assert response.status_code == 503
+        assert "PROVIDER_SECRET" not in response.text
+        config.anthropic_key = SecretStr("ANTHROPIC_SECRET")
+        config.openai_key = SecretStr("")
+        data = (await http.get("/admin/assistant/api/status")).json()
+        assert data["chat_enabled"] and data["anthropic_configured"]
+        assert config.require_model()["provider"] == "anthropic"
+
+
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"])
+async def test_claude_models_use_actual_sdk_and_read_only_mcp_protocol(app, config, monkeypatch, model):
+    config.anthropic_key = SecretStr("ANTHROPIC_SECRET")
+    config.anthropic_workspace_id = "wrkspc_fixture"
+    config.require_user_auth = False
+    execute = AsyncMock(return_value=(json.dumps({"source": SOURCE, "data": {"spend": 50}}), False))
+    monkeypatch.setattr(assistant_mcp, "execute_analytics_tool", execute)
+    calls = []
+
+    def provider(request):
+        assert request.url == "https://api.anthropic.com/v1/messages"
+        assert request.headers["x-api-key"] == "ANTHROPIC_SECRET"
+        assert request.headers["anthropic-workspace-id"] == "wrkspc_fixture"
+        assert "PROVIDER_SECRET" not in str(request.headers)
+        payload = json.loads(request.content)
+        calls.append(payload)
+        assert payload["model"] == model
+        assert {t["name"] for t in payload["tools"]} == DECLARED_TOOLS
+        assert all("input_schema" in t and "parameters" not in t for t in payload["tools"])
+        assert "Asia/Kolkata" in payload["system"]
+        assert payload["max_tokens"] == 4000
+        if len(calls) == 1:
+            return httpx.Response(200, json=claude_response([
+                {"type": "tool_use", "id": "tool_one", "name": "get_ad_performance", "input": {"limit": 5}},
+            ], "tool_use", model))
+        assert payload["messages"][-2]["role"] == "assistant"
+        tool_result = payload["messages"][-1]["content"][0]
+        assert tool_result["type"] == "tool_result" and tool_result["tool_use_id"] == "tool_one"
+        assert "50" in tool_result["content"]
+        return httpx.Response(200, json=claude_response([{"type": "text", "text": "Spend is ₹50."}], model=model))
+
+    mock_claude(monkeypatch, provider)
+    async with client(app) as http:
+        response = await http.post("/admin/assistant/api/chat", headers={"Origin": config.public_origin}, json={
+            "model": model, "messages": [{"role": "user", "content": "What is my spend?"}],
+        })
+        assert response.status_code == 200, response.text
+        assert response.json() == {"message": "Spend is ₹50.", "sources": [SOURCE]}
+        assert "SECRET" not in response.text
+    assert len(calls) == 2
+    execute.assert_awaited_once_with("get_ad_performance", {"limit": 5}, read_only=True)
+
+
+@pytest.mark.parametrize("failure", [400, 401, 403, 429, 500, "workspace", "connection", "tool", "truncated"])
+async def test_claude_failures_stop_without_retry_or_provider_fallback(app, config, monkeypatch, failure):
+    config.anthropic_key = SecretStr("ANTHROPIC_SECRET")
+    requests = []
+    execute = AsyncMock(side_effect=HTTPException(504, "Analytics timeout; stopped."))
+    monkeypatch.setattr(assistant_mcp, "execute_analytics_tool", execute)
+
+    def provider(request):
+        requests.append(request)
+        if failure == "connection":
+            raise httpx.ConnectError("ANTHROPIC_SECRET echoed", request=request)
+        if failure == "workspace":
+            return httpx.Response(400, json={"error": {"type": "invalid_request_error", "message":
+                "This API key is not scoped to a workspace; include anthropic-workspace-id. ANTHROPIC_SECRET"}})
+        if isinstance(failure, int):
+            return httpx.Response(failure, json={"type": "error", "error": {"type": "api_error", "message": "ANTHROPIC_SECRET"}})
+        if failure == "truncated":
+            return httpx.Response(200, json=claude_response([{"type": "text", "text": "Incomplete"}], "max_tokens"))
+        return httpx.Response(200, json=claude_response([
+            {"type": "tool_use", "id": "t1", "name": "get_ad_performance", "input": {"limit": 5}},
+        ], "tool_use"))
+
+    mock_claude(monkeypatch, provider)
+    async with client(app, headers=bearer()) as http:
+        response = await http.post("/admin/assistant/api/chat", json={
+            "model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "Spend?"}],
+        })
+    assert response.status_code == ({"connection": 503, "tool": 504, 429: 429}.get(failure, 502))
+    assert "SECRET" not in response.text and "message" not in response.json()
+    if failure == "workspace":
+        assert "ASSISTANT_API_ANTHROPIC_WORKSPACE_ID" in response.json()["detail"]
+    assert len(requests) == 1
+    assert execute.await_count == (1 if failure == "tool" else 0)
+
+
+@pytest.mark.parametrize("workspace_id", ["", "  wrkspc_fixture  "])
+async def test_anthropic_client_routes_workspace_without_retries(workspace_id):
+    async with assistant_api.anthropic_client("fixture-key", workspace_id) as provider:
+        assert provider.max_retries == 0
+        assert provider.default_headers.get("anthropic-workspace-id") == (workspace_id.strip() or None)
+
+
+async def test_extra_gpt_models_are_explicitly_allowlisted(app, config, monkeypatch):
+    config.openai_models = ("second-gpt",)
+    calls = []
+    def provider(request):
+        payload = json.loads(request.content)
+        calls.append(payload)
+        assert payload["model"] == "second-gpt"
+        assert request.headers["authorization"] == "Bearer PROVIDER_SECRET"
+        assert payload["input"][1]["content"] == "Prior Claude answer"
+        return httpx.Response(200, text=event([
+            {"type": "message", "content": [{"type": "output_text", "text": "GPT answer"}]},
+        ]))
+    monkeypatch.setattr(assistant_api, "provider_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(provider)))
+    monkeypatch.setattr(assistant_api, "anthropic_client", lambda key: pytest.fail("GPT must use OpenAI"))
+    async with client(app, headers=bearer()) as http:
+        response = await http.post("/admin/assistant/api/chat", json={"model": "second-gpt", "messages": [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "Prior Claude answer"},
+            {"role": "user", "content": "Explain that"},
+        ]})
+    assert response.status_code == 200 and response.json()["message"] == "GPT answer"
+    assert len(calls) == 1

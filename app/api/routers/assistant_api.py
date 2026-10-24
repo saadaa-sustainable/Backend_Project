@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
+import anthropic
 from fastapi import APIRouter, HTTPException, Request
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -14,7 +15,8 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.responses import JSONResponse
 
 from app.api.routers.assistant import ChatRequest, ChatResponse, ChatSource
-from app.services import assistant_api_auth as auth, chatgpt_responses
+from app.services import assistant_api_auth as auth, chatgpt_responses, claude_messages
+from app.services.anthropic_provider import workspace_headers
 from app.services.assistant_analytics import ANALYTICS_SYSTEM_PROMPT
 from app.services.assistant_limits import CHAT_TIMEOUT_SECONDS, MCP_TIMEOUT_SECONDS
 
@@ -42,9 +44,10 @@ async def status(request: Request):
         user = auth.authenticated(request)
     except HTTPException:
         user = None
-    chat_enabled = bool(config.openai_key.get_secret_value() and config.model.strip())
+    chat_enabled = any(model["available"] for model in config.models())
     return result({"available": True, "connected": user is not None, "chat_enabled": chat_enabled,
                    "auth_required": config.require_user_auth,
+                   "anthropic_configured": bool(config.anthropic_key.get_secret_value().strip()),
                    "user": {"name": user["name"]} if user else None,
                    "mcp_url": config.mcp_url if user and config.require_user_auth else None})
 
@@ -56,7 +59,8 @@ async def connect(body: Connection, request: Request):
     config = auth.settings()
     response = result({"available": True, "connected": True, "user": {"name": user["name"]},
                        "auth_required": config.require_user_auth,
-                       "chat_enabled": bool(config.openai_key.get_secret_value() and config.model.strip()),
+                       "chat_enabled": any(model["available"] for model in config.models()),
+                       "anthropic_configured": bool(config.anthropic_key.get_secret_value().strip()),
                        "mcp_url": config.mcp_url})
     response.set_cookie(auth.COOKIE, auth.issue(user, "dashboard", 8 * 3600),
                         max_age=8 * 3600, path=auth.COOKIE_PATH, httponly=True, samesite="strict",
@@ -78,16 +82,21 @@ async def models(request: Request):
     auth.authenticated(request)
     config = auth.settings()
     config.require_model()
-    # Administrator-selected model only: clients cannot switch to arbitrary billed models.
-    return result([{"id": config.model, "label": config.model, "provider": "openai"}])
+    return result(config.models())
 
 
 def provider_client():
     return httpx.AsyncClient(timeout=45, follow_redirects=False)
 
 
+def anthropic_client(key: str, workspace_id: str = ""):
+    return anthropic.AsyncAnthropic(api_key=key.strip(), max_retries=0, timeout=45.0,
+                                    default_headers=workspace_headers(workspace_id))
+
+
 async def mcp_answer(request: Request, body: ChatRequest, user: dict) -> ChatResponse:
     config = auth.settings()
+    selected = config.require_model(body.model)
     sources: list[ChatSource] = []
     tool_calls = 0
     # Real HTTP protocol over ASGI, avoiding a network round trip back to our own Render service.
@@ -125,11 +134,19 @@ async def mcp_answer(request: Request, body: ChatRequest, user: dict) -> ChatRes
                             sources.append(source)
                     return content, False
 
+                prompt = ANALYTICS_SYSTEM_PROMPT + "\nToday's date in Asia/Kolkata is " + datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+                if selected["provider"] == "anthropic":
+                    async with anthropic_client(config.anthropic_key.get_secret_value(), config.anthropic_workspace_id) as client:
+                        message = await claude_messages.answer(
+                            client, selected["id"], prompt,
+                            [message.model_dump() for message in body.messages], execute,
+                            lambda: auth.revalidate(user), tool_definitions=definitions,
+                        )
+                    return ChatResponse(message=message, sources=sources)
                 async with provider_client() as client:
                     try:
-                        prompt = ANALYTICS_SYSTEM_PROMPT + "\nToday's date in Asia/Kolkata is " + datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
                         message = await chatgpt_responses.answer(
-                            client, config.openai_key.get_secret_value(), config.model, prompt,
+                            client, config.openai_key.get_secret_value(), selected["id"], prompt,
                             [message.model_dump() for message in body.messages], execute,
                             lambda: auth.revalidate(user), tool_definitions=definitions,
                             max_output_tokens=4000,
@@ -158,9 +175,9 @@ def _http_failure(exc: BaseException) -> HTTPException | None:
 async def chat(body: ChatRequest, request: Request):
     user = auth.authenticated(request, mutation=True)
     config = auth.settings()
-    config.require_model()
-    if body.mode != "analytics" or (body.model and body.model != config.model):
-        raise HTTPException(400, "Use analytics mode and the configured API model.")
+    config.require_model(body.model)
+    if body.mode != "analytics":
+        raise HTTPException(400, "Use analytics mode and a configured API model.")
     with chat_limits.admit(user["key_id"], per_minute=10, concurrent=2, global_per_minute=30):
         try:
             async with asyncio.timeout(CHAT_TIMEOUT_SECONDS):

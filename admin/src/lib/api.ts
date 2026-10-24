@@ -474,6 +474,7 @@ export interface AssistantModel {
   label: string;
   provider: "cloudflare" | "anthropic" | "chatgpt" | "openai";
   note: string | null;
+  available?: boolean;
 }
 
 export function fetchAssistantModels(): Promise<AssistantModel[]> {

@@ -63,7 +63,8 @@ export default function APIAssistant() {
           <h2 className="text-sm font-semibold text-text-primary">{status?.auth_required ? (status.connected ? `Connected as ${status.user?.name}` : "Connect to team analytics") : "Ask your analytics"}</h2>
           <p className="mt-1 max-w-2xl text-sm text-text-secondary">
             Explore metrics, ads, assets, data freshness, refresh runs, and table schemas.
-            Read-only answers use the team’s OpenAI API account. Questions and relevant data are sent to OpenAI.
+            Choose GPT or Claude below. Questions, conversation history, and relevant analytics data
+            are sent to the selected provider using the team’s API account.
           </p>
         </div>
         {status?.auth_required && status.connected && <button type="button" onClick={disconnect} disabled={connecting || busy}
@@ -85,7 +86,7 @@ export default function APIAssistant() {
         </div>
       </form>}
       {status?.connected && !status.chat_enabled && <p role="status" className="mt-3 text-sm text-text-secondary">
-        Your administrator needs to configure the OpenAI API key and model to enable chat here.
+        Your administrator needs to connect an OpenAI or Anthropic API account to enable chat here.
       </p>}
       {status?.auth_required && status.connected && status.mcp_url && <details className="mt-4 border-t border-border-primary pt-3 text-sm">
         <summary className="w-fit cursor-pointer rounded text-text-primary focus-visible:outline-2 focus-visible:outline-text-primary">Connect an MCP client</summary>
