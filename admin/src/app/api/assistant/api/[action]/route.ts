@@ -10,12 +10,31 @@ const cookieName = "saadaa_assistant_api";
 const visitorCookie = "saadaa_assistant_visitor";
 const noStore = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
 
+function dashboardOrigin(): string | null {
+  // Use server configuration, never browser-controlled Host/forwarded headers.
+  // Render terminates HTTPS before Next.js, so the internal request URL differs.
+  const configured = process.env.ASSISTANT_API_PUBLIC_ORIGIN ?? process.env.RENDER_EXTERNAL_URL
+    ?? (process.env.NODE_ENV !== "production" ? "http://localhost:3000" : "");
+  try {
+    const value = configured.trim().replace(/\/+$/, "");
+    const url = new URL(value);
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if (url.username || url.password || url.search || url.hash || url.pathname !== "/"
+      || (url.protocol !== "https:" && !(url.protocol === "http:" && local))) return null;
+    return url.origin;
+  } catch { return null; }
+}
+
 async function forward(request: Request, context: Context) {
   const { action } = await context.params;
   if (!Object.hasOwn(methods, action) || request.method !== methods[action]) {
     return Response.json({ detail: "Unknown assistant action." }, { status: 404, headers: noStore });
   }
-  const origin = process.env.ASSISTANT_API_PUBLIC_ORIGIN ?? "http://localhost:3000";
+  const origin = dashboardOrigin();
+  if (!origin) {
+    return Response.json({ detail: "Assistant dashboard URL is not configured. Set ASSISTANT_API_PUBLIC_ORIGIN on the frontend and backend to the dashboard's public URL." },
+      { status: 503, headers: noStore });
+  }
   if (request.method === "POST" && request.headers.get("origin") !== origin) {
     return Response.json({ detail: "This action must start from the dashboard." }, { status: 403, headers: noStore });
   }

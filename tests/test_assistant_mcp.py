@@ -86,6 +86,19 @@ def test_configuration_fails_closed(config, change):
         config.model_copy(update=change).require_configured()
 
 
+@pytest.mark.parametrize("origin,expected", [
+    ("https://dashboard.onrender.com", 200), (None, 403), ("null", 403),
+    ("https://attacker.example", 403), ("https://dashboard.onrender.com.attacker.example", 403),
+])
+async def test_render_dashboard_origin_checks_on_backend(app, config, monkeypatch, origin, expected):
+    monkeypatch.delenv("ASSISTANT_API_PUBLIC_ORIGIN", raising=False)
+    monkeypatch.setenv("ADMIN_APP_ORIGIN", "https://dashboard.onrender.com/")
+    config.public_origin = auth.APISettings(_env_file=None).public_origin
+    async with client(app) as http:
+        response = await http.post("/admin/assistant/api/disconnect", headers={"Origin": origin} if origin else {})
+    assert response.status_code == expected
+
+
 async def test_sdk_initialize_list_call_and_read_only(app, monkeypatch):
     execute = AsyncMock(return_value=(json.dumps({"source": SOURCE, "data": {"spend": 50}}), False))
     monkeypatch.setattr(assistant_mcp, "execute_analytics_tool", execute)

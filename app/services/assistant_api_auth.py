@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 import jwt
 from fastapi import HTTPException, Request
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 COOKIE = "saadaa_assistant_api"
@@ -28,7 +28,9 @@ class APISettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ASSISTANT_API_", env_file=".env", extra="ignore")
     enabled: bool = False
     require_user_auth: bool = False
-    public_origin: str = "http://localhost:3000"
+    public_origin: str = Field(default="http://localhost:3000", validation_alias=AliasChoices(
+        "public_origin", "ASSISTANT_API_PUBLIC_ORIGIN", "ADMIN_APP_ORIGIN",
+    ))
     mcp_url: str = "http://localhost:8002/mcp"
     # JSON {human-readable user label: sha256(access_key)}. Never store raw access keys.
     access_key_hashes: SecretStr = SecretStr("{}")
@@ -46,6 +48,12 @@ class APISettings(BaseSettings):
     #: Never holds an access key or a token -- see app/services/mcp_oauth.py.
     #: Losing this file costs a re-add of the connector, nothing more.
     oauth_store_path: str = "var/mcp_oauth.sqlite3"
+
+    @field_validator("public_origin")
+    @classmethod
+    def normalize_public_origin(cls, value: str) -> str:
+        # A copied dashboard URL often includes a trailing slash; Origin never does.
+        return value.strip().rstrip("/")
 
     def require_configured(self) -> dict[str, str]:
         try:
