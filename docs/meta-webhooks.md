@@ -158,6 +158,10 @@ of `run_meta_delta_sync` for one account:
 | `/adsets?filtering=adset.updated_time` | 200 | 0 | 0.5s | ~0% |
 | `/ads?filtering=ad.updated_time` | 200 | 0 | 0.5s | ~0% |
 
+All three levels are also confirmed working on account 1, including
+`campaign.updated_time`, which Graph rejects on any edge but
+`/campaigns`.
+
 A whole cycle is **1% of the hourly CPU budget and 1.5 seconds**. At 15
 minutes that is ~4%/hour per account; even a 5-minute interval would be
 ~12%/hour. Account 1 was already above its limit before any of this ran
@@ -170,6 +174,26 @@ default leaves room for that rather than assuming the numbers transfer.
 Recovery is slow and not monotonic: 108% → 105% over five minutes, then
 back to 111%, as calls age out of the one-hour window rather than being
 refunded.
+
+**How slow a throttled account is, measured.** One request against
+account 1 while it was over budget, through the client's own backoff:
+
+```
+19:13  attempt 1   usage 117%   wait 365s → (#80004) too many calls
+19:25  attempt 2   usage 106%   wait 125s → (#80004)
+19:29  attempt 3   usage 107%   wait 125s → (#80004)
+19:33  attempt 4   usage 107%   wait 365s → (#80004)
+19:46  attempt 5   usage 102%   wait 125s → (#80004)
+19:50  attempt 6   usage  97%   wait  10s → 200
+```
+
+37 minutes for one page. This is why `run_meta_delta_sync` runs the
+accounts **concurrently** rather than one after another: sequentially,
+account 1 would hold accounts 2 and 3 behind it for longer than the whole
+interval, and `max_instances: 1` would then coalesce away the runs that
+were meant to cover them. The `gather` passes `return_exceptions=True`,
+since opening a session happens outside the per-account handler and one
+account's connection problem must not cancel the others mid-flight.
 
 While an account sits above 90% the client waits instead of calling, so
 that account's delta refresh is skipped until its budget recovers. The

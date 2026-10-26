@@ -503,3 +503,62 @@ def test_an_id_scoped_batch_does_not_advance_the_watermark():
     # would silently skip the window between it and the real last sync.
     sql = str(live_refresh._WATERMARK)
     assert "object_ids" in sql and "NOT coalesce" in sql
+
+
+async def test_a_throttled_account_does_not_hold_up_the_healthy_ones(monkeypatch):
+    # Measured: against an account already over its CPU budget, the
+    # client's backoff spent 37 minutes across six attempts before a 200.
+    # Run sequentially, that one account holds the others behind it for
+    # longer than the whole interval -- and max_instances: 1 then
+    # coalesces away the runs meant to cover them.
+    import asyncio
+
+    from app.scheduler import jobs
+
+    started, finished = [], []
+
+    async def one(account_key, *, overlap, lookback):
+        started.append(account_key)
+        if account_key == "1":
+            await asyncio.sleep(0.05)      # stands in for the 37 minutes
+        finished.append(account_key)
+
+    monkeypatch.setattr(jobs, "_delta_sync_one_account", one)
+    monkeypatch.setattr(jobs, "process_pending_meta_events", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(jobs, "get_settings", lambda: SimpleNamespace(
+        scheduler=SimpleNamespace(meta_delta_overlap_seconds=900,
+                                  meta_delta_max_lookback_days=7),
+        meta=SimpleNamespace(accounts=[SimpleNamespace(key="1"), SimpleNamespace(key="2"),
+                                       SimpleNamespace(key="3")])))
+
+    await jobs.run_meta_delta_sync()
+
+    assert started == ["1", "2", "3"]
+    # The healthy accounts finished while account 1 was still waiting.
+    assert finished == ["2", "3", "1"]
+
+
+async def test_one_account_s_failure_is_logged_and_the_others_still_run(monkeypatch):
+    import asyncio
+
+    from app.scheduler import jobs
+
+    ran = []
+
+    async def one(account_key, *, overlap, lookback):
+        if account_key == "2":
+            raise RuntimeError("boom")
+        ran.append(account_key)
+
+    monkeypatch.setattr(jobs, "_delta_sync_one_account", one)
+    monkeypatch.setattr(jobs, "process_pending_meta_events", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(jobs, "get_settings", lambda: SimpleNamespace(
+        scheduler=SimpleNamespace(meta_delta_overlap_seconds=900,
+                                  meta_delta_max_lookback_days=7),
+        meta=SimpleNamespace(accounts=[SimpleNamespace(key=k) for k in ("1", "2", "3")])))
+
+    # A failure the per-account handler cannot catch -- opening the
+    # session happens outside its try -- must not cancel the accounts
+    # running alongside it.
+    await jobs.run_meta_delta_sync()
+    assert ran == ["1", "3"]

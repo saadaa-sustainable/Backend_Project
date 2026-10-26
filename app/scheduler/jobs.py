@@ -6,6 +6,8 @@ jobs never share state with the request that may have triggered them.
 
 from __future__ import annotations
 
+import asyncio
+
 from app.config import get_settings
 from app.core.meta_registry import DatePreset, InsightsLevel
 from app.core.security import get_meta_credentials
@@ -53,6 +55,25 @@ async def run_hourly_sync() -> None:
     logger.info("scheduled_hourly_sync_completed")
 
 
+async def _delta_sync_one_account(account_key: str, *, overlap: int, lookback: int) -> None:
+    """One account's delta refresh, in its own session."""
+    async with session_scope() as session:
+        try:
+            since = await last_fetch_epoch(
+                session,
+                account_key=account_key,
+                overlap_seconds=overlap,
+                max_lookback_days=lookback,
+            )
+            written = await refresh_changed_since(
+                session, account_key=account_key, since_epoch=since
+            )
+        except Exception as exc:  # noqa: BLE001 - one account must not stop the rest
+            logger.error("meta_delta_sync_failed", account_key=account_key, error=str(exc))
+            return
+    logger.info("meta_delta_sync_completed", account_key=account_key, **written)
+
+
 async def run_meta_delta_sync() -> None:
     """Near-real-time entity refresh: ask Meta which campaigns/ad sets/ads
     changed since we last looked, re-read just those, and re-flatten just
@@ -65,11 +86,14 @@ async def run_meta_delta_sync() -> None:
     review outcomes and issue flags. Filtering the account edge on
     `updated_time` is the only mechanism that sees the rest.
 
-    Cheap enough to run on a short interval because Meta does the
-    filtering: a quiet interval costs three empty pages per account, not a
-    walk of every ad. Accounts run one after another rather than in
-    parallel -- each account has its own rate-limit budget, but this job
-    fires every few minutes and has no deadline to race.
+    Accounts run concurrently, and that is not an optimisation. Each
+    account has its own rate-limit budget, but a throttled one is slow in
+    a way that has to be seen to be believed: against an account already
+    over its CPU budget, the client's own backoff spent 37 minutes across
+    six attempts (117% -> 106% -> 107% -> 107% -> 102% -> 97%, then a
+    200). Sequentially, that one account would hold the healthy ones
+    behind it for longer than the whole interval, and `max_instances: 1`
+    would then coalesce away the runs that were supposed to cover them.
     """
     settings = get_settings()
 
@@ -80,26 +104,21 @@ async def run_meta_delta_sync() -> None:
     except Exception as exc:  # noqa: BLE001 - the delta refresh still has to run
         logger.error("meta_webhook_backlog_failed", error=str(exc))
 
-    interval = settings.scheduler.meta_delta_overlap_seconds
+    overlap = settings.scheduler.meta_delta_overlap_seconds
     lookback = settings.scheduler.meta_delta_max_lookback_days
-    for account in settings.meta.accounts:
-        async with session_scope() as session:
-            try:
-                since = await last_fetch_epoch(
-                    session,
-                    account_key=account.key,
-                    overlap_seconds=interval,
-                    max_lookback_days=lookback,
-                )
-                written = await refresh_changed_since(
-                    session, account_key=account.key, since_epoch=since
-                )
-            except Exception as exc:  # noqa: BLE001 - one account must not stop the rest
-                logger.error(
-                    "meta_delta_sync_failed", account_key=account.key, error=str(exc)
-                )
-                continue
-        logger.info("meta_delta_sync_completed", account_key=account.key, **written)
+    # return_exceptions, because the per-account handler cannot catch
+    # everything -- a failure opening the session happens outside it, and
+    # without this one account's connection problem cancels the others
+    # mid-flight.
+    results = await asyncio.gather(*(
+        _delta_sync_one_account(account.key, overlap=overlap, lookback=lookback)
+        for account in settings.meta.accounts
+    ), return_exceptions=True)
+    for account, result in zip(settings.meta.accounts, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.error(
+                "meta_delta_sync_crashed", account_key=account.key, error=str(result)
+            )
 
 
 async def run_historical_backfill() -> None:
