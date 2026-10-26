@@ -78,7 +78,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -478,7 +478,7 @@ def fetch_span(client, property_id: str, since: date, until: date):
 
 def _to_tuples(rows, *, property_id: str, tz: str, sampled: bool,
                thresholded: bool) -> list[tuple]:
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     out: list[tuple] = []
     for r in rows:
         d = [v.value for v in r.dimension_values]

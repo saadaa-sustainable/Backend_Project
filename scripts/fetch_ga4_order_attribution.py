@@ -69,7 +69,7 @@ import argparse
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -301,7 +301,7 @@ def main() -> int:
     if not rows:
         return 0
 
-    payload = [tuple(r[c] for c in COLUMNS) + (datetime.now(),) for r in rows]
+    payload = [tuple(r[c] for c in COLUMNS) + (datetime.now(timezone.utc),) for r in rows]
     conn = psycopg2.connect(_dsn(), connect_timeout=20)
     conn.autocommit = False
     try:
