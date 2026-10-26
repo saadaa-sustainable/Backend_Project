@@ -142,21 +142,44 @@ Measured live on 2026-10-26, from `X-Business-Use-Case-Usage`:
 | 2 Fourth Ad Account | 0% | 0% | 0% | `development_access` |
 | 3 Third Ad Account | 0% | 0% | 0% | `development_access` |
 
-Three `updated_time`-filtered pages were enough to put account 1 over its
-budget while the call count stayed at 1%. The number of requests is not
-the constraint — the cost of each one is. Meta applies the filter by
-scanning every ad in the account, and all three accounts are on
-**`development_access`**, where the CPU allowance is small. Moving the app
-to Standard Access would raise it; that needs App Review and Business
-Verification, which is not something this code can do.
+Account 1's `call_count` is 1% while its CPU is over 100%, so the
+constraint is the cost of each call, not the number of them. All three
+accounts are on **`development_access`**, where that allowance is small.
+Moving the app to Standard Access would raise it; that needs App Review
+and Business Verification, which is not something this code can do.
 
-Recovery is slow: 108% → 106% over four minutes, with the expensive calls
-ageing out of the one-hour window rather than being refunded.
+**The delta poll is not what exhausted it.** Measured directly against
+account 2 on a clean budget — three filtered pages, exactly one interval
+of `run_meta_delta_sync` for one account:
+
+| Call | HTTP | Rows | Time | CPU after |
+|---|---|---|---|---|
+| `/campaigns?filtering=campaign.updated_time` | 200 | 0 | 0.5s | 1% |
+| `/adsets?filtering=adset.updated_time` | 200 | 0 | 0.5s | ~0% |
+| `/ads?filtering=ad.updated_time` | 200 | 0 | 0.5s | ~0% |
+
+A whole cycle is **1% of the hourly CPU budget and 1.5 seconds**. At 15
+minutes that is ~4%/hour per account; even a 5-minute interval would be
+~12%/hour. Account 1 was already above its limit before any of this ran
+(its first probe came back `(#80004) too many calls`), so **something
+else is consuming that account's budget** — worth finding, but not this
+feature. Account 1 also carries ~12,600 ads against account 2's handful,
+so its per-cycle scan costs more than the 1% measured here; the 15-minute
+default leaves room for that rather than assuming the numbers transfer.
+
+Recovery is slow and not monotonic: 108% → 105% over five minutes, then
+back to 111%, as calls age out of the one-hour window rather than being
+refunded.
+
+While an account sits above 90% the client waits instead of calling, so
+that account's delta refresh is skipped until its budget recovers. The
+other accounts are unaffected — each has its own budget.
 
 This is why:
 
-* the default interval is **15 minutes**, not 1 or 5
-  (`SCHEDULER_META_DELTA_INTERVAL_MINUTES`);
+* the default interval is **15 minutes**
+  (`SCHEDULER_META_DELTA_INTERVAL_MINUTES`) — measured headroom allows 5,
+  but not while account 1 is pinned by an unidentified consumer;
 * `run_meta_delta_sync` catches per level, so a throttled `/campaigns`
   call does not cost the ad refresh;
 * the watermark is read from `sync_batches`, not from
@@ -170,12 +193,47 @@ The client already waits proactively above 90% usage
 the interval too low degrades into skipped runs rather than a throttled
 account — but it does mean an over-eager interval buys nothing.
 
+## Verified end to end, 2026-10-26
+
+One real run of `run_meta_delta_sync` against account 2 (`act_1349767139294217`),
+real API, real writes, watermark 2026-10-23 01:39:
+
+```
+campaigns  →  9 changed → Bronze → meta_campaigns
+adsets     →  7 changed → Bronze → meta_adsets
+ads        → 100 changed → Bronze → meta_ads
+33 seconds end to end
+meta_ads for the account: 3,050 → 3,078 rows
+max(updated_at):          2026-10-23 01:38 → 2026-10-26 14:14
+```
+
+Every refreshed ad came out with its `adset_name` and `campaign_name`
+populated, so the parent pull works.
+
+And the invariant the whole design rests on, checked against real data —
+all 3,078 of that account's ads in `meta_ads` match the newest Bronze
+snapshot exactly on `ad_status`, `ad_effective_status` and `updated_at`:
+
+| ads checked | agree | disagree |
+|---|---|---|
+| 3,078 | 3,078 | 0 |
+
+A later full rebuild will produce the same rows the scoped refresh just
+wrote.
+
 ## Known state as of 2026-10-26
 
 `meta_campaigns` / `meta_adsets` / `meta_ads` were last refreshed
 **2026-10-23 01:39 UTC**, three days stale, and `sync_batches` shows no
 successful entity sync since. That is the gap this feature closes: it is
 not that an hour was too slow, it is that nothing was running.
+
+Separately, **account 1 (Raho Saadaa) sits above 100% of its CPU budget
+with a 1% call count**, and it was already there before any of this work
+touched it. Accounts 2 and 3 read 1%. Until that consumer is identified,
+account 1's delta refresh will be skipped by the client's proactive wait
+whenever it runs — the other two accounts are unaffected, since each has
+its own budget.
 
 ## Configuration
 
