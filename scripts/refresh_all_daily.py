@@ -226,9 +226,21 @@ PHASE_INGEST = [
     # above at any later stage: reach counts people, and summing days
     # counts a person once per day they saw the ad -- measured at 2.55x
     # the truth over a 15-day window. --anchors keeps this to the ~8
-    # as-of dates the UI's date presets can ask for, and rows already
-    # stored are skipped, so a nightly run only fetches the dates that
-    # moved (today, yesterday, and the rolling preset boundaries).
+    # as-of dates the UI's date presets can ask for.
+    #
+    # The skip is now SETTLE-AWARE, which was a correctness fix: see
+    # _existing_windows in the fetcher. Meta keeps revising a cumulative
+    # window while its last day is still accruing, so a snapshot
+    # measured ON its own as-of date is provisional -- up to 24% off.
+    # It stops moving the moment that day closes, and is then exact
+    # forever (verified at +1, +2, +7, +30 and +90 days: 0.00%).
+    #
+    # Skipping every stored row, as this used to, therefore froze the
+    # provisional ones: incremental reach subtracted a figure measured
+    # weeks ago from one measured last night, and the 7-day columns read
+    # ~14% high. Re-measuring all 8 anchors would fix it at 3x the
+    # requests; re-measuring only the provisional ones fixes it for the
+    # cost of the newest one or two, which is what this now does.
     ("meta_reach_cumulative", ["scripts/fetch_reach_cumulative.py",
                                "--anchors",
                                "--levels", "ad,adset,campaign"],            3600),
@@ -318,6 +330,30 @@ PHASE_INGEST = [
     # Google restates recent days as conversions land.
     ("google_ads_spend",      ["scripts/fetch_google_ads_spend.py",
                                "--days", "35"],                              900),
+    # The SAME table, from Google's own API, and it runs AFTER MapleMonk
+    # on purpose: the API is the authority and must have the last word.
+    #
+    # Spend is not why. Checked day by day on 2026-10-21, MapleMonk's
+    # spend is exact -- Rs 18,220,448 against Rs 18,220,323 over 430
+    # days. CONVERSIONS are why. Google keeps attributing for about a
+    # week after the fact, and MapleMonk's copy freezes whatever had
+    # landed when it synced: Rs 39,332 short over 30 days, every rupee
+    # of it inside the last eight days. Re-reading a trailing window
+    # from the API lets those days settle. It is also a day fresher.
+    #
+    # MapleMonk is NOT redundant. It reaches back to 2025-08-18 and
+    # needs no Google Ads credential, so it is the fallback: its upsert
+    # declines to overwrite an API row until that row is three days
+    # stale, at which point a dead API feed degrades to MapleMonk rather
+    # than freezing the table.
+    ("google_ads_api",        ["scripts/fetch_google_ads_api.py",
+                               "--days", "35"],                              900),
+    # BRONZE for the Google roster: raw_dump_google_ads, the counterpart
+    # of raw_dump_meta's campaign/adset/ad rows. Three GAQL queries, ~806
+    # rows a run, no fee. Silver is a separate step --
+    # `silver_google_entities` in PHASE_SILVER -- exactly as
+    # raw_dump_meta is promoted by `silver_meta_entities`.
+    ("google_ads_entities",   ["scripts/fetch_google_ads_entities.py"],      600),
 ]
 
 PHASE_SILVER = [
@@ -331,6 +367,18 @@ PHASE_SILVER = [
     # Must precede ad_lifecycle (reads meta_ads for ad_name/status) and
     # silver_shopify (re-derives the whole attribution table each run).
     ("silver_meta_entities",  ["scripts/refresh_meta_entities.py"],          900),
+    # google_campaigns / google_ad_groups / google_ads from
+    # raw_dump_google_ads. Same ordering constraint as the Meta step
+    # above and for the same reason: silver_shopify_attribution
+    # re-derives every order against whatever roster exists at that
+    # moment, and its Google pass reads google_ads / google_campaigns.
+    #
+    # Reading Silver rather than calling the Google Ads API live during
+    # the rebuild is the whole point -- the nightly runs in CI, where no
+    # refresh token exists, and the live-API version silently degraded
+    # to campaign-level matching there. Bronze is append-only, so Silver
+    # also keeps naming campaigns and ads that GAQL has since aged out.
+    ("silver_google_entities", ["scripts/refresh_google_entities.py"],       600),
     # 900 -> 2400 (2026-09-21). The rebuild takes 1372-1514s measured, so
     # a 900s budget killed it EVERY night: the table sat frozen at
     # 2026-09-17 -- the date of the last manual run -- while Bronze had

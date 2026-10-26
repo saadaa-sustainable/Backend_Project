@@ -97,7 +97,16 @@ async def test_attribution_publishes_all_batches_in_one_commit(monkeypatch, fail
         session.commit.assert_awaited_once()
     assert [len(rows) for rows in writes] == [10_000, 1]
     assert [row["order_id"] for rows in writes for row in rows] == [o.order_id for o in orders]
-    assert str(session.execute.call_args_list[0].args[0]) == "TRUNCATE shopify_order_attribution"
+    # The TRUNCATE must come before every INSERT, not necessarily first
+    # overall: the Google pass reads its campaign names before the write
+    # phase begins. What this guards is the publication order -- clear
+    # the table, then write, then one commit.
+    statements = [str(c.args[0]) for c in session.execute.call_args_list]
+    truncates = [i for i, q in enumerate(statements)
+                 if q == "TRUNCATE shopify_order_attribution"]
+    inserts = [i for i, q in enumerate(statements) if q.startswith("INSERT INTO")]
+    assert len(truncates) == 1, statements
+    assert all(truncates[0] < i for i in inserts)
 
 
 @pytest.mark.parametrize("attributed_day,ok", [(3, True), (2, False), (None, False)])
