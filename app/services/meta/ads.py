@@ -27,6 +27,15 @@ class AdSyncService(BaseMetaSyncService):
             fields = AD_URL_TRACKING_FIELDS
         else:
             fields = ",".join(request_params.get("fields") or AD_FIELDS)
+
+        # Near-real-time paths pass the exact ids that changed; walking
+        # the account edge to rediscover them would be pointless.
+        object_ids = request_params.get("object_ids")
+        if object_ids:
+            async for item in self.fetch_objects_by_id(object_ids, fields):
+                yield item
+            return
+
         params: dict[str, Any] = {
             "fields": fields,
             # NOTE: "DELETED" deliberately excluded — Meta rejects it
@@ -45,6 +54,9 @@ class AdSyncService(BaseMetaSyncService):
                     "ADSET_PAUSED",
                 ],
             ),
+            # A Graph `filtering` spec, e.g. ad.updated_time GREATER_THAN
+            # <unix ts> for a delta pull.
+            "filtering": request_params.get("filtering"),
         }
         adset_id = request_params.get("adset_id")
         campaign_id = request_params.get("campaign_id")

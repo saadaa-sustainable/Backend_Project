@@ -10,7 +10,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.logging.setup import get_logger
-from app.scheduler.jobs import run_daily_sync, run_flatten_poll, run_hourly_sync, run_retry_failed_jobs
+from app.scheduler.jobs import (
+    run_daily_sync,
+    run_flatten_poll,
+    run_hourly_sync,
+    run_meta_delta_sync,
+    run_retry_failed_jobs,
+)
 
 logger = get_logger(__name__)
 
@@ -56,6 +62,15 @@ def start_scheduler() -> AsyncIOScheduler:
             replace_existing=True,
         )
 
+    if settings.meta_delta_sync_enabled:
+        scheduler.add_job(
+            run_meta_delta_sync,
+            trigger=IntervalTrigger(minutes=settings.meta_delta_interval_minutes),
+            id="meta_delta_sync",
+            name="Near-real-time Meta entity delta refresh",
+            replace_existing=True,
+        )
+
     scheduler.add_job(
         run_retry_failed_jobs,
         trigger=IntervalTrigger(minutes=settings.retry_interval_minutes),
@@ -77,6 +92,8 @@ def start_scheduler() -> AsyncIOScheduler:
         "scheduler_started",
         daily_sync_hour=settings.daily_sync_hour,
         hourly_sync_enabled=settings.hourly_sync_enabled,
+        meta_delta_sync_enabled=settings.meta_delta_sync_enabled,
+        meta_delta_interval_minutes=settings.meta_delta_interval_minutes,
         retry_interval_minutes=settings.retry_interval_minutes,
         flatten_poll_interval_minutes=settings.flatten_poll_interval_minutes,
     )

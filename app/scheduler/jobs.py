@@ -6,6 +6,7 @@ jobs never share state with the request that may have triggered them.
 
 from __future__ import annotations
 
+from app.config import get_settings
 from app.core.meta_registry import DatePreset, InsightsLevel
 from app.core.security import get_meta_credentials
 from app.database.session import session_scope
@@ -13,6 +14,8 @@ from app.logging.setup import get_logger
 from app.repositories.failed_job_repository import FailedJobRepository
 from app.services.meta.client import MetaAPIClient
 from app.services.meta.insights import insights_retry_kwargs
+from app.services.meta.live_refresh import last_fetch_epoch, refresh_changed_since
+from app.services.meta.webhook_processor import process_pending_meta_events
 from app.services.meta.orchestrator import MultiAccountSyncCoordinator, SyncOrchestrator
 from app.services.silver.runner import run_auto_enabled_jobs
 
@@ -48,6 +51,55 @@ async def run_hourly_sync() -> None:
         triggered_by="scheduler_hourly",
     )
     logger.info("scheduled_hourly_sync_completed")
+
+
+async def run_meta_delta_sync() -> None:
+    """Near-real-time entity refresh: ask Meta which campaigns/ad sets/ads
+    changed since we last looked, re-read just those, and re-flatten just
+    those rows into Silver.
+
+    This is what carries a status flip or an edit onto the dashboard within
+    minutes. It is not the webhook: Meta's `ad_account` webhook topic has
+    six fields and none of them fires on ACTIVE/PAUSED or on an ordinary
+    edit (see docs/meta-webhooks.md), so the webhook can only ever cover
+    review outcomes and issue flags. Filtering the account edge on
+    `updated_time` is the only mechanism that sees the rest.
+
+    Cheap enough to run on a short interval because Meta does the
+    filtering: a quiet interval costs three empty pages per account, not a
+    walk of every ad. Accounts run one after another rather than in
+    parallel -- each account has its own rate-limit budget, but this job
+    fires every few minutes and has no deadline to race.
+    """
+    settings = get_settings()
+
+    # Any webhook whose background task was lost to a restart. Same work,
+    # so it belongs here rather than on a timer of its own.
+    try:
+        await process_pending_meta_events()
+    except Exception as exc:  # noqa: BLE001 - the delta refresh still has to run
+        logger.error("meta_webhook_backlog_failed", error=str(exc))
+
+    interval = settings.scheduler.meta_delta_overlap_seconds
+    lookback = settings.scheduler.meta_delta_max_lookback_days
+    for account in settings.meta.accounts:
+        async with session_scope() as session:
+            try:
+                since = await last_fetch_epoch(
+                    session,
+                    account_key=account.key,
+                    overlap_seconds=interval,
+                    max_lookback_days=lookback,
+                )
+                written = await refresh_changed_since(
+                    session, account_key=account.key, since_epoch=since
+                )
+            except Exception as exc:  # noqa: BLE001 - one account must not stop the rest
+                logger.error(
+                    "meta_delta_sync_failed", account_key=account.key, error=str(exc)
+                )
+                continue
+        logger.info("meta_delta_sync_completed", account_key=account.key, **written)
 
 
 async def run_historical_backfill() -> None:

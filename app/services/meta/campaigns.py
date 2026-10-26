@@ -18,6 +18,15 @@ class CampaignSyncService(BaseMetaSyncService):
         self, request_params: dict[str, Any]
     ) -> AsyncIterator[dict[str, Any]]:
         fields = ",".join(request_params.get("fields") or CAMPAIGN_FIELDS)
+
+        # Near-real-time paths pass the exact ids that changed; walking
+        # the account edge to rediscover them would be pointless.
+        object_ids = request_params.get("object_ids")
+        if object_ids:
+            async for item in self.fetch_objects_by_id(object_ids, fields):
+                yield item
+            return
+
         params: dict[str, Any] = {
             "fields": fields,
             # `effective_status` filter lets callers scope to e.g. only
@@ -35,6 +44,9 @@ class CampaignSyncService(BaseMetaSyncService):
                     "WITH_ISSUES",
                 ],
             ),
+            # A Graph `filtering` spec, e.g. campaign.updated_time
+            # GREATER_THAN <unix ts> for a delta pull.
+            "filtering": request_params.get("filtering"),
         }
         async for item in self.client.paginate(
             f"{self.client.credentials.ad_account_id_prefixed}/campaigns", params=params

@@ -1,4 +1,4 @@
-"""Inbound webhooks. Currently EasyEcom.
+"""Inbound webhooks: EasyEcom delivery events and Meta ad-object events.
 
 A webhook receiver has one job at the moment of the call: take custody
 of the payload and say 200. Everything else -- parsing, mapping to an
@@ -22,16 +22,20 @@ character at a time.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import secrets
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
 from app.api.deps import SessionDep
 from app.config import get_settings
 from app.logging.setup import get_logger
+from app.services.meta.webhook_processor import process_meta_event
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = get_logger(__name__)
@@ -53,9 +57,15 @@ EasyEcomEvent = Literal[
 
 _INSERT = text("""
     INSERT INTO public.webhook_events (source, event, payload, headers)
-    VALUES ('easyecom', :event, CAST(:payload AS jsonb), CAST(:headers AS jsonb))
+    VALUES (:source, :event, CAST(:payload AS jsonb), CAST(:headers AS jsonb))
     RETURNING id
 """)
+
+#: Headers worth keeping on a stored event. Neither EasyEcom's
+#: ``Access-Token`` nor Meta's ``X-Hub-Signature-256`` is among them --
+#: storing the credential next to the data it protects would undo the
+#: point of having one.
+_KEEP_HEADERS = {"content-type", "user-agent", "x-forwarded-for"}
 
 
 def _authorise(supplied: str | None) -> None:
@@ -107,13 +117,12 @@ async def easyecom_webhook(
         payload = {"_unparsed": raw.decode("utf-8", "replace")}
         logger.warning("easyecom webhook %s: body was not JSON", event)
 
-    # Only the headers worth keeping. Access-Token is deliberately NOT
-    # among them -- storing the shared secret next to the data it
-    # protects would undo the point of having one.
-    keep = {"content-type", "user-agent", "x-forwarded-for"}
-    headers = {k: v for k, v in request.headers.items() if k.lower() in keep}
+    headers = {
+        k: v for k, v in request.headers.items() if k.lower() in _KEEP_HEADERS
+    }
 
     row = await session.execute(_INSERT, {
+        "source": "easyecom",
         "event": event,
         "payload": json.dumps(payload),
         "headers": json.dumps(headers),
@@ -123,3 +132,136 @@ async def easyecom_webhook(
 
     logger.info("easyecom webhook stored", extra={"event": event, "id": event_id})
     return {"received": True, "event": event, "id": event_id}
+
+
+# ----------------------------------------------------------------------
+# Meta
+# ----------------------------------------------------------------------
+
+#: The six fields the `ad_account` webhook topic can carry, per
+#: https://developers.facebook.com/docs/graph-api/webhooks/reference/ad-account.
+#:
+#: Worth being blunt about what is NOT here, because it is the whole shape
+#: of this feature: there is no `effective_status` field and no `ad` field.
+#: Meta does not send a webhook when an ad is paused, resumed, renamed,
+#: re-budgeted or re-creatived. The two status-ish fields below are narrow:
+#: `in_process_ad_objects` fires when an object leaves review, and
+#: `with_issues_ad_objects` when one is flagged WITH_ISSUES. Ordinary edits
+#: and ACTIVE/PAUSED flips reach the dashboard through the delta poll
+#: instead (`run_meta_delta_sync`), which asks Meta what changed.
+META_FIELDS = frozenset({
+    "ads_async_creation_request",
+    "creative_fatigue",
+    "ad_recommendations",
+    "in_process_ad_objects",
+    "product_set_issue",
+    "with_issues_ad_objects",
+})
+
+#: Fields whose `value` names an ad object we hold in Silver, and the keys
+#: that carry its id. Everything else is stored and not acted on.
+_META_OBJECT_KEYS = {
+    "in_process_ad_objects": ("id",),
+    "with_issues_ad_objects": ("id",),
+    "ad_recommendations": ("ad_object_ids",),
+    "creative_fatigue": ("adgroup_id",),
+}
+
+
+def _verify_meta_signature(raw: bytes, supplied: str | None) -> None:
+    """Check Meta's `X-Hub-Signature-256` over the exact bytes received.
+
+    Over `raw`, never over a re-serialised parse of it: `json.dumps` of a
+    parsed body differs from Meta's bytes in key order and whitespace, and
+    every event would be rejected for no visible reason.
+    """
+    secret = get_settings().meta.app_secret
+    if not secret:
+        logger.error("meta webhook received but META_APP_SECRET is unset")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook receiver is not configured.",
+        )
+    if not supplied or not supplied.startswith("sha256="):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or malformed X-Hub-Signature-256.",
+        )
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(supplied[len("sha256="):], expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bad X-Hub-Signature-256.",
+        )
+
+
+@router.get("/meta", response_class=PlainTextResponse)
+async def meta_webhook_verify(
+    hub_mode: Annotated[str | None, Query(alias="hub.mode")] = None,
+    hub_verify_token: Annotated[str | None, Query(alias="hub.verify_token")] = None,
+    hub_challenge: Annotated[str | None, Query(alias="hub.challenge")] = None,
+) -> str:
+    """Meta's one-time verification handshake, run when the callback URL is
+    registered on the app.
+
+    Meta requires the body to be `hub.challenge` and nothing else -- not
+    JSON, not a wrapper object -- or it refuses to register the URL, which
+    is why this returns a bare `PlainTextResponse`.
+    """
+    expected = get_settings().meta_webhook_verify_token
+    if not expected:
+        logger.error("meta webhook verify attempted but META_WEBHOOK_VERIFY_TOKEN is unset")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook receiver is not configured.",
+        )
+    if hub_mode != "subscribe" or not hub_verify_token or not hub_challenge:
+        raise HTTPException(status_code=400, detail="Not a subscribe handshake.")
+    if not secrets.compare_digest(hub_verify_token, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Bad verify token.")
+
+    logger.info("meta webhook verified")
+    return hub_challenge
+
+
+@router.post("/meta", status_code=status.HTTP_200_OK)
+async def meta_webhook(
+    request: Request,
+    session: SessionDep,
+    background: BackgroundTasks,
+    signature: Annotated[str | None, Header(alias="X-Hub-Signature-256")] = None,
+) -> dict[str, Any]:
+    """Receive one Meta `ad_account` notification, store it verbatim, and
+    queue the affected objects for a Bronze re-read.
+
+    Same custody rule as EasyEcom: the body is in `webhook_events` before
+    anything interprets it. Meta retries a non-200 for a while and then
+    disables the subscription outright, so interpretation happens after the
+    response, never in front of it -- a payload shape we do not recognise
+    must not be able to cost us the subscription.
+    """
+    raw = await request.body()
+    _verify_meta_signature(raw, signature)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty body.")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = {"_unparsed": raw.decode("utf-8", "replace")}
+        logger.warning("meta webhook: body was not JSON")
+
+    headers = {
+        k: v for k, v in request.headers.items() if k.lower() in _KEEP_HEADERS
+    }
+    row = await session.execute(_INSERT, {
+        "source": "meta",
+        "event": str(payload.get("object") or "unknown")[:64],
+        "payload": json.dumps(payload),
+        "headers": json.dumps(headers),
+    })
+    event_id = row.scalar_one()
+    await session.commit()
+
+    background.add_task(process_meta_event, event_id)
+    logger.info("meta webhook stored", extra={"id": event_id})
+    return {"received": True, "id": event_id}
