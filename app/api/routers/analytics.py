@@ -2467,7 +2467,7 @@ _FIRST_CLICK_GRAINS = {
 #: looking authoritative.
 
 
-def _first_click_sql(grain: str) -> str:
+def _first_click_sql(grain: str, basis: str = "order") -> str:
     """Both ends of each order, aggregated per entity at one grain.
 
     Unions the two ENDS rather than joining an entity list back onto the
@@ -2497,6 +2497,41 @@ def _first_click_sql(grain: str) -> str:
     # be, when an order's journey never touched a paid click at that end.
     not_null = "" if grain == "source" else (
         f"     AND ({first_k} IS NOT NULL OR {last_k} IS NOT NULL)\n")
+
+    # Which date the window means, per side.
+    #
+    # The LAST touch IS the session that converted, so it sits on the
+    # order's own day: windowing it by order date and by last-touch date
+    # are the same thing, and `basis` never moves it.
+    #
+    # The FIRST touch can sit weeks earlier -- measured over 26 Sep to
+    # 25 Oct at ad grain, 30.4% of orders (Rs 85.2L, 31.2% of first-click
+    # revenue) were opened BEFORE the window, average 14.9 days to
+    # convert and up to 89. On the default 'order' basis that revenue is
+    # credited against spend from a window that did not contain the click
+    # which earned it, so first-click ROAS reads 30-50% high on an
+    # established ad and is unchanged only where the whole life sits
+    # inside the window.
+    #
+    # basis='first_touch' asks the cohort question instead: of the
+    # journeys this ad OPENED in these dates, what have they returned so
+    # far, against what it cost in these dates. Numerator and denominator
+    # then describe the same clicks.
+    #
+    # The trade is real and is why this is a toggle rather than a fix.
+    # On 'first_touch' the two sides no longer describe the same orders,
+    # so the columns stop being addable against the last-click table, and
+    # journeys opened in-window that have not converted yet are missing
+    # their revenue -- it understates recent ads exactly as 'order'
+    # overstates old ones.
+    def _window(column: str) -> str:
+        return (f"   WHERE {column} >= (CAST(:from_date AS date)::timestamp"
+                " AT TIME ZONE 'Asia/Kolkata')\n"
+                f"     AND {column} <  ((CAST(:to_date AS date) + 1)::timestamp"
+                " AT TIME ZONE 'Asia/Kolkata')\n")
+
+    order_window = _window("order_at")
+    first_window = _window("first_seen_at") if basis == "first_touch" else order_window
     # Each id grain has its own name source. Falling back to the raw id
     # rather than hiding the row: an unresolved id is still a real order
     # the entity above it earned.
@@ -2546,23 +2581,69 @@ def _first_click_sql(grain: str) -> str:
                f"WHEN e.{side}_orders > 0 THEN {spend_col} ELSE 0 END")
         for side in ("first", "last")
     }
+    # Lifetime: the same two questions asked of ALL history held rather
+    # than the picked dates, so one row shows recent form beside total
+    # return. Aggregated once per entity and joined, NOT looked up per
+    # page row.
+    #
+    # Measured against an 18,737-block baseline. Per-row LATERAL lookups
+    # are cheap only while the page is small -- 50,840 blocks at
+    # limit=25, but 97,882 at the default limit of 200, because the top
+    # rows are the highest-volume ads and each one's lifetime sum touches
+    # a heap row per order. That grows with the page, and `limit` goes to
+    # 5,000. Aggregating up front is flat: 84,353 blocks at ad grain and
+    # 54,400 at adset whatever the limit, and it is the only version that
+    # can be SORTED on, because every entity has a value before the LIMIT
+    # runs. The endpoint is cached 900s, so it is paid once a window.
+    #
+    # Lifetime spend comes from the DAILY table, deliberately not from
+    # ad_insights: that holds one all_days row per ad over whatever
+    # window each was last fetched in, and those windows overlap and
+    # disagree -- it totals Rs 69.8L against the daily table's Rs 12.04 Cr.
+    if grain == "source":
+        # Same rule as `spend`: a source like 'kwikengage' or 'affiliate'
+        # is not a billable entity, so there is no lifetime cost to show
+        # and a zero would claim the orders were free.
+        life_cte, life_join = "", ""
+        life_cols = ("NULL::numeric AS lifetime_spend,\n"
+                     "       NULL::numeric AS lifetime_first_click_roas")
+    else:
+        sp_tbl, sp_key = spend_tables[grain]
+        fc_key = "first_ad_id" if grain == "ad" else "first_adset_id"
+        life_cte = (
+            f"life_spend AS (\n"
+            f"  SELECT {sp_key} AS k, SUM(spend) AS lifetime_spend\n"
+            f"    FROM {sp_tbl} GROUP BY {sp_key}\n"
+            f"), life_first AS (\n"
+            f"  SELECT {fc_key} AS k, SUM(revenue) AS revenue, COUNT(*) AS orders\n"
+            f"    FROM public.ga4_order_attribution\n"
+            f"   WHERE {fc_key} IS NOT NULL GROUP BY {fc_key}\n"
+            f"), ")
+        # Slightly conservative by construction: spend history starts
+        # 2025-12-29 but ga4_order_attribution starts 2026-01-01, so an
+        # ad that spent in those three days carries cost without revenue.
+        life_cols = (
+            "ls.lifetime_spend AS lifetime_spend,\n"
+            f"       CASE WHEN ls.lifetime_spend >= {roas_min} AND lf.orders > 0\n"
+            "            THEN lf.revenue / ls.lifetime_spend END AS lifetime_first_click_roas")
+        life_join = ("  LEFT JOIN life_spend ls ON ls.k = e.entity\n"
+                     "  LEFT JOIN life_first lf ON lf.k = e.entity\n")
     return f"""
-WITH j AS (
-  SELECT {first_k} AS first_k, {last_k} AS last_k,
-         COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS first_src,
-         COALESCE(NULLIF(btrim(last_source), ''),  '(none)') AS last_src,
-         revenue, days_to_convert, total_sessions
+WITH {life_cte}ends AS (
+  -- One SELECT per side rather than a shared scan, because `basis` can
+  -- give each side a different date column. On the default they are the
+  -- same predicate and this is the query it always was.
+  SELECT {first_k} AS entity,
+         COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS channel,
+         'first'::text AS side, revenue, days_to_convert, total_sessions
     FROM public.ga4_order_attribution
-   WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
-     AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
-{not_null}), ends AS (
-  SELECT first_k AS entity, first_src AS channel, 'first'::text AS side,
-         revenue, days_to_convert, total_sessions
-    FROM j WHERE first_k IS NOT NULL
+{first_window}     AND {first_k} IS NOT NULL
   UNION ALL
-  SELECT last_k, last_src, 'last'::text,
-         revenue, days_to_convert, total_sessions
-    FROM j WHERE last_k IS NOT NULL
+  SELECT {last_k},
+         COALESCE(NULLIF(btrim(last_source), ''), '(none)'),
+         'last'::text, revenue, days_to_convert, total_sessions
+    FROM public.ga4_order_attribution
+{order_window}     AND {last_k} IS NOT NULL
 ), agg AS (
   SELECT entity,
          -- One entity can carry rows from two spellings of its channel
@@ -2614,9 +2695,11 @@ SELECT e.entity AS source, {label} AS label, e.channel AS channel,
             THEN e.first_click_revenue / {spend_col} END AS first_click_roas,
        CASE WHEN {spend_col} >= {roas_min} AND e.last_orders > 0
             THEN e.last_click_revenue  / {spend_col} END AS last_click_roas,
-       e.avg_days_to_convert, e.avg_sessions
+       e.avg_days_to_convert, e.avg_sessions,
+       {life_cols}
   FROM agg e
-{join}{spend_join}"""
+{join}{spend_join}
+{life_join}"""
 
 
 class FirstClickRow(BaseModel):
@@ -2649,6 +2732,25 @@ class FirstClickRow(BaseModel):
     #: None if spend is unavailable or at source grain. The pair overlaps.
     first_click_spend: float | None
     last_click_spend: float | None
+    #: The entity's spend over ALL history held (insights_daily_by_ad runs
+    #: from 2025-12-29), ignoring the selected window. None at source grain,
+    #: and None for an entity Meta never billed.
+    #:
+    #: NOT from ad_insights despite its name: that table holds one
+    #: all_days row per ad over whatever window each was last fetched in,
+    #: and those windows overlap and disagree -- it totals Rs 69.8L
+    #: against the daily table's Rs 12.04 Cr.
+    lifetime_spend: float | None
+    #: Lifetime first-click revenue over lifetime spend, on the same
+    #: _ROAS_MIN_SPEND floor as the windowed pair. None where lifetime
+    #: spend is unavailable, under the floor, or the entity opened no
+    #: order ever.
+    #:
+    #: Slightly conservative by construction: spend history starts
+    #: 2025-12-29 but ga4_order_attribution starts 2026-01-01, so an ad
+    #: that spent in those three days carries the cost without the
+    #: revenue.
+    lifetime_first_click_roas: float | None
     first_click_revenue: float
     last_click_revenue: float
     #: Each side's revenue over the entity's own window spend. None at
@@ -2683,6 +2785,10 @@ class FirstClickResponse(BaseModel):
     #: single number that says how much last click is deciding.
     orders_reattributed: int
     orders_total: int
+    #: Which date the window meant for the FIRST-click side. Echoed so a
+    #: reader of the payload alone cannot mistake a cohort view for the
+    #: default one -- they answer different questions.
+    basis: Literal["order", "first_touch"] = "order"
 
 
 class UtmOrderResponse(BaseModel):
@@ -2774,6 +2880,8 @@ _FIRST_CLICK_SORTS = {
     "last_click_roas": "last_click_roas",
     "avg_days_to_convert": "avg_days_to_convert",
     "avg_sessions": "avg_sessions",
+    "lifetime_spend": "lifetime_spend",
+    "lifetime_first_click_roas": "lifetime_first_click_roas",
 }
 
 
@@ -2789,6 +2897,18 @@ async def get_first_click(
         default="desc",
         description="Sort direction. NULLs stay last either way, so a dash "
                     "never leads the table.",
+    ),
+    basis: Literal["order", "first_touch"] = Query(
+        default="order",
+        description="Which date the window means for the FIRST-click side. "
+                    "'order' (default) counts orders that CLOSED in these "
+                    "dates, matching the last-click side and the last-click "
+                    "table. 'first_touch' counts journeys this entity OPENED "
+                    "in these dates, so first-click revenue and spend describe "
+                    "the same clicks -- at the cost that the two sides no "
+                    "longer cover the same orders, and journeys not yet "
+                    "converted carry no revenue. The last-click side is never "
+                    "affected: the last touch is the converting session.",
     ),
     limit: int = Query(default=200, ge=1, le=5000,
                       description="Rows per page. The ad grain has ~2,300 entities "
@@ -2814,16 +2934,19 @@ async def get_first_click(
     # back with the page for free. Without it `total` could only ever
     # report the page size, which is what hid 2,283 of 2,333 ads behind
     # a limit of 50 and read as "these are all the ads there are".
+    # NULLS LAST on BOTH directions, not just DESC. Ascending puts the
+    # weakest rows first, which is the point of reversing -- but the
+    # column is full of honest NULLs (source grain, ads Meta never
+    # billed, ROAS under the spend floor), and Postgres sorts NULLs
+    # first on ASC by default. That would hand the page to rows with
+    # no number at all and bury the answer under dashes.
+    order_by = (f"{_FIRST_CLICK_SORTS[sort]} "
+                f"{'ASC' if direction == 'asc' else 'DESC'} NULLS LAST")
+
     rows_result = await session.execute(
-        # NULLS LAST on BOTH directions, not just DESC. Ascending puts the
-        # weakest rows first, which is the point of reversing -- but the
-        # column is full of honest NULLs (source grain, ads Meta never
-        # billed, ROAS under the spend floor), and Postgres sorts NULLs
-        # first on ASC by default. That would hand the page to rows with
-        # no number at all and bury the answer under dashes.
-        text(f"SELECT *, COUNT(*) OVER ()::int AS _total FROM ({_first_click_sql(grain)}) t "
-             f"ORDER BY {_FIRST_CLICK_SORTS[sort]} {'ASC' if direction == 'asc' else 'DESC'}"
-             f" NULLS LAST LIMIT :limit"),
+        text(f"SELECT *, COUNT(*) OVER ()::int AS _total "
+             f"FROM ({_first_click_sql(grain, basis)}) t "
+             f"ORDER BY {order_by} LIMIT :limit"),
         {**params, "limit": limit},
     )
     raw = [dict(r._mapping) for r in rows_result]
@@ -2845,7 +2968,7 @@ async def get_first_click(
     """), params)).one()
 
     return FirstClickResponse(
-        rows=rows, total=len(rows), matched=matched,
+        rows=rows, total=len(rows), matched=matched, basis=basis,
         orders_reattributed=head.orders_reattributed,
         orders_total=head.orders_total,
     )

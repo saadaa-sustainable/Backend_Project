@@ -111,3 +111,9 @@ var/
 
 # Copied in by admin/package.json prebuild from docs/ -- generated, not source.
 admin/public/docs/
+
+# Validation and analysis runs written against the live database. Same
+# reason as docs/*.csv above: this repo is PUBLIC and these hold real
+# revenue, order counts and ad-level rows. outputs/ was 2.7 MB of
+# first-click validation JSON sitting untracked and committable.
+outputs/

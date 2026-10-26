@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearAnalyticsCache } from "./api";
+import { useAnalyticsSectionVisible } from "./analyticsSectionVisibility";
 
 /**
  * sessionStorage-backed cache for API fetches. Survives page refresh
@@ -13,8 +14,9 @@ import { clearAnalyticsCache } from "./api";
  * Behavior:
  *   1. First mount, cache hit + not expired  -> render cached data immediately, no network
  *   2. First mount, cache miss or expired    -> fetch, render on arrival, populate cache
- *   3. Tab switch back to a cached tab       -> synchronous cache hit, no loading state
+ *   3. Tab switch back to a cached tab       -> instant data; refresh if expired
  *   4. User calls `refetch()`                -> force fresh fetch, update cache
+ *   5. Visible section reaches expiry       -> refresh without hiding its data
  *
  * TTL defaults to 5 minutes -- long enough that browsing between
  * tabs feels instant, short enough that a merchant checking numbers
@@ -29,7 +31,7 @@ interface CacheEntry<T> {
   ts: number;
 }
 
-function readCache<T>(key: string, ttlMs: number): T | null {
+function readCache<T>(key: string, ttlMs: number): CacheEntry<T> | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.sessionStorage.getItem(key);
@@ -42,7 +44,7 @@ function readCache<T>(key: string, ttlMs: number): T | null {
       window.sessionStorage.removeItem(key);
       return null;
     }
-    return entry.data;
+    return entry;
   } catch {
     return null;
   }
@@ -97,6 +99,7 @@ export function useCachedFetch<T>(
   fetcher: () => Promise<T>,
   ttlMs: number = DEFAULT_TTL_MS,
 ): UseCachedFetchResult<T> {
+  const visible = useAnalyticsSectionVisible();
   const [revision, setRevision] = useState(0);
   // Parse sessionStorage only when the request changes, rather than on
   // every render of a dashboard tile.
@@ -110,33 +113,74 @@ export function useCachedFetch<T>(
     error: Error | null;
   } | null>(null);
   const fetcherRef = useRef(fetcher);
+  // Analytics tabs stay mounted while hidden. Track the age of the
+  // rendered response independently of mounts and unrelated rerenders.
+  const lastSuccess = useRef<{ scope: typeof scope; ts: number } | null>(null);
+  const failedScope = useRef<typeof scope | null>(null);
 
   useEffect(() => {
     fetcherRef.current = fetcher;
   }, [fetcher]);
 
   useEffect(() => {
-    if (scope.cached !== null) return;
+    if (!visible) return;
     let cancelled = false;
-    fetchShared(scope.key, fetcherRef.current)
-      .then((data) => {
-        if (!cancelled) setResult({ scope, data, error: null });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setResult({
-            scope,
-            data: null,
-            error: error instanceof Error ? error : new Error(String(error)),
-          });
-        }
+    let pending = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    function schedule(ts: number) {
+      clearTimeout(timer);
+      timer = setTimeout(refreshIfStale, Math.max(1000, ts + ttlMs - Date.now()));
+    }
+
+    function refreshIfStale() {
+      if (cancelled || pending || document.visibilityState === "hidden"
+        || failedScope.current === scope) return;
+      const loadedAt = lastSuccess.current?.scope === scope
+        ? lastSuccess.current.ts : scope.cached?.ts;
+      if (loadedAt !== undefined && Date.now() - loadedAt < ttlMs) {
+        schedule(loadedAt);
+        return;
+      }
+
+      pending = true;
+      // Another reader may have refreshed this key while we were hidden.
+      const cached = readCache<T>(scope.key, ttlMs);
+      const request = cached !== null ? Promise.resolve(cached)
+        : fetchShared(scope.key, fetcherRef.current)
+          .then((data) => ({ data, ts: Date.now() }));
+      request.then((entry) => {
+        if (cancelled) return;
+        lastSuccess.current = { scope, ts: entry.ts };
+        setResult({ scope, data: entry.data, error: null });
+        schedule(entry.ts);
+      }).catch((error: unknown) => {
+        if (cancelled) return;
+        // Leave failures to the existing Retry control; focus and timers
+        // must not silently retry a failed connection.
+        failedScope.current = scope;
+        setResult({
+          scope,
+          data: null,
+          error: error instanceof Error ? error : new Error(String(error)),
+        });
+      }).finally(() => {
+        pending = false;
       });
+    }
+
+    refreshIfStale();
+    window.addEventListener("focus", refreshIfStale);
+    document.addEventListener("visibilitychange", refreshIfStale);
     // This also invalidates a pending response when the next key is a
     // cache hit, and prevents updates after the component unmounts.
     return () => {
       cancelled = true;
+      clearTimeout(timer);
+      window.removeEventListener("focus", refreshIfStale);
+      document.removeEventListener("visibilitychange", refreshIfStale);
     };
-  }, [scope]);
+  }, [scope, visible, ttlMs]);
 
   const refetch = useCallback(() => {
     try {
@@ -151,7 +195,7 @@ export function useCachedFetch<T>(
 
   const current = result?.scope === scope ? result : null;
   return {
-    data: current ? current.data : scope.cached,
+    data: current ? current.data : scope.cached?.data ?? null,
     error: current?.error ?? null,
     loading: current === null && scope.cached === null,
     refetch,
