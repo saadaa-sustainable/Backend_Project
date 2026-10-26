@@ -1218,6 +1218,14 @@ export interface FirstClickRow {
   /** Null when the source only ever appears as a closer in this window. */
   avg_days_to_convert: number | null;
   avg_sessions: number | null;
+  /** The entity's spend over ALL history held, ignoring the selected dates.
+   *  Null at source grain and for entities Meta never billed. */
+  lifetime_spend: number | null;
+  /** Lifetime first-click revenue over lifetime spend, on the same ₹1,000
+   *  floor as the windowed pair. Reads lower than the windowed ROAS for an
+   *  ad that has been running a while — the window shows its recent form,
+   *  this shows what it has returned in total. */
+  lifetime_first_click_roas: number | null;
 }
 
 export interface FirstClickResponse {
@@ -1229,6 +1237,8 @@ export interface FirstClickResponse {
   matched: number;
   orders_reattributed: number;
   orders_total: number;
+  /** Which date the window meant for the FIRST-click side. */
+  basis?: "order" | "first_touch";
 }
 
 export interface FirstClickParams {
@@ -1240,6 +1250,11 @@ export interface FirstClickParams {
   /** Sort direction. NULLs stay last either way, so a dash never leads. */
   direction?: "asc" | "desc";
   limit?: number;
+  /** Which date the window means for the FIRST-click side. "order"
+   *  (default) counts orders that CLOSED in the dates; "first_touch"
+   *  counts journeys OPENED in them. The last-click side never moves —
+   *  the last touch is the converting session. */
+  basis?: "order" | "first_touch";
 }
 
 export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstClickResponse> {
@@ -1250,6 +1265,7 @@ export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstCli
   if (params.sort) qs.set("sort", params.sort);
   if (params.direction) qs.set("direction", params.direction);
   if (params.limit) qs.set("limit", String(params.limit));
+  if (params.basis) qs.set("basis", params.basis);
   const s = qs.toString();
   return request<FirstClickResponse>(`/admin/analytics/first-click${s ? `?${s}` : ""}`);
 }

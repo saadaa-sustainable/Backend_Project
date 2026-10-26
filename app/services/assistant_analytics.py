@@ -98,8 +98,10 @@ class FirstClickInput(ToolInput):
     date_from: date | None = Field(default=None, description="Inclusive YYYY-MM-DD. Defaults to 30 days back.")
     date_to: date | None = Field(default=None, description="Inclusive YYYY-MM-DD. Defaults to today.")
     grain: Literal["source", "ad", "adset"] = "source"
+    basis: Literal["order", "first_touch"] = "order"
     sort: Literal["spend", "first_click_spend", "last_click_spend", "first_click_revenue", "last_click_revenue",
                   "first_click_roas", "last_click_roas",
+                  "lifetime_spend", "lifetime_first_click_roas",
                   "avg_days_to_convert", "avg_sessions"] = "first_click_revenue"
     direction: Literal["desc", "asc"] = "desc"
     limit: int = Field(default=25, ge=1, le=200)
@@ -108,8 +110,11 @@ class FirstClickInput(ToolInput):
     def check_range(self) -> FirstClickInput:
         if (self.date_from is None) != (self.date_to is None):
             raise ValueError("Provide both date_from and date_to, or neither.")
-        if self.grain == "source" and self.sort in {"spend", "first_click_spend", "last_click_spend", "first_click_roas", "last_click_roas"}:
-            raise ValueError("Source grain carries no Meta spend, so spend and both ROAS sorts are unavailable there.")
+        if self.grain == "source" and self.sort in {"spend", "first_click_spend", "last_click_spend",
+                                                    "first_click_roas", "last_click_roas",
+                                                    "lifetime_spend", "lifetime_first_click_roas"}:
+            raise ValueError("Source grain carries no Meta spend, so spend, both ROAS and both "
+                             "lifetime sorts are unavailable there.")
         return self
 
 
@@ -232,7 +237,22 @@ _TOOL_SPECS = {
         "matched entity's selected-window Meta spend once, regardless of order count. "
         "Both ROAS columns use this shared spend denominator. Do not present the legacy "
         "first_click_spend and last_click_spend fields as additional costs. "
-        "The window filters order dates and spend dates, not first-touch dates. "
+        "lifetime_spend and lifetime_first_click_roas IGNORE the selected dates and cover all "
+        "history held -- lifetime_spend is everything Meta ever billed the entity, and the ROAS "
+        "is its lifetime first-click revenue over that. Read them BESIDE the windowed pair, "
+        "never instead of it: a first_click_roas above lifetime_first_click_roas means the entity "
+        "is performing better lately than it has overall, which is the comparison these two "
+        "columns exist for. Never add a lifetime column to a windowed one. "
+        "basis='order' (the default) means the window filters ORDER dates: first-click "
+        "revenue can come from journeys opened weeks earlier while spend is in-window only, "
+        "which is why first_click_roas runs high for an established entity. Measured over a "
+        "30-day window at ad grain, 30.4% of orders -- 31.2% of first-click revenue -- were "
+        "opened BEFORE the window. basis='first_touch' instead counts journeys OPENED in the "
+        "window, so first-click revenue and spend describe the same clicks; on that setting the "
+        "two sides no longer cover the same orders, so never reconcile them against "
+        "get_last_click_attribution, and journeys not yet converted carry no revenue, which "
+        "understates recent entities. The last-click side is identical under both, because the "
+        "last touch IS the converting session. State which basis a figure came from. "
         "Source grain has no Meta spend, so spend and both ROAS columns are null there. "
         "first_click_roas and last_click_roas are null below Rs 1,000 of window spend, where the "
         "quotient stops being a rate. first_click_roas runs HIGH for an ad winding down: its "

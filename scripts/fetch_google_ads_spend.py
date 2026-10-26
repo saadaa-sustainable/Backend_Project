@@ -114,7 +114,33 @@ ON CONFLICT (day, campaign_id) DO UPDATE SET
   conversions = EXCLUDED.conversions,
   conv_value = EXCLUDED.conv_value,
   fetched_at = EXCLUDED.fetched_at
+-- Do not overwrite a FRESH row the Google Ads API wrote. Both feeds
+-- land in this table and the API is the authority: MapleMonk's copy of
+-- CONVERSIONS is a snapshot of whatever had attributed when it synced,
+-- and measured 2026-10-21 it was short by Rs 39,332 over 30 days, all
+-- of it in the last eight. Spend agrees to the rupee, so the guard
+-- costs nothing there and protects the column that matters.
+--
+-- The staleness clause is the important half. A bare
+-- `source <> 'google_ads_api'` would mean that if the API feed ever
+-- stopped -- an expired refresh token, a revoked developer token --
+-- MapleMonk's rows would be refused forever and Google data would
+-- silently FREEZE at the last API run, while both jobs reported
+-- success. Letting MapleMonk take an API row back once it is three
+-- days stale makes the API preferred rather than absolute, so a dead
+-- feed degrades to the slightly laggier source instead of to nothing.
+WHERE public.google_ads_spend_daily.source <> 'google_ads_api'
+   OR public.google_ads_spend_daily.fetched_at < now() - interval '3 days'
 """
+
+#: The DDL above is CREATE TABLE IF NOT EXISTS, so it will not add a
+#: column to a table that already exists. `source` has to arrive by
+#: ALTER, and it must exist before the UPSERT's WHERE clause references
+#: it -- scripts/fetch_google_ads_api.py runs the same statement.
+MIGRATIONS = [
+    "ALTER TABLE public.google_ads_spend_daily "
+    "  ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'maplemonk'",
+]
 
 #: GROUP BY because the source is an Airbyte landing table and can hold
 #: more than one row per campaign-day across sync generations. Summing
@@ -198,6 +224,8 @@ def main() -> int:
     with connect(autocommit=False, statement_timeout="300s") as conn:
         with conn.cursor() as cur:
             cur.execute(DDL)
+            for _stmt in MIGRATIONS:
+                cur.execute(_stmt)
             if payload:
                 # fetched_at comes from the server clock, not this
                 # machine's -- the nightly and a laptop run must stamp

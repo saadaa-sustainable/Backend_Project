@@ -54,6 +54,8 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: "spend", label: "Ad spend" },
   { value: "first_click_revenue", label: "First-click revenue" },
   { value: "last_click_revenue", label: "Last-click revenue" },
+  { value: "lifetime_spend", label: "Lifetime spend" },
+  { value: "lifetime_first_click_roas", label: "Lifetime FC ROAS" },
   { value: "first_click_roas", label: "First-click ROAS" },  // hidden at source grain
   { value: "last_click_roas", label: "Last-click ROAS" },    // hidden at source grain
   { value: "avg_days_to_convert", label: "Days to convert" },
@@ -65,7 +67,8 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
  *  stay legible at one glance, and they are the twelve whose two ends
  *  disagree most — which is the only question the chart is asked. */
 const DIVERGING_ROWS = 12;
-const SPEND_SORTS = ["spend", "first_click_roas", "last_click_roas"];
+const SPEND_SORTS = ["spend", "first_click_roas", "last_click_roas",
+                     "lifetime_spend", "lifetime_first_click_roas"];
 
 function num(n: number | null | undefined, digits = 0) {
   if (n === null || n === undefined) return "—";
@@ -78,6 +81,9 @@ function rupees(n: number) {
 
 export function FirstClick() {
   const [grain, setGrain] = useState("ad");
+  // Which date the window means for the FIRST-click side. The last-click
+  // side never moves: the last touch IS the converting session.
+  const [basis, setBasis] = useState<"order" | "first_touch">("order");
   const [sort, setSort] = useState("first_click_revenue");
   // Header clicks sort server-side, not in the page. That matters because
   // the table is a TOP-N: reversing the direction changes which rows come
@@ -151,8 +157,8 @@ export function FirstClick() {
   const [error, setError] = useState<string | null>(null);
 
   const filters = useMemo(
-    () => ({ grain, sort, direction, from_date: fromDate, to_date: toDate, limit }),
-    [grain, sort, direction, fromDate, toDate, limit],
+    () => ({ grain, sort, direction, from_date: fromDate, to_date: toDate, limit, basis }),
+    [grain, sort, direction, fromDate, toDate, limit, basis],
   );
 
   useEffect(() => {
@@ -263,6 +269,21 @@ export function FirstClick() {
             {GRAIN_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
+          </select>
+        </FilterCell>
+
+        <FilterCell label="Window means" className="w-56" htmlFor="fc-basis">
+          <select
+            id="fc-basis"
+            value={basis}
+            onChange={(e) => setBasis(e.target.value as "order" | "first_touch")}
+            className={filterControlClass}
+            title={basis === "order"
+              ? "Orders that CLOSED in these dates. First-click revenue can come from journeys opened weeks earlier, while spend is in-window only — so first-click ROAS reads high for an established ad."
+              : "Journeys this entity OPENED in these dates. First-click revenue and spend then describe the same clicks, but journeys not yet converted carry no revenue, and the two sides no longer cover the same orders."}
+          >
+            <option value="order">Order date</option>
+            <option value="first_touch">First-touch date</option>
           </select>
         </FilterCell>
 
@@ -403,7 +424,10 @@ export function FirstClick() {
               </span>
             </div>
             {grain !== "source" && <p className="text-[11.5px] text-text-tertiary">
-              Ad spend covers the selected date range, counted once per matched {grainNoun.toLowerCase()}. Both ROAS columns use this spend.
+              Ad spend covers the selected date range, counted once per matched {grainNoun.toLowerCase()}. Both ROAS columns use this spend. The two lifetime columns ignore the dates entirely and cover all history held.
+            </p>}
+            {basis === "first_touch" && <p className="text-[11.5px] text-warning-text">
+              First-click columns count journeys <strong>opened</strong> in these dates, so they line up with the spend that bought them. Journeys opened here but not yet converted carry no revenue, which understates recent {grainNoun.toLowerCase()}s. The two sides no longer cover the same orders — do not reconcile against Last Click on this setting.
             </p>}
             {/* Hairlines and a sticky first column, no container: the
                 box this replaces carried a rounded border AND a shadow,
@@ -462,6 +486,11 @@ export function FirstClick() {
                       ...(grain === "source" ? [] : [
                         ["First-click ROAS", "First-click revenue divided by Ad spend for the selected date range. A dash means spend is unavailable, below ₹1,000, or there are no first-click orders. The first touch can predate this order window.", "first_click_roas"] as const,
                         ["Last-click ROAS", "Last-click revenue divided by the same Ad spend. A dash means spend is unavailable, below ₹1,000, or there are no last-click orders.", "last_click_roas"] as const,
+                        // Lifetime pair: the same two questions asked of the
+                        // whole history rather than the picked dates, so a
+                        // row shows recent form beside total return.
+                        ["Lifetime spend", "Everything Meta has billed this " + grainNoun.toLowerCase() + " across all history held, ignoring the selected dates. Equals Ad spend for anything whose whole life sits inside the window.", "lifetime_spend"] as const,
+                        ["Lifetime FC ROAS", "Lifetime first-click revenue divided by lifetime spend. Compare it with First-click ROAS beside it: a higher windowed number means the " + grainNoun.toLowerCase() + " is doing better lately than it has overall. A dash means lifetime spend is unavailable or below ₹1,000.", "lifetime_first_click_roas"] as const,
                       ]),
                       ["Days to convert", "Average days from first session to order, over the orders this one started.", "avg_days_to_convert"],
                       ["Sessions", "Average sessions before the order, over the orders this one started.", "avg_sessions"],
@@ -554,6 +583,36 @@ export function FirstClick() {
                               : undefined}
                           >
                             {num(r.last_click_roas, 2)}
+                          </td>
+                        )}
+                        {grain !== "source" && (
+                          <td
+                            className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary"
+                            title={r.lifetime_spend == null
+                              ? "Meta never billed this entity, so it has no lifetime cost"
+                              : undefined}
+                          >
+                            {r.lifetime_spend == null
+                              ? <span className="text-text-tertiary">&mdash;</span>
+                              : num(r.lifetime_spend)}
+                          </td>
+                        )}
+                        {grain !== "source" && (
+                          <td
+                            className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${
+                              // Flag the ad whose recent form is running ahead of
+                              // what it has returned overall -- the comparison the
+                              // column exists for, and easy to miss by eye.
+                              r.first_click_roas != null && r.lifetime_first_click_roas != null
+                              && r.first_click_roas > r.lifetime_first_click_roas
+                                ? "text-success-text" : "text-text-primary"}`}
+                            title={r.lifetime_first_click_roas == null
+                              ? "Lifetime spend unavailable or below ₹1,000"
+                              : r.first_click_roas != null && r.first_click_roas > r.lifetime_first_click_roas
+                                ? "Doing better in the selected range than over its whole life"
+                                : undefined}
+                          >
+                            {num(r.lifetime_first_click_roas, 2)}
                           </td>
                         )}
                         <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">{num(r.avg_days_to_convert, 1)}</td>

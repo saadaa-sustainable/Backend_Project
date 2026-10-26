@@ -26,6 +26,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.silver.google_order_attribution import (
+    attribute_google, is_google_order, load_google_universe,
+)
+
 from app.logging.setup import get_logger
 
 logger = get_logger(__name__)
@@ -784,25 +788,44 @@ async def _refresh_order_attribution(session: AsyncSession) -> int:
     universe = await _load_ad_universe(session)
     orders = await _load_orders(session)
     match_order = _build_order_matcher(universe)
+    # Google's own last-click pass. Loaded once; campaigns come from
+    # Postgres and ads from the Google Ads API, and it degrades to
+    # campaign-level rather than failing when the API is unreachable.
+    google = await load_google_universe(session)
     logger.info("order_attribution_matching_started", orders=len(orders))
 
     rows = []
+    google_matched = 0
     for index, o in enumerate(orders, 1):
         result = match_order(o.utm_content, o.utm_term, o.utm_campaign, order_id=o.order_id or "")
+        tier = result.tier
+        ad_id, ad_name = result.matched_ad_id, result.matched_ad_name
+        camp_id, camp_name = result.matched_campaign_id, result.matched_campaign_name
+        matched_value = result.matched_value
+        # ONLY where Meta found nothing: a Google pass must never take an
+        # order away from a Meta match, and an order carrying both is
+        # already decided by the stronger evidence.
+        if tier == "unmatched" and google and is_google_order(o.utm_source):
+            hit = attribute_google(o.utm_campaign, o.utm_content, google)
+            if hit is not None:
+                tier, ad_id, ad_name, camp_id, camp_name, matched_value = hit
+                google_matched += 1
         rows.append({
             "order_id": o.order_id, "name": o.name, "total_price": o.total_price,
             "created_at": o.created_at, "customer_id": o.customer_id,
             "utm_source": o.utm_source, "utm_medium": o.utm_medium,
             "utm_campaign": o.utm_campaign, "utm_content": o.utm_content, "utm_term": o.utm_term,
-            "tier": result.tier, "matched_ad_id": result.matched_ad_id,
-            "matched_ad_name": result.matched_ad_name,
-            "matched_value": result.matched_value,
-            "matched_campaign_id": result.matched_campaign_id,
-            "matched_campaign_name": result.matched_campaign_name,
+            "tier": tier, "matched_ad_id": ad_id,
+            "matched_ad_name": ad_name,
+            "matched_value": matched_value,
+            "matched_campaign_id": camp_id,
+            "matched_campaign_name": camp_name,
         })
         if index % 25_000 == 0:
             logger.info("order_attribution_matching_progress", processed=index, total=len(orders))
 
+    logger.info("google_attribution_applied", orders=google_matched,
+                source=google.source)
     logger.info("order_attribution_writing_started", rows=len(rows))
     await session.execute(text("TRUNCATE shopify_order_attribution"))
     for start in range(0, len(rows), 10_000):

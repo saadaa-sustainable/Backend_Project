@@ -18,6 +18,9 @@ from app.services.gold.ad_performance import refresh_ad_performance_summary
 from app.services.gold.cpis import refresh_cpis_by_sku
 from app.services.gold.cpis_utm import refresh_cpis_by_sku_utm
 from app.services.gold.landing_page import refresh_landing_page_tables
+from app.services.google.entity_flatten import (
+    refresh_google_entity_tables,
+)
 from app.services.meta.entity_flatten import refresh_entity_tables
 from app.services.silver.ad_lifecycle import refresh_ad_lifecycle
 from app.services.silver.insights_flatten import refresh_insights_tables
@@ -42,6 +45,13 @@ FLATTEN_REGISTRY: dict[str, FlattenJob] = {
         source_table="raw_dump_meta",
         target_tables=("meta_campaigns", "meta_adsets", "meta_ads"),
         refresh=refresh_entity_tables,
+    ),
+    "google_entities": FlattenJob(
+        key="google_entities",
+        label="Google campaigns / ad groups / ads",
+        source_table="raw_dump_google_ads",
+        target_tables=("google_campaigns", "google_ad_groups", "google_ads"),
+        refresh=refresh_google_entity_tables,
     ),
     "insta_data": FlattenJob(
         key="insta_data",

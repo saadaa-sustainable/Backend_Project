@@ -17,12 +17,38 @@ import remarkGfm from "remark-gfm";
  * only HTML reaches the browser, so no markdown parser ships to the client.
  */
 
-const DOC = {
-  file: "mcp-connector.md",
-  pdf: "/docs/mcp-connector.pdf",
-  title: "The SAADAA Analytics connector for Claude",
-  blurb: "Connecting the read-only MCP connector, and how to prompt it so the answers are defensible.",
-};
+interface Doc {
+  slug: string;
+  file: string;
+  pdf: string;
+  title: string;
+  /** Short label for the switcher; the title is too long to sit in a tab. */
+  tab: string;
+  blurb: string;
+}
+
+/** Every document the section serves. Adding one here is the whole change
+ *  — but its markdown and PDF must also be added to `prebuild`/`predev` in
+ *  package.json, or the file will be missing in the deployed tree and the
+ *  page will render its "file is missing" notice instead. */
+const DOCS: Doc[] = [
+  {
+    slug: "connector",
+    file: "mcp-connector.md",
+    pdf: "/docs/mcp-connector.pdf",
+    tab: "Claude connector",
+    title: "The SAADAA Analytics connector for Claude",
+    blurb: "Connecting the read-only MCP connector, and how to prompt it so the answers are defensible.",
+  },
+  {
+    slug: "first-click",
+    file: "first-click-guide.md",
+    pdf: "/docs/first-click-guide.pdf",
+    tab: "First Click",
+    title: "First Click attribution and customer journeys",
+    blurb: "How a journey is reconstructed, what the two revenue columns each claim, and what the date range means on either setting.",
+  },
+];
 
 /** Opens a new Claude conversation with a prompt already in the composer.
  *
@@ -32,11 +58,16 @@ const DOC = {
  *
  *  The connector still has to be attached to their account. This link is a
  *  shortcut to the conversation, never a substitute for section 3. */
-const CLAUDE_NEW =
-  "https://claude.ai/new?q=" +
-  encodeURIComponent(
+const CLAUDE_PROMPT: Record<string, string> = {
+  connector:
     "List the analytics tools you can use for SAADAA, and tell me the latest date each dataset has data for.",
-  );
+  "first-click":
+    "Using the First Click section for the last 30 days at ad grain, show me the ads whose first-click ROAS is furthest ahead of their lifetime FC ROAS, and say which attribution basis you used.",
+};
+
+function claudeNew(slug: string): string {
+  return "https://claude.ai/new?q=" + encodeURIComponent(CLAUDE_PROMPT[slug] ?? CLAUDE_PROMPT.connector);
+}
 
 /** Heading text -> the slug ReactMarkdown would not give us otherwise. */
 function slug(children: React.ReactNode): string {
@@ -48,10 +79,20 @@ function slug(children: React.ReactNode): string {
 
 export const metadata = {
   title: "Documentation",
-  description: DOC.blurb,
+  description: DOCS[0].blurb,
 };
 
-export default async function DocsPage() {
+/** `searchParams` is a Promise in this version of Next and must be awaited
+ *  — see node_modules/next/dist/docs/01-app/01-getting-started/03-layouts-and-pages.md.
+ *  Reading it synchronously compiles but does not give you the value. */
+export default async function DocsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
+  const wanted = (await searchParams).doc;
+  const DOC = DOCS.find((d) => d.slug === wanted) ?? DOCS[0];
+
   let markdown: string | null = null;
   try {
     markdown = await readFile(path.join(process.cwd(), "public", "docs", DOC.file), "utf8");
@@ -61,12 +102,42 @@ export default async function DocsPage() {
 
   // Everything above the first horizontal rule is the lead, which the page
   // header below already states. Dropping it avoids saying it twice.
-  const body = markdown?.includes("\n---\n")
-    ? markdown.slice(markdown.indexOf("\n---\n") + 5)
-    : markdown;
+  //
+  // Not every doc has a horizontal rule, though: first-click-guide.md has
+  // none at all, so this used to fall through and render its H1 and lead
+  // a second time directly under the page header. The fallback drops
+  // everything above the first `## ` instead, which is the same intent
+  // expressed without depending on a rule being there.
+  const body =
+    markdown === null
+      ? null
+      : markdown.includes("\n---\n")
+        ? markdown.slice(markdown.indexOf("\n---\n") + 5)
+        : markdown.includes("\n## ")
+          ? markdown.slice(markdown.indexOf("\n## ") + 1)
+          : markdown;
 
   return (
     <div className="mx-auto w-full max-w-4xl px-6 py-8">
+      {DOCS.length > 1 && (
+        <nav className="mb-6 flex flex-wrap gap-1.5" aria-label="Documents">
+          {DOCS.map((d) => (
+            <a
+              key={d.slug}
+              href={`/user/docs?doc=${d.slug}`}
+              aria-current={d.slug === DOC.slug ? "page" : undefined}
+              className={`rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                d.slug === DOC.slug
+                  ? "bg-text-primary text-bg-white"
+                  : "border border-border-primary bg-bg-white text-text-secondary hover:bg-bg-muted"
+              }`}
+            >
+              {d.tab}
+            </a>
+          ))}
+        </nav>
+      )}
+
       <header className="mb-8 border-b border-border-primary pb-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
@@ -82,7 +153,7 @@ export default async function DocsPage() {
               ↓ Download PDF
             </a>
             <a
-              href={CLAUDE_NEW}
+              href={claudeNew(DOC.slug)}
               target="_blank"
               rel="noopener noreferrer"
               className="rounded-md bg-text-primary px-3.5 py-2 text-sm font-medium text-bg-white transition-opacity hover:opacity-90"
