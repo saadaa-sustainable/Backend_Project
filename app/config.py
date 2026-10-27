@@ -261,6 +261,30 @@ class Settings(BaseSettings):
     #: ingestion. Override in .env if the admin app runs anywhere other
     #: than the default `next dev` port.
     admin_app_origin: str = Field(default="http://localhost:3000", alias="ADMIN_APP_ORIGIN")
+
+    @property
+    def admin_app_origins(self) -> list[str]:
+        """Every origin the admin app may be browsed on, for CORS.
+
+        `localhost` and `127.0.0.1` are the same machine but different
+        ORIGINS, so a browser treats a call from one to the other as
+        cross-site. With only one of them allowed, opening the dashboard
+        on the other loaded the page fine and then had every API request
+        refused — which reads as an empty section rather than a network
+        error, because a section with no rows renders its empty state and
+        hides the controls above its table. Allowing the pair costs
+        nothing: anything that can reach 127.0.0.1 can reach localhost.
+
+        Still not a wildcard — /admin/* can trigger ingestion, so this
+        stays an explicit list and ADMIN_APP_ORIGIN still names the one
+        that matters in deployment.
+        """
+        origins = [self.admin_app_origin]
+        for a, b in (("//localhost", "//127.0.0.1"), ("//127.0.0.1", "//localhost")):
+            swapped = self.admin_app_origin.replace(a, b)
+            if swapped != self.admin_app_origin and swapped not in origins:
+                origins.append(swapped)
+        return origins
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
 

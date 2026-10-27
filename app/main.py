@@ -82,10 +82,13 @@ def create_app() -> FastAPI:
 
     # The Next.js admin app (admin/) runs on a different origin in dev
     # (localhost:3000 -> localhost:8000) -- restricted to the admin app's
-    # own origin, not a wildcard, since this API can trigger ingestion.
+    # own origins, not a wildcard, since this API can trigger ingestion.
+    # The plural matters: localhost and 127.0.0.1 are one machine but two
+    # origins, and allowing only one makes the dashboard look empty on the
+    # other rather than reporting a network error.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.admin_app_origin],
+        allow_origins=settings.admin_app_origins,
         allow_methods=["GET", "POST"],
         allow_headers=["Content-Type"],
     )

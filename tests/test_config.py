@@ -107,3 +107,35 @@ def test_account_by_key_returns_matching_account(monkeypatch: pytest.MonkeyPatch
     settings = MetaAPISettings()
 
     assert settings.account_by_key("2").account_id == "222"
+
+
+def test_cors_covers_both_names_for_the_same_machine(monkeypatch):
+    """localhost and 127.0.0.1 are one machine but two ORIGINS.
+
+    Allowing only one meant the dashboard loaded on the other and then
+    had every API call refused by the browser. That does not surface as
+    a network error: the section renders its no-rows empty state, which
+    hides the controls above its table — so a new control looked like it
+    had never shipped.
+    """
+    from app.config import Settings
+
+    monkeypatch.setenv("ADMIN_APP_ORIGIN", "http://localhost:3000")
+    assert Settings().admin_app_origins == [
+        "http://localhost:3000", "http://127.0.0.1:3000",
+    ]
+
+    # Works from either side.
+    monkeypatch.setenv("ADMIN_APP_ORIGIN", "http://127.0.0.1:3000")
+    assert Settings().admin_app_origins == [
+        "http://127.0.0.1:3000", "http://localhost:3000",
+    ]
+
+
+def test_a_deployed_origin_is_not_given_a_loopback_twin(monkeypatch):
+    """Still not a wildcard. /admin/* can trigger ingestion, so a real
+    deployment host gets exactly itself and nothing invented alongside."""
+    from app.config import Settings
+
+    monkeypatch.setenv("ADMIN_APP_ORIGIN", "https://dashboard.example.com")
+    assert Settings().admin_app_origins == ["https://dashboard.example.com"]
