@@ -1257,6 +1257,66 @@ export interface FirstClickParams {
   basis?: "order" | "first_touch";
 }
 
+export interface FirstClickDailyRow {
+  day: string;
+  /** Orders in this window whose journey OPENED on this day. */
+  opened_revenue: number;
+  opened_orders: number;
+  /** Only ever non-zero on the window's first day: orders in this window
+   *  whose journey opened BEFORE it. Kept so the days sum to the window,
+   *  reported apart so day one is not inflated by a tail of unknown
+   *  length. Never add it into `opened_revenue` — it is not same-day
+   *  activity, and it moves if the window boundary moves. */
+  carried_in_revenue: number;
+  carried_in_orders: number;
+  /** Orders that CLOSED on this day. Never clamped: the last touch is
+   *  the converting session, so it is always in-window. */
+  closed_revenue: number;
+  closed_orders: number;
+  /** The entity's spend when one is named, otherwise every ad's — which
+   *  is the account's daily spend, not the spend of these rows. Null at
+   *  source grain. */
+  spend: number | null;
+}
+
+export interface FirstClickDailyResponse {
+  rows: FirstClickDailyRow[];
+  grain: string;
+  entity: string | null;
+  opened_total: number;
+  carried_in_total: number;
+  /** How many journeys the carried-in figure covers. */
+  carried_in_orders_total: number;
+  closed_total: number;
+  spend_total: number | null;
+}
+
+export interface FirstClickDailyParams {
+  grain?: string;
+  from_date?: string;
+  to_date?: string;
+  /** Scope to one ad id / ad set id / source. Omit for every entity. */
+  entity?: string;
+}
+
+/** Day-wise first click. `opened_revenue + carried_in_revenue` totals the
+ *  window exactly and equals what `fetchFirstClick` reports on
+ *  `basis="order"`; `closed_revenue` covers the same orders counted at
+ *  their other end, so it must never be added to either. */
+export function fetchFirstClickDaily(
+  params: FirstClickDailyParams = {},
+): Promise<FirstClickDailyResponse> {
+  const qs = new URLSearchParams();
+  if (params.grain) qs.set("grain", params.grain);
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.entity) qs.set("entity", params.entity);
+  const s = qs.toString();
+  return request<FirstClickDailyResponse>(
+    `/admin/analytics/first-click/daily${s ? `?${s}` : ""}`,
+  );
+}
+
 export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstClickResponse> {
   const qs = new URLSearchParams();
   if (params.grain) qs.set("grain", params.grain);
@@ -3251,4 +3311,219 @@ export function fetchAssetIterations(
   assetId: string,
 ): Promise<{ asset_id: string; iterations: AssetIteration[] }> {
   return request(`/admin/analytics/asset-analysis/${encodeURIComponent(assetId)}/iterations`);
+}
+
+
+/* ---------------------------------------------------------------- *
+ * Campaign Tracker                                                   *
+ * ---------------------------------------------------------------- */
+
+export interface CampaignTrackerRow {
+  campaign_id: string;
+  campaign_name: string;
+  status: string | null;
+  objective: string | null;
+  account_name: string | null;
+  adsets: number;
+  adsets_active: number;
+  ads: number;
+  ads_active: number;
+  /** Ads CREATED in the trailing window. An ad made today that has not
+   *  spent yet still counts -- that is the point of the section. */
+  ads_added_7d: number;
+  ads_added_30d: number;
+  /** Null where the campaign has no ads at all -- a dash, not a zero. */
+  newest_ad: string | null;
+  newest_adset: string | null;
+  days_since_new_ad: number | null;
+  spend_7d: number;
+}
+
+export interface CampaignTrackerResponse {
+  rows: CampaignTrackerRow[];
+  total: number;
+  matched: number;
+  campaigns: number;
+  ads_added_7d: number;
+  ads_added_30d: number;
+  /** Campaigns that spent in the last 7 days whose newest ad is older
+   *  than `stale_days`. The number this section exists for. */
+  stale_spending: number;
+  stale_days: number;
+  as_of: string;
+}
+
+export interface CampaignTrackerParams {
+  status?: string;
+  account?: string;
+  search?: string;
+  stale_days?: number;
+  only_stale?: boolean;
+  sort?: string;
+  direction?: "asc" | "desc";
+  limit?: number;
+}
+
+export function fetchCampaignTracker(
+  params: CampaignTrackerParams = {},
+): Promise<CampaignTrackerResponse> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set("status", params.status);
+  if (params.account) qs.set("account", params.account);
+  if (params.search) qs.set("search", params.search);
+  if (params.stale_days) qs.set("stale_days", String(params.stale_days));
+  if (params.only_stale) qs.set("only_stale", "true");
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.direction) qs.set("direction", params.direction);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return request<CampaignTrackerResponse>(
+    `/admin/analytics/campaign-tracker${q ? `?${q}` : ""}`,
+  );
+}
+
+
+/* ---------------------------------------------------------------- *
+ * Meta Hypothesis                                                    *
+ * ---------------------------------------------------------------- */
+
+export interface HypothesisRow {
+  /** The register's own key. Use this, not `row_index`: a test entered
+   *  from the dashboard has no sheet line and carries row_index null. */
+  id: number;
+  /** 'sheet' | 'dashboard'. */
+  source: string;
+  row_index: number | null;
+  test_date: string | null;
+  test_date_parsed: string | null;
+  month_of_testing: string | null;
+  test_category: string | null;
+  hypothesis_code: string | null;
+  hypothesis: string | null;
+  test_status: string | null;
+  primary_kpi: string | null;
+  success_criteria: string | null;
+  test_threshold: string | null;
+  confidence_interval: string | null;
+  supporting_metrics: string | null;
+  budget_per_day: string | null;
+  launch_date: string | null;
+  launch_date_parsed: string | null;
+  ad_account: string | null;
+  entity_raw: string | null;
+  entity_names: string[] | null;
+  /** 'campaign' | 'adset' | 'campaign~' | 'adset~' (~ = fuzzy), or null
+   *  where the typed name matches nothing in Meta. */
+  matched_level: string | null;
+  matched_id: string | null;
+  matched_name: string | null;
+  completion_date: string | null;
+  completion_date_parsed: string | null;
+  total_ad_spend: string | null;
+  performance_summary: string | null;
+  insight_audience: string | null;
+  insight_creative: string | null;
+  insight_extra: string | null;
+  kpi_change: string | null;
+  outcome_next_steps: string | null;
+  detail_link: string | null;
+  test_result: string | null;
+  /** Null on a dashboard row: it was typed here, not ingested. */
+  ingested_at: string | null;
+}
+
+export interface HypothesisResponse {
+  rows: HypothesisRow[];
+  total: number;
+  matched: number;
+  by_category: Record<string, number>;
+  by_status: Record<string, number>;
+  by_result: Record<string, number>;
+  resolved: number;
+  sheet_rows: number;
+  /** How many of `sheet_rows` were entered here rather than synced. */
+  dashboard_rows: number;
+  ingested_at: string | null;
+}
+
+export interface HypothesisParams {
+  category?: string;
+  status?: string;
+  result?: string;
+  account?: string;
+  search?: string;
+  only_matched?: boolean;
+  sort?: string;
+  direction?: "asc" | "desc";
+  limit?: number;
+}
+
+export function fetchMetaHypotheses(
+  params: HypothesisParams = {},
+): Promise<HypothesisResponse> {
+  const qs = new URLSearchParams();
+  if (params.category) qs.set("category", params.category);
+  if (params.status) qs.set("status", params.status);
+  if (params.result) qs.set("result", params.result);
+  if (params.account) qs.set("account", params.account);
+  if (params.search) qs.set("search", params.search);
+  if (params.only_matched) qs.set("only_matched", "true");
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.direction) qs.set("direction", params.direction);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return request<HypothesisResponse>(
+    `/admin/analytics/meta-hypotheses${q ? `?${q}` : ""}`,
+  );
+}
+
+/** One campaign or ad set the typed name could mean. */
+export interface EntityMatch {
+  level: "campaign" | "adset";
+  id: string;
+  name: string;
+  account_name: string | null;
+  status: string | null;
+}
+
+export function searchHypothesisEntity(
+  q: string,
+  limit = 20,
+): Promise<{ matches: EntityMatch[] }> {
+  return request<{ matches: EntityMatch[] }>(
+    `/admin/analytics/meta-hypotheses/entity-search?q=${encodeURIComponent(q)}` +
+      `&limit=${limit}`,
+  );
+}
+
+/** A test entered from the dashboard. Only the first four are required --
+ *  the sheet's own rows are routinely missing everything else, and
+ *  refusing a partial test would send the team back to the sheet. */
+export interface HypothesisCreate {
+  hypothesis: string;
+  test_category: string;
+  primary_kpi: string;
+  test_status?: string;
+  hypothesis_code?: string | null;
+  success_criteria?: string | null;
+  test_threshold?: string | null;
+  confidence_interval?: string | null;
+  supporting_metrics?: string | null;
+  budget_per_day?: string | null;
+  ad_account?: string | null;
+  launch_date?: string | null;
+  completion_date?: string | null;
+  matched_level?: "campaign" | "adset" | null;
+  matched_id?: string | null;
+  matched_name?: string | null;
+  created_by?: string | null;
+}
+
+export function createMetaHypothesis(
+  body: HypothesisCreate,
+): Promise<{ id: number; matched_level: string | null; matched_name: string | null }> {
+  return request("/admin/analytics/meta-hypotheses", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

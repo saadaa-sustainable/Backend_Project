@@ -296,3 +296,48 @@ async def test_fastapi_keeps_future_annotations_body_validation_and_dependency_l
     assert set(opened) == set(closed)
     request_schema = schema["paths"]["/probe"]["post"]["requestBody"]["content"]["application/json"]["schema"]
     assert request_schema["$ref"].endswith("/CacheProbeRequest")
+
+
+async def test_invalidate_drops_cached_answers() -> None:
+    """A write must make the next read go back to the database."""
+    cache = AnalyticsCache(ttl=600.0)
+    calls = 0
+
+    async def load() -> int:
+        nonlocal calls
+        calls += 1
+        return calls
+
+    assert await cache.get("k", load) == 1
+    assert await cache.get("k", load) == 1  # served from the cache
+    cache.invalidate()
+    assert await cache.get("k", load) == 2
+    assert calls == 2
+
+
+async def test_a_read_in_flight_when_a_write_lands_is_not_cached() -> None:
+    """The slow read still answers its own caller, but its pre-write
+    result must not be stored -- otherwise the write stays invisible for
+    a further full ttl, which is exactly what invalidate() prevents."""
+    cache = AnalyticsCache(ttl=600.0)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def slow() -> int:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return calls
+
+    reader = asyncio.create_task(cache.get("k", slow))
+    await entered.wait()
+    cache.invalidate()          # the write lands mid-read
+    release.set()
+    assert await reader == 1    # its own caller still gets an answer
+    assert cache.entries == {}  # but nothing stale was kept
+
+    async def fresh() -> int:
+        return 99
+
+    assert await cache.get("k", fresh) == 99

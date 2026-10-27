@@ -1,5 +1,7 @@
 """The EasyEcom webhook receiver.
 
+(The Meta receiver is in test_meta_webhook.py.)
+
 A webhook URL is public by necessity, so the shared secret is the only
 thing standing between EasyEcom's delivery events and anyone who learns
 the path. These pin that, and pin the other property that matters: an
@@ -72,10 +74,10 @@ def test_every_documented_event_is_accepted():
     assert {"tracking", "mark_return", "manifested", "rtd"} <= allowed
 
 
-def test_the_shared_secret_is_never_stored():
-    # Storing Access-Token beside the data it protects would undo the
-    # point of having it, so only these headers are kept.
-    import inspect
-    src = inspect.getsource(webhooks.easyecom_webhook)
-    assert '"content-type", "user-agent", "x-forwarded-for"' in src
-    assert "access-token" not in src.lower().split("keep =")[1].split("}")[0]
+def test_neither_shared_secret_is_ever_stored():
+    # Storing a credential beside the data it protects would undo the
+    # point of having it, so the kept set is a closed allowlist -- and
+    # neither EasyEcom's Access-Token nor Meta's signature is in it.
+    assert webhooks._KEEP_HEADERS == {"content-type", "user-agent", "x-forwarded-for"}
+    assert "access-token" not in webhooks._KEEP_HEADERS
+    assert "x-hub-signature-256" not in webhooks._KEEP_HEADERS

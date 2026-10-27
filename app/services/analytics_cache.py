@@ -31,6 +31,17 @@ class AnalyticsCache:
         self.max_entries = max_entries
         self.entries: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self.fills: dict[str, _Fill] = {}
+        #: Bumped by invalidate(). A fill that started before the bump is
+        #: reading pre-write data, so its result is returned to the
+        #: caller that asked for it but never stored -- otherwise a read
+        #: already in flight when a write lands would re-cache the stale
+        #: answer for a further full ttl.
+        self.generation = 0
+
+    def invalidate(self) -> None:
+        """Drop every cached answer. Called after a write."""
+        self.entries.clear()
+        self.generation += 1
 
     async def get(self, key: str, load: Callable[[], Awaitable[Any]]) -> Any:
         fill = self.fills.setdefault(key, _Fill())
@@ -42,7 +53,10 @@ class AnalyticsCache:
                     self.entries.move_to_end(key)
                     return entry[1]
                 self.entries.pop(key, None)
+                started_at = self.generation
                 value = await load()
+                if self.generation != started_at:
+                    return value
                 self.entries[key] = (monotonic(), value)
                 while len(self.entries) > self.max_entries:
                     self.entries.popitem(last=False)

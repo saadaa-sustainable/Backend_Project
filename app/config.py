@@ -186,6 +186,28 @@ class SchedulerSettings(BaseSettings):
     hourly_sync_enabled: bool = Field(default=False, alias="SCHEDULER_HOURLY_SYNC_ENABLED")
     retry_interval_minutes: int = Field(default=30, alias="SCHEDULER_RETRY_INTERVAL_MINUTES")
     flatten_poll_interval_minutes: int = Field(default=15, alias="SCHEDULER_FLATTEN_POLL_INTERVAL_MINUTES")
+
+    #: Near-real-time Meta entity refresh (see
+    #: app/scheduler/jobs.py::run_meta_delta_sync). On by default: Meta
+    #: sends no webhook for a status change or an edit, so without this
+    #: the dashboard shows whatever the last full sync saw -- which has in
+    #: practice meant days, not hours.
+    meta_delta_sync_enabled: bool = Field(default=True, alias="SCHEDULER_META_DELTA_SYNC_ENABLED")
+    #: 15, not 5. The binding Meta limit on these accounts is CPU time,
+    #: not call count (measured live: call=1% while total_cputime=108%),
+    #: and an `updated_time`-filtered page makes Meta scan every ad in the
+    #: account. The app is on `development_access`, where that budget is
+    #: small. 15 minutes still turns days of staleness into minutes; raise
+    #: the frequency only against measured headroom.
+    meta_delta_interval_minutes: int = Field(default=15, alias="SCHEDULER_META_DELTA_INTERVAL_MINUTES")
+    #: How far back past the last fetch each delta run re-reads. Bronze is
+    #: append-only, so re-reading an unchanged object is harmless, while
+    #: missing one because its edit landed mid-run is not.
+    meta_delta_overlap_seconds: int = Field(default=900, alias="SCHEDULER_META_DELTA_OVERLAP_SECONDS")
+    #: Caps a cold start or a long outage, so the first run cannot ask Meta
+    #: for every edit in the account's history.
+    meta_delta_max_lookback_days: int = Field(default=7, alias="SCHEDULER_META_DELTA_MAX_LOOKBACK_DAYS")
+
     timezone: str = Field(default="UTC", alias="SCHEDULER_TIMEZONE")
 
 
@@ -239,6 +261,30 @@ class Settings(BaseSettings):
     #: ingestion. Override in .env if the admin app runs anywhere other
     #: than the default `next dev` port.
     admin_app_origin: str = Field(default="http://localhost:3000", alias="ADMIN_APP_ORIGIN")
+
+    @property
+    def admin_app_origins(self) -> list[str]:
+        """Every origin the admin app may be browsed on, for CORS.
+
+        `localhost` and `127.0.0.1` are the same machine but different
+        ORIGINS, so a browser treats a call from one to the other as
+        cross-site. With only one of them allowed, opening the dashboard
+        on the other loaded the page fine and then had every API request
+        refused — which reads as an empty section rather than a network
+        error, because a section with no rows renders its empty state and
+        hides the controls above its table. Allowing the pair costs
+        nothing: anything that can reach 127.0.0.1 can reach localhost.
+
+        Still not a wildcard — /admin/* can trigger ingestion, so this
+        stays an explicit list and ADMIN_APP_ORIGIN still names the one
+        that matters in deployment.
+        """
+        origins = [self.admin_app_origin]
+        for a, b in (("//localhost", "//127.0.0.1"), ("//127.0.0.1", "//localhost")):
+            swapped = self.admin_app_origin.replace(a, b)
+            if swapped != self.admin_app_origin and swapped not in origins:
+                origins.append(swapped)
+        return origins
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
 
@@ -248,6 +294,14 @@ class Settings(BaseSettings):
     #: could post fabricated delivery events into the warehouse.
     easyecom_webhook_token: str | None = Field(
         default=None, alias="EASYECOM_WEBHOOK_TOKEN"
+    )
+
+    #: Token Meta echoes back on the one-time GET verification handshake
+    #: when the callback URL is registered on the app. Unset means the
+    #: handshake is refused, so a URL can never be silently registered
+    #: against a receiver that was not deliberately configured for it.
+    meta_webhook_verify_token: str | None = Field(
+        default=None, alias="META_WEBHOOK_VERIFY_TOKEN"
     )
 
     meta: MetaAPISettings = Field(default_factory=lambda: MetaAPISettings())  # type: ignore[call-arg]

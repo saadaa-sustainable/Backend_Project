@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import abc
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,6 +80,39 @@ class BaseMetaSyncService(abc.ABC):
         """
         raise NotImplementedError
         yield  # pragma: no cover - makes this an async generator for typing
+
+    async def fetch_objects_by_id(
+        self, object_ids: Sequence[str], fields: str
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Read specific objects by id instead of walking the account edge.
+
+        Used by the near-real-time paths (the Meta webhook processor and
+        the delta poll) where we already know exactly which handful of
+        objects changed, so walking tens of thousands of account rows to
+        find them would be absurd.
+
+        Each id is fetched on its own rather than through Graph's
+        ``?ids=a,b,c`` batch read: one unknown or newly-deleted id in a
+        batch fails the whole call, and these ids come from an external
+        event we do not control. A single bad id must not cost us the
+        other updates in the same event, so a failure is logged and
+        skipped.
+        """
+        for object_id in object_ids:
+            try:
+                item = await self.client.request(
+                    "GET", str(object_id), params={"fields": fields}
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad id must not sink the rest
+                logger.warning(
+                    "meta_object_fetch_failed",
+                    endpoint=self.endpoint_name,
+                    object_id=str(object_id),
+                    error=str(exc),
+                )
+                continue
+            if item.get("id"):
+                yield item
 
     def extract_parent_ids(self, item: dict[str, Any]) -> dict[str, Any] | None:
         """Return the parent-object ids implied by ``item`` (e.g.

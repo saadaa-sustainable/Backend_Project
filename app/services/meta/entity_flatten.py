@@ -135,7 +135,7 @@ SELECT DISTINCT ON (meta_id)
     NULLIF(raw_payload ->> 'updated_time', '')::timestamptz AS updated_time,
     extracted_at AS updated_at
 FROM raw_dump_meta
-WHERE object_type = 'campaign'
+WHERE object_type = 'campaign'{extra}
 ORDER BY meta_id, extracted_at DESC
 """
 
@@ -166,7 +166,7 @@ SELECT DISTINCT ON (a.meta_id)
     a.extracted_at AS updated_at
 FROM raw_dump_meta a
 LEFT JOIN meta_campaigns c ON c.campaign_id = a.parent_ids ->> 'campaign_id'
-WHERE a.object_type = 'adset'
+WHERE a.object_type = 'adset'{extra}
 ORDER BY a.meta_id, a.extracted_at DESC
 """
 
@@ -192,7 +192,7 @@ SELECT DISTINCT ON (a.meta_id)
 FROM raw_dump_meta a
 LEFT JOIN meta_adsets ads ON ads.adset_id = a.parent_ids ->> 'adset_id'
 LEFT JOIN meta_campaigns c ON c.campaign_id = a.parent_ids ->> 'campaign_id'
-WHERE a.object_type = 'ad'
+WHERE a.object_type = 'ad'{extra}
 ORDER BY a.meta_id, a.extracted_at DESC
 """
 
@@ -211,15 +211,15 @@ async def refresh_entity_tables(session: AsyncSession) -> dict[str, int]:
     await ensure_entity_tables(session)
 
     await session.execute(text(_TRUNCATE_CAMPAIGNS))
-    await session.execute(text(_INSERT_CAMPAIGNS))
+    await session.execute(text(_INSERT_CAMPAIGNS.format(extra="")))
     await session.commit()
 
     await session.execute(text(_TRUNCATE_ADSETS))
-    await session.execute(text(_INSERT_ADSETS))
+    await session.execute(text(_INSERT_ADSETS.format(extra="")))
     await session.commit()
 
     await session.execute(text(_TRUNCATE_ADS))
-    await session.execute(text(_INSERT_ADS))
+    await session.execute(text(_INSERT_ADS.format(extra="")))
     await session.commit()
 
     counts: dict[str, int] = {}
@@ -229,3 +229,65 @@ async def refresh_entity_tables(session: AsyncSession) -> dict[str, int]:
 
     logger.info("meta_entity_tables_refreshed", **counts)
     return counts
+
+
+#: Per level: the Silver table, its primary key, the Bronze
+#: ``object_type``, the alias the templated INSERT uses for
+#: ``raw_dump_meta``, and the INSERT template itself.
+_LEVELS = {
+    "campaign": ("meta_campaigns", "campaign_id", "", _INSERT_CAMPAIGNS),
+    "adset": ("meta_adsets", "adset_id", "a.", _INSERT_ADSETS),
+    "ad": ("meta_ads", "ad_id", "a.", _INSERT_ADS),
+}
+
+#: Campaign before adset before ad: the adset INSERT joins
+#: ``campaign_name`` out of ``meta_campaigns`` and the ad INSERT joins
+#: ``adset_name``/``campaign_name`` out of both, so a child flattened
+#: before its parent lands with a null parent name.
+_LEVEL_ORDER = ("campaign", "adset", "ad")
+
+
+async def refresh_entities_for_ids(
+    session: AsyncSession, ids_by_level: dict[str, list[str]]
+) -> dict[str, int]:
+    """Re-flatten only the named entities, leaving the rest of the Silver
+    tables untouched.
+
+    ``refresh_entity_tables`` TRUNCATEs and rebuilds all three tables from
+    1.7M Bronze rows, which is the right thing after a full sync and far
+    too much after a webhook about one ad. This does the same work scoped
+    to a handful of ids: delete those rows, re-select them from Bronze.
+
+    It reuses the very same INSERT templates as the full rebuild, with a
+    `meta_id = ANY(...)` predicate spliced into the existing WHERE — so a
+    column added to the full rebuild cannot silently go missing here, and
+    `DELETE`-then-`INSERT` reproduces `TRUNCATE`-then-`INSERT` row for row.
+    That matters because the two must agree: Bronze is append-only and the
+    newest `extracted_at` wins, so a scoped refresh of a just-inserted row
+    yields exactly what tonight's full rebuild will.
+
+    Returns the number of rows written per table.
+    """
+    await ensure_entity_tables(session)
+
+    written: dict[str, int] = {}
+    for level in _LEVEL_ORDER:
+        ids = [str(i) for i in ids_by_level.get(level) or [] if i]
+        if not ids:
+            continue
+        table, primary_key, alias, insert_template = _LEVELS[level]
+        await session.execute(
+            text(f"DELETE FROM {table} WHERE {primary_key} = ANY(:ids)"), {"ids": ids}
+        )
+        result = await session.execute(
+            text(insert_template.format(extra=f" AND {alias}meta_id = ANY(:ids)")),
+            {"ids": ids},
+        )
+        written[table] = result.rowcount
+        # Committed per level so the next level's name join reads the rows
+        # this one just wrote.
+        await session.commit()
+
+    if written:
+        logger.info("meta_entities_refreshed_for_ids", **written)
+    return written
