@@ -30,7 +30,13 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { DateRangePicker } from "@/components/DateRangePicker";
-import { ApiError, FirstClickRow, fetchFirstClick } from "@/lib/api";
+import {
+  ApiError,
+  FirstClickRow,
+  FirstClickDailyResponse,
+  fetchFirstClick,
+  fetchFirstClickDaily,
+} from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
 import { SectionHeader, FilterRule, FilterCell, FieldLabel, FigureBand, filterControlClass } from "./SectionChrome";
 
@@ -156,6 +162,19 @@ export function FirstClick() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  /** Which question the chart above the table answers. "gap" is the
+   *  section's own: which entities the two models disagree about.
+   *  "daily" is the other one people keep asking of it -- WHEN the
+   *  window's revenue was opened, as against when it arrived.
+   *
+   *  A separate fetch, and only once the reader asks for it: the
+   *  day-wise query reads every order in the window rather than the
+   *  aggregate the table already has, and most visits never open it. */
+  const [chartView, setChartView] = useState<"gap" | "daily">("gap");
+  const [daily, setDaily] = useState<FirstClickDailyResponse | null>(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
+  const [dailyError, setDailyError] = useState<string | null>(null);
+
   const filters = useMemo(
     () => ({ grain, sort, direction, from_date: fromDate, to_date: toDate, limit, basis }),
     [grain, sort, direction, fromDate, toDate, limit, basis],
@@ -181,6 +200,21 @@ export function FirstClick() {
     return () => { cancelled = true; };
   }, [filters]);
 
+  useEffect(() => {
+    if (chartView !== "daily") return;
+    let cancelled = false;
+    setDailyLoading(true);
+    setDailyError(null);
+    fetchFirstClickDaily({ grain, from_date: fromDate, to_date: toDate })
+      .then((res) => { if (!cancelled) setDaily(res); })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setDailyError(err instanceof ApiError ? err.message : "Could not load the day-wise view.");
+      })
+      .finally(() => !cancelled && setDailyLoading(false));
+    return () => { cancelled = true; };
+  }, [chartView, grain, fromDate, toDate]);
+
   const pct = ordersTotal ? (reattributed * 100) / ordersTotal : 0;
   const grainNoun = grain === "ad" ? "Ad" : grain === "adset" ? "Ad set" : "Source";
 
@@ -193,6 +227,24 @@ export function FirstClick() {
     }
     return { first, last };
   }, [rows]);
+
+  /** One scale for both series, so a day's opened and closed columns are
+   *  read against each other rather than each against its own max.
+   *
+   *  Carried-in is deliberately NOT in it. Drawn to the daily scale it
+   *  was 5.1x the TALLEST real day at account scale -- Rs 86.3L of
+   *  backlog against Rs 16.8L -- and flattened every other column into a
+   *  stub.
+   *  It is a backlog of journeys opened before these dates, not a day,
+   *  so it gets its own detached block to the left of the axis instead
+   *  of a bar competing with days it is not comparable to. */
+  const dailyMax = useMemo(() => {
+    if (!daily) return 0;
+    return daily.rows.reduce(
+      (m, d) => Math.max(m, d.opened_revenue, d.closed_revenue),
+      0,
+    );
+  }, [daily]);
 
   /** The gap, biggest first, both directions. Sorted on the ABSOLUTE
    *  difference so a source that last click over-credits is as visible
@@ -351,9 +403,44 @@ export function FirstClick() {
           />
 
           {/* ═══════════════════════════════════════════════════════════
-              Where the two disagree.
+              Two questions, one slot.
 
-              The point of the section, drawn once. Two revenue columns
+              The gap view is the section's own: WHICH entities the two
+              models disagree about. The daily view is WHEN the window's
+              revenue was opened as against when it arrived — a different
+              axis entirely, and the only one that has to decide which
+              day an order opened before the window belongs to.
+             ═══════════════════════════════════════════════════════════ */}
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
+              <div className="flex items-center gap-1">
+                {([["gap", "Where the two disagree"], ["daily", "Day by day"]] as const).map(
+                  ([v, label]) => (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() => setChartView(v)}
+                      aria-pressed={chartView === v}
+                      className={`px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${
+                        chartView === v
+                          ? "text-text-primary border-b-2 border-text-primary"
+                          : "text-text-tertiary border-b-2 border-transparent hover:text-text-secondary"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ),
+                )}
+              </div>
+              <span className="text-[11.5px] text-text-tertiary">
+                {chartView === "gap"
+                  ? `first-click minus last-click revenue, by ${grainNoun.toLowerCase()} · widest ${diverging.scored.length} of ${rows.length.toLocaleString()}`
+                  : `revenue by IST day · every ${grainNoun.toLowerCase()} at this grain`}
+              </span>
+            </div>
+          </div>
+
+          {/* The point of the section, drawn once. Two revenue columns
               side by side ask the reader to subtract eighteen pairs of
               seven-digit numbers by eye, and the subtraction is the only
               thing either column is here for. A bar right of the zero
@@ -363,17 +450,9 @@ export function FirstClick() {
 
               Neutral ink on both sides, deliberately: a hand-off is not
               a failure, it is where the two models part, and colouring
-              one direction red would make a fact look like a verdict.
-             ═══════════════════════════════════════════════════════════ */}
-          {diverging.scored.length > 0 && (
+              one direction red would make a fact look like a verdict. */}
+          {chartView === "gap" && diverging.scored.length > 0 && (
             <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border-primary pb-1.5">
-                <FieldLabel>Where the two disagree</FieldLabel>
-                <span className="text-[11.5px] text-text-tertiary">
-                  first-click minus last-click revenue, by {grainNoun.toLowerCase()} · widest {diverging.scored.length} of{" "}
-                  {rows.length.toLocaleString()}
-                </span>
-              </div>
               {/* Capped, not full-bleed. The zero line is the thing
                   being read against, and at 1600px a full-width axis
                   pushed it 600px from the labels with nothing in
@@ -414,6 +493,156 @@ export function FirstClick() {
                 <span>first click credits more</span>
               </div>
             </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════
+              Day by day.
+
+              A window total never has to say which DAY an order belongs
+              to. A daily series does, and the two bases on the selector
+              above each answer it in a way that is wrong for a chart: by
+              order date an ad's work shows on the day the money arrived,
+              and by first-touch date an order opened before the window
+              vanishes from the view entirely — measured on one real ad,
+              Rs 3,112 of the window's Rs 26,471, gone with nothing on
+              the page to say so.
+
+              So every order the window contains is kept and placed on
+              the day it opened, or on day one where that is earlier. The
+              clamped part is drawn as its OWN segment rather than folded
+              in: folding turned Rs 806 of real same-day opening into a
+              Rs 3,918 bar, 4.9x, an artifact of where the window was cut
+              that moves when you scroll it. Hatched, because it is the
+              one segment that does not describe the day it sits on.
+             ═══════════════════════════════════════════════════════════ */}
+          {chartView === "daily" && (
+            dailyError ? (
+              <p className="text-sm text-error-text">{dailyError}</p>
+            ) : dailyLoading || !daily ? (
+              <p className="text-sm text-text-secondary">Loading…</p>
+            ) : daily.rows.length === 0 ? (
+              <p className="text-sm text-text-secondary">No attributed orders in this window.</p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11.5px] text-text-secondary">
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block h-2.5 w-3.5 bg-text-primary" />opened that day
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block h-2.5 w-3.5" style={{ background:
+                      "repeating-linear-gradient(45deg,currentColor 0 2px,transparent 2px 4px)" }} />
+                    carried in from before the window
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block h-2.5 w-3.5 bg-text-tertiary" />closed that day
+                  </span>
+                </div>
+
+                <div className="flex items-stretch gap-3 overflow-x-auto">
+                  {daily.carried_in_total > 0 && (
+                    /* Off the daily axis on purpose: this is every journey
+                       opened before the window, not a day, and at account
+                       scale it is 5.1x the tallest real one. Full height,
+                       labelled with its own value, divided from the days
+                       by a rule so it cannot be read as one of them. */
+                    <div className="flex shrink-0 flex-col">
+                      <div
+                        className="flex h-[200px] w-[72px] items-end justify-center border-b border-border-primary"
+                        title={`₹${num(daily.carried_in_total)} from ${daily.carried_in_orders_total.toLocaleString()} journeys opened before ${daily.rows[0]?.day}`}
+                      >
+                        <div
+                          className="w-[30px] text-text-primary"
+                          style={{
+                            height: "100%",
+                            background:
+                              "repeating-linear-gradient(45deg,currentColor 0 2px,transparent 2px 4px)",
+                          }}
+                        />
+                      </div>
+                      <div className="w-[72px] pt-1 text-center text-[9.5px] leading-tight text-text-tertiary">
+                        before
+                      </div>
+                    </div>
+                  )}
+                  {daily.carried_in_total > 0 && (
+                    <div className="shrink-0 self-stretch border-l border-dashed border-border-primary" />
+                  )}
+                  <div className="min-w-max">
+                  <div className="flex h-[200px] items-end gap-[3px] border-b border-border-primary">
+                    {daily.rows.map((d) => {
+                      const h = (v: number) => (dailyMax > 0 ? (v / dailyMax) * 100 : 0);
+                      return (
+                        <div
+                          key={d.day}
+                          className="flex h-full w-[26px] shrink-0 items-end justify-center gap-[2px]"
+                          title={[
+                            d.day,
+                            `opened ₹${num(d.opened_revenue)} (${d.opened_orders} orders)`,
+                            d.carried_in_revenue > 0
+                              ? `carried in ₹${num(d.carried_in_revenue)} (${d.carried_in_orders} orders)`
+                              : null,
+                            `closed ₹${num(d.closed_revenue)} (${d.closed_orders} orders)`,
+                            d.spend !== null ? `spend ₹${num(d.spend)}` : null,
+                          ].filter(Boolean).join("\n")}
+                        >
+                          <div className="w-[11px] bg-text-primary" style={{ height: `${h(d.opened_revenue)}%` }} />
+                          <div className="w-[11px] bg-text-tertiary" style={{ height: `${h(d.closed_revenue)}%` }} />
+                          {d.opened_revenue === 0 && d.closed_revenue === 0 && (
+                            <div className="h-px w-full bg-border-soft" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex min-w-max gap-[3px] pt-1">
+                    {daily.rows.map((d, i) => (
+                      <div
+                        key={d.day}
+                        className="w-[26px] shrink-0 text-center text-[9.5px] tabular-nums text-text-tertiary"
+                      >
+                        {/* Every day on a short window, every third on a
+                            long one -- thirty labels at 26px collide. */}
+                        {daily.rows.length <= 10 || i % 3 === 0 ? d.day.slice(8) : ""}
+                      </div>
+                    ))}
+                  </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-x-8 gap-y-1 border-t border-border-soft pt-2 text-[12px] tabular-nums text-text-secondary">
+                  <span>opened <strong className="text-text-primary">{rupees(daily.opened_total)}</strong></span>
+                  <span>carried in <strong className="text-text-primary">{rupees(daily.carried_in_total)}</strong></span>
+                  <span>
+                    = first-click revenue{" "}
+                    <strong className="text-text-primary">
+                      {rupees(daily.opened_total + daily.carried_in_total)}
+                    </strong>
+                  </span>
+                  <span>closed <strong className="text-text-primary">{rupees(daily.closed_total)}</strong></span>
+                  {daily.spend_total !== null && (
+                    <span>spend <strong className="text-text-primary">{rupees(daily.spend_total)}</strong></span>
+                  )}
+                </div>
+
+                <p className="text-[11.5px] text-text-tertiary">
+                  Opened plus carried-in is the window&rsquo;s whole first-click revenue across all{" "}
+                  {matched.toLocaleString()} {grainNoun.toLowerCase()}s at this grain — not the{" "}
+                  {rows.length.toLocaleString()} the table below is limited to, so the two headline
+                  figures differ by design.{" "}
+                  {daily.carried_in_total > 0 ? (
+                    <>
+                      The hatched block is <strong>{rupees(daily.carried_in_total)}</strong> from{" "}
+                      {daily.carried_in_orders_total.toLocaleString()} journeys opened{" "}
+                      <strong>before</strong> {daily.rows[0]?.day}. It sits off the day axis because
+                      it is a backlog, not a day: it has no width in time, it dwarfs any real day,
+                      and it changes if you move the window.
+                    </>
+                  ) : (
+                    <>Every journey in this window also opened inside it, so nothing is carried in.</>
+                  )}
+                </p>
+              </div>
+            )
           )}
 
           <div className="flex flex-col gap-2">

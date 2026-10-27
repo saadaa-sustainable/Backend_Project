@@ -1257,6 +1257,66 @@ export interface FirstClickParams {
   basis?: "order" | "first_touch";
 }
 
+export interface FirstClickDailyRow {
+  day: string;
+  /** Orders in this window whose journey OPENED on this day. */
+  opened_revenue: number;
+  opened_orders: number;
+  /** Only ever non-zero on the window's first day: orders in this window
+   *  whose journey opened BEFORE it. Kept so the days sum to the window,
+   *  reported apart so day one is not inflated by a tail of unknown
+   *  length. Never add it into `opened_revenue` — it is not same-day
+   *  activity, and it moves if the window boundary moves. */
+  carried_in_revenue: number;
+  carried_in_orders: number;
+  /** Orders that CLOSED on this day. Never clamped: the last touch is
+   *  the converting session, so it is always in-window. */
+  closed_revenue: number;
+  closed_orders: number;
+  /** The entity's spend when one is named, otherwise every ad's — which
+   *  is the account's daily spend, not the spend of these rows. Null at
+   *  source grain. */
+  spend: number | null;
+}
+
+export interface FirstClickDailyResponse {
+  rows: FirstClickDailyRow[];
+  grain: string;
+  entity: string | null;
+  opened_total: number;
+  carried_in_total: number;
+  /** How many journeys the carried-in figure covers. */
+  carried_in_orders_total: number;
+  closed_total: number;
+  spend_total: number | null;
+}
+
+export interface FirstClickDailyParams {
+  grain?: string;
+  from_date?: string;
+  to_date?: string;
+  /** Scope to one ad id / ad set id / source. Omit for every entity. */
+  entity?: string;
+}
+
+/** Day-wise first click. `opened_revenue + carried_in_revenue` totals the
+ *  window exactly and equals what `fetchFirstClick` reports on
+ *  `basis="order"`; `closed_revenue` covers the same orders counted at
+ *  their other end, so it must never be added to either. */
+export function fetchFirstClickDaily(
+  params: FirstClickDailyParams = {},
+): Promise<FirstClickDailyResponse> {
+  const qs = new URLSearchParams();
+  if (params.grain) qs.set("grain", params.grain);
+  if (params.from_date) qs.set("from_date", params.from_date);
+  if (params.to_date) qs.set("to_date", params.to_date);
+  if (params.entity) qs.set("entity", params.entity);
+  const s = qs.toString();
+  return request<FirstClickDailyResponse>(
+    `/admin/analytics/first-click/daily${s ? `?${s}` : ""}`,
+  );
+}
+
 export function fetchFirstClick(params: FirstClickParams = {}): Promise<FirstClickResponse> {
   const qs = new URLSearchParams();
   if (params.grain) qs.set("grain", params.grain);

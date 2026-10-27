@@ -2974,6 +2974,207 @@ async def get_first_click(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════
+# First click, day by day
+# ══════════════════════════════════════════════════════════════════════
+#
+# The table above is one row per entity over a whole window. This asks
+# the same question per DAY, and the reason it needs its own endpoint is
+# that a day-wise view forces a choice the window-level view never has
+# to make: which day does an order belong to?
+#
+# An order placed on the 11th whose journey opened on the 3rd, read in a
+# window of the 6th to the 11th, has three defensible homes and the two
+# existing bases pick two of them:
+#
+#   basis='order'        -> the 11th. Its own order date.
+#   basis='first_touch'  -> nowhere. The 3rd is outside the window, so
+#                           the order drops out of the view entirely.
+#   here                 -> the 6th, as carried-in.
+#
+# Dropping it is right for a window total, where the point is that
+# numerator and denominator describe the same clicks. It is wrong for a
+# daily series, where the days must still add up to the window: the
+# middle column of a three-way comparison on one real ad came to
+# Rs 23,359 against the window's true Rs 26,471, and the missing
+# Rs 3,112 was simply gone with nothing on the page to say so.
+#
+# So this keeps every order the window contains and places each one on
+# GREATEST(first_seen_day, window_start) -- but reports the clamped
+# portion SEPARATELY rather than folding it into day one. That matters
+# because the fold is not a small correction: on the same ad, day one
+# went from Rs 806 actually opened to Rs 3,918, a 4.9x bar that is an
+# artifact of where the window was cut and moves if you scroll it. Split
+# out, the reader sees "Rs 806 opened here, Rs 3,112 carried in from
+# before", which is true and stays true whatever the boundary.
+
+
+class FirstClickDailyRow(BaseModel):
+    """One IST day of the selected window."""
+
+    day: date
+    #: Revenue of orders in this window whose journey OPENED on this day.
+    opened_revenue: float
+    opened_orders: int
+    #: Only ever non-zero on the window's first day. Revenue of orders in
+    #: this window whose journey opened BEFORE it -- kept so the days sum
+    #: to the window, reported apart so day one is not inflated by a tail
+    #: of unknown length. Read it as "and this much was already in
+    #: flight", never as same-day activity.
+    carried_in_revenue: float
+    carried_in_orders: int
+    #: Revenue of orders that CLOSED on this day. Needs no clamp: the
+    #: last touch is the converting session, so it is always in-window.
+    closed_revenue: float
+    closed_orders: int
+    #: Spend on this day. The entity's own when one is named, otherwise
+    #: every ad's, which is the account's daily spend and not the spend
+    #: of the rows above it. None at source grain, which Meta never bills.
+    spend: float | None
+
+
+class FirstClickDailyResponse(BaseModel):
+    """Day-wise first click. The three revenue series answer different
+    questions and only two of them are addable: ``opened_revenue`` plus
+    ``carried_in_revenue`` totals the window exactly, and equals what the
+    windowed table reports on ``basis='order'``. ``closed_revenue``
+    covers the same orders counted at their other end, so it must never
+    be added to either."""
+
+    rows: list[FirstClickDailyRow]
+    grain: str
+    #: The single entity this is scoped to, or None for every entity at
+    #: this grain.
+    entity: str | None
+    opened_total: float
+    carried_in_total: float
+    #: How many journeys the carried-in figure covers, so the reader can
+    #: size the backlog rather than guess at it from one bar.
+    carried_in_orders_total: int
+    closed_total: float
+    spend_total: float | None
+
+
+@router.get("/first-click/daily", response_model=FirstClickDailyResponse)
+@cached_analytics(ttl=900.0)
+async def get_first_click_daily(
+    session: SessionDep,
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    grain: str = Query(default="ad", description="One of " + ", ".join(_FIRST_CLICK_GRAINS)),
+    entity: str | None = Query(
+        default=None,
+        description="Scope to one ad id / ad set id / source. Omit for every "
+                    "entity at this grain, which totals the window's orders.",
+    ),
+) -> FirstClickDailyResponse:
+    """First-click and last-click revenue per IST day.
+
+    Every order the window contains is kept. One opened before the window
+    is placed on the first day and counted in ``carried_in_revenue``, so
+    the series adds to the window total without pretending the click
+    happened on that day.
+    """
+    if grain not in _FIRST_CLICK_GRAINS:
+        raise HTTPException(400, f"grain must be one of {sorted(_FIRST_CLICK_GRAINS)}")
+    to_d = to_date or date.today()
+    from_d = from_date or (to_d - timedelta(days=29))
+    if from_d > to_d:
+        raise HTTPException(400, "from_date must not be after to_date.")
+
+    first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    # An entity filter binds; no entity means "wherever this grain
+    # resolves at all", which is what makes the no-entity totals equal
+    # the window's own order revenue.
+    first_match = "o.fk = :entity" if entity else "o.fk IS NOT NULL"
+    last_match = "o.lk = :entity" if entity else "o.lk IS NOT NULL"
+
+    params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
+    if entity:
+        params["entity"] = entity
+
+    sql = f"""
+    WITH b AS (
+        SELECT CAST(:from_date AS date) AS a, CAST(:to_date AS date) AS z
+    ),
+    o AS (
+        SELECT (g.order_at      AT TIME ZONE 'Asia/Kolkata')::date AS od,
+               (g.first_seen_at AT TIME ZONE 'Asia/Kolkata')::date AS fd,
+               g.revenue,
+               {first_k} AS fk,
+               {last_k}  AS lk
+          FROM public.ga4_order_attribution g, b
+         WHERE g.order_at >= (b.a::timestamp AT TIME ZONE 'Asia/Kolkata')
+           AND g.order_at <  ((b.z + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+    ),
+    d AS (SELECT generate_series(b.a, b.z, '1 day')::date AS day FROM b)
+    SELECT d.day,
+           COALESCE(SUM(o.revenue) FILTER (
+               WHERE {first_match} AND o.fd = d.day AND o.fd >= b.a), 0) AS opened_revenue,
+           COUNT(*) FILTER (
+               WHERE {first_match} AND o.fd = d.day AND o.fd >= b.a)     AS opened_orders,
+           COALESCE(SUM(o.revenue) FILTER (
+               WHERE {first_match} AND o.fd < b.a AND d.day = b.a), 0)   AS carried_in_revenue,
+           COUNT(*) FILTER (
+               WHERE {first_match} AND o.fd < b.a AND d.day = b.a)       AS carried_in_orders,
+           COALESCE(SUM(o.revenue) FILTER (
+               WHERE {last_match} AND o.od = d.day), 0)                  AS closed_revenue,
+           COUNT(*) FILTER (
+               WHERE {last_match} AND o.od = d.day)                      AS closed_orders
+      FROM d
+      CROSS JOIN b
+      -- Every order joins every day, then the FILTERs above pick the day
+      -- each one belongs to per series. The window is at most a few
+      -- hundred days against a few tens of thousands of orders, and the
+      -- alternative -- one pass per series UNIONed -- reads worse for
+      -- the same work.
+      LEFT JOIN o ON TRUE
+     GROUP BY d.day
+     ORDER BY d.day
+    """
+    rows = [dict(r._mapping) for r in await session.execute(text(sql), params)]
+
+    # Spend keeps the same rule as the windowed table: a dash where Meta
+    # never billed the entity, never a zero that would claim the orders
+    # were free.
+    spend_by_day: dict[date, float] = {}
+    if grain != "source":
+        sp_tbl, sp_key = (("public.insights_daily_by_ad", "ad_id") if grain == "ad"
+                          else ("public.insights_daily_by_adset", "adset_id"))
+        where = "WHERE day BETWEEN :from_date AND :to_date"
+        if entity:
+            where += f" AND {sp_key} = :entity"
+        spend_rows = await session.execute(
+            text(f"SELECT day, SUM(spend) AS spend FROM {sp_tbl} {where} GROUP BY day"),
+            params,
+        )
+        spend_by_day = {r.day: float(r.spend or 0) for r in spend_rows}
+
+    out = [
+        FirstClickDailyRow(
+            day=r["day"],
+            opened_revenue=float(r["opened_revenue"]),
+            opened_orders=r["opened_orders"],
+            carried_in_revenue=float(r["carried_in_revenue"]),
+            carried_in_orders=r["carried_in_orders"],
+            closed_revenue=float(r["closed_revenue"]),
+            closed_orders=r["closed_orders"],
+            spend=spend_by_day.get(r["day"]) if grain != "source" else None,
+        )
+        for r in rows
+    ]
+    return FirstClickDailyResponse(
+        rows=out,
+        grain=grain,
+        entity=entity,
+        opened_total=sum(r.opened_revenue for r in out),
+        carried_in_total=sum(r.carried_in_revenue for r in out),
+        carried_in_orders_total=sum(r.carried_in_orders for r in out),
+        closed_total=sum(r.closed_revenue for r in out),
+        spend_total=(sum(r.spend or 0 for r in out) if grain != "source" else None),
+    )
+
+
 @router.get("/last-click-utm", response_model=UtmOrderResponse)
 @cached_analytics(ttl=900.0)
 async def get_last_click_utm(
