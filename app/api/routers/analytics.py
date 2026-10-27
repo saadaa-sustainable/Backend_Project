@@ -12522,3 +12522,573 @@ async def get_asset_iterations(
             match_source=r["match_source"], name_conflict=r["name_conflict"],
         ))
     return AssetIterationsResponse(asset_id=asset_id, iterations=out)
+
+
+# ----------------------------------------------------------------------
+# Campaign tracker -- is each campaign still being given new creative?
+# ----------------------------------------------------------------------
+
+#: The question this answers is NOT "how is this campaign performing" --
+#: every other section covers that. It is "has anyone added new ads to it
+#: lately, or is it spending on the same creative it had a month ago".
+#:
+#: So the row is structural (counts of ad sets and ads) plus one date
+#: (the newest ad's created_time) plus enough spend to tell a live
+#: campaign from a dormant one. A campaign spending real money whose
+#: newest ad is weeks old is the thing worth seeing, and nothing in the
+#: dashboard showed it before.
+_CAMPAIGN_TRACKER_SQL = """
+WITH adsets AS (
+  SELECT campaign_id,
+         count(*)                                                   AS adsets,
+         count(*) FILTER (WHERE adset_effective_status = 'ACTIVE')  AS adsets_active,
+         max(created_time)                                          AS newest_adset
+    FROM public.meta_adsets GROUP BY campaign_id
+), ads AS (
+  SELECT campaign_id,
+         count(*)                                                     AS ads,
+         count(*) FILTER (WHERE ad_effective_status = 'ACTIVE')        AS ads_active,
+         count(*) FILTER (WHERE created_time >= now() - interval  '7 days') AS ads_added_7d,
+         count(*) FILTER (WHERE created_time >= now() - interval '30 days') AS ads_added_30d,
+         max(created_time)                                            AS newest_ad
+    FROM public.meta_ads GROUP BY campaign_id
+), spend AS (
+  -- Joined through meta_ads because insights_daily_by_ad has no
+  -- campaign_id of its own. Seven days is enough to separate a live
+  -- campaign from a paused one without widening the scan.
+  SELECT a.campaign_id, SUM(i.spend) AS spend_7d
+    FROM public.insights_daily_by_ad i
+    JOIN public.meta_ads a ON a.ad_id = i.ad_id
+   WHERE i.day >= (now() AT TIME ZONE 'Asia/Kolkata')::date - 7
+   GROUP BY a.campaign_id
+)
+SELECT c.campaign_id,
+       c.campaign_name,
+       c.campaign_effective_status                      AS status,
+       c.objective,
+       c.account_name,
+       COALESCE(s.adsets, 0)                            AS adsets,
+       COALESCE(s.adsets_active, 0)                     AS adsets_active,
+       COALESCE(a.ads, 0)                               AS ads,
+       COALESCE(a.ads_active, 0)                        AS ads_active,
+       COALESCE(a.ads_added_7d, 0)                      AS ads_added_7d,
+       COALESCE(a.ads_added_30d, 0)                     AS ads_added_30d,
+       a.newest_ad::date                                AS newest_ad,
+       s.newest_adset::date                             AS newest_adset,
+       ((now() AT TIME ZONE 'Asia/Kolkata')::date - a.newest_ad::date)
+                                                        AS days_since_new_ad,
+       COALESCE(sp.spend_7d, 0)::float                  AS spend_7d
+  FROM public.meta_campaigns c
+  LEFT JOIN adsets s ON s.campaign_id = c.campaign_id
+  LEFT JOIN ads    a ON a.campaign_id = c.campaign_id
+  LEFT JOIN spend sp ON sp.campaign_id = c.campaign_id
+"""
+
+_CAMPAIGN_TRACKER_SORTS = {
+    "days_since_new_ad": "days_since_new_ad",
+    "ads_added_7d": "ads_added_7d",
+    "ads_added_30d": "ads_added_30d",
+    "ads": "ads",
+    "ads_active": "ads_active",
+    "adsets": "adsets",
+    "adsets_active": "adsets_active",
+    "spend_7d": "spend_7d",
+    "newest_ad": "newest_ad",
+}
+
+
+class CampaignTrackerRow(BaseModel):
+    campaign_id: str
+    campaign_name: str
+    status: str | None
+    objective: str | None
+    account_name: str | None
+    adsets: int
+    adsets_active: int
+    ads: int
+    ads_active: int
+    #: Ads whose created_time falls in the trailing window. This is a
+    #: CREATION count, not a delivery count: an ad made today that has
+    #: not spent yet still counts, which is the point.
+    ads_added_7d: int
+    ads_added_30d: int
+    #: None where the campaign has no ads at all -- a dash, not a zero.
+    newest_ad: date | None
+    newest_adset: date | None
+    days_since_new_ad: int | None
+    spend_7d: float
+
+
+class CampaignTrackerResponse(BaseModel):
+    rows: list[CampaignTrackerRow]
+    total: int
+    #: Campaigns matching the filters before the limit.
+    matched: int
+    #: Headline counts over the FILTERED population, not the page.
+    campaigns: int
+    ads_added_7d: int
+    ads_added_30d: int
+    #: Campaigns that spent in the last 7 days and whose newest ad is
+    #: older than `stale_days`. The number the section exists for.
+    stale_spending: int
+    stale_days: int
+    as_of: date
+
+
+@router.get("/campaign-tracker", response_model=CampaignTrackerResponse)
+@cached_analytics(ttl=600.0)
+async def get_campaign_tracker(
+    session: SessionDep,
+    status: str = Query(default="ACTIVE",
+                        description="Campaign effective status, or 'all'."),
+    account: str | None = Query(default=None, description="Exact account_name."),
+    search: str | None = Query(default=None, max_length=120),
+    stale_days: int = Query(default=14, ge=1, le=365,
+                            description="A campaign counts as stale when it spent in "
+                                        "the last 7 days and its newest ad is older "
+                                        "than this."),
+    only_stale: bool = Query(default=False),
+    sort: str = Query(default="days_since_new_ad",
+                      description="One of " + ", ".join(_CAMPAIGN_TRACKER_SORTS)),
+    direction: Literal["desc", "asc"] = Query(default="desc"),
+    limit: int = Query(default=200, ge=1, le=2000),
+) -> CampaignTrackerResponse:
+    """Campaign structure and creative refresh, one row per campaign.
+
+    Counts come from the Silver entity tables (`meta_campaigns`,
+    `meta_adsets`, `meta_ads`), so they are current as of the last
+    `silver_meta_entities` run, not live from Meta.
+    """
+    if sort not in _CAMPAIGN_TRACKER_SORTS:
+        raise HTTPException(400, f"sort must be one of {sorted(_CAMPAIGN_TRACKER_SORTS)}")
+
+    where: list[str] = []
+    params: dict[str, object] = {"limit": limit, "stale_days": stale_days}
+    if status and status.lower() != "all":
+        where.append("status = :status")
+        params["status"] = status.upper()
+    if account:
+        where.append("account_name = :account")
+        params["account"] = account
+    if search:
+        where.append("campaign_name ILIKE :search")
+        params["search"] = f"%{search}%"
+    # Spent recently AND has not been given a new ad since stale_days.
+    stale_expr = ("(spend_7d > 0 AND (days_since_new_ad IS NULL "
+                  "OR days_since_new_ad > :stale_days))")
+    if only_stale:
+        where.append(stale_expr)
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    order_by = (f"{_CAMPAIGN_TRACKER_SORTS[sort]} "
+                f"{'ASC' if direction == 'asc' else 'DESC'} NULLS LAST")
+
+    rows_result = await session.execute(text(f"""
+        WITH base AS ({_CAMPAIGN_TRACKER_SQL}), filtered AS (
+          SELECT * FROM base {where_sql}
+        )
+        SELECT *,
+               COUNT(*)            OVER ()::int AS _matched,
+               SUM(ads_added_7d)   OVER ()::int AS _added_7d,
+               SUM(ads_added_30d)  OVER ()::int AS _added_30d,
+               COUNT(*) FILTER (WHERE {stale_expr}) OVER ()::int AS _stale
+          FROM filtered
+         ORDER BY {order_by}, campaign_name
+         LIMIT :limit
+    """), params)
+    raw = [dict(r._mapping) for r in rows_result]
+
+    head = raw[0] if raw else {}
+    meta_keys = ("_matched", "_added_7d", "_added_30d", "_stale")
+    rows = [CampaignTrackerRow(**{k: v for k, v in r.items() if k not in meta_keys})
+            for r in raw]
+    today = (await session.execute(
+        text("SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date"))).scalar()
+
+    return CampaignTrackerResponse(
+        rows=rows,
+        total=len(rows),
+        matched=int(head.get("_matched") or 0),
+        campaigns=int(head.get("_matched") or 0),
+        ads_added_7d=int(head.get("_added_7d") or 0),
+        ads_added_30d=int(head.get("_added_30d") or 0),
+        stale_spending=int(head.get("_stale") or 0),
+        stale_days=stale_days,
+        as_of=today,
+    )
+
+
+# ----------------------------------------------------------------------
+# Meta Hypothesis -- the team's own experiment register
+# ----------------------------------------------------------------------
+
+#: Meta exposes no notion of an experiment, so the team's sheet IS the
+#: register and this section reads it back with its own headers intact.
+#: scripts/ingest_meta_hypotheses.py mirrors it into
+#: public.meta_hypothesis_tests and resolves each test's campaign or ad
+#: set name where it can.
+#:
+#: Only about a third resolve -- 32 of 102, measured 2026-10-27 -- because
+#: the name column is hand-typed and drifts from Meta. That is reported
+#: rather than hidden: an unmatched test is still a real test, and
+#: dropping it would make the register look smaller than it is.
+_HYPOTHESIS_SQL = """
+SELECT id, source, row_index, test_date, test_date_parsed, month_of_testing, test_category,
+       hypothesis_code, hypothesis, test_status, primary_kpi, success_criteria,
+       test_threshold, confidence_interval, supporting_metrics, budget_per_day,
+       launch_date, launch_date_parsed, ad_account, entity_raw, entity_names,
+       matched_level, matched_id, matched_name, completion_date,
+       completion_date_parsed, total_ad_spend, performance_summary,
+       insight_audience, insight_creative, insight_extra, kpi_change,
+       outcome_next_steps, detail_link, test_result, ingested_at
+  FROM public.meta_hypothesis_tests
+"""
+
+_HYPOTHESIS_SORTS = {
+    "row_index": "row_index",
+    "launch_date": "launch_date_parsed",
+    "test_date": "test_date_parsed",
+    "completion_date": "completion_date_parsed",
+    "test_category": "test_category",
+    "test_status": "test_status",
+    "test_result": "test_result",
+}
+
+
+class HypothesisRow(BaseModel):
+    """One test, with the sheet's own fields.
+
+    Every text field is passed through as written. The sheet mixes
+    '26-Sep-2024', '26/10/2024' and '8-2026' in its date columns, so the
+    raw string is always kept and `*_parsed` carries a real date ONLY
+    where the format was unambiguous.
+    """
+    #: The register's own key. row_index is the SHEET's line number and
+    #: is null on anything entered from the dashboard, so it cannot be the
+    #: identity -- `id` is.
+    id: int
+    #: 'sheet' | 'dashboard'.
+    source: str
+    row_index: int | None
+    test_date: str | None
+    test_date_parsed: date | None
+    month_of_testing: str | None
+    test_category: str | None
+    hypothesis_code: str | None
+    hypothesis: str | None
+    test_status: str | None
+    primary_kpi: str | None
+    success_criteria: str | None
+    test_threshold: str | None
+    confidence_interval: str | None
+    supporting_metrics: str | None
+    budget_per_day: str | None
+    launch_date: str | None
+    launch_date_parsed: date | None
+    ad_account: str | None
+    #: The name cell as typed; `entity_names` splits a multi-line cell.
+    entity_raw: str | None
+    entity_names: list[str] | None
+    #: 'campaign' | 'adset' | 'campaign~' | 'adset~' (~ = fuzzy), or None
+    #: where the typed name matches nothing in Meta.
+    matched_level: str | None
+    matched_id: str | None
+    matched_name: str | None
+    completion_date: str | None
+    completion_date_parsed: date | None
+    total_ad_spend: str | None
+    performance_summary: str | None
+    insight_audience: str | None
+    insight_creative: str | None
+    insight_extra: str | None
+    kpi_change: str | None
+    outcome_next_steps: str | None
+    detail_link: str | None
+    test_result: str | None
+    #: Null on a dashboard row: it was typed here, not ingested.
+    ingested_at: datetime | None
+
+
+class HypothesisResponse(BaseModel):
+    rows: list[HypothesisRow]
+    total: int
+    matched: int
+    #: Counts over the FILTERED population, for the facet controls.
+    by_category: dict[str, int]
+    by_status: dict[str, int]
+    by_result: dict[str, int]
+    #: Tests whose typed name resolves to a live Meta entity.
+    resolved: int
+    sheet_rows: int
+    #: How many of `sheet_rows` were entered here rather than synced.
+    dashboard_rows: int
+    ingested_at: datetime | None
+
+
+@router.get("/meta-hypotheses", response_model=HypothesisResponse)
+@cached_analytics(ttl=600.0)
+async def get_meta_hypotheses(
+    session: SessionDep,
+    category: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    result: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=160),
+    only_matched: bool = Query(default=False,
+                               description="Only tests whose name resolves to a Meta entity."),
+    sort: str = Query(default="launch_date",
+                      description="One of " + ", ".join(_HYPOTHESIS_SORTS)),
+    direction: Literal["desc", "asc"] = Query(default="desc"),
+    limit: int = Query(default=250, ge=1, le=1000),
+) -> HypothesisResponse:
+    """The hypothesis register, as the team records it."""
+    if sort not in _HYPOTHESIS_SORTS:
+        raise HTTPException(400, f"sort must be one of {sorted(_HYPOTHESIS_SORTS)}")
+
+    where: list[str] = []
+    params: dict[str, object] = {"limit": limit}
+    for field, value in (("test_category", category), ("test_status", status),
+                         ("test_result", result), ("ad_account", account)):
+        if value:
+            where.append(f"{field} = :{field}")
+            params[field] = value
+    if search:
+        # Across the fields someone would actually search by.
+        where.append("(hypothesis ILIKE :search OR hypothesis_code ILIKE :search "
+                     "OR entity_raw ILIKE :search OR primary_kpi ILIKE :search "
+                     "OR outcome_next_steps ILIKE :search)")
+        params["search"] = f"%{search}%"
+    if only_matched:
+        where.append("matched_level IS NOT NULL")
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    order_by = (f"{_HYPOTHESIS_SORTS[sort]} "
+                f"{'ASC' if direction == 'asc' else 'DESC'} NULLS LAST")
+
+    rows_result = await session.execute(text(
+        f"WITH base AS ({_HYPOTHESIS_SQL}) "
+        f"SELECT *, COUNT(*) OVER ()::int AS _matched FROM base {where_sql} "
+        f"ORDER BY {order_by}, row_index NULLS LAST, id LIMIT :limit"), params)
+    raw = [dict(r._mapping) for r in rows_result]
+    matched = int(raw[0]["_matched"]) if raw else 0
+    rows = [HypothesisRow(**{k: v for k, v in r.items() if k != "_matched"}) for r in raw]
+
+    # Facet counts over the whole register, so the controls do not change
+    # their options as you filter.
+    facets = (await session.execute(text("""
+        SELECT 'category' AS kind, COALESCE(test_category, '(blank)') AS key, COUNT(*)::int AS n
+          FROM public.meta_hypothesis_tests GROUP BY 1, 2
+        UNION ALL
+        SELECT 'status', COALESCE(test_status, '(blank)'), COUNT(*)::int
+          FROM public.meta_hypothesis_tests GROUP BY 1, 2
+        UNION ALL
+        SELECT 'result', COALESCE(test_result, '(blank)'), COUNT(*)::int
+          FROM public.meta_hypothesis_tests GROUP BY 1, 2
+    """))).mappings().all()
+
+    head = (await session.execute(text("""
+        SELECT COUNT(*)::int AS sheet_rows,
+               COUNT(*) FILTER (WHERE matched_level IS NOT NULL)::int AS resolved,
+               COUNT(*) FILTER (WHERE source = 'dashboard')::int AS dashboard_rows,
+               MAX(ingested_at) AS ingested_at
+          FROM public.meta_hypothesis_tests"""))).mappings().one()
+
+    def facet(kind: str) -> dict[str, int]:
+        return {f["key"]: f["n"] for f in facets if f["kind"] == kind}
+
+    return HypothesisResponse(
+        rows=rows, total=len(rows), matched=matched,
+        by_category=facet("category"), by_status=facet("status"),
+        by_result=facet("result"),
+        resolved=head["resolved"], sheet_rows=head["sheet_rows"],
+        dashboard_rows=head["dashboard_rows"],
+        ingested_at=head["ingested_at"],
+    )
+
+
+# ----------------------------------------------------------------------
+# Meta Hypothesis -- creating a test from the dashboard
+# ----------------------------------------------------------------------
+
+#: Campaign and ad set names, for the form's entity picker.
+#:
+#: The whole reason only 32 of 102 sheet tests link to Meta is that the
+#: name is typed from memory. Letting the form search the real roster and
+#: store the resolved id at creation time is what stops the next hundred
+#: tests landing in the same state.
+#:
+#: The search is token-wise: every whitespace-separated word must appear,
+#: in any order. Meta's names join their parts with '_', '+' and '-'
+#: ("NCP_CBO_SMCP_EX-P(30)_1C_Oct-2025"), but people type them with
+#: spaces -- a single ILIKE on "SMCP EX-P" matches nothing at all, which
+#: is exactly the dead end that leaves a test unlinked.
+_ENTITY_SEARCH_SQL = """
+-- The UNION sits in a subquery because Postgres only allows bare result
+-- column names in a set operation's ORDER BY, and the ACTIVE-first sort
+-- is an expression.
+SELECT * FROM (
+    SELECT 'campaign' AS level, campaign_id AS id, campaign_name AS name,
+           account_name, campaign_effective_status AS status
+      FROM public.meta_campaigns
+     WHERE {campaign_terms}
+    UNION ALL
+    SELECT 'adset', adset_id, adset_name, account_name, adset_effective_status
+      FROM public.meta_adsets
+     WHERE {adset_terms}
+) m
+ORDER BY (status = 'ACTIVE') DESC, length(name), name
+LIMIT :limit
+"""
+
+
+class EntityMatch(BaseModel):
+    level: str
+    id: str
+    name: str
+    account_name: str | None
+    status: str | None
+
+
+class EntitySearchResponse(BaseModel):
+    matches: list[EntityMatch]
+
+
+@router.get("/meta-hypotheses/entity-search", response_model=EntitySearchResponse)
+async def search_hypothesis_entity(
+    session: SessionDep,
+    q: str = Query(min_length=2, max_length=160),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> EntitySearchResponse:
+    """Campaigns and ad sets matching every word of `q`, ACTIVE first."""
+    terms = q.split()[:6]  # six words is already more than any name needs
+    if not terms:
+        return EntitySearchResponse(matches=[])
+    params: dict[str, object] = {"limit": limit}
+    for i, term in enumerate(terms):
+        params[f"t{i}"] = f"%{term}%"
+    sql = _ENTITY_SEARCH_SQL.format(
+        campaign_terms=" AND ".join(f"campaign_name ILIKE :t{i}" for i in range(len(terms))),
+        adset_terms=" AND ".join(f"adset_name ILIKE :t{i}" for i in range(len(terms))),
+    )
+    rows = (await session.execute(text(sql), params)).mappings().all()
+    return EntitySearchResponse(matches=[EntityMatch(**r) for r in rows])
+
+
+class HypothesisCreate(BaseModel):
+    """A test entered from the dashboard.
+
+    Only the four fields a test is meaningless without are required. The
+    sheet's own rows are frequently missing everything else, and refusing
+    a partially-filled test would just push the team back to the sheet --
+    which is the drift this is meant to end.
+    """
+    hypothesis: str = Field(min_length=5, max_length=2000)
+    test_category: str = Field(min_length=2, max_length=80)
+    primary_kpi: str = Field(min_length=1, max_length=120)
+    test_status: str = Field(default="Ongoing", max_length=40)
+
+    hypothesis_code: str | None = Field(default=None, max_length=60)
+    success_criteria: str | None = Field(default=None, max_length=1000)
+    test_threshold: str | None = Field(default=None, max_length=120)
+    confidence_interval: str | None = Field(default=None, max_length=40)
+    supporting_metrics: str | None = Field(default=None, max_length=1000)
+    budget_per_day: str | None = Field(default=None, max_length=120)
+    ad_account: str | None = Field(default=None, max_length=120)
+    launch_date: date | None = None
+    completion_date: date | None = None
+    #: Chosen from entity-search, so the id is known rather than guessed.
+    matched_level: Literal["campaign", "adset"] | None = None
+    matched_id: str | None = Field(default=None, max_length=40)
+    matched_name: str | None = Field(default=None, max_length=400)
+    created_by: str | None = Field(default=None, max_length=120)
+
+
+class HypothesisCreated(BaseModel):
+    id: int
+    matched_level: str | None
+    matched_name: str | None
+
+
+@router.post("/meta-hypotheses", response_model=HypothesisCreated, status_code=201)
+async def create_meta_hypothesis(
+    session: SessionDep, body: HypothesisCreate,
+) -> HypothesisCreated:
+    """Record a test from the dashboard.
+
+    Written with source='dashboard'. scripts/ingest_meta_hypotheses.py
+    only ever touches source='sheet' rows, so a sheet sync cannot
+    overwrite or delete what is entered here.
+    """
+    # A claimed entity is re-checked against Meta rather than trusted
+    # from the form -- otherwise a stale picker would store an id that
+    # resolves to nothing and the test would silently carry no metrics.
+    today = datetime.now(timezone.utc).date()
+    level, ident, name = body.matched_level, body.matched_id, body.matched_name
+    if level and ident:
+        table, id_col, name_col = (
+            ("public.meta_campaigns", "campaign_id", "campaign_name") if level == "campaign"
+            else ("public.meta_adsets", "adset_id", "adset_name"))
+        found = (await session.execute(
+            text(f"SELECT {name_col} AS name FROM {table} WHERE {id_col} = :id"),
+            {"id": ident})).first()
+        if not found:
+            raise HTTPException(422, f"No {level} in Meta with id {ident}. "
+                                     "Pick it again from the search.")
+        name = found.name
+    else:
+        level = ident = name = None
+
+    row = (await session.execute(text("""
+        INSERT INTO public.meta_hypothesis_tests (
+            source, hypothesis, test_category, primary_kpi, test_status,
+            hypothesis_code, success_criteria, test_threshold,
+            confidence_interval, supporting_metrics, budget_per_day,
+            ad_account, launch_date, launch_date_parsed,
+            completion_date, completion_date_parsed,
+            test_date, test_date_parsed, month_of_testing,
+            entity_raw, entity_names, matched_level, matched_id, matched_name,
+            created_by
+        ) VALUES (
+            'dashboard', :hypothesis, :test_category, :primary_kpi, :test_status,
+            :hypothesis_code, :success_criteria, :test_threshold,
+            :confidence_interval, :supporting_metrics, :budget_per_day,
+            :ad_account, :launch_text, :launch_date,
+            :completion_text, :completion_date,
+            -- The sheet's "test date" is the day the test was written down.
+            -- Here that is today, and the month label follows from it so the
+            -- row groups with its neighbours.
+            :test_text, :test_date, :month_of_testing,
+            :entity_raw, :entity_names, :matched_level, :matched_id, :matched_name,
+            :created_by
+        ) RETURNING id"""), {
+        "hypothesis": body.hypothesis.strip(),
+        "test_category": body.test_category.strip(),
+        "primary_kpi": body.primary_kpi.strip(),
+        "test_status": body.test_status.strip(),
+        "hypothesis_code": body.hypothesis_code,
+        "success_criteria": body.success_criteria,
+        "test_threshold": body.test_threshold,
+        "confidence_interval": body.confidence_interval,
+        "supporting_metrics": body.supporting_metrics,
+        "budget_per_day": body.budget_per_day,
+        "ad_account": body.ad_account,
+        # Both forms stored: the text column keeps the sheet's shape, the
+        # parsed one is what sorting and any window maths use.
+        "launch_text": body.launch_date.isoformat() if body.launch_date else None,
+        "launch_date": body.launch_date,
+        "completion_text": body.completion_date.isoformat() if body.completion_date else None,
+        "completion_date": body.completion_date,
+        "test_text": today.isoformat(),
+        "test_date": today,
+        "month_of_testing": today.strftime("%B %Y"),
+        "entity_raw": name,
+        "entity_names": [name] if name else None,
+        "matched_level": level,
+        "matched_id": ident,
+        "matched_name": name,
+        "created_by": body.created_by,
+    })).first()
+    await session.commit()
+    # The register read is cached for ten minutes. Without this, a test
+    # saved here would not show up until the cache aged out -- and the
+    # team, seeing nothing, would simply save it again.
+    get_meta_hypotheses.analytics_cache.invalidate()
+    return HypothesisCreated(id=row.id, matched_level=level, matched_name=name)
