@@ -25,9 +25,11 @@ var PRICE_IMPACT = {
   // Fixed tabs, in reading order.
   fixed: [
     { view: 'sku_price_impact_summary', tab: 'Summary', order: 'direction.asc' },
-    { view: 'sku_page_compare', tab: 'Product', order: 'sessions_today.desc.nullslast',
+    { view: 'sku_page_compare', tab: 'Product', grouped: true,
+      order: 'master_sku.asc,sessions_today.desc.nullslast',
       filter: 'page_type=eq.Product&direction=neq.Unchanged&hidden=is.false' },
-    { view: 'sku_page_compare', tab: 'Collection', order: 'sessions_today.desc.nullslast',
+    { view: 'sku_page_compare', tab: 'Collection', grouped: true,
+      order: 'master_sku.asc,sessions_today.desc.nullslast',
       filter: 'page_type=eq.Collection&direction=neq.Unchanged&hidden=is.false' },
     // No SKU column on purpose. Of 111 Shopify custom pages, ZERO name a
     // product or collection anywhere in their HTML -- they are built from
@@ -56,7 +58,8 @@ function syncPriceImpact() {
 
   PRICE_IMPACT.fixed.forEach(function (spec) {
     var rows = priFetchAll_(cfg, spec);
-    priWriteTab_(ss, spec.tab, rows);
+    if (spec.grouped) priWriteGroupedTab_(ss, spec.tab, rows);
+    else priWriteTab_(ss, spec.tab, rows);
     summary.push([spec.tab, rows.length]);
   });
 
@@ -163,6 +166,110 @@ function priWriteTab_(ss, tabName, rows) {
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+}
+
+/** Columns on a grouped tab. The SKU block header carries the identity
+ *  and the block's totals; the page rows beneath carry only what varies
+ *  between them. */
+var GROUP_SKU_COLUMNS = ['master_sku', 'direction', 'old_price', 'new_price', 'price_change'];
+var GROUP_PAGE_COLUMNS = [
+  'page_type', 'page_path', 'page_title', 'skus_on_page',
+  'sessions_today', 'sessions_prev_day', 'sessions_prev_week', 'sessions_prev_month',
+  'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
+  'atc_delta_vs_prev_week'
+];
+
+/** One header row per SKU, then its pages beneath it.
+ *
+ *  The flat version repeated the SKU, its direction and both prices on
+ *  every row and ordered the whole tab by sessions, so one SKU's five
+ *  pages landed on rows 58, 84, 101, 136 and 223 with the same five
+ *  values restated each time. Grouping puts a SKU's pages together and
+ *  states what they share exactly once.
+ *
+ *  The header's totals are summed over the pages listed beneath it and
+ *  nothing else. On the Collection tab that is a SHARED figure -- those
+ *  pages sell other SKUs too -- which is why the rate is labelled as
+ *  the block's own and `skus_on_page` stays on every row. */
+function priWriteGroupedTab_(ss, tabName, rows) {
+  var sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+  if (!rows.length) {
+    sheet.clearContents();
+    sheet.getRange(1, 1).setValue('No rows for this group.');
+    return;
+  }
+
+  var groups = [];
+  var index = {};
+  rows.forEach(function (r) {
+    if (!(r.master_sku in index)) {
+      index[r.master_sku] = groups.length;
+      groups.push({ sku: r.master_sku, head: r, pages: [] });
+    }
+    groups[index[r.master_sku]].pages.push(r);
+  });
+
+  // Biggest SKU first, by the traffic of the pages in its own block.
+  groups.forEach(function (g) {
+    g.sessions = g.pages.reduce(function (t, r) { return t + (r.sessions_today || 0); }, 0);
+  });
+  groups.sort(function (a, b) { return b.sessions - a.sessions; });
+
+  var headers = GROUP_SKU_COLUMNS.concat(GROUP_PAGE_COLUMNS);
+  var values = [headers];
+  var headerRows = [];
+
+  groups.forEach(function (g) {
+    var prevWeek = g.pages.reduce(function (t, r) { return t + (r.sessions_prev_week || 0); }, 0);
+    var atcNow = priBlendedAtc_(g.pages, 'sessions_today', 'atc_rate_today');
+    var atcWeek = priBlendedAtc_(g.pages, 'sessions_prev_week', 'atc_rate_prev_week');
+
+    headerRows.push(values.length + 1);
+    values.push([
+      g.sku, g.head.direction, g.head.old_price, g.head.new_price, g.head.price_change,
+      g.pages.length + ' pages',
+      // Spelt out per tab, because the two totals do not mean the same
+      // thing. Product pages belong to this SKU; collection pages are
+      // shared with every other SKU on them, so the block total is not
+      // this SKU's traffic and must not be read as if it were.
+      tabName === 'Collection'
+        ? 'ALL COLLECTIONS - SHARED TRAFFIC, NOT THIS SKU ALONE'
+        : 'ALL PRODUCT PAGES FOR THIS SKU',
+      '', '',
+      g.sessions, '', prevWeek, '',
+      atcNow, '', atcWeek, '',
+      (atcNow !== '' && atcWeek !== '') ? Math.round((atcNow - atcWeek) * 1000) / 1000 : ''
+    ]);
+
+    g.pages.forEach(function (r) {
+      values.push(['', '', '', '', ''].concat(GROUP_PAGE_COLUMNS.map(function (h) {
+        var v = r[h];
+        return (v === null || v === undefined) ? '' : v;
+      })));
+    });
+  });
+
+  priPace_();
+  sheet.clearContents();
+  sheet.getRange(1, 1, values.length, headers.length).setValues(values);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  // Bold each SKU header so the blocks are findable while scrolling.
+  headerRows.forEach(function (row) {
+    sheet.getRange(row, 1, 1, headers.length).setFontWeight('bold');
+  });
+}
+
+/** Sessions-weighted add-to-cart rate across a block's pages.
+ *  Weighted, never an average of the rates: a page with 66 sessions
+ *  would otherwise weigh as much as one with 6,787. */
+function priBlendedAtc_(pages, sessionKey, rateKey) {
+  var sess = 0, adds = 0;
+  pages.forEach(function (r) {
+    var s = r[sessionKey], rate = r[rateKey];
+    if (s && rate !== null && rate !== undefined) { sess += s; adds += s * rate / 100; }
+  });
+  return sess ? Math.round(adds / sess * 100 * 1000) / 1000 : '';
 }
 
 /** Keep the write rate under the Sheets per-user quota. */

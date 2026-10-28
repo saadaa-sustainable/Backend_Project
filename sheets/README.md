@@ -278,8 +278,8 @@ enough** — verified by reading all three views as the `anon` role.
 | Tab | Supabase view | Rows | One row per |
 |---|---|---|---|
 | Summary | `sku_price_impact_summary` | 4 | price direction — **read this first** |
-| Product | `sku_page_compare` | 326 | repriced SKU × one of its product pages |
-| Collection | `sku_page_compare` | 1,043 | repriced SKU × a collection it sits on |
+| Product | `sku_page_compare` | 370 | **grouped** — a header row per SKU, then its product pages |
+| Collection | `sku_page_compare` | 1,087 | **grouped** — a header row per SKU, then its collections |
 | Other | `other_page_compare` | 63 | page — **no SKU column, see below** |
 | *one per SKU* | `sku_page_compare` | 43 tabs | every page that SKU appears on |
 
@@ -307,6 +307,33 @@ SKUs and its traffic is not SDCP's.
 `setupPriceImpactTrigger()` refreshes at 07:00 daily, after the nightly
 has rebuilt the source tables. Writes are paced to stay under the Sheets
 quota of 60 per minute.
+
+### Product and Collection are grouped, not flat
+
+A flat tab ordered by sessions scattered one SKU's pages across the
+sheet — SMCTS landed on rows 58, 84, 101, 136 and 223 — and restated its
+direction and both prices on every one of them. Each SKU now gets a bold
+header row carrying what its pages share, with the pages listed beneath:
+
+| master_sku | direction | old | new | page_type | page_path | shared | sessions | atc |
+|---|---|---|---|---|---|---|---|---|
+| **SMCTS** | **Decreased** | **1199** | **999** | **5 pages** | **ALL PRODUCT PAGES FOR THIS SKU** | | **55** | **1.818** |
+| | | | | Product | `/products/men-olive-green-tailored-cotton-shorts` | 1 | 21 | 0 |
+| | | | | Product | `/products/men-grey-tailored-cotton-shorts` | 1 | 14 | 7.143 |
+| | | | | Product | `/products/men-beige-tailored-cotton-shorts` | 1 | 11 | 0 |
+| | | | | Product | `/products/men-dark-grey-tailored-cotton-shorts` | 1 | 7 | 0 |
+| | | | | Product | `/products/men-black-tailored-cotton-shorts` | 1 | 2 | 0 |
+
+Blocks are ordered by the traffic of the pages inside them, and the
+header's add-to-cart rate is **sessions-weighted**, never an average of
+the page rates — a page with 66 sessions must not weigh as much as one
+with 6,787.
+
+The header label differs by tab on purpose. On Product it reads *ALL
+PRODUCT PAGES FOR THIS SKU*; on Collection it reads *ALL COLLECTIONS —
+SHARED TRAFFIC, NOT THIS SKU ALONE*, because SDCP's 31 collections total
+8,276 sessions that it shares with other SKUs. `skus_on_page` stays on
+every row so the distinction survives a copy-paste.
 
 ### Why the Other tab has no SKU column
 
