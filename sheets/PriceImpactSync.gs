@@ -229,31 +229,10 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   var headerRows = [];
 
   groups.forEach(function (g) {
-    var prevWeek = g.pages.reduce(function (t, r) { return t + (r.sessions_prev_week || 0); }, 0);
-    var atcNow = priBlendedAtc_(g.pages, 'sessions_today', 'atc_rate_today');
-    var atcWeek = priBlendedAtc_(g.pages, 'sessions_prev_week', 'atc_rate_prev_week');
-
-    var rev = priSum_(g.pages, 'revenue_today');
-    var revWeek = priSum_(g.pages, 'revenue_prev_week');
-
     headerRows.push(values.length + 1);
-    values.push([
-      g.sku, g.head.direction, g.head.old_price, g.head.new_price, g.head.price_change,
-      g.pages.length + ' pages',
-      // Spelt out per tab, because the two totals do not mean the same
-      // thing. Product pages belong to this SKU; collection pages are
-      // shared with every other SKU on them, so the block total is not
-      // this SKU's traffic or revenue and must not be read as if it were.
-      tabName === 'Collection'
-        ? 'ALL COLLECTIONS - SHARED TRAFFIC AND REVENUE, NOT THIS SKU ALONE'
-        : 'ALL PRODUCT PAGES FOR THIS SKU',
-      '', '',
-      g.sessions, '', prevWeek, '',
-      atcNow, '', atcWeek, '',
-      (atcNow !== '' && atcWeek !== '') ? Math.round((atcNow - atcWeek) * 1000) / 1000 : '',
-      rev, '', revWeek, '',
-      priSum_(g.pages, 'orders_today'), priSum_(g.pages, 'orders_prev_week')
-    ]);
+    values.push(
+      [g.sku, g.head.direction, g.head.old_price, g.head.new_price, g.head.price_change]
+        .concat(priBlockTotals_(g.pages, tabName)));
 
     g.pages.forEach(function (r) {
       values.push(['', '', '', '', ''].concat(GROUP_PAGE_COLUMNS.map(function (h) {
@@ -272,6 +251,46 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   // Bold each SKU header so the blocks are findable while scrolling.
   headerRows.forEach(function (row) {
     sheet.getRange(row, 1, 1, headers.length).setFontWeight('bold');
+  });
+}
+
+/** The block header's cells, derived from GROUP_PAGE_COLUMNS rather
+ *  than hand-listed.
+ *
+ *  Hand-listing is what broke it: the first version spelt out
+ *  `sessions, '', prevWeek, ''` and so filled only today and prev_week,
+ *  leaving sessions_prev_day, sessions_prev_month, atc_rate_prev_day
+ *  and atc_rate_prev_month permanently blank on every header row.
+ *  Deriving each cell from the column name means a column added to
+ *  GROUP_PAGE_COLUMNS is totalled automatically instead of silently
+ *  arriving empty.
+ *
+ *  Each kind of column gets the aggregate it deserves: counts and money
+ *  are summed, a rate is re-derived from its own slot's sessions, and
+ *  the delta is recomputed from the two weighted rates rather than
+ *  summed. */
+function priBlockTotals_(pages, tabName) {
+  return GROUP_PAGE_COLUMNS.map(function (h) {
+    if (h === 'page_type') return pages.length + ' pages';
+    if (h === 'page_path') {
+      // Spelt out per tab, because the two totals do not mean the same
+      // thing. Product pages belong to this SKU; collection pages are
+      // shared with every other SKU on them, so the block total is not
+      // this SKU's traffic or revenue and must not be read as if it were.
+      return tabName === 'Collection'
+        ? 'ALL COLLECTIONS - SHARED TRAFFIC AND REVENUE, NOT THIS SKU ALONE'
+        : 'ALL PRODUCT PAGES FOR THIS SKU';
+    }
+    if (/^sessions_|^revenue_|^orders_/.test(h)) return priSum_(pages, h);
+    if (/^atc_rate_/.test(h)) {
+      return priBlendedAtc_(pages, h.replace('atc_rate_', 'sessions_'), h);
+    }
+    if (h === 'atc_delta_vs_prev_week') {
+      var now = priBlendedAtc_(pages, 'sessions_today', 'atc_rate_today');
+      var wk = priBlendedAtc_(pages, 'sessions_prev_week', 'atc_rate_prev_week');
+      return (now === '' || wk === '') ? '' : Math.round((now - wk) * 1000) / 1000;
+    }
+    return '';  // page_title, skus_on_page: nothing to total
   });
 }
 

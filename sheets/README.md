@@ -329,6 +329,12 @@ header's add-to-cart rate is **sessions-weighted**, never an average of
 the page rates — a page with 66 sessions must not weigh as much as one
 with 6,787.
 
+Every header cell is derived from the column list rather than spelt out,
+so a column added later is totalled automatically instead of arriving
+blank. A rate is still blank where its day had **no sessions at all** —
+SDLCT took none in the week-ago slot, and 0% would claim people saw the
+page and declined, which is not what happened.
+
 The header label differs by tab on purpose. On Product it reads *ALL
 PRODUCT PAGES FOR THIS SKU*; on Collection it reads *ALL COLLECTIONS —
 SHARED TRAFFIC, NOT THIS SKU ALONE*, because SDCP's 31 collections total
