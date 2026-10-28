@@ -323,7 +323,10 @@ page_revenue AS (
            SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
                                         = (an.day - INTERVAL '1 month')::date)                       AS rev_prev_month,
            COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day)     AS ord_anchor,
-           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 7) AS ord_prev_week
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 1) AS ord_prev_day,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 7) AS ord_prev_week,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
+                                  = (an.day - INTERVAL '1 month')::date)                       AS ord_prev_month
     FROM public.ga4_order_attribution g, anchor an
     WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
           IN (an.day, an.day - 1, an.day - 7, (an.day - INTERVAL '1 month')::date)
@@ -387,8 +390,10 @@ SELECT
     CASE WHEN dp.has_prev_day   THEN ROUND(COALESCE(rv.rev_prev_day, 0), 2) END   AS revenue_prev_day,
     CASE WHEN dp.has_prev_week  THEN ROUND(COALESCE(rv.rev_prev_week, 0), 2) END  AS revenue_prev_week,
     CASE WHEN dp.has_prev_month THEN ROUND(COALESCE(rv.rev_prev_month, 0), 2) END AS revenue_prev_month,
-    CASE WHEN dp.has_anchor    THEN COALESCE(rv.ord_anchor, 0) END    AS orders_today,
-    CASE WHEN dp.has_prev_week THEN COALESCE(rv.ord_prev_week, 0) END AS orders_prev_week,
+    CASE WHEN dp.has_anchor     THEN COALESCE(rv.ord_anchor, 0) END     AS orders_today,
+    CASE WHEN dp.has_prev_day   THEN COALESCE(rv.ord_prev_day, 0) END   AS orders_prev_day,
+    CASE WHEN dp.has_prev_week  THEN COALESCE(rv.ord_prev_week, 0) END  AS orders_prev_week,
+    CASE WHEN dp.has_prev_month THEN COALESCE(rv.ord_prev_month, 0) END AS orders_prev_month,
     -- What the page returned for the traffic it got: the only figure
     -- that compares a 66-session page with a 6,787-session one.
     --
@@ -424,37 +429,76 @@ WITH anchor AS (
     SELECT MAX(day) AS day FROM public.shopify_landing_page_analysis
     WHERE day < current_date
 ),
-slots AS (
-    SELECT a.landing_page_type, a.landing_page_path,
-           a.sessions, a.sessions_with_cart_additions AS atc,
-           CASE
-             WHEN a.day = an.day                              THEN 'anchor'
-             WHEN a.day = an.day - 1                          THEN 'prev_day'
-             WHEN a.day = an.day - 7                          THEN 'prev_week'
-             WHEN a.day = (an.day - INTERVAL '1 month')::date THEN 'prev_month'
-           END AS slot,
-           an.day AS anchor_day
+day_present AS (
+    SELECT bool_or(x.day = an.day)                              AS has_anchor,
+           bool_or(x.day = an.day - 1)                          AS has_prev_day,
+           bool_or(x.day = an.day - 7)                          AS has_prev_week,
+           bool_or(x.day = (an.day - INTERVAL '1 month')::date) AS has_prev_month
+    FROM public.shopify_landing_page_analysis x, anchor an
+    WHERE x.day IN (an.day, an.day - 1, an.day - 7,
+                    (an.day - INTERVAL '1 month')::date)
+),
+page_revenue AS (
+    SELECT COALESCE(NULLIF(regexp_replace(
+               regexp_replace(g.last_landing, '^https?://[^/]+', ''),
+               '[?].*$', ''), ''), '/') AS path,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day)     AS rev_anchor,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 1) AS rev_prev_day,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 7) AS rev_prev_week,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
+                                        = (an.day - INTERVAL '1 month')::date)                       AS rev_prev_month,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day)     AS ord_anchor,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 1) AS ord_prev_day,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 7) AS ord_prev_week,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
+                                  = (an.day - INTERVAL '1 month')::date)                       AS ord_prev_month
+    FROM public.ga4_order_attribution g, anchor an
+    WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
+          IN (an.day, an.day - 1, an.day - 7, (an.day - INTERVAL '1 month')::date)
+    GROUP BY 1
+),
+agg AS (
+    SELECT a.landing_page_type AS page_type, a.landing_page_path AS page_path,
+           MAX(an.day) AS anchor_day,
+           SUM(a.sessions) FILTER (WHERE a.day = an.day)     AS sess_anchor,
+           SUM(a.sessions) FILTER (WHERE a.day = an.day - 1) AS sess_prev_day,
+           SUM(a.sessions) FILTER (WHERE a.day = an.day - 7) AS sess_prev_week,
+           SUM(a.sessions) FILTER (WHERE a.day = (an.day - INTERVAL '1 month')::date) AS sess_prev_month,
+           SUM(a.sessions_with_cart_additions) FILTER (WHERE a.day = an.day)     AS atc_anchor,
+           SUM(a.sessions_with_cart_additions) FILTER (WHERE a.day = an.day - 1) AS atc_prev_day,
+           SUM(a.sessions_with_cart_additions) FILTER (WHERE a.day = an.day - 7) AS atc_prev_week,
+           SUM(a.sessions_with_cart_additions) FILTER (WHERE a.day = (an.day - INTERVAL '1 month')::date) AS atc_prev_month
     FROM public.shopify_landing_page_analysis a CROSS JOIN anchor an
     WHERE a.landing_page_type NOT IN ('Product', 'Collection')
       AND a.day IN (an.day, an.day - 1, an.day - 7,
                     (an.day - INTERVAL '1 month')::date)
+    GROUP BY 1, 2
 )
 SELECT
-    landing_page_type AS page_type,
-    landing_page_path AS page_path,
-    MAX(anchor_day) AS anchor_day,
+    a.page_type, a.page_path, a.anchor_day,
     'not attributable to a SKU'::text AS sku_note,
-    SUM(sessions) FILTER (WHERE slot='anchor')     AS sessions_today,
-    SUM(sessions) FILTER (WHERE slot='prev_day')   AS sessions_prev_day,
-    SUM(sessions) FILTER (WHERE slot='prev_week')  AS sessions_prev_week,
-    SUM(sessions) FILTER (WHERE slot='prev_month') AS sessions_prev_month,
-    ROUND(100.0*SUM(atc) FILTER (WHERE slot='anchor')
-        / NULLIF(SUM(sessions) FILTER (WHERE slot='anchor'),0), 3)    AS atc_rate_today,
-    ROUND(100.0*SUM(atc) FILTER (WHERE slot='prev_week')
-        / NULLIF(SUM(sessions) FILTER (WHERE slot='prev_week'),0), 3) AS atc_rate_prev_week
-FROM slots
-GROUP BY landing_page_type, landing_page_path
-HAVING SUM(sessions) FILTER (WHERE slot='anchor') > 0
+    CASE WHEN dp.has_anchor     THEN COALESCE(a.sess_anchor, 0) END     AS sessions_today,
+    CASE WHEN dp.has_prev_day   THEN COALESCE(a.sess_prev_day, 0) END   AS sessions_prev_day,
+    CASE WHEN dp.has_prev_week  THEN COALESCE(a.sess_prev_week, 0) END  AS sessions_prev_week,
+    CASE WHEN dp.has_prev_month THEN COALESCE(a.sess_prev_month, 0) END AS sessions_prev_month,
+    ROUND(100.0*a.atc_anchor     / NULLIF(a.sess_anchor, 0), 3)      AS atc_rate_today,
+    ROUND(100.0*a.atc_prev_day   / NULLIF(a.sess_prev_day, 0), 3)    AS atc_rate_prev_day,
+    ROUND(100.0*a.atc_prev_week  / NULLIF(a.sess_prev_week, 0), 3)   AS atc_rate_prev_week,
+    ROUND(100.0*a.atc_prev_month / NULLIF(a.sess_prev_month, 0), 3)  AS atc_rate_prev_month,
+    ROUND(100.0*a.atc_anchor / NULLIF(a.sess_anchor, 0)
+        - 100.0*a.atc_prev_week / NULLIF(a.sess_prev_week, 0), 3)    AS atc_delta_vs_prev_week,
+    CASE WHEN dp.has_anchor     THEN ROUND(COALESCE(rv.rev_anchor, 0), 2) END     AS revenue_today,
+    CASE WHEN dp.has_prev_day   THEN ROUND(COALESCE(rv.rev_prev_day, 0), 2) END   AS revenue_prev_day,
+    CASE WHEN dp.has_prev_week  THEN ROUND(COALESCE(rv.rev_prev_week, 0), 2) END  AS revenue_prev_week,
+    CASE WHEN dp.has_prev_month THEN ROUND(COALESCE(rv.rev_prev_month, 0), 2) END AS revenue_prev_month,
+    CASE WHEN dp.has_anchor     THEN COALESCE(rv.ord_anchor, 0) END     AS orders_today,
+    CASE WHEN dp.has_prev_day   THEN COALESCE(rv.ord_prev_day, 0) END   AS orders_prev_day,
+    CASE WHEN dp.has_prev_week  THEN COALESCE(rv.ord_prev_week, 0) END  AS orders_prev_week,
+    CASE WHEN dp.has_prev_month THEN COALESCE(rv.ord_prev_month, 0) END AS orders_prev_month
+FROM agg a
+CROSS JOIN day_present dp
+LEFT JOIN page_revenue rv ON rv.path = a.page_path
+WHERE COALESCE(a.sess_anchor, 0) > 0 OR COALESCE(rv.rev_anchor, 0) > 0
 """
 
 # Which exact pages a SKU is on, so a reader can check the mapping

@@ -280,7 +280,7 @@ enough** — verified by reading all three views as the `anon` role.
 | Summary | `sku_price_impact_summary` | 4 | price direction — **read this first** |
 | Product | `sku_page_compare` | 370 | **grouped** — a header row per SKU, then its product pages |
 | Collection | `sku_page_compare` | 1,087 | **grouped** — a header row per SKU, then its collections |
-| Other | `other_page_compare` | 63 | page — **no SKU column, see below** |
+| Other | `other_page_compare` | 63 | page — same columns, **no SKU column, see below** |
 | *one per SKU* | `sku_page_compare` | 43 tabs | every page that SKU appears on |
 
 48 tabs in all. The per-SKU tabs are **discovered from the data**, not
@@ -399,6 +399,11 @@ misformat a column.
 
 The Status tab repeats the four dates in one line, so the sheet always
 states which days it is showing.
+
+Every metric carries all four days — sessions, add-to-cart rate,
+revenue and orders. The Other tab carries the same set, so a page there
+can be read the same way as a product or collection page; only the SKU
+attribution is missing.
 
 ### Blank means missing, zero means zero
 

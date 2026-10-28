@@ -146,7 +146,7 @@ var SKU_TAB_COLUMNS = [
   // Revenue of the orders whose converting session landed on this page,
   // from real orders rather than the landing-page table's own count.
   'revenue_today', 'revenue_prev_day', 'revenue_prev_week', 'revenue_prev_month',
-  'orders_today', 'orders_prev_week',
+  'orders_today', 'orders_prev_day', 'orders_prev_week', 'orders_prev_month',
   'revenue_per_1k_today', 'revenue_per_1k_prev_week',
   'product_status', 'anchor_day'
 ];
@@ -193,7 +193,7 @@ var GROUP_PAGE_COLUMNS = [
   'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
   'atc_delta_vs_prev_week',
   'revenue_today', 'revenue_prev_day', 'revenue_prev_week', 'revenue_prev_month',
-  'orders_today', 'orders_prev_week'
+  'orders_today', 'orders_prev_day', 'orders_prev_week', 'orders_prev_month'
 ];
 
 /** One header row per SKU, then its pages beneath it.
