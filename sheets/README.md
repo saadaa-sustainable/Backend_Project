@@ -14,8 +14,48 @@ no database migration or package installation is required.
 | `meta_direct_daily_30d` | Daily 30d | `ad_id`, `date` |
 | `meta_direct_daily_90d` | Daily 90d | `ad_id`, `date` |
 
-All six are enabled. Column names come from Supabase automatically. The order
-of daily rows is **ad ID, then date**, matching the existing unique index.
+## Campaign Tracker (separate script)
+
+`CampaignTracker.gs` adds **three** tabs for a hard-coded list of
+campaigns, all from the same three requests:
+
+| Tab | One row per | Columns |
+|---|---|---|
+| Campaign Tracker | campaign | running/total ad sets and ads, latest ad created, days since |
+| Ad Sets | ad set | campaign, name, status, ads in it, ads running, created, id |
+| Ads | ad | campaign, ad set, name, status, **created date**, id |
+
+Ad Sets and Ads are sorted newest first. The per-ad-set ad counts are
+derived from the ad rows already in memory, so an ad set with no ads
+shows `0` rather than disappearing.
+
+No database view. It reads `meta_campaigns`, `meta_adsets` and `meta_ads`
+directly and aggregates in the script -- 142 ad sets and 611 ads for the
+four campaigns currently listed. Edit `CAMPAIGN_TRACKER.campaigns` to
+track different ones.
+
+**It needs a service-role key.** Those three tables have ROW LEVEL
+SECURITY enabled with no policies, so `anon` and `authenticated` read
+zero rows while PostgREST still answers `200` -- indistinguishable from
+"these campaigns have no ads". A `service_role` / `sb_secret_` key
+bypasses RLS. The six views `MetaDirectSync` reads do not need one
+because RLS is off on those materialized views; base tables are not the
+same thing. The script refuses to write the tab when the campaign lookup
+returns nothing, so this fails loudly rather than publishing zeros.
+
+Setup, alongside `MetaDirectSync`:
+
+1. **Extensions → Apps Script**, add `CampaignTracker.gs` as a new file.
+2. Script Properties: it reuses `SUPABASE_URL`, `SUPABASE_KEY` and
+   `SPREADSHEET_ID`; add `CAMPAIGN_SYNC_HOUR_IST` (0-23). Schedule it
+   **after** the backend refresh -- that starts 07:00 IST, so use 9 or
+   later, otherwise the sheet copies yesterday's numbers silently.
+3. Run `syncCampaignTracker` once to approve scopes.
+4. Run `setupCampaignTrackerTrigger` to install the nightly run.
+
+Re-running `setupCampaignTrackerTrigger` replaces its own trigger rather
+than stacking a second one. A **Campaign Tracker** menu appears in the
+sheet with Sync now / Install / Remove.
 
 ## Install
 
@@ -227,3 +267,63 @@ responses, empty views, source changes, cell budgets, API failures, locks,
 triggers, and literal value handling. These are not a substitute for the first
 manual run in your Google account; Google runtime latency and workbook-specific
 limits cannot be measured by local mocks.
+
+## Price-change impact (separate script)
+
+[PriceImpactSync.gs](PriceImpactSync.gs) writes three tabs for the
+2026-10-28 repricing. Same Script Properties as above
+(`SUPABASE_URL`, `SUPABASE_KEY`, `SPREADSHEET_ID`); the **anon key is
+enough** — verified by reading all three views as the `anon` role.
+
+| Supabase view | Sheet tab | One row per |
+|---|---|---|
+| `sku_price_impact_compare` | Price Impact | master SKU — the headline |
+| `sku_price_impact_daily` | Daily | master SKU × day (last 60) |
+| `sku_price_impact_pages` | Pages | master SKU × page it appears on |
+
+`setupPriceImpactTrigger()` refreshes at 07:00 daily, after the nightly
+has rebuilt the source tables. No resume state: ~16,000 rows finish in
+one execution, and each view costs ~1.3s.
+
+### The three things a reader has to know
+
+**The anchor is the latest COMPLETE day, never today.**
+`shopify_landing_page_analysis` is rebuilt once by the nightly, so today
+holds only the hours before that run — 10,918 sessions against a full
+day's ~65,000. Read today against a full yesterday and every SKU looks
+80% down for reasons that have nothing to do with price. So tomorrow
+morning the anchor is today, and `anchor_at_new_price` flips to true on
+its own.
+
+**Add-to-cart rate is the headline, and there is no conversion rate.**
+`sessions_that_completed_checkout` captured **4.5%–8.8%** of real Shopify
+orders over ten days — GoKwik owns the checkout, so Shopify never sees
+most conversions, and the swing in what it captures is larger than any
+price effect. Add-to-cart is measured on the same sessions and holds
+6.9%–7.9%, and it is the step where the shopper has just seen the price.
+The real outcome comes from `cpis_by_sku_daily` instead: `units_sold`
+and `revenue` from actual orders.
+
+**Collection pages are shared.** `/collections/men-cotton-pant` carries
+100,869 sessions and belongs to no single SKU. Collection and product
+columns are kept apart so the two are never summed, and `skus_on_page`
+says how many SKUs share each one.
+
+### Why there is no "other pages" split
+
+Measured over 30 days, everything outside product and collection pages
+is either not merchandising or not material:
+
+| Page | Sessions 30d | |
+|---|---|---|
+| `/` homepage | 228,051 | not SKU-specific |
+| `/pages/knit-wear-collection` | 2,026 | merchandising |
+| `/pages/behtar-cotton` | 646 | merchandising |
+| `/pages/shop-all-kurta-sets` | 405 | merchandising |
+| contact-us, returns, shipping, our-store | ~3,900 | policy pages |
+
+The merchandising custom pages come to roughly 3,400 sessions against
+4.2M on product pages and 12.4M on collection pages. Product presence on
+them is also not recorded anywhere — it would have to be inferred by
+reading each page's HTML, which misses anything rendered by a dynamic
+block. Not worth the inference for 0.02% of the traffic.
