@@ -178,6 +178,7 @@ function priWriteTab_(ss, tabName, rows) {
   sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
   priApplyFormats_(sheet, keys, values.length);
+  priHighlightRecent_(sheet, keys, values.length);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
 }
@@ -253,6 +254,7 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
   priApplyFormats_(sheet, keys, values.length);
+  priHighlightRecent_(sheet, keys, values.length);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
   // Bold each SKU header so the blocks are findable while scrolling.
@@ -361,6 +363,39 @@ function priDateHeaders_(headers, rows) {
     if (h === 'anchor_day') return 'anchor day';
     return h.replace(/_/g, ' ');
   });
+}
+
+/** Tint the most recent day's columns so the eye lands on them.
+ *
+ *  A tab carries the same metric four times over -- sessions on four
+ *  dates, add-to-cart on four, revenue on four -- and they are
+ *  indistinguishable at a glance once the header scrolls away. The
+ *  anchor columns get a pale wash so "what happened on the latest
+ *  complete day" is findable without reading the header row.
+ *
+ *  Keyed on the ORIGINAL column names, not the dated labels, since the
+ *  labels are the thing that stops saying "today".
+ *
+ *  Pale on purpose. These sheets are read beside a filter bar and a
+ *  frozen header, and a saturated fill would compete with the bold SKU
+ *  block headers that carry the actual structure. */
+var RECENT_FILL = '#fff6e0';   // warm, barely there
+var RECENT_HEAD = '#f6e4b8';   // one step up, for the header cell
+
+function priHighlightRecent_(sheet, keys, rowCount) {
+  var hits = keys.map(function (k) { return /_today$/.test(k); });
+  if (hits.indexOf(true) < 0) return;
+
+  // ONE setBackgrounds over the whole grid, not two calls per tinted
+  // column. Four anchor columns across 48 tabs would be 384 separate
+  // writes against a quota of 60 a minute; this is 48.
+  var grid = [];
+  for (var r = 0; r < rowCount; r++) {
+    grid.push(hits.map(function (hit) {
+      return hit ? (r === 0 ? RECENT_HEAD : RECENT_FILL) : null;
+    }));
+  }
+  sheet.getRange(1, 1, rowCount, keys.length).setBackgrounds(grid);
 }
 
 /** Number format per column, applied explicitly on every write.

@@ -408,6 +408,20 @@ revenue and orders. The Other tab carries the same set, so a page there
 can be read the same way as a product or collection page; only the SKU
 attribution is missing.
 
+### The most recent day is tinted
+
+Every tab carries the same metric four times over — sessions on four
+dates, add-to-cart on four, revenue on four — and once the header row
+scrolls away they are indistinguishable. The anchor day's columns get a
+pale wash (`#fff6e0`, header `#f6e4b8`) so the latest complete day is
+findable at a glance.
+
+It keys on the original column names, not the dated labels, since the
+labels are exactly what stops saying "today". Applied as **one**
+`setBackgrounds` call over the whole grid rather than two per column —
+four anchor columns across 48 tabs would be 384 writes against a Sheets
+quota of 60 a minute.
+
 ### Blank means missing, zero means zero
 
 Of the 1,163 pages the repriced SKUs sit on, only about 650–740 get any
