@@ -369,6 +369,45 @@ unaffected, since the same share is missing from each. And on a
 collection row it is **shared**, exactly as the sessions are: SDCP's 31
 collections total ₹30,042, earned alongside every other SKU on them.
 
+### Blank means missing, zero means zero
+
+Of the 1,163 pages the repriced SKUs sit on, only about 650–740 get any
+traffic on a given day — steady across all four comparison days (705 /
+689 / 736 / 651 on the first run). Those pages had no sessions, and the
+cells now say **0** rather than sitting empty, so a reader is never left
+guessing whether a blank is a quiet page or a broken pipeline.
+
+A blank is reserved for the one case it should mean: a day the source
+does not hold at all. The view checks which of the four days exist
+before filling, so if the nightly misses a run the affected column goes
+blank instead of claiming a measured zero.
+
+### The GA4 attribution lag will bite
+
+Revenue comes from `ga4_order_attribution`, which is refreshed by its
+own fetch, not by the nightly that rebuilds the landing-page table. On
+2026-10-28 that fetch had not run for over a day, and the anchor day
+held **286 of 1,262 real orders — 23%**, against a normal 75–86%. Page
+revenue read about a quarter of its true value and most cells were
+empty, with nothing on the sheet to say why.
+
+Check it before trusting a day's revenue:
+
+```sql
+SELECT (order_at AT TIME ZONE 'Asia/Kolkata')::date AS day, count(*)
+FROM ga4_order_attribution WHERE order_at >= current_date - 7 GROUP BY 1 ORDER BY 1 DESC;
+```
+
+Against roughly 1,200 orders a day, anything under ~900 means the fetch
+is behind. Catch it up with:
+
+```
+./.venv/bin/python scripts/fetch_ga4_order_attribution.py --days 3
+```
+
+Three days scans 84.8 GiB, about $0.52. It took 5 seconds and lifted the
+anchor day from 286 orders to 988.
+
 ### Why the Other tab has no SKU column
 
 Checked directly rather than assumed: of **111 Shopify custom pages,

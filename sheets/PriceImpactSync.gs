@@ -149,7 +149,7 @@ var SKU_TAB_COLUMNS = [
 function priWriteTab_(ss, tabName, rows) {
   var sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
   if (!rows.length) {
-    sheet.clearContents();
+    sheet.clear();  // clear() not clearContents(): formats must go too
     sheet.getRange(1, 1).setValue('No rows for this group.');
     return;
   }
@@ -168,8 +168,9 @@ function priWriteTab_(ss, tabName, rows) {
   });
 
   priPace_();
-  sheet.clearContents();
+  sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
+  priApplyFormats_(sheet, headers, values.length);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
 }
@@ -202,7 +203,7 @@ var GROUP_PAGE_COLUMNS = [
 function priWriteGroupedTab_(ss, tabName, rows) {
   var sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
   if (!rows.length) {
-    sheet.clearContents();
+    sheet.clear();  // clear() not clearContents(): formats must go too
     sheet.getRange(1, 1).setValue('No rows for this group.');
     return;
   }
@@ -263,8 +264,9 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   });
 
   priPace_();
-  sheet.clearContents();
+  sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
+  priApplyFormats_(sheet, headers, values.length);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
   // Bold each SKU header so the blocks are findable while scrolling.
@@ -296,6 +298,32 @@ function priBlendedAtc_(pages, sessionKey, rateKey) {
     if (s && rate !== null && rate !== undefined) { sess += s; adds += s * rate / 100; }
   });
   return sess ? Math.round(adds / sess * 100 * 1000) / 1000 : '';
+}
+
+/** Number format per column, applied explicitly on every write.
+ *
+ *  clearContents() clears VALUES and leaves formats behind, so when the
+ *  column layout changed a revenue figure landed in a cell still
+ *  carrying a date format from the previous run: 4132 rendered as
+ *  1911-04-24, which is exactly 4,132 days after the Sheets epoch.
+ *  clear() fixes the inherited case; setting formats explicitly means a
+ *  tab no longer depends on whatever it happened to hold before. */
+function priNumberFormat_(header) {
+  if (/^anchor_day$|_date$/.test(header)) return 'yyyy-mm-dd';
+  if (/^revenue/.test(header)) return '#,##0.00';
+  if (/_rate_|^atc_delta|_per_1k/.test(header)) return '0.000';
+  if (/^sessions|^orders|^units|skus_on_page|^old_price$|^new_price$|^price_change$/.test(header)) {
+    return '#,##0';
+  }
+  return '@';  // text, so a SKU code or a path is never guessed at
+}
+
+/** Apply formats column by column, over the data rows only. */
+function priApplyFormats_(sheet, headers, rowCount) {
+  if (rowCount < 2) return;
+  headers.forEach(function (h, i) {
+    sheet.getRange(2, i + 1, rowCount - 1, 1).setNumberFormat(priNumberFormat_(h));
+  });
 }
 
 /** Keep the write rate under the Sheets per-user quota. */
@@ -351,7 +379,7 @@ function priWriteStatus_(ss, summary) {
     ['Tab', 'Rows']
   ];
   var all = notes.concat(summary);
-  sheet.clearContents();
+  sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, all.length, 2).setValues(all);
   sheet.setColumnWidth(1, 210);
   sheet.setColumnWidth(2, 660);

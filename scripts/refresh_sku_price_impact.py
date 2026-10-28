@@ -280,6 +280,22 @@ WITH anchor AS (
     SELECT MAX(day) AS day FROM public.shopify_landing_page_analysis
     WHERE day < current_date
 ),
+-- Which of the four days the sources actually hold. A page with no row
+-- on a day it HAS data for had no sessions, and should read 0; a day
+-- the source is missing entirely must stay blank, because 0 would claim
+-- a measurement nobody made. Checked rather than assumed: all four are
+-- present today, but the anchor rolls forward every morning and the
+-- GA4 fetch has run a day late before.
+day_present AS (
+    SELECT
+        bool_or(x.day = an.day)                              AS has_anchor,
+        bool_or(x.day = an.day - 1)                          AS has_prev_day,
+        bool_or(x.day = an.day - 7)                          AS has_prev_week,
+        bool_or(x.day = (an.day - INTERVAL '1 month')::date) AS has_prev_month
+    FROM public.shopify_landing_page_analysis x, anchor an
+    WHERE x.day IN (an.day, an.day - 1, an.day - 7,
+                    (an.day - INTERVAL '1 month')::date)
+),
 page_revenue AS (
     -- Every order carries the page its converting session started on,
     -- as a full URL with the whole UTM tail attached. Strip scheme,
@@ -356,7 +372,10 @@ SELECT
     -- 1 on a product page; higher on a collection, which is shared. A
     -- collection's sessions and revenue are NOT this SKU's alone.
     a.skus_on_page, a.product_status,
-    a.sessions_today, a.sessions_prev_day, a.sessions_prev_week, a.sessions_prev_month,
+    CASE WHEN dp.has_anchor     THEN COALESCE(a.sessions_today, 0) END     AS sessions_today,
+    CASE WHEN dp.has_prev_day   THEN COALESCE(a.sessions_prev_day, 0) END   AS sessions_prev_day,
+    CASE WHEN dp.has_prev_week  THEN COALESCE(a.sessions_prev_week, 0) END  AS sessions_prev_week,
+    CASE WHEN dp.has_prev_month THEN COALESCE(a.sessions_prev_month, 0) END AS sessions_prev_month,
     ROUND(100.0*a.atc_anchor     / NULLIF(a.sessions_today, 0), 3)      AS atc_rate_today,
     ROUND(100.0*a.atc_prev_day   / NULLIF(a.sessions_prev_day, 0), 3)   AS atc_rate_prev_day,
     ROUND(100.0*a.atc_prev_week  / NULLIF(a.sessions_prev_week, 0), 3)  AS atc_rate_prev_week,
@@ -364,12 +383,12 @@ SELECT
     ROUND(100.0*a.atc_anchor / NULLIF(a.sessions_today, 0)
         - 100.0*a.atc_prev_week / NULLIF(a.sessions_prev_week, 0), 3)   AS atc_delta_vs_prev_week,
     -- Revenue of orders whose converting session LANDED on this page.
-    ROUND(rv.rev_anchor, 2)     AS revenue_today,
-    ROUND(rv.rev_prev_day, 2)   AS revenue_prev_day,
-    ROUND(rv.rev_prev_week, 2)  AS revenue_prev_week,
-    ROUND(rv.rev_prev_month, 2) AS revenue_prev_month,
-    rv.ord_anchor    AS orders_today,
-    rv.ord_prev_week AS orders_prev_week,
+    CASE WHEN dp.has_anchor     THEN ROUND(COALESCE(rv.rev_anchor, 0), 2) END     AS revenue_today,
+    CASE WHEN dp.has_prev_day   THEN ROUND(COALESCE(rv.rev_prev_day, 0), 2) END   AS revenue_prev_day,
+    CASE WHEN dp.has_prev_week  THEN ROUND(COALESCE(rv.rev_prev_week, 0), 2) END  AS revenue_prev_week,
+    CASE WHEN dp.has_prev_month THEN ROUND(COALESCE(rv.rev_prev_month, 0), 2) END AS revenue_prev_month,
+    CASE WHEN dp.has_anchor    THEN COALESCE(rv.ord_anchor, 0) END    AS orders_today,
+    CASE WHEN dp.has_prev_week THEN COALESCE(rv.ord_prev_week, 0) END AS orders_prev_week,
     -- What the page returned for the traffic it got: the only figure
     -- that compares a 66-session page with a 6,787-session one.
     --
@@ -383,6 +402,7 @@ SELECT
     CASE WHEN a.sessions_prev_week >= 50
          THEN ROUND(1000.0 * rv.rev_prev_week / a.sessions_prev_week, 2) END AS revenue_per_1k_prev_week
 FROM agg a
+CROSS JOIN day_present dp
 JOIN public.sku_price_change c ON c.master_sku = a.master_sku
 LEFT JOIN page_revenue rv ON rv.path = a.page_path
 """
