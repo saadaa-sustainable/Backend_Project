@@ -20,6 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -34,6 +35,7 @@ from app.services.ad_customer_mix import read_ad_customer_mix
 from app.services.ad_efficiency import calculate_efficiency_scores, get_efficiency_anchors
 from app.services.analytics_cache import cached_analytics
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
+from app.services.dashboard_sessions import META_SOURCE_SQL
 from app.services.gold.cpis import match_ads_to_sku
 from app.services.gold.cpis_value_weighted import RANGE_AGG_SQL, TOTALS_SQL
 from app.services.reach_anchors import window_anchors
@@ -2149,6 +2151,12 @@ async def get_ads_analyse(
 #: stable when a source happens to contain multiple keywords (rare, but
 #: e.g. an email campaign whose name mentions "facebook" would otherwise
 #: swing tile totals around).
+#: `META_SOURCE_SQL` with its column alias-qualified, for queries that
+#: name the orders table. Derived, never retyped: the session band's
+#: numerator and its denominator have to be the same population, and a
+#: second hand-copied edition of the rule is how they stop being that.
+_META_ORDER_SQL = META_SOURCE_SQL.replace("utm_source", "o.utm_source")
+
 _CHANNEL_SUBSTRINGS: list[tuple[str, tuple[str, ...]]] = [
     ("Retention", ("email", "sms", "whatsapp", "klaviyo", "wati", "mailmodo", "spur", "robylon", "kwikengage", "kwikchat")),
     ("Meta", ("meta", "facebook", "instagram", "ig_", "igshop", "igstor", "fb_", "fbads")),
@@ -8166,8 +8174,20 @@ class OverviewSummaryResponse(BaseModel):
 class KpisResponse(BaseModel):
     total_spend: float
     total_impressions: float
+    #: ALL Shopify revenue and orders, every traffic source. The
+    #: headline cards show these.
     total_shopify_revenue: float
     total_shopify_orders: int
+    #: The Meta-driven slice of the two above, selected by the same
+    #: utm_source rule that builds `meta_sessions`.
+    #:
+    #: The Dashboard's session band divides by Meta-driven sessions, so
+    #: its numerator has to be Meta's too. It was the all-traffic figure
+    #: until 2026-10-28, which made revenue per session read 97 per cent
+    #: high -- Rs 4.65cr over 29 Sep to 28 Oct where Meta drove Rs
+    #: 2.36cr, against a session count narrowed to Meta alone.
+    meta_shopify_revenue: float = 0.0
+    meta_shopify_orders: int = 0
     #: Customers whose FIRST EVER Shopify order falls inside the
     #: selected window -- newly acquired in that window, not merely
     #: active in it. Read off `order_customer_type.is_new_customer`,
@@ -8218,6 +8238,20 @@ class DashboardSessionsResponse(BaseModel):
     #: User-DAYS over the range, not unique users.
     ga4_active_users: int | None = None
     ga4_revenue: float | None = None
+    #: GA4's own session and purchase counts, so the Google tab can
+    #: divide GA4 by GA4 rather than borrowing Shopify's denominator.
+    #:
+    #: ALL traffic, not Meta-driven -- GA4 cannot be narrowed to Meta
+    #: with the data we hold. Its landing_page column is stripped of
+    #: query strings (0 of 68,241 rows over 30 days carry a utm_source),
+    #: and its own channel_group files the bulk of Meta traffic under
+    #: Organic Social: 1,194,834 sessions there against 20,242 in Paid
+    #: Social, while Shopify's utm_source rule finds 1,504,827 Meta
+    #: sessions over the same days. So the Google tab is all-traffic by
+    #: necessity and the UI says so -- the alternative is a Meta share
+    #: invented from a channel grouping that demonstrably misfiles it.
+    ga4_sessions: int | None = None
+    ga4_purchases: int | None = None
     session_data_from: date | None
     session_data_to: date | None
     available_days: int
@@ -8242,6 +8276,15 @@ class DashboardSessionTrendPoint(BaseModel):
     revenue_per_session: float | None
     # Fraction, like the existing frontend KPI: 0.05 means 5%.
     conversion_rate: float | None
+    #: The same three ratios on GA4's own figures, so the chart can
+    #: follow the source tab above it instead of always plotting
+    #: Shopify's. GA4 is all traffic -- it cannot be narrowed to Meta --
+    #: so `ga4_cost_per_session` is Meta spend over every GA4 session
+    #: and is the one line here that mixes two sources.
+    ga4_sessions: int | None = None
+    ga4_cost_per_session: float | None = None
+    ga4_revenue_per_session: float | None = None
+    ga4_conversion_rate: float | None = None
 
 
 class DashboardSessionTrendResponse(BaseModel):
@@ -8270,7 +8313,7 @@ async def get_dashboard_session_trend(
     if date_from and date_to and (date_to - date_from).days > 10000:
         raise HTTPException(status_code=422, detail="Select a date range of at most 10,001 days")
     try:
-        rows = (await session.execute(text("""
+        rows = (await session.execute(text(f"""
             WITH bounds AS (
                 SELECT COALESCE(CAST(:df AS date), MIN(day)) AS lo,
                        COALESCE(CAST(:dt AS date), MAX(day)) AS hi
@@ -8282,7 +8325,8 @@ async def get_dashboard_session_trend(
             ), arpu_days AS (
                 -- `(all)` only: the per-device rows beside it would
                 -- double-count anyone who used two devices that day.
-                SELECT g.day, g.active_users, g.total_revenue
+                SELECT g.day, g.active_users, g.total_revenue,
+                       g.sessions, g.purchases
                 FROM public.ga4_arpu_daily g, bounds b
                 WHERE g.device_category = '(all)'
                   AND g.day BETWEEN b.lo AND b.hi
@@ -8291,10 +8335,16 @@ async def get_dashboard_session_trend(
                 FROM insights_daily_by_ad d, bounds b
                 WHERE d.day BETWEEN b.lo AND b.hi GROUP BY d.day
             ), order_days AS (
+                -- Meta's orders only. `session_days` above is
+                -- meta_sessions, so an unfiltered numerator here
+                -- divided all of Shopify by Meta's traffic alone and
+                -- read 97 per cent high, exactly as the cards did.
+                -- Same rule as the cards and as meta_sessions itself.
                 SELECT CAST(o.created_at AS date) AS day,
                        SUM(o.total_price) AS revenue, COUNT(*) AS orders
                 FROM shopify_order_attribution o, bounds b
                 WHERE o.created_at >= b.lo AND o.created_at < (b.hi + 1)
+                  AND {_META_ORDER_SQL}
                 GROUP BY CAST(o.created_at AS date)
             ), days AS (
                 SELECT day FROM session_days UNION SELECT day FROM ad_days
@@ -8304,7 +8354,8 @@ async def get_dashboard_session_trend(
             )
             SELECT d.day, s.sessions, a.spend, o.revenue, o.orders,
                    sb.first_day, sb.last_day,
-                   g.active_users, g.total_revenue
+                   g.active_users, g.total_revenue,
+                   g.sessions AS ga4_sessions, g.purchases AS ga4_purchases
             FROM days d
             LEFT JOIN session_days s ON s.day = d.day
             LEFT JOIN ad_days a ON a.day = d.day
@@ -8343,6 +8394,12 @@ async def get_dashboard_session_trend(
         # measured here".
         g_users = int(row[7]) if row and row[7] is not None else None
         g_rev = float(row[8]) if row and row[8] is not None else None
+        # GA4 divided by GA4, exactly as the Google tab's cards do.
+        # NULL rather than 0 where GA4 has no row, for the same reason
+        # as ARPU above: the day was not measured, not empty.
+        g_sess = int(row[9]) if row and row[9] is not None else None
+        g_buys = int(row[10]) if row and row[10] is not None else None
+        g_denom = g_sess if g_sess and g_sess > 0 else None
         points.append(DashboardSessionTrendPoint(
             day=day, sessions=sessions, ad_spend=spend,
             ga4_active_users=g_users,
@@ -8351,6 +8408,10 @@ async def get_dashboard_session_trend(
             cost_per_session=spend / denominator if denominator and spend is not None else None,
             revenue_per_session=revenue / denominator if denominator else None,
             conversion_rate=orders / denominator if denominator else None,
+            ga4_sessions=g_sess,
+            ga4_cost_per_session=(spend / g_denom) if g_denom and spend is not None else None,
+            ga4_revenue_per_session=(g_rev / g_denom) if g_denom and g_rev is not None else None,
+            ga4_conversion_rate=(g_buys / g_denom) if g_denom and g_buys is not None else None,
         ))
     return DashboardSessionTrendResponse(points=points, spend_data_from=spend_from, spend_data_to=spend_to)
 
@@ -8375,6 +8436,39 @@ async def _get_dashboard_order_groups(
         + where + "GROUP BY utm_source, 2"
     ), params)
     return [tuple(row) for row in result.all()]
+
+
+async def _meta_sources(session: AsyncSession, sources: Iterable[Any]) -> set[str]:
+    """Which of `sources` the session rule counts as Meta.
+
+    META_SOURCE_SQL is the SAME rule that builds `meta_sessions`, and
+    the session band divides these orders by that count -- a ratio whose
+    halves are selected by two different definitions of "Meta" is not a
+    ratio of anything. This file holds a second, nearly-identical
+    definition in `_classify_channel`; over 29 Sep to 28 Oct the two
+    differ by 85 orders and Rs 1.38L (0.46 per cent), almost all of it
+    the Organic (IG) bio-link carve-out the channel rules make and the
+    session rule does not.
+
+    Classified as a VALUES list rather than in the scan above, and not
+    reimplemented in Python. Adding the predicate to that GROUP BY
+    flipped its plan from an Index Scan to a parallel Gather Merge --
+    3,884 blocks to 10,058 -- while there are only 46 distinct
+    utm_source values in the whole table and 23 in a typical month, so
+    classifying the keys alone touches no table at all: 0 blocks.
+    """
+    names = sorted({s for s in sources if s})
+    if not names:
+        return set()
+    # UNION ALL rather than VALUES ... v(col): naming a VALUES list's
+    # columns is Postgres-only syntax, and these endpoints are covered
+    # against SQLite. Both read the same, and neither touches a table.
+    values = " UNION ALL ".join(
+        f"SELECT :s{i} AS utm_source" for i in range(len(names)))
+    params = {f"s{i}": n for i, n in enumerate(names)}
+    rows = await session.execute(text(
+        f"SELECT utm_source FROM ({values}) v WHERE {META_SOURCE_SQL}"), params)
+    return {r[0] for r in rows}
 
 
 # ----------------------------------------------------------------------
@@ -8707,13 +8801,19 @@ async def get_dashboard_sessions(
             where += " AND day BETWEEN :af AND :at"
             aparams = {"af": date_from, "at": date_to}
         a = (await session.execute(text(
-            "SELECT COALESCE(SUM(active_users), 0), COALESCE(SUM(total_revenue), 0) "
+            "SELECT COALESCE(SUM(active_users), 0), COALESCE(SUM(total_revenue), 0), "
+            "       COALESCE(SUM(sessions), 0), COALESCE(SUM(purchases), 0) "
             f"FROM public.ga4_arpu_daily {where}"
         ), aparams)).first()
         if a and a[0]:
             arpu = {"ga4_arpu": float(a[1]) / int(a[0]),
                     "ga4_active_users": int(a[0]),
                     "ga4_revenue": float(a[1])}
+        # Sessions can be present on days active_users is not, so these
+        # are kept outside the ARPU guard rather than hidden by it.
+        if a and a[2]:
+            arpu["ga4_sessions"] = int(a[2])
+            arpu["ga4_purchases"] = int(a[3])
     except DBAPIError:
         # Table not built yet. The session figures are still good.
         pass
@@ -8775,11 +8875,23 @@ async def get_dashboard_kpis(
             "SELECT COUNT(*), COALESCE(SUM(total_price),0) "
             "FROM public.order_customer_type WHERE is_new_customer"
         ))).one()
+        # Lifetime takes its headline from ad_performance_summary, which
+        # is per-AD and so already Meta's. The session band still needs
+        # the figure selected the same way as its denominator, so it is
+        # read from the orders table under the session rule rather than
+        # assumed equal to the headline.
+        meta = (await session.execute(text(
+            "SELECT COALESCE(SUM(total_price),0), COUNT(*) "
+            "FROM shopify_order_attribution "
+            f"WHERE {META_SOURCE_SQL}"
+        ))).one()
         return KpisResponse(
             total_spend=float(totals[0]),
             total_impressions=float(totals[1]),
             total_shopify_revenue=float(totals[2]),
             total_shopify_orders=int(totals[3]),
+            meta_shopify_revenue=float(meta[0]),
+            meta_shopify_orders=int(meta[1]),
             new_customers=int(acq[0]),
             new_customer_revenue=float(acq[1]),
         )
@@ -8790,6 +8902,7 @@ async def get_dashboard_kpis(
         "FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt"
     ), {"df": df, "dt": dt})).one()
     shop = await _get_dashboard_order_groups(session, df, dt)
+    meta_srcs = await _meta_sources(session, (row[0] for row in shop))
     # `order_day` is a date, so BETWEEN is inclusive on both ends and
     # matches the spend window above exactly -- the two halves of
     # Acquisition MER must cover the same days or the ratio is a
@@ -8805,6 +8918,8 @@ async def get_dashboard_kpis(
         total_impressions=float(ads[1]),
         total_shopify_revenue=float(sum(row[2] or 0 for row in shop)),
         total_shopify_orders=sum(row[3] for row in shop),
+        meta_shopify_revenue=float(sum(row[2] or 0 for row in shop if row[0] in meta_srcs)),
+        meta_shopify_orders=sum(row[3] for row in shop if row[0] in meta_srcs),
         new_customers=int(acq[0]),
         new_customer_revenue=float(acq[1]),
         spend_data_from=floor.isoformat() if floor and df < floor else None,

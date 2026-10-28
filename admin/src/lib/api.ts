@@ -2174,6 +2174,12 @@ export interface OverviewSummaryResponse {
   total_impressions: number;
   total_shopify_revenue: number;
   total_shopify_orders: number;
+  /** The Meta-driven slice of the two above, selected by the same
+   *  utm_source rule that builds `total_sessions` (meta_sessions).
+   *  The session band divides by Meta sessions, so it must use these
+   *  and not the all-traffic totals. */
+  meta_shopify_revenue?: number;
+  meta_shopify_orders?: number;
   category_breakdown: BreakdownItem[];
   channel_breakdown: BreakdownItem[];
   top_landing_pages: TopLandingPage[];
@@ -2300,6 +2306,12 @@ export interface DashboardKpis {
   total_impressions: number;
   total_shopify_revenue: number;
   total_shopify_orders: number;
+  /** The Meta-driven slice of the two above, selected by the same
+   *  utm_source rule that builds `total_sessions` (meta_sessions).
+   *  The session band divides by Meta sessions, so it must use these
+   *  and not the all-traffic totals. */
+  meta_shopify_revenue?: number;
+  meta_shopify_orders?: number;
   /** Customers whose FIRST EVER Shopify order falls inside the selected
    *  window — acquired in it, not merely active in it. Windowed on the
    *  same calendar as `total_spend`, so Acquisition MER divides two
@@ -2341,6 +2353,12 @@ export interface DashboardSessions {
   /** User-days over the range, not unique users. */
   ga4_active_users?: number | null;
   ga4_revenue?: number | null;
+  /** GA4's own session and purchase counts, for the Google tab.
+   *  ALL traffic: GA4 cannot be narrowed to Meta from the data we
+   *  hold -- its landing pages carry no query string and its
+   *  channel_group files most Meta traffic under Organic Social. */
+  ga4_sessions?: number | null;
+  ga4_purchases?: number | null;
   session_data_from: string | null;
   session_data_to: string | null;
   available_days: number;
@@ -2362,6 +2380,14 @@ export interface DashboardSessionTrendPoint {
    *  per day. Null where GA4 has no row for the day. */
   ga4_arpu?: number | null;
   ga4_active_users?: number | null;
+  /** The same three ratios on GA4's own figures, so the chart can
+   *  follow the source tab. GA4 is all traffic, so
+   *  `ga4_cost_per_session` is Meta spend over every GA4 session --
+   *  the one line here that mixes two sources. */
+  ga4_sessions?: number | null;
+  ga4_cost_per_session?: number | null;
+  ga4_revenue_per_session?: number | null;
+  ga4_conversion_rate?: number | null;
 }
 
 export interface DashboardSessionTrend {

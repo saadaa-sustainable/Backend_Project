@@ -127,6 +127,38 @@ It does **not** lose orders that convert later. The setting follows the journey 
 
 **Which to use.** Order date answers "which entities were involved in the orders I received in this range", and is the better reporting view. First-touch date answers "of the journeys this entity opened in this range, what have they returned against what it cost", and is the better view for judging a single ad. A large disagreement between the two for one entity means it is living on journeys it started earlier.
 
+### The "Day by day" view
+
+Above the table sit two views of the same selection: **Where the two disagree**, which ranks entities by the gap between their opening and closing credit, and **Day by day**, which drops the entity dimension and plots the selection against time.
+
+The day-wise view exists because a daily series has to answer a question the table never faces: **which day does an order belong to?** An order placed on 11 October whose journey opened on 3 October, read in a range of 6–11 October, has three defensible homes, and neither "Window means" setting produces the useful one.
+
+| Treatment | Where the order lands | Problem for a daily series |
+|---|---|---|
+| Order date | 11 October | Shows the ad's work on the day the money arrived, not the day the ad did it. |
+| First-touch date | nowhere | 3 October is outside the range, so the order leaves the view entirely. |
+| **Day by day** | **6 October** | None for the total; see the carried-in note below. |
+
+The second row is the one that matters. Measured on ad `SDAFD_UGC_TM_SC_GAD-Jun-165` over 6–11 October, the range contains 21 opened orders worth ₹26,471. Windowed on first-touch date the daily series totals only ₹23,359, because three orders opened before 6 October drop out — **₹3,112 missing, with nothing on the page to say so**. A daily series whose days do not add up to its own range is worse than no series.
+
+So the day-wise view keeps every order the range contains and places each one on the day it opened, or on the range's first day where that is earlier.
+
+**Carried-in revenue is reported separately, and is not a day.** Folding the clamped orders into day one is the obvious thing to do and it is wrong. On the ad above it turned ₹806 of genuine same-day opening into a ₹3,918 bar — 4.9× — an artifact of where the range was cut that moves when the range moves. At account scale it is far worse: over a 30-day range the carried-in figure is **₹86,25,895 from 6,267 journeys**, against a tallest real day of ₹16,76,980. Drawn on the same axis it is **5.1× the largest true day** and flattens every other column into a stub.
+
+It therefore sits **off the day axis**, hatched, behind a dashed rule, labelled *before*. It has no width in time, it is not comparable to any day, and it changes if the range changes.
+
+| Series | What it counts | Addable? |
+|---|---|---|
+| Opened | Orders in the range whose journey opened on that day | Yes, with carried-in |
+| Carried in | Orders in the range whose journey opened **before** it | Yes, with opened |
+| Closed | Orders that closed on that day | **No** — the same orders counted at their other end |
+
+**Opened plus carried-in equals the range's whole first-click revenue**, and matches what the table reports on Order date. Over the standard 30-day range that is ₹1,95,40,373 opened plus ₹86,25,895 carried in, or ₹2,81,66,267, against ₹2,75,43,661 closed.
+
+**One figure will not match the cards above it.** The day-wise view covers every entity at the selected grain; the table and its revenue cards are capped by the **Rows** control. With Rows at 200 and 2,329 ads present, the two differ by design, and the note under the chart says which is which.
+
+**Why this is not a third "Window means" option.** At range level the clamp produces exactly the numbers Order date already gives — same orders, same spend, same ROAS. Only the day placement changes. A third entry in that dropdown would therefore be a control that does nothing when selected, so the behaviour lives in a view switch instead.
+
 ## How revenue and Ad spend are calculated
 
 ### Revenue receives full credit at each endpoint
@@ -224,6 +256,7 @@ The duration and session averages use only orders an entity **opened**. Ad A's a
 | Channel | A representative recorded source label for that entity. The current query selects a stable label from its endpoint records; it does not normalize every spelling into a canonical channel. |
 | Ad spend | One selected-range cost per matched entity. A dash means no matching spend value is available. |
 | Window means | Whether the selected range filters the order date (default) or the first-touch date. Affects the first-click columns only. |
+| Chart view | **Where the two disagree** ranks entities by opening-versus-closing credit; **Day by day** plots the same selection against time, across every entity at the grain rather than the returned rows. |
 | First-click revenue | Full GA4 value of selected orders opened by the entity. |
 | Last-click revenue | Full GA4 value of selected orders closed by the entity. |
 | First-click and last-click ROAS | Each revenue column divided by the same Ad spend, subject to the display rules above. |
@@ -319,6 +352,7 @@ These limitations affect how much confidence to place in a ranking. They do not 
 | Journey extraction | [`fetch_ga4_order_attribution.py`](../scripts/fetch_ga4_order_attribution.py): GA4 session aggregation, purchase candidates, lookback and endpoint selection. |
 | Stored result | `public.ga4_order_attribution`: one stored row per retained transaction ID, with first/last identifiers, GA4 revenue and journey measures. |
 | Dashboard calculations | [`analytics.py`](../app/api/routers/analytics.py), `_first_click_sql()` and `get_first_click()`: IST order-window filters, endpoint aggregation, daily spend joins, ROAS, sorting and headline counts. |
+| Day-wise calculations | [`analytics.py`](../app/api/routers/analytics.py), `get_first_click_daily()`: per-IST-day opened, carried-in and closed revenue, with the clamp to the range's first day and the daily spend join. Reconciles to `get_first_click()` on Order date. |
 | Display and CSV | [`FirstClick.tsx`](../admin/src/app/user/analytics/FirstClick.tsx): filters, row limits, one Ad spend column, displayed-row revenue totals and export fields. |
 | Refresh orchestration | [`refresh_all_daily.py`](../scripts/refresh_all_daily.py): the configured `ga4_attribution` step refreshes a rolling five-day order window. A successful scheduled trigger alone does not prove this step completed. |
 | AI interpretation | [`assistant_analytics.py`](../app/services/assistant_analytics.py): the read-only First Click tool and its metric guidance. |

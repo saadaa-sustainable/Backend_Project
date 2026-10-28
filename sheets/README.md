@@ -14,8 +14,48 @@ no database migration or package installation is required.
 | `meta_direct_daily_30d` | Daily 30d | `ad_id`, `date` |
 | `meta_direct_daily_90d` | Daily 90d | `ad_id`, `date` |
 
-All six are enabled. Column names come from Supabase automatically. The order
-of daily rows is **ad ID, then date**, matching the existing unique index.
+## Campaign Tracker (separate script)
+
+`CampaignTracker.gs` adds **three** tabs for a hard-coded list of
+campaigns, all from the same three requests:
+
+| Tab | One row per | Columns |
+|---|---|---|
+| Campaign Tracker | campaign | running/total ad sets and ads, latest ad created, days since |
+| Ad Sets | ad set | campaign, name, status, ads in it, ads running, created, id |
+| Ads | ad | campaign, ad set, name, status, **created date**, id |
+
+Ad Sets and Ads are sorted newest first. The per-ad-set ad counts are
+derived from the ad rows already in memory, so an ad set with no ads
+shows `0` rather than disappearing.
+
+No database view. It reads `meta_campaigns`, `meta_adsets` and `meta_ads`
+directly and aggregates in the script -- 142 ad sets and 611 ads for the
+four campaigns currently listed. Edit `CAMPAIGN_TRACKER.campaigns` to
+track different ones.
+
+**It needs a service-role key.** Those three tables have ROW LEVEL
+SECURITY enabled with no policies, so `anon` and `authenticated` read
+zero rows while PostgREST still answers `200` -- indistinguishable from
+"these campaigns have no ads". A `service_role` / `sb_secret_` key
+bypasses RLS. The six views `MetaDirectSync` reads do not need one
+because RLS is off on those materialized views; base tables are not the
+same thing. The script refuses to write the tab when the campaign lookup
+returns nothing, so this fails loudly rather than publishing zeros.
+
+Setup, alongside `MetaDirectSync`:
+
+1. **Extensions → Apps Script**, add `CampaignTracker.gs` as a new file.
+2. Script Properties: it reuses `SUPABASE_URL`, `SUPABASE_KEY` and
+   `SPREADSHEET_ID`; add `CAMPAIGN_SYNC_HOUR_IST` (0-23). Schedule it
+   **after** the backend refresh -- that starts 07:00 IST, so use 9 or
+   later, otherwise the sheet copies yesterday's numbers silently.
+3. Run `syncCampaignTracker` once to approve scopes.
+4. Run `setupCampaignTrackerTrigger` to install the nightly run.
+
+Re-running `setupCampaignTrackerTrigger` replaces its own trigger rather
+than stacking a second one. A **Campaign Tracker** menu appears in the
+sheet with Sync now / Install / Remove.
 
 ## Install
 
@@ -227,3 +267,260 @@ responses, empty views, source changes, cell budgets, API failures, locks,
 triggers, and literal value handling. These are not a substitute for the first
 manual run in your Google account; Google runtime latency and workbook-specific
 limits cannot be measured by local mocks.
+
+## Price-change impact (separate script)
+
+[PriceImpactSync.gs](PriceImpactSync.gs) writes three tabs for the
+2026-10-28 repricing. Same Script Properties as above
+(`SUPABASE_URL`, `SUPABASE_KEY`, `SPREADSHEET_ID`); the **anon key is
+enough** — verified by reading all three views as the `anon` role.
+
+| Tab | Supabase view | Rows | One row per |
+|---|---|---|---|
+| Summary | `sku_price_impact_summary` | 4 | price direction — **read this first** |
+| Product | `sku_page_compare` | 370 | **grouped** — a header row per SKU, then its product pages |
+| Collection | `sku_page_compare` | 1,087 | **grouped** — a header row per SKU, then its collections |
+| Other | `other_page_compare` | 63 | page — same columns, **no SKU column, see below** |
+| *one per SKU* | `sku_page_compare` | 43 tabs | every page that SKU appears on |
+
+48 tabs in all. The per-SKU tabs are **discovered from the data**, not
+listed in the script, so a later repricing needs no edit: whatever has a
+direction other than Unchanged gets a tab, and a SKU that stops being
+repriced has its tab removed rather than left showing a reversed
+decision. The removal is anchored to the catalogue's own master-SKU
+pattern (`SD|SM|SU` + 1–4 letters) so a tab you named yourself cannot be
+caught by it.
+
+A SKU tab reads as that SKU's whole surface. `SDCP`, for instance:
+
+| page_type | page_path | skus_on_page | sessions_today |
+|---|---|---|---|
+| Collection | `/collections/cotton-trousers` | 1 | 6,787 |
+| Collection | `/collections/best-sellers-women` | 58 | 535 |
+| Collection | `/collections/shop-all-bottoms` | 22 | 521 |
+| Product | `/products/beige-solid-regular-fit-cotton-trouser` | 1 | 498 |
+
+`skus_on_page` is what stops that table being misread. `cotton-trousers`
+is SDCP's own collection; `best-sellers-women` is shared with 57 other
+SKUs and its traffic is not SDCP's.
+
+`setupPriceImpactTrigger()` refreshes at 07:00 daily, after the nightly
+has rebuilt the source tables. Writes are paced to stay under the Sheets
+quota of 60 per minute.
+
+### Product and Collection are grouped, not flat
+
+A flat tab ordered by sessions scattered one SKU's pages across the
+sheet — SMCTS landed on rows 58, 84, 101, 136 and 223 — and restated its
+direction and both prices on every one of them. Each SKU now gets a bold
+header row carrying what its pages share, with the pages listed beneath:
+
+| master_sku | direction | old | new | page_type | page_path | shared | sessions | atc |
+|---|---|---|---|---|---|---|---|---|
+| **SMCTS** | **Decreased** | **1199** | **999** | **5 pages** | **ALL PRODUCT PAGES FOR THIS SKU** | | **55** | **1.818** |
+
+No delta columns: each metric is shown as its four dated values, and a
+reader subtracts the two that matter rather than being handed one
+difference the layout chose for them.
+| | | | | Product | `/products/men-olive-green-tailored-cotton-shorts` | 1 | 21 | 0 |
+| | | | | Product | `/products/men-grey-tailored-cotton-shorts` | 1 | 14 | 7.143 |
+| | | | | Product | `/products/men-beige-tailored-cotton-shorts` | 1 | 11 | 0 |
+| | | | | Product | `/products/men-dark-grey-tailored-cotton-shorts` | 1 | 7 | 0 |
+| | | | | Product | `/products/men-black-tailored-cotton-shorts` | 1 | 2 | 0 |
+
+Blocks are ordered by the traffic of the pages inside them, and the
+header's add-to-cart rate is **sessions-weighted**, never an average of
+the page rates — a page with 66 sessions must not weigh as much as one
+with 6,787.
+
+Every header cell is derived from the column list rather than spelt out,
+so a column added later is totalled automatically instead of arriving
+blank. A rate is still blank where its day had **no sessions at all** —
+SDLCT took none in the week-ago slot, and 0% would claim people saw the
+page and declined, which is not what happened.
+
+The header label differs by tab on purpose. On Product it reads *ALL
+PRODUCT PAGES FOR THIS SKU*; on Collection it reads *ALL COLLECTIONS —
+SHARED TRAFFIC, NOT THIS SKU ALONE*, because SDCP's 31 collections total
+8,276 sessions that it shares with other SKUs. `skus_on_page` stays on
+every row so the distinction survives a copy-paste.
+
+### Revenue per page
+
+Every order records the page its converting session landed on, as a full
+URL with the UTM tail attached. Stripped of scheme, host and query it
+joins straight onto `landing_page_path` — all 29,280 orders in a 30-day
+window normalise, and the reconstructed per-page totals match the source
+exactly (51 of 51 pages, revenue and order count both).
+
+So `revenue_today` is **real order revenue**, not the landing-page
+table's own count, which sees under a tenth of conversions. Columns:
+`revenue_today / prev_day / prev_week / prev_month`, `orders_today`,
+`orders_prev_week`, and `revenue_per_1k_today` — what a page returned
+for the traffic it got, which is the only figure that compares a
+66-session page with a 6,787-session one.
+
+| page | sessions | revenue | orders | per 1k |
+|---|---|---|---|---|
+| `/collections/cotton-trousers` | 6,787 | ₹17,916 | 13 | ₹2,640 |
+| `/collections/all-whites` | 10 | ₹4,397 | 1 | — |
+| `/collections/best-sellers-women` | 535 | ₹4,030 | 3 | ₹7,534 |
+| `/products/wine-solid-regular-fit-cotton-trouser` | 104 | ₹1,498 | 1 | ₹14,404 |
+
+`revenue_per_1k` is suppressed under 50 sessions, the same reflex as the
+ROAS floor elsewhere in this codebase. `all-whites` took ten sessions
+and one ₹4,397 order, which works out at ₹4,39,700 per thousand and
+would have topped any sort on that column. One order is not a rate.
+
+**Two things the number is not.** It is a floor: `ga4_order_attribution`
+holds about 76% of Shopify orders, so every revenue figure here is
+roughly a quarter light in absolute terms — day-over-day ratios are
+unaffected, since the same share is missing from each. And on a
+collection row it is **shared**, exactly as the sessions are: SDCP's 31
+collections total ₹30,042, earned alongside every other SKU on them.
+
+### Headers carry the date, not the slot name
+
+`sessions_prev_month` says nothing about which day it is, and the answer
+moves every morning as the anchor rolls forward. Columns are labelled
+with the date itself, so a tab copied into a deck or mailed on is still
+legible a week later:
+
+```
+sessions · 27 Oct (Tue)   sessions · 26 Oct (Mon)
+sessions · 20 Oct (Tue)   sessions · 27 Sep (Sun)
+```
+
+The weekday is there on purpose — it shows at a glance that the
+week-ago column is the same weekday, so the comparison is like for like.
+
+The anchor comes from the rows themselves, never from the script's
+clock: the sheet is written from whatever day the pipeline last
+completed, and that is not always yesterday. Number formats stay keyed
+to the original column names, so relabelling the headers cannot
+misformat a column.
+
+The Status tab repeats the four dates in one line, so the sheet always
+states which days it is showing.
+
+Every metric carries all four days — sessions, add-to-cart rate,
+revenue and orders. The Other tab carries the same set, so a page there
+can be read the same way as a product or collection page; only the SKU
+attribution is missing.
+
+### Blank means missing, zero means zero
+
+Of the 1,163 pages the repriced SKUs sit on, only about 650–740 get any
+traffic on a given day — steady across all four comparison days (705 /
+689 / 736 / 651 on the first run). Those pages had no sessions, and the
+cells now say **0** rather than sitting empty, so a reader is never left
+guessing whether a blank is a quiet page or a broken pipeline.
+
+A blank is reserved for the one case it should mean: a day the source
+does not hold at all. The view checks which of the four days exist
+before filling, so if the nightly misses a run the affected column goes
+blank instead of claiming a measured zero.
+
+### The GA4 attribution lag will bite
+
+Revenue comes from `ga4_order_attribution`, which is refreshed by its
+own fetch, not by the nightly that rebuilds the landing-page table. On
+2026-10-28 that fetch had not run for over a day, and the anchor day
+held **286 of 1,262 real orders — 23%**, against a normal 75–86%. Page
+revenue read about a quarter of its true value and most cells were
+empty, with nothing on the sheet to say why.
+
+Check it before trusting a day's revenue:
+
+```sql
+SELECT (order_at AT TIME ZONE 'Asia/Kolkata')::date AS day, count(*)
+FROM ga4_order_attribution WHERE order_at >= current_date - 7 GROUP BY 1 ORDER BY 1 DESC;
+```
+
+Against roughly 1,200 orders a day, anything under ~900 means the fetch
+is behind. Catch it up with:
+
+```
+./.venv/bin/python scripts/fetch_ga4_order_attribution.py --days 3
+```
+
+Three days scans 84.8 GiB, about $0.52. It took 5 seconds and lifted the
+anchor day from 286 orders to 988.
+
+### Why the Other tab has no SKU column
+
+Checked directly rather than assumed: of **111 Shopify custom pages,
+zero** reference a product or a collection anywhere in their HTML body.
+They are assembled from dynamic blocks, so nothing stored in Shopify
+says what any of them merchandises, and the homepage belongs to no SKU
+in the first place.
+
+The tab therefore carries the pages and their traffic — 63 pages, ~8,100
+sessions on the anchor day — with the reason printed on the Status tab,
+rather than dropping the traffic or inventing an attribution for it.
+
+### Unchanged is the control, not filler
+
+Those 41 SKUs were reviewed in the same exercise and deliberately left
+at their old price, so they carry every site-wide influence the repriced
+ones do — campaigns, weather, a slow Tuesday — and none of the price
+change. **If add-to-cart moves the same way on Unchanged, the move is
+not about price.**
+
+The first anchor day shows exactly why that matters. Every group rose
+together against the same weekday a week earlier:
+
+| Group | SKUs | ATC rate | vs last week |
+|---|---|---|---|
+| Decreased | 27 | 6.62% | **+1.91** |
+| Increased | 16 | 8.65% | +1.10 |
+| Unchanged | 41 | 9.42% | **+1.64** |
+| Hidden | 9 | 12.31% | +3.17 |
+
+Read the Decreased row alone and the price cut looks like it worked.
+Read it beside Unchanged and it is a site-wide lift that the repriced
+SKUs happened to share — and the cut actually *underperformed* the
+control. That comparison is the whole point of the Summary tab.
+
+### The three things a reader has to know
+
+**The anchor is the latest COMPLETE day, never today.**
+`shopify_landing_page_analysis` is rebuilt once by the nightly, so today
+holds only the hours before that run — 10,918 sessions against a full
+day's ~65,000. Read today against a full yesterday and every SKU looks
+80% down for reasons that have nothing to do with price. So tomorrow
+morning the anchor is today, and `anchor_at_new_price` flips to true on
+its own.
+
+**Add-to-cart rate is the headline, and there is no conversion rate.**
+`sessions_that_completed_checkout` captured **4.5%–8.8%** of real Shopify
+orders over ten days — GoKwik owns the checkout, so Shopify never sees
+most conversions, and the swing in what it captures is larger than any
+price effect. Add-to-cart is measured on the same sessions and holds
+6.9%–7.9%, and it is the step where the shopper has just seen the price.
+The real outcome comes from `cpis_by_sku_daily` instead: `units_sold`
+and `revenue` from actual orders.
+
+**Collection pages are shared.** `/collections/men-cotton-pant` carries
+100,869 sessions and belongs to no single SKU. Collection and product
+columns are kept apart so the two are never summed, and `skus_on_page`
+says how many SKUs share each one.
+
+### Why there is no "other pages" split
+
+Measured over 30 days, everything outside product and collection pages
+is either not merchandising or not material:
+
+| Page | Sessions 30d | |
+|---|---|---|
+| `/` homepage | 228,051 | not SKU-specific |
+| `/pages/knit-wear-collection` | 2,026 | merchandising |
+| `/pages/behtar-cotton` | 646 | merchandising |
+| `/pages/shop-all-kurta-sets` | 405 | merchandising |
+| contact-us, returns, shipping, our-store | ~3,900 | policy pages |
+
+The merchandising custom pages come to roughly 3,400 sessions against
+4.2M on product pages and 12.4M on collection pages. Product presence on
+them is also not recorded anywhere — it would have to be inferred by
+reading each page's HTML, which misses anything rendered by a dynamic
+block. Not worth the inference for 0.02% of the traffic.
