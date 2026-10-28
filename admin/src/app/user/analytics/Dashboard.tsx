@@ -641,7 +641,7 @@ function DashboardContent() {
                 <button type="button" className="underline underline-offset-2" onClick={sessionTrend.refetch}>Retry chart</button>
               </div>
             ) : sessionTrend.data ? (
-              <SessionTrendChart key={rangeKey} points={sessionTrend.data.points} />
+              <SessionTrendChart key={rangeKey} points={sessionTrend.data.points} source={source} />
             ) : (
               <div role="status" aria-label="Loading daily session trends"><WidgetSkeleton heightPx={340} /></div>
             )}

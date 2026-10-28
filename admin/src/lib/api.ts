@@ -2380,6 +2380,14 @@ export interface DashboardSessionTrendPoint {
    *  per day. Null where GA4 has no row for the day. */
   ga4_arpu?: number | null;
   ga4_active_users?: number | null;
+  /** The same three ratios on GA4's own figures, so the chart can
+   *  follow the source tab. GA4 is all traffic, so
+   *  `ga4_cost_per_session` is Meta spend over every GA4 session --
+   *  the one line here that mixes two sources. */
+  ga4_sessions?: number | null;
+  ga4_cost_per_session?: number | null;
+  ga4_revenue_per_session?: number | null;
+  ga4_conversion_rate?: number | null;
 }
 
 export interface DashboardSessionTrend {

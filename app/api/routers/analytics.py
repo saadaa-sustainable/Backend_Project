@@ -8276,6 +8276,15 @@ class DashboardSessionTrendPoint(BaseModel):
     revenue_per_session: float | None
     # Fraction, like the existing frontend KPI: 0.05 means 5%.
     conversion_rate: float | None
+    #: The same three ratios on GA4's own figures, so the chart can
+    #: follow the source tab above it instead of always plotting
+    #: Shopify's. GA4 is all traffic -- it cannot be narrowed to Meta --
+    #: so `ga4_cost_per_session` is Meta spend over every GA4 session
+    #: and is the one line here that mixes two sources.
+    ga4_sessions: int | None = None
+    ga4_cost_per_session: float | None = None
+    ga4_revenue_per_session: float | None = None
+    ga4_conversion_rate: float | None = None
 
 
 class DashboardSessionTrendResponse(BaseModel):
@@ -8316,7 +8325,8 @@ async def get_dashboard_session_trend(
             ), arpu_days AS (
                 -- `(all)` only: the per-device rows beside it would
                 -- double-count anyone who used two devices that day.
-                SELECT g.day, g.active_users, g.total_revenue
+                SELECT g.day, g.active_users, g.total_revenue,
+                       g.sessions, g.purchases
                 FROM public.ga4_arpu_daily g, bounds b
                 WHERE g.device_category = '(all)'
                   AND g.day BETWEEN b.lo AND b.hi
@@ -8344,7 +8354,8 @@ async def get_dashboard_session_trend(
             )
             SELECT d.day, s.sessions, a.spend, o.revenue, o.orders,
                    sb.first_day, sb.last_day,
-                   g.active_users, g.total_revenue
+                   g.active_users, g.total_revenue,
+                   g.sessions AS ga4_sessions, g.purchases AS ga4_purchases
             FROM days d
             LEFT JOIN session_days s ON s.day = d.day
             LEFT JOIN ad_days a ON a.day = d.day
@@ -8383,6 +8394,12 @@ async def get_dashboard_session_trend(
         # measured here".
         g_users = int(row[7]) if row and row[7] is not None else None
         g_rev = float(row[8]) if row and row[8] is not None else None
+        # GA4 divided by GA4, exactly as the Google tab's cards do.
+        # NULL rather than 0 where GA4 has no row, for the same reason
+        # as ARPU above: the day was not measured, not empty.
+        g_sess = int(row[9]) if row and row[9] is not None else None
+        g_buys = int(row[10]) if row and row[10] is not None else None
+        g_denom = g_sess if g_sess and g_sess > 0 else None
         points.append(DashboardSessionTrendPoint(
             day=day, sessions=sessions, ad_spend=spend,
             ga4_active_users=g_users,
@@ -8391,6 +8408,10 @@ async def get_dashboard_session_trend(
             cost_per_session=spend / denominator if denominator and spend is not None else None,
             revenue_per_session=revenue / denominator if denominator else None,
             conversion_rate=orders / denominator if denominator else None,
+            ga4_sessions=g_sess,
+            ga4_cost_per_session=(spend / g_denom) if g_denom and spend is not None else None,
+            ga4_revenue_per_session=(g_rev / g_denom) if g_denom and g_rev is not None else None,
+            ga4_conversion_rate=(g_buys / g_denom) if g_denom and g_buys is not None else None,
         ))
     return DashboardSessionTrendResponse(points=points, spend_data_from=spend_from, spend_data_to=spend_to)
 

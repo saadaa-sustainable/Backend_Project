@@ -42,11 +42,12 @@ def session():
         -- person on two devices in one day would be counted twice.
         -- 2 Oct is deliberately absent, so the series has a real gap.
         CREATE TABLE ga4_arpu_daily(
-            day TEXT, device_category TEXT, active_users INTEGER, total_revenue NUMERIC);
+            day TEXT, device_category TEXT, active_users INTEGER, total_revenue NUMERIC,
+            sessions INTEGER, purchases INTEGER);
         INSERT INTO ga4_arpu_daily VALUES
-            ('2026-10-01','(all)',  100, 2500),
-            ('2026-10-01','mobile',  90, 2300),
-            ('2026-10-03','(all)',   50, 2000);
+            ('2026-10-01','(all)',  100, 2500, 250, 5),
+            ('2026-10-01','mobile',  90, 2300, 220, 4),
+            ('2026-10-03','(all)',   50, 2000, 125, 2);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC);
         INSERT INTO insights_daily_by_ad VALUES
             ('a','2026-10-01',100), ('b','2026-10-01',50),
@@ -174,3 +175,38 @@ async def test_daily_arpu_is_exact_per_day_and_gaps_where_ga4_has_no_row(session
 
     assert by_day[date(2026, 10, 2)].ga4_arpu is None
     assert by_day[date(2026, 10, 2)].ga4_active_users is None
+
+
+async def test_ga4_daily_ratios_divide_ga4_by_ga4(session):
+    """The Google tab's chart lines, on GA4's own numbers.
+
+    Its denominator is `(all)` GA4 sessions, never the Meta-driven
+    Shopify count the lines beside them use -- that mismatch is exactly
+    what made the Shopify ratios read 97 per cent high.
+    """
+    result = await analytics.get_dashboard_session_trend(
+        session, date(2026, 10, 1), date(2026, 10, 3))
+    first, gap, last = result.points
+
+    # 1 Oct: 250 `(all)` sessions, Rs 2,500, 5 purchases. The mobile row
+    # beside it (220 sessions) is excluded, as it is for ARPU.
+    assert first.ga4_sessions == 250
+    assert first.ga4_revenue_per_session == 10
+    assert first.ga4_conversion_rate == 0.02
+    assert first.ga4_cost_per_session == 150 / 250
+
+    # Shopify's lines for the same day divide Meta's orders by Meta's
+    # 100 sessions, so the two sources genuinely disagree here.
+    assert first.revenue_per_session == 1
+    assert first.conversion_rate == 0.02
+
+    # 2 Oct has no GA4 row at all: a gap, not a zero.
+    assert gap.ga4_sessions is None
+    assert gap.ga4_revenue_per_session is None
+    assert gap.ga4_conversion_rate is None
+    assert gap.ga4_cost_per_session is None
+
+    # 3 Oct: 125 sessions, Rs 2,000, 2 purchases, and no spend that day.
+    assert last.ga4_revenue_per_session == 16
+    assert last.ga4_conversion_rate == 0.016
+    assert last.ga4_cost_per_session == 0
