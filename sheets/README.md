@@ -275,15 +275,43 @@ limits cannot be measured by local mocks.
 (`SUPABASE_URL`, `SUPABASE_KEY`, `SPREADSHEET_ID`); the **anon key is
 enough** — verified by reading all three views as the `anon` role.
 
-| Supabase view | Sheet tab | One row per |
-|---|---|---|
-| `sku_price_impact_compare` | Price Impact | master SKU — the headline |
-| `sku_price_impact_daily` | Daily | master SKU × day (last 60) |
-| `sku_price_impact_pages` | Pages | master SKU × page it appears on |
+| Tab | Supabase view | Rows | One row per |
+|---|---|---|---|
+| Summary | `sku_price_impact_summary` | 4 | price direction — **read this first** |
+| Increased | `sku_price_impact_compare` | 16 | master SKU, price up |
+| Decreased | `sku_price_impact_compare` | 27 | master SKU, price down |
+| Unchanged | `sku_price_impact_compare` | 41 | master SKU, untouched — **the control** |
+| Hidden | `sku_price_impact_compare` | 9 | master SKU pulled from sale |
+| All SKUs | `sku_price_impact_compare` | 93 | every master SKU |
+| Daily | `sku_price_impact_daily` | ~11k | master SKU × day (last 60) |
+| Pages | `sku_price_impact_pages` | 4,339 | master SKU × page it appears on |
 
 `setupPriceImpactTrigger()` refreshes at 07:00 daily, after the nightly
 has rebuilt the source tables. No resume state: ~16,000 rows finish in
 one execution, and each view costs ~1.3s.
+
+### Unchanged is the control, not filler
+
+Those 41 SKUs were reviewed in the same exercise and deliberately left
+at their old price, so they carry every site-wide influence the repriced
+ones do — campaigns, weather, a slow Tuesday — and none of the price
+change. **If add-to-cart moves the same way on Unchanged, the move is
+not about price.**
+
+The first anchor day shows exactly why that matters. Every group rose
+together against the same weekday a week earlier:
+
+| Group | SKUs | ATC rate | vs last week |
+|---|---|---|---|
+| Decreased | 27 | 6.62% | **+1.91** |
+| Increased | 16 | 8.65% | +1.10 |
+| Unchanged | 41 | 9.42% | **+1.64** |
+| Hidden | 9 | 12.31% | +3.17 |
+
+Read the Decreased row alone and the price cut looks like it worked.
+Read it beside Unchanged and it is a site-wide lift that the repriced
+SKUs happened to share — and the cut actually *underperformed* the
+control. That comparison is the whole point of the Summary tab.
 
 ### The three things a reader has to know
 

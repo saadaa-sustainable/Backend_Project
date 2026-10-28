@@ -192,6 +192,82 @@ FROM d
 GROUP BY master_sku, direction, old_price, new_price, price_change, hidden
 """
 
+# ── The control-group read ───────────────────────────────────────────
+#
+# One row per direction, which is the only way to tell a price effect
+# from a Tuesday. The 41 Unchanged SKUs were reviewed in the same
+# exercise and deliberately left alone, so they carry every site-wide
+# influence the repriced ones do -- weather, campaigns, a slow news day
+# -- and none of the price change. If add-to-cart moves the same way on
+# Unchanged as on Increased, the move is not about price.
+#
+# Rates are recomputed from summed numerators and denominators, never
+# averaged from the per-SKU rates: a SKU with 94 sessions would
+# otherwise weigh as much as one with 1,361.
+SUMMARY_VIEW = """
+CREATE OR REPLACE VIEW public.sku_price_impact_summary AS
+WITH anchor AS (
+    SELECT MAX(day) AS day FROM public.shopify_landing_page_analysis
+    WHERE day < current_date
+),
+d AS (
+    SELECT i.direction, i.hidden, i.product_sessions, i.product_atc,
+           i.units_sold, i.revenue, a.day AS anchor_day,
+           CASE
+             WHEN i.day = a.day                              THEN 'anchor'
+             WHEN i.day = a.day - 1                          THEN 'prev_day'
+             WHEN i.day = a.day - 7                          THEN 'prev_week'
+             WHEN i.day = (a.day - INTERVAL '1 month')::date THEN 'prev_month'
+           END AS slot
+    FROM public.sku_price_impact_daily i CROSS JOIN anchor a
+    WHERE i.day IN (a.day, a.day - 1, a.day - 7, (a.day - INTERVAL '1 month')::date)
+),
+agg AS (
+    SELECT direction, hidden, MAX(anchor_day) AS anchor_day,
+           SUM(product_sessions) FILTER (WHERE slot='anchor')     AS sess_anchor,
+           SUM(product_atc)      FILTER (WHERE slot='anchor')     AS atc_anchor,
+           SUM(product_sessions) FILTER (WHERE slot='prev_day')   AS sess_prev_day,
+           SUM(product_atc)      FILTER (WHERE slot='prev_day')   AS atc_prev_day,
+           SUM(product_sessions) FILTER (WHERE slot='prev_week')  AS sess_prev_week,
+           SUM(product_atc)      FILTER (WHERE slot='prev_week')  AS atc_prev_week,
+           SUM(product_sessions) FILTER (WHERE slot='prev_month') AS sess_prev_month,
+           SUM(product_atc)      FILTER (WHERE slot='prev_month') AS atc_prev_month,
+           SUM(units_sold) FILTER (WHERE slot='anchor')     AS units_anchor,
+           SUM(units_sold) FILTER (WHERE slot='prev_day')   AS units_prev_day,
+           SUM(units_sold) FILTER (WHERE slot='prev_week')  AS units_prev_week,
+           SUM(units_sold) FILTER (WHERE slot='prev_month') AS units_prev_month,
+           SUM(revenue) FILTER (WHERE slot='anchor')     AS revenue_anchor,
+           SUM(revenue) FILTER (WHERE slot='prev_day')   AS revenue_prev_day,
+           SUM(revenue) FILTER (WHERE slot='prev_week')  AS revenue_prev_week,
+           SUM(revenue) FILTER (WHERE slot='prev_month') AS revenue_prev_month
+    FROM d GROUP BY direction, hidden
+)
+SELECT
+    a.direction, a.hidden, a.anchor_day,
+    (SELECT COUNT(*) FROM public.sku_price_change c
+      WHERE c.direction = a.direction AND c.hidden = a.hidden) AS skus,
+    a.sess_anchor AS sessions_today,
+    a.sess_prev_day AS sessions_prev_day,
+    a.sess_prev_week AS sessions_prev_week,
+    a.sess_prev_month AS sessions_prev_month,
+    ROUND(100.0 * a.atc_anchor     / NULLIF(a.sess_anchor, 0), 3)     AS atc_rate_today,
+    ROUND(100.0 * a.atc_prev_day   / NULLIF(a.sess_prev_day, 0), 3)   AS atc_rate_prev_day,
+    ROUND(100.0 * a.atc_prev_week  / NULLIF(a.sess_prev_week, 0), 3)  AS atc_rate_prev_week,
+    ROUND(100.0 * a.atc_prev_month / NULLIF(a.sess_prev_month, 0), 3) AS atc_rate_prev_month,
+    ROUND(100.0 * a.atc_anchor / NULLIF(a.sess_anchor, 0)
+        - 100.0 * a.atc_prev_day   / NULLIF(a.sess_prev_day, 0), 3)   AS atc_delta_vs_prev_day,
+    ROUND(100.0 * a.atc_anchor / NULLIF(a.sess_anchor, 0)
+        - 100.0 * a.atc_prev_week  / NULLIF(a.sess_prev_week, 0), 3)  AS atc_delta_vs_prev_week,
+    ROUND(100.0 * a.atc_anchor / NULLIF(a.sess_anchor, 0)
+        - 100.0 * a.atc_prev_month / NULLIF(a.sess_prev_month, 0), 3) AS atc_delta_vs_prev_month,
+    a.units_anchor AS units_today,
+    a.units_prev_day, a.units_prev_week, a.units_prev_month,
+    a.revenue_anchor AS revenue_today,
+    a.revenue_prev_day, a.revenue_prev_week, a.revenue_prev_month
+FROM agg a
+ORDER BY a.hidden, a.direction
+"""
+
 # Which exact pages a SKU is on, so a reader can check the mapping
 # rather than trust it.
 PAGES_VIEW = """
@@ -218,7 +294,7 @@ GROUP BY 1,2,3,4,5,6,7,8,9
 
 def _rebuild_views(cur) -> None:
     for name, sql in (("daily", DAILY_VIEW), ("compare", COMPARE_VIEW),
-                      ("pages", PAGES_VIEW)):
+                      ("summary", SUMMARY_VIEW), ("pages", PAGES_VIEW)):
         cur.execute(sql)
         print(f"  view sku_price_impact_{name} ready")
 

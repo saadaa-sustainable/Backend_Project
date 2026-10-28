@@ -10,10 +10,31 @@
  */
 var PRICE_IMPACT = {
   views: [
-    { view: 'sku_price_impact_compare', tab: 'Price Impact', order: 'sessions_today.desc.nullslast' },
-    { view: 'sku_price_impact_daily',   tab: 'Daily',        order: 'day.desc,master_sku.asc',
+    // Read top to bottom: what happened across the groups, then each
+    // group's SKUs, then the history, then the page mapping behind it.
+    { view: 'sku_price_impact_summary', tab: 'Summary',   order: 'direction.asc' },
+
+    // One tab per price direction. Unchanged is NOT filler -- those 41
+    // SKUs were reviewed in the same exercise and deliberately left
+    // alone, so they carry every site-wide influence the repriced ones
+    // do and none of the price change. It is the control: if add-to-cart
+    // moves the same way there, the move is not about price. Measured on
+    // the first anchor day, every group rose together (Decreased +1.91,
+    // Increased +1.10, Unchanged +1.64), which is exactly the reading
+    // this tab exists to make visible.
+    { view: 'sku_price_impact_compare', tab: 'Increased',  order: 'sessions_today.desc.nullslast',
+      filter: 'direction=eq.Increased' },
+    { view: 'sku_price_impact_compare', tab: 'Decreased',  order: 'sessions_today.desc.nullslast',
+      filter: 'direction=eq.Decreased' },
+    { view: 'sku_price_impact_compare', tab: 'Unchanged',  order: 'sessions_today.desc.nullslast',
+      filter: 'direction=eq.Unchanged' },
+    { view: 'sku_price_impact_compare', tab: 'Hidden',     order: 'sessions_today.desc.nullslast',
+      filter: 'hidden=is.true', allowEmpty: true },
+
+    { view: 'sku_price_impact_compare', tab: 'All SKUs',   order: 'sessions_today.desc.nullslast' },
+    { view: 'sku_price_impact_daily',   tab: 'Daily',      order: 'day.desc,master_sku.asc',
       filter: 'day=gte.' + priDaysAgo_(60) },
-    { view: 'sku_price_impact_pages',   tab: 'Pages',        order: 'sessions_7d.desc.nullslast' }
+    { view: 'sku_price_impact_pages',   tab: 'Pages',      order: 'sessions_7d.desc.nullslast' }
   ],
   pageRows: 1000,
   statusTab: 'Status'
@@ -76,14 +97,23 @@ function priFetchAll_(cfg, spec) {
   // grants returns 200 with zero rows, which is indistinguishable from
   // a genuinely empty result. Refuse rather than publish blanks over a
   // tab somebody is about to read.
-  if (!all.length) {
-    throw new Error(spec.view + ' returned no rows. Check SUPABASE_KEY can read it.');
+  if (!all.length && !spec.allowEmpty) {
+    throw new Error(spec.view + ' returned no rows' +
+      (spec.filter ? ' for ' + spec.filter : '') +
+      '. Check SUPABASE_KEY can read it.');
   }
   return all;
 }
 
 function priWriteTab_(ss, tabName, rows) {
   var sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
+  if (!rows.length) {
+    // Clear it anyway: leaving yesterday's rows under a heading that no
+    // longer describes them is worse than an empty tab.
+    sheet.clearContents();
+    sheet.getRange(1, 1).setValue('No SKUs in this group.');
+    return;
+  }
   var headers = Object.keys(rows[0]);
   var values = [headers];
   rows.forEach(function (r) {
