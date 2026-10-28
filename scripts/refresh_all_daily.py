@@ -515,6 +515,22 @@ PHASE_SILVER = [
     # and the Landing Page Analysis tab was serving a fixed 30d snapshot
     # that ended two weeks in the past.
     ("landing_page_gold",     ["scripts/refresh_landing_page_gold.py"],      900),
+    # The SKU -> page map behind the price-impact Google Sheet: which
+    # product page carries which master SKU, and which collections each
+    # one sits in. A Shopify GraphQL walk over ~1,200 products, about
+    # 30s, no BigQuery -- so it is unaffected by the GOOGLE_CREDS_JSON
+    # gap that currently fails ga4_landing and ga4_attribution.
+    #
+    # It needs refreshing because it is a SNAPSHOT, not a view: a
+    # product moving between collections, or a new launch, silently
+    # stops matching until this runs again. Everything else the sheet
+    # reads is a view over tables this pipeline already rebuilds.
+    ("sku_page_map",          ["scripts/fetch_product_collection_map.py"],   600),
+    # Rebuilds the price-impact views on top of it. Cheap -- CREATE OR
+    # REPLACE VIEW only, no scan -- but it has to follow sku_page_map so
+    # a column added to one is present in the other on the same run.
+    ("sku_price_impact",      ["scripts/refresh_sku_price_impact.py",
+                               "--views-only"],                             300),
     # LAST on purpose. The meta_direct_* snapshots are materialized
     # views feeding a founder-facing Google Sheet, so they must be
     # rebuilt only once Meta insights, Shopify and the attribution
