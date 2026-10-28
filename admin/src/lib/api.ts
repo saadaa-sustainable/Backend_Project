@@ -2174,6 +2174,12 @@ export interface OverviewSummaryResponse {
   total_impressions: number;
   total_shopify_revenue: number;
   total_shopify_orders: number;
+  /** The Meta-driven slice of the two above, selected by the same
+   *  utm_source rule that builds `total_sessions` (meta_sessions).
+   *  The session band divides by Meta sessions, so it must use these
+   *  and not the all-traffic totals. */
+  meta_shopify_revenue?: number;
+  meta_shopify_orders?: number;
   category_breakdown: BreakdownItem[];
   channel_breakdown: BreakdownItem[];
   top_landing_pages: TopLandingPage[];
@@ -2300,6 +2306,12 @@ export interface DashboardKpis {
   total_impressions: number;
   total_shopify_revenue: number;
   total_shopify_orders: number;
+  /** The Meta-driven slice of the two above, selected by the same
+   *  utm_source rule that builds `total_sessions` (meta_sessions).
+   *  The session band divides by Meta sessions, so it must use these
+   *  and not the all-traffic totals. */
+  meta_shopify_revenue?: number;
+  meta_shopify_orders?: number;
   /** Customers whose FIRST EVER Shopify order falls inside the selected
    *  window — acquired in it, not merely active in it. Windowed on the
    *  same calendar as `total_spend`, so Acquisition MER divides two

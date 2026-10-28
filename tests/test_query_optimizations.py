@@ -25,9 +25,39 @@ def clear_dashboard_cache():
         fn.analytics_cache.entries.clear()
 
 
+class _Result:
+    """What SQLAlchemy hands back, to the extent these tests use it.
+
+    A real Result is iterable as well as having .one() and .all(), and
+    code that loops over rows directly is perfectly ordinary -- so the
+    fake has to be iterable too. It cannot be a SimpleNamespace with an
+    __iter__ attribute: Python looks dunder methods up on the type, not
+    the instance, so that silently stays non-iterable.
+    """
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def one(self):
+        return self._rows[0]
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+    def all(self):
+        return self._rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
 @pytest.fixture
 def session():
     db = sqlite3.connect(":memory:")
+    # btrim is Postgres' name for the standard no-argument trim. The
+    # Meta source rule the dashboard shares with the session rollup
+    # uses it, so the harness has to answer to it.
+    db.create_function("btrim", 1, lambda value: value.strip() if value is not None else None)
     db.executescript("""
         CREATE TABLE shopify_order_attribution (
             order_id TEXT PRIMARY KEY, created_at TEXT, total_price NUMERIC,
@@ -67,7 +97,7 @@ def session():
         rows = db.execute(sql, values).fetchall()
         if "MIN(day)" in sql:
             rows = [(*rows[0][:2], date.fromisoformat(rows[0][2]))]
-        return SimpleNamespace(one=lambda: rows[0], all=lambda: rows)
+        return _Result(rows)
 
     fake = SimpleNamespace(execute=AsyncMock(side_effect=execute))
     yield fake
@@ -81,6 +111,11 @@ async def test_dashboard_widgets_share_one_scan_and_include_end_day(session):
     )
     assert (kpis.total_spend, kpis.total_impressions) == (30, 300)
     assert (kpis.total_shopify_revenue, kpis.total_shopify_orders) == (300, 3)
+    # The Meta slice the session band divides by Meta sessions. 'first'
+    # (meta, 100) and 'last' (instagram, 200) qualify; 'middle' carries
+    # a null utm_source and so is in the all-traffic total but not this
+    # one -- which is the whole point of keeping the two apart.
+    assert (kpis.meta_shopify_revenue, kpis.meta_shopify_orders) == (300, 2)
     assert sum(row.value for row in channels) == 300
     assert any(row.label == analytics._classify_channel("instagram", "link_in_bio")
                and row.value == 200 for row in channels)
@@ -93,10 +128,19 @@ async def test_dashboard_widgets_share_one_scan_and_include_end_day(session):
     # scan would make BOTH widgets pay for a join only one of them
     # reads. What this assertion protects is the shared scan: still one
     # pass over shopify_order_attribution for two widgets.
-    assert len(statements) == 3
+    assert len(statements) == 4
     assert sum("FROM shopify_order_attribution" in q for q in statements) == 1
     assert sum("FROM public.order_customer_type" in q for q in statements) == 1
     assert all("created_at::date" not in q for q in statements)
+    # The fourth classifies the handful of utm_source values the shared
+    # scan already returned. It reads no table at all -- measured at 0
+    # blocks -- which is why it does not weaken the one-scan contract
+    # above. Folding it into that scan's GROUP BY instead flipped the
+    # plan from an Index Scan to a parallel Gather Merge, 3,884 blocks
+    # to 10,058.
+    classify = [q for q in statements if "UNION ALL" in q and "AS utm_source" in q]
+    assert len(classify) == 1
+    assert "FROM shopify_order_attribution" not in classify[0]
 
 
 async def test_dashboard_cache_keeps_ranges_separate_and_empty_counts_zero(session):
@@ -108,13 +152,18 @@ async def test_dashboard_cache_keeps_ranges_separate_and_empty_counts_zero(sessi
     assert result.new_customers == 1
     repeated = await analytics.get_dashboard_kpis(session, date_from="2026-09-02", date_to="2026-09-02")
     assert repeated == result
-    # 3 per windowed call: ad aggregate, order aggregate, acquisition
-    # count. The repeat is served from cache and costs none.
-    assert session.execute.await_count == 3
+    # 4 per windowed call: ad aggregate, order aggregate, acquisition
+    # count, and the Meta-source classification -- which reads no table,
+    # only the handful of utm_source keys the order aggregate already
+    # returned. The repeat is served from cache and costs none.
+    assert session.execute.await_count == 4
     empty = await analytics.get_dashboard_kpis(session, date_from="2026-10-01", date_to="2026-10-01")
     assert empty.total_shopify_orders == empty.total_shopify_revenue == empty.total_spend == 0
     assert empty.new_customers == 0
-    assert session.execute.await_count == 6
+    # 7, not 8: an empty window returns no order groups, so there are no
+    # utm_source values left to classify and that query is skipped
+    # rather than run against an empty list.
+    assert session.execute.await_count == 7
 
 
 async def test_lifetime_keeps_gold_totals_and_spend_floor_stays_visible(session):
@@ -123,8 +172,12 @@ async def test_lifetime_keeps_gold_totals_and_spend_floor_stays_visible(session)
     # Lifetime counts every acquisition ever, including 'older' outside
     # any window the other tests use.
     assert lifetime.new_customers == 3
-    # Two: the gold table, and the acquisition count.
-    assert session.execute.await_count == 2
+    # Three: the gold table, the acquisition count, and the Meta order
+    # slice. Lifetime takes its headline from ad_performance_summary,
+    # which is per-AD and so already Meta's, but the session band's
+    # numerator is still read from the orders table under the session
+    # rule rather than assumed equal to it.
+    assert session.execute.await_count == 3
     window = await analytics.get_dashboard_kpis(session, date_from="2026-08-01", date_to="2026-09-03")
     assert window.spend_data_from == "2026-09-01"
 

@@ -343,10 +343,18 @@ function DashboardContent() {
     ? (sessionCount / allSessionCount) * 100 : null;
   const costPerSession = kpis.data && sessionCount !== null && sessionCount > 0
     ? kpis.data.total_spend / sessionCount : null;
-  const revenuePerSession = kpis.data && sessionCount !== null && sessionCount > 0
-    ? kpis.data.total_shopify_revenue / sessionCount : null;
-  const conversionRate = kpis.data && sessionCount !== null && sessionCount > 0
-    ? kpis.data.total_shopify_orders / sessionCount : null;
+  // The Meta slice of Shopify, not all of it. The denominator is
+  // Meta-driven sessions, so the numerator has to be the orders those
+  // sessions could have produced -- dividing ALL Shopify revenue by
+  // Meta-only sessions read 97% high (Rs 4.65cr over 29 Sep - 28 Oct
+  // where Meta drove Rs 2.36cr, against 14,57,313 of 19,56,848
+  // sessions). Both halves are now selected by one utm_source rule.
+  const metaRevenue = kpis.data?.meta_shopify_revenue ?? null;
+  const metaOrders = kpis.data?.meta_shopify_orders ?? null;
+  const revenuePerSession = metaRevenue !== null && sessionCount !== null && sessionCount > 0
+    ? metaRevenue / sessionCount : null;
+  const conversionRate = metaOrders !== null && sessionCount !== null && sessionCount > 0
+    ? metaOrders / sessionCount : null;
 
   // GA4 divided by GA4. Its revenue and purchases are its own, so the
   // denominator is its own session count rather than Shopify's -- the
@@ -538,7 +546,7 @@ function DashboardContent() {
                   <dd className="mt-1 text-xs text-text-secondary">
                     {source === "google"
                       ? "GA4 revenue \u00f7 GA4 sessions"
-                      : "Attributed Shopify revenue \u00f7 Meta-driven Shopify sessions"}
+                      : "Meta-driven Shopify revenue \u00f7 Meta-driven Shopify sessions"}
                   </dd>
                 </div>
                 <div>
@@ -551,7 +559,7 @@ function DashboardContent() {
                   <dd className="mt-1 text-xs text-text-secondary">
                     {source === "google"
                       ? "GA4 purchases \u00f7 GA4 sessions \u00d7 100"
-                      : "Attributed Shopify orders \u00f7 Meta-driven Shopify sessions \u00d7 100"}
+                      : "Meta-driven Shopify orders \u00f7 Meta-driven Shopify sessions \u00d7 100"}
                   </dd>
                 </div>
                 {/* ARPU is GA4's end to end -- its revenue over its own

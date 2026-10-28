@@ -24,6 +24,9 @@ def reset_cache():
 @pytest.fixture
 def session():
     db = sqlite3.connect(":memory:")
+    # btrim is Postgres' name for the standard no-argument trim, and the
+    # Meta source rule shared with the session rollup uses it.
+    db.create_function("btrim", 1, lambda v: v.strip() if v is not None else None)
     db.executescript("""
         -- The trend reads meta_sessions, not sessions. `sessions` is
         -- deliberately larger on every row so a regression that reads
@@ -48,11 +51,19 @@ def session():
         INSERT INTO insights_daily_by_ad VALUES
             ('a','2026-10-01',100), ('b','2026-10-01',50),
             ('a','2026-10-02',200), ('a','2026-10-06',100);
-        CREATE TABLE shopify_order_attribution(order_id TEXT, created_at TEXT, total_price NUMERIC);
+        CREATE TABLE shopify_order_attribution(
+            order_id TEXT, created_at TEXT, total_price NUMERIC, utm_source TEXT);
+        -- 'f' is the guard on the Meta filter: a 500-rupee Google order
+        -- on a day the assertions below pin at 100. Drop the filter and
+        -- 1 Oct reads 600 over 3 orders instead of 100 over 2, so the
+        -- numerator and the meta_sessions denominator part company.
         INSERT INTO shopify_order_attribution VALUES
-            ('a','2026-10-01 00:00:00',25), ('b','2026-10-01 23:59:59.999999',75),
-            ('c','2026-10-03 23:59:59.999999',100), ('d','2026-10-04 00:00:00',800),
-            ('e','2026-10-06 12:00:00',-20);
+            ('a','2026-10-01 00:00:00',25,'meta'),
+            ('b','2026-10-01 23:59:59.999999',75,'facebook'),
+            ('f','2026-10-01 12:00:00',500,'google'),
+            ('c','2026-10-03 23:59:59.999999',100,'instagram'),
+            ('d','2026-10-04 00:00:00',800,'meta'),
+            ('e','2026-10-06 12:00:00',-20,'ig');
     """)
 
     async def execute(query, params):

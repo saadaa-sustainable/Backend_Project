@@ -20,6 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from collections.abc import Iterable
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -34,6 +35,7 @@ from app.services.ad_customer_mix import read_ad_customer_mix
 from app.services.ad_efficiency import calculate_efficiency_scores, get_efficiency_anchors
 from app.services.analytics_cache import cached_analytics
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
+from app.services.dashboard_sessions import META_SOURCE_SQL
 from app.services.gold.cpis import match_ads_to_sku
 from app.services.gold.cpis_value_weighted import RANGE_AGG_SQL, TOTALS_SQL
 from app.services.reach_anchors import window_anchors
@@ -2149,6 +2151,12 @@ async def get_ads_analyse(
 #: stable when a source happens to contain multiple keywords (rare, but
 #: e.g. an email campaign whose name mentions "facebook" would otherwise
 #: swing tile totals around).
+#: `META_SOURCE_SQL` with its column alias-qualified, for queries that
+#: name the orders table. Derived, never retyped: the session band's
+#: numerator and its denominator have to be the same population, and a
+#: second hand-copied edition of the rule is how they stop being that.
+_META_ORDER_SQL = META_SOURCE_SQL.replace("utm_source", "o.utm_source")
+
 _CHANNEL_SUBSTRINGS: list[tuple[str, tuple[str, ...]]] = [
     ("Retention", ("email", "sms", "whatsapp", "klaviyo", "wati", "mailmodo", "spur", "robylon", "kwikengage", "kwikchat")),
     ("Meta", ("meta", "facebook", "instagram", "ig_", "igshop", "igstor", "fb_", "fbads")),
@@ -8166,8 +8174,20 @@ class OverviewSummaryResponse(BaseModel):
 class KpisResponse(BaseModel):
     total_spend: float
     total_impressions: float
+    #: ALL Shopify revenue and orders, every traffic source. The
+    #: headline cards show these.
     total_shopify_revenue: float
     total_shopify_orders: int
+    #: The Meta-driven slice of the two above, selected by the same
+    #: utm_source rule that builds `meta_sessions`.
+    #:
+    #: The Dashboard's session band divides by Meta-driven sessions, so
+    #: its numerator has to be Meta's too. It was the all-traffic figure
+    #: until 2026-10-28, which made revenue per session read 97 per cent
+    #: high -- Rs 4.65cr over 29 Sep to 28 Oct where Meta drove Rs
+    #: 2.36cr, against a session count narrowed to Meta alone.
+    meta_shopify_revenue: float = 0.0
+    meta_shopify_orders: int = 0
     #: Customers whose FIRST EVER Shopify order falls inside the
     #: selected window -- newly acquired in that window, not merely
     #: active in it. Read off `order_customer_type.is_new_customer`,
@@ -8284,7 +8304,7 @@ async def get_dashboard_session_trend(
     if date_from and date_to and (date_to - date_from).days > 10000:
         raise HTTPException(status_code=422, detail="Select a date range of at most 10,001 days")
     try:
-        rows = (await session.execute(text("""
+        rows = (await session.execute(text(f"""
             WITH bounds AS (
                 SELECT COALESCE(CAST(:df AS date), MIN(day)) AS lo,
                        COALESCE(CAST(:dt AS date), MAX(day)) AS hi
@@ -8305,10 +8325,16 @@ async def get_dashboard_session_trend(
                 FROM insights_daily_by_ad d, bounds b
                 WHERE d.day BETWEEN b.lo AND b.hi GROUP BY d.day
             ), order_days AS (
+                -- Meta's orders only. `session_days` above is
+                -- meta_sessions, so an unfiltered numerator here
+                -- divided all of Shopify by Meta's traffic alone and
+                -- read 97 per cent high, exactly as the cards did.
+                -- Same rule as the cards and as meta_sessions itself.
                 SELECT CAST(o.created_at AS date) AS day,
                        SUM(o.total_price) AS revenue, COUNT(*) AS orders
                 FROM shopify_order_attribution o, bounds b
                 WHERE o.created_at >= b.lo AND o.created_at < (b.hi + 1)
+                  AND {_META_ORDER_SQL}
                 GROUP BY CAST(o.created_at AS date)
             ), days AS (
                 SELECT day FROM session_days UNION SELECT day FROM ad_days
@@ -8389,6 +8415,39 @@ async def _get_dashboard_order_groups(
         + where + "GROUP BY utm_source, 2"
     ), params)
     return [tuple(row) for row in result.all()]
+
+
+async def _meta_sources(session: AsyncSession, sources: Iterable[Any]) -> set[str]:
+    """Which of `sources` the session rule counts as Meta.
+
+    META_SOURCE_SQL is the SAME rule that builds `meta_sessions`, and
+    the session band divides these orders by that count -- a ratio whose
+    halves are selected by two different definitions of "Meta" is not a
+    ratio of anything. This file holds a second, nearly-identical
+    definition in `_classify_channel`; over 29 Sep to 28 Oct the two
+    differ by 85 orders and Rs 1.38L (0.46 per cent), almost all of it
+    the Organic (IG) bio-link carve-out the channel rules make and the
+    session rule does not.
+
+    Classified as a VALUES list rather than in the scan above, and not
+    reimplemented in Python. Adding the predicate to that GROUP BY
+    flipped its plan from an Index Scan to a parallel Gather Merge --
+    3,884 blocks to 10,058 -- while there are only 46 distinct
+    utm_source values in the whole table and 23 in a typical month, so
+    classifying the keys alone touches no table at all: 0 blocks.
+    """
+    names = sorted({s for s in sources if s})
+    if not names:
+        return set()
+    # UNION ALL rather than VALUES ... v(col): naming a VALUES list's
+    # columns is Postgres-only syntax, and these endpoints are covered
+    # against SQLite. Both read the same, and neither touches a table.
+    values = " UNION ALL ".join(
+        f"SELECT :s{i} AS utm_source" for i in range(len(names)))
+    params = {f"s{i}": n for i, n in enumerate(names)}
+    rows = await session.execute(text(
+        f"SELECT utm_source FROM ({values}) v WHERE {META_SOURCE_SQL}"), params)
+    return {r[0] for r in rows}
 
 
 # ----------------------------------------------------------------------
@@ -8795,11 +8854,23 @@ async def get_dashboard_kpis(
             "SELECT COUNT(*), COALESCE(SUM(total_price),0) "
             "FROM public.order_customer_type WHERE is_new_customer"
         ))).one()
+        # Lifetime takes its headline from ad_performance_summary, which
+        # is per-AD and so already Meta's. The session band still needs
+        # the figure selected the same way as its denominator, so it is
+        # read from the orders table under the session rule rather than
+        # assumed equal to the headline.
+        meta = (await session.execute(text(
+            "SELECT COALESCE(SUM(total_price),0), COUNT(*) "
+            "FROM shopify_order_attribution "
+            f"WHERE {META_SOURCE_SQL}"
+        ))).one()
         return KpisResponse(
             total_spend=float(totals[0]),
             total_impressions=float(totals[1]),
             total_shopify_revenue=float(totals[2]),
             total_shopify_orders=int(totals[3]),
+            meta_shopify_revenue=float(meta[0]),
+            meta_shopify_orders=int(meta[1]),
             new_customers=int(acq[0]),
             new_customer_revenue=float(acq[1]),
         )
@@ -8810,6 +8881,7 @@ async def get_dashboard_kpis(
         "FROM insights_daily_by_ad WHERE day BETWEEN :df AND :dt"
     ), {"df": df, "dt": dt})).one()
     shop = await _get_dashboard_order_groups(session, df, dt)
+    meta_srcs = await _meta_sources(session, (row[0] for row in shop))
     # `order_day` is a date, so BETWEEN is inclusive on both ends and
     # matches the spend window above exactly -- the two halves of
     # Acquisition MER must cover the same days or the ratio is a
@@ -8825,6 +8897,8 @@ async def get_dashboard_kpis(
         total_impressions=float(ads[1]),
         total_shopify_revenue=float(sum(row[2] or 0 for row in shop)),
         total_shopify_orders=sum(row[3] for row in shop),
+        meta_shopify_revenue=float(sum(row[2] or 0 for row in shop if row[0] in meta_srcs)),
+        meta_shopify_orders=sum(row[3] for row in shop if row[0] in meta_srcs),
         new_customers=int(acq[0]),
         new_customer_revenue=float(acq[1]),
         spend_data_from=floor.isoformat() if floor and df < floor else None,
