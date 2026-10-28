@@ -318,6 +318,10 @@ header row carrying what its pages share, with the pages listed beneath:
 | master_sku | direction | old | new | page_type | page_path | shared | sessions | atc |
 |---|---|---|---|---|---|---|---|---|
 | **SMCTS** | **Decreased** | **1199** | **999** | **5 pages** | **ALL PRODUCT PAGES FOR THIS SKU** | | **55** | **1.818** |
+
+No delta columns: each metric is shown as its four dated values, and a
+reader subtracts the two that matter rather than being handed one
+difference the layout chose for them.
 | | | | | Product | `/products/men-olive-green-tailored-cotton-shorts` | 1 | 21 | 0 |
 | | | | | Product | `/products/men-grey-tailored-cotton-shorts` | 1 | 14 | 7.143 |
 | | | | | Product | `/products/men-beige-tailored-cotton-shorts` | 1 | 11 | 0 |
@@ -385,7 +389,6 @@ legible a week later:
 ```
 sessions · 27 Oct (Tue)   sessions · 26 Oct (Mon)
 sessions · 20 Oct (Tue)   sessions · 27 Sep (Sun)
-atc delta vs 20 Oct (Tue)
 ```
 
 The weekday is there on purpose — it shows at a glance that the

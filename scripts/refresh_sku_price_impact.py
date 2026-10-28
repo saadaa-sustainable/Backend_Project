@@ -168,12 +168,6 @@ SELECT
     MAX(product_atc_rate)  FILTER (WHERE slot = 'prev_week')  AS atc_rate_prev_week,
     MAX(product_atc_rate)  FILTER (WHERE slot = 'prev_month') AS atc_rate_prev_month,
 
-    ROUND(MAX(product_atc_rate) FILTER (WHERE slot='anchor')
-        - MAX(product_atc_rate) FILTER (WHERE slot='prev_day'), 3)   AS atc_delta_vs_prev_day,
-    ROUND(MAX(product_atc_rate) FILTER (WHERE slot='anchor')
-        - MAX(product_atc_rate) FILTER (WHERE slot='prev_week'), 3)  AS atc_delta_vs_prev_week,
-    ROUND(MAX(product_atc_rate) FILTER (WHERE slot='anchor')
-        - MAX(product_atc_rate) FILTER (WHERE slot='prev_month'), 3) AS atc_delta_vs_prev_month,
 
     MAX(units_sold) FILTER (WHERE slot = 'anchor')     AS units_today,
     MAX(units_sold) FILTER (WHERE slot = 'prev_day')   AS units_prev_day,
@@ -254,12 +248,6 @@ SELECT
     ROUND(100.0 * a.atc_prev_day   / NULLIF(a.sess_prev_day, 0), 3)   AS atc_rate_prev_day,
     ROUND(100.0 * a.atc_prev_week  / NULLIF(a.sess_prev_week, 0), 3)  AS atc_rate_prev_week,
     ROUND(100.0 * a.atc_prev_month / NULLIF(a.sess_prev_month, 0), 3) AS atc_rate_prev_month,
-    ROUND(100.0 * a.atc_anchor / NULLIF(a.sess_anchor, 0)
-        - 100.0 * a.atc_prev_day   / NULLIF(a.sess_prev_day, 0), 3)   AS atc_delta_vs_prev_day,
-    ROUND(100.0 * a.atc_anchor / NULLIF(a.sess_anchor, 0)
-        - 100.0 * a.atc_prev_week  / NULLIF(a.sess_prev_week, 0), 3)  AS atc_delta_vs_prev_week,
-    ROUND(100.0 * a.atc_anchor / NULLIF(a.sess_anchor, 0)
-        - 100.0 * a.atc_prev_month / NULLIF(a.sess_prev_month, 0), 3) AS atc_delta_vs_prev_month,
     a.units_anchor AS units_today,
     a.units_prev_day, a.units_prev_week, a.units_prev_month,
     a.revenue_anchor AS revenue_today,
@@ -383,8 +371,6 @@ SELECT
     ROUND(100.0*a.atc_prev_day   / NULLIF(a.sessions_prev_day, 0), 3)   AS atc_rate_prev_day,
     ROUND(100.0*a.atc_prev_week  / NULLIF(a.sessions_prev_week, 0), 3)  AS atc_rate_prev_week,
     ROUND(100.0*a.atc_prev_month / NULLIF(a.sessions_prev_month, 0), 3) AS atc_rate_prev_month,
-    ROUND(100.0*a.atc_anchor / NULLIF(a.sessions_today, 0)
-        - 100.0*a.atc_prev_week / NULLIF(a.sessions_prev_week, 0), 3)   AS atc_delta_vs_prev_week,
     -- Revenue of orders whose converting session LANDED on this page.
     CASE WHEN dp.has_anchor     THEN ROUND(COALESCE(rv.rev_anchor, 0), 2) END     AS revenue_today,
     CASE WHEN dp.has_prev_day   THEN ROUND(COALESCE(rv.rev_prev_day, 0), 2) END   AS revenue_prev_day,
@@ -485,8 +471,6 @@ SELECT
     ROUND(100.0*a.atc_prev_day   / NULLIF(a.sess_prev_day, 0), 3)    AS atc_rate_prev_day,
     ROUND(100.0*a.atc_prev_week  / NULLIF(a.sess_prev_week, 0), 3)   AS atc_rate_prev_week,
     ROUND(100.0*a.atc_prev_month / NULLIF(a.sess_prev_month, 0), 3)  AS atc_rate_prev_month,
-    ROUND(100.0*a.atc_anchor / NULLIF(a.sess_anchor, 0)
-        - 100.0*a.atc_prev_week / NULLIF(a.sess_prev_week, 0), 3)    AS atc_delta_vs_prev_week,
     CASE WHEN dp.has_anchor     THEN ROUND(COALESCE(rv.rev_anchor, 0), 2) END     AS revenue_today,
     CASE WHEN dp.has_prev_day   THEN ROUND(COALESCE(rv.rev_prev_day, 0), 2) END   AS revenue_prev_day,
     CASE WHEN dp.has_prev_week  THEN ROUND(COALESCE(rv.rev_prev_week, 0), 2) END  AS revenue_prev_week,

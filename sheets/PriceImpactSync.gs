@@ -142,7 +142,6 @@ var SKU_TAB_COLUMNS = [
   'page_type', 'page_path', 'page_title', 'skus_on_page',
   'sessions_today', 'sessions_prev_day', 'sessions_prev_week', 'sessions_prev_month',
   'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
-  'atc_delta_vs_prev_week',
   // Revenue of the orders whose converting session landed on this page,
   // from real orders rather than the landing-page table's own count.
   'revenue_today', 'revenue_prev_day', 'revenue_prev_week', 'revenue_prev_month',
@@ -191,7 +190,6 @@ var GROUP_PAGE_COLUMNS = [
   'page_type', 'page_path', 'page_title', 'skus_on_page',
   'sessions_today', 'sessions_prev_day', 'sessions_prev_week', 'sessions_prev_month',
   'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
-  'atc_delta_vs_prev_week',
   'revenue_today', 'revenue_prev_day', 'revenue_prev_week', 'revenue_prev_month',
   'orders_today', 'orders_prev_day', 'orders_prev_week', 'orders_prev_month'
 ];
@@ -294,11 +292,6 @@ function priBlockTotals_(pages, tabName) {
     if (/^atc_rate_/.test(h)) {
       return priBlendedAtc_(pages, h.replace('atc_rate_', 'sessions_'), h);
     }
-    if (h === 'atc_delta_vs_prev_week') {
-      var now = priBlendedAtc_(pages, 'sessions_today', 'atc_rate_today');
-      var wk = priBlendedAtc_(pages, 'sessions_prev_week', 'atc_rate_prev_week');
-      return (now === '' || wk === '') ? '' : Math.round((now - wk) * 1000) / 1000;
-    }
     return '';  // page_title, skus_on_page: nothing to total
   });
 }
@@ -363,10 +356,6 @@ function priDateHeaders_(headers, rows) {
                  '  ·  vs ' + label.prev_week + '  ·  vs ' + label.prev_month;
 
   return headers.map(function (h) {
-    // The delta is checked FIRST: it ends in `_prev_week` and would
-    // otherwise be caught by the generic rule below and come out as
-    // "atc delta vs · 20 Oct", with a separator where a word belongs.
-    if (h === 'atc_delta_vs_prev_week') return 'atc delta vs ' + label.prev_week;
     var m = h.match(/^(.*)_(today|prev_day|prev_week|prev_month)$/);
     if (m) return m[1].replace(/_/g, ' ') + ' · ' + label[m[2]];
     if (h === 'anchor_day') return 'anchor day';
@@ -385,7 +374,7 @@ function priDateHeaders_(headers, rows) {
 function priNumberFormat_(header) {
   if (/^anchor_day$|_date$/.test(header)) return 'yyyy-mm-dd';
   if (/^revenue/.test(header)) return '#,##0.00';
-  if (/_rate_|^atc_delta|_per_1k/.test(header)) return '0.000';
+  if (/_rate_|_per_1k/.test(header)) return '0.000';
   if (/^sessions|^orders|^units|skus_on_page|^old_price$|^new_price$|^price_change$/.test(header)) {
     return '#,##0';
   }
