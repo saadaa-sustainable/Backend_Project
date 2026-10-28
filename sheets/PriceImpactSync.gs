@@ -1,60 +1,82 @@
 /**
- * Price-change impact -> three Google Sheets tabs. See sheets/README.md.
- * Credentials stay in Script Properties: SUPABASE_URL, SUPABASE_KEY, SPREADSHEET_ID.
- * Public entry points: syncPriceImpact, setupPriceImpactTrigger, removePriceImpactTrigger.
+ * Price-change impact -> one tab per repriced SKU, plus three page-type
+ * tabs and a summary. See sheets/README.md for setup.
  *
- * No resume state, unlike MetaDirectSync: the three views total about
- * 16,000 rows and finish inside one execution. The pagination is still
- * here because PostgREST caps a response regardless of how small the
- * view is.
+ * Credentials stay in Script Properties: SUPABASE_URL, SUPABASE_KEY,
+ * SPREADSHEET_ID. The anon key is enough -- verified by reading every
+ * view as the `anon` role.
+ *
+ * Public entry points: syncPriceImpact, setupPriceImpactTrigger,
+ * removePriceImpactTrigger.
+ *
+ * Layout
+ * ------
+ *   Summary     one row per price direction, including the untouched
+ *               control group
+ *   Product     every repriced SKU x its product pages
+ *   Collection  every repriced SKU x the collection pages it sits on
+ *   Other       everything else, site level and with no SKU column
+ *   <SKU>       one tab per repriced SKU: every page it appears on
+ *
+ * The SKU tabs are discovered from the data, not listed here, so a later
+ * repricing needs no edit to this file.
  */
 var PRICE_IMPACT = {
-  views: [
-    // Read top to bottom: what happened across the groups, then each
-    // group's SKUs, then the history, then the page mapping behind it.
-    { view: 'sku_price_impact_summary', tab: 'Summary',   order: 'direction.asc' },
-
-    // One tab per price direction. Unchanged is NOT filler -- those 41
-    // SKUs were reviewed in the same exercise and deliberately left
-    // alone, so they carry every site-wide influence the repriced ones
-    // do and none of the price change. It is the control: if add-to-cart
-    // moves the same way there, the move is not about price. Measured on
-    // the first anchor day, every group rose together (Decreased +1.91,
-    // Increased +1.10, Unchanged +1.64), which is exactly the reading
-    // this tab exists to make visible.
-    { view: 'sku_price_impact_compare', tab: 'Increased',  order: 'sessions_today.desc.nullslast',
-      filter: 'direction=eq.Increased' },
-    { view: 'sku_price_impact_compare', tab: 'Decreased',  order: 'sessions_today.desc.nullslast',
-      filter: 'direction=eq.Decreased' },
-    { view: 'sku_price_impact_compare', tab: 'Unchanged',  order: 'sessions_today.desc.nullslast',
-      filter: 'direction=eq.Unchanged' },
-    { view: 'sku_price_impact_compare', tab: 'Hidden',     order: 'sessions_today.desc.nullslast',
-      filter: 'hidden=is.true', allowEmpty: true },
-
-    { view: 'sku_price_impact_compare', tab: 'All SKUs',   order: 'sessions_today.desc.nullslast' },
-    { view: 'sku_price_impact_daily',   tab: 'Daily',      order: 'day.desc,master_sku.asc',
-      filter: 'day=gte.' + priDaysAgo_(60) },
-    { view: 'sku_price_impact_pages',   tab: 'Pages',      order: 'sessions_7d.desc.nullslast' }
+  // Fixed tabs, in reading order.
+  fixed: [
+    { view: 'sku_price_impact_summary', tab: 'Summary', order: 'direction.asc' },
+    { view: 'sku_page_compare', tab: 'Product', order: 'sessions_today.desc.nullslast',
+      filter: 'page_type=eq.Product&direction=neq.Unchanged&hidden=is.false' },
+    { view: 'sku_page_compare', tab: 'Collection', order: 'sessions_today.desc.nullslast',
+      filter: 'page_type=eq.Collection&direction=neq.Unchanged&hidden=is.false' },
+    // No SKU column on purpose. Of 111 Shopify custom pages, ZERO name a
+    // product or collection anywhere in their HTML -- they are built from
+    // dynamic blocks, so nothing stored says what they merchandise. The
+    // tab carries the traffic and the reason, rather than dropping both.
+    { view: 'other_page_compare', tab: 'Other', order: 'sessions_today.desc.nullslast',
+      allowEmpty: true }
   ],
+  // The per-SKU tabs come from this: every SKU whose price actually moved.
+  skuSource: {
+    view: 'sku_page_compare',
+    filter: 'direction=neq.Unchanged&hidden=is.false',
+    order: 'master_sku.asc'
+  },
   pageRows: 1000,
-  statusTab: 'Status'
+  writeIntervalMs: 1200,  // under the Sheets quota of 60 writes/minute
+  statusTab: 'Status',
+  lastWriteAt: 0
 };
 
-function priDaysAgo_(n) {
-  var d = new Date(Date.now() - n * 86400000);
-  return d.toISOString().slice(0, 10);
-}
-
-/** Manual run. Rewrites all three tabs from the current view contents. */
+/** Rewrites every tab from the current view contents. */
 function syncPriceImpact() {
   var cfg = priConfig_();
   var ss = SpreadsheetApp.openById(cfg.spreadsheetId);
   var summary = [];
-  PRICE_IMPACT.views.forEach(function (spec) {
+
+  PRICE_IMPACT.fixed.forEach(function (spec) {
     var rows = priFetchAll_(cfg, spec);
     priWriteTab_(ss, spec.tab, rows);
-    summary.push(spec.tab + ': ' + rows.length);
+    summary.push([spec.tab, rows.length]);
   });
+
+  // One tab per repriced SKU. Every row is a page that SKU appears on,
+  // so the reader sees its own product pages beside the collections it
+  // shares with others.
+  var skuRows = priFetchAll_(cfg, PRICE_IMPACT.skuSource);
+  var bySku = {};
+  skuRows.forEach(function (r) {
+    (bySku[r.master_sku] = bySku[r.master_sku] || []).push(r);
+  });
+  Object.keys(bySku).sort().forEach(function (sku) {
+    var rows = bySku[sku].sort(function (a, b) {
+      return (b.sessions_today || 0) - (a.sessions_today || 0);
+    });
+    priWriteTab_(ss, sku, rows);
+    summary.push([sku, rows.length]);
+  });
+
+  priRemoveStaleSkuTabs_(ss, Object.keys(bySku));
   priWriteStatus_(ss, summary);
 }
 
@@ -69,8 +91,7 @@ function priConfig_() {
   return { url: url, key: key, spreadsheetId: spreadsheetId };
 }
 
-/** Walk a view to exhaustion. PostgREST caps each response, so a view
- *  that fits in one logical read still arrives in pages. */
+/** Walk a view to exhaustion; PostgREST caps each response. */
 function priFetchAll_(cfg, spec) {
   var all = [];
   var offset = 0;
@@ -92,11 +113,11 @@ function priFetchAll_(cfg, spec) {
     if (page.length < PRICE_IMPACT.pageRows) break;
     offset += PRICE_IMPACT.pageRows;
   }
-  // An empty view is a failure here, not a quiet "nothing to report":
-  // the base tables have row-level security, so a key without the right
-  // grants returns 200 with zero rows, which is indistinguishable from
-  // a genuinely empty result. Refuse rather than publish blanks over a
-  // tab somebody is about to read.
+  // An empty result is a failure unless the caller allows it: the base
+  // tables have row-level security, so a key without the right grants
+  // returns 200 with zero rows -- indistinguishable from a genuinely
+  // empty view. Refuse rather than publish blanks over a tab somebody is
+  // about to read.
   if (!all.length && !spec.allowEmpty) {
     throw new Error(spec.view + ' returned no rows' +
       (spec.filter ? ' for ' + spec.filter : '') +
@@ -105,16 +126,30 @@ function priFetchAll_(cfg, spec) {
   return all;
 }
 
+/** Columns a per-SKU tab leads with. The SKU is the tab name, and the
+ *  price is the same on every row, so neither earns a column; what the
+ *  reader wants first is which page, how shared it is, and whether its
+ *  add-to-cart rate moved. */
+var SKU_TAB_COLUMNS = [
+  'page_type', 'page_path', 'page_title', 'skus_on_page',
+  'sessions_today', 'sessions_prev_day', 'sessions_prev_week', 'sessions_prev_month',
+  'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
+  'atc_delta_vs_prev_week', 'product_status', 'anchor_day'
+];
+
 function priWriteTab_(ss, tabName, rows) {
   var sheet = ss.getSheetByName(tabName) || ss.insertSheet(tabName);
   if (!rows.length) {
-    // Clear it anyway: leaving yesterday's rows under a heading that no
-    // longer describes them is worse than an empty tab.
     sheet.clearContents();
-    sheet.getRange(1, 1).setValue('No SKUs in this group.');
+    sheet.getRange(1, 1).setValue('No rows for this group.');
     return;
   }
-  var headers = Object.keys(rows[0]);
+  // A per-SKU tab uses the curated order; everything else keeps the
+  // view's own columns.
+  var headers = rows[0].hasOwnProperty('master_sku') && SKU_TAB_RE.test(tabName)
+    ? SKU_TAB_COLUMNS.filter(function (h) { return rows[0].hasOwnProperty(h); })
+    : Object.keys(rows[0]);
+
   var values = [headers];
   rows.forEach(function (r) {
     values.push(headers.map(function (h) {
@@ -122,27 +157,71 @@ function priWriteTab_(ss, tabName, rows) {
       return (v === null || v === undefined) ? '' : v;
     }));
   });
+
+  priPace_();
   sheet.clearContents();
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
 }
 
+/** Keep the write rate under the Sheets per-user quota. */
+function priPace_() {
+  var wait = PRICE_IMPACT.writeIntervalMs - (Date.now() - PRICE_IMPACT.lastWriteAt);
+  if (wait > 0) Utilities.sleep(wait);
+  PRICE_IMPACT.lastWriteAt = Date.now();
+}
+
+/** The catalogue's master-SKU shape, the same pattern the pipeline
+ *  validates against: SD/SM/SU plus one to four letters.
+ *
+ *  Deliberately NOT a loose /^[A-Z]+$/ -- this function DELETES what it
+ *  matches, and a tab somebody named NOTES or TODO would match that.
+ *  Anchored to the real prefixes, a hand-made tab cannot collide. */
+var SKU_TAB_RE = /^(SD|SM|SU)[A-Z]{1,4}$/;
+
+/** A SKU that is no longer repriced should not leave a tab behind
+ *  showing numbers from a decision that has been reversed. */
+function priRemoveStaleSkuTabs_(ss, currentSkus) {
+  var keep = {};
+  currentSkus.forEach(function (s) { keep[s] = true; });
+  PRICE_IMPACT.fixed.forEach(function (f) { keep[f.tab] = true; });
+  keep[PRICE_IMPACT.statusTab] = true;
+  ss.getSheets().forEach(function (sheet) {
+    var name = sheet.getName();
+    if (!keep[name] && SKU_TAB_RE.test(name) && ss.getSheets().length > 1) {
+      ss.deleteSheet(sheet);
+    }
+  });
+}
+
 function priWriteStatus_(ss, summary) {
   var sheet = ss.getSheetByName(PRICE_IMPACT.statusTab) ||
               ss.insertSheet(PRICE_IMPACT.statusTab);
-  sheet.clearContents();
-  sheet.getRange(1, 1, 5 + summary.length, 2).setValues([
+  var notes = [
     ['Last sync', new Date()],
-    ['Anchor', 'latest COMPLETE day; today is partial until the nightly runs'],
+    ['Anchor day', 'the latest COMPLETE day. Today is partial until the nightly runs, ' +
+                   'so comparing it against full days would show every SKU down ~80%.'],
     ['Headline metric', 'product-page add-to-cart rate (%)'],
-    ['Not a conversion rate',
-     'sessions_that_completed_checkout sees 4.5-8.8% of real orders (GoKwik checkout). ' +
-     'units_sold / revenue come from real orders instead.'],
-    ['Collection pages', 'shared across SKUs - see skus_on_page before reading as one SKU\'s traffic']
-  ].concat(summary.map(function (s) { return [s.split(': ')[0] + ' rows', s.split(': ')[1]]; })));
-  sheet.setColumnWidth(1, 180);
-  sheet.setColumnWidth(2, 640);
+    ['There is no conversion rate',
+     'sessions_that_completed_checkout sees 4.5-8.8% of real orders because GoKwik owns ' +
+     'the checkout. units_sold and revenue come from real orders instead.'],
+    ['Collection pages are shared',
+     'skus_on_page says how many SKUs sit on a collection. Its sessions are not one ' +
+     'SKU\'s sessions - do not add a collection row to a product row.'],
+    ['Why Other has no SKU column',
+     'Of 111 Shopify custom pages, zero name a product or collection in their HTML. ' +
+     'They are built from dynamic blocks, so no product-to-page link exists to report.'],
+    ['Control group', 'the Unchanged SKUs in Summary moved too. If add-to-cart shifts ' +
+                      'there as well, the shift is not about price.'],
+    ['', ''],
+    ['Tab', 'Rows']
+  ];
+  var all = notes.concat(summary);
+  sheet.clearContents();
+  sheet.getRange(1, 1, all.length, 2).setValues(all);
+  sheet.setColumnWidth(1, 210);
+  sheet.setColumnWidth(2, 660);
 }
 
 /** Refresh each morning, after the nightly has rebuilt the source tables. */

@@ -268,6 +268,119 @@ FROM agg a
 ORDER BY a.hidden, a.direction
 """
 
+# ── SKU x page, on the same four days ────────────────────────────────
+#
+# One view behind every per-SKU tab and the Product/Collection tabs:
+# filter it by master_sku for a SKU's tab, by page_type for a page tab.
+# Building forty-odd tabs from forty-odd different views would be the
+# same query written forty times.
+PAGE_COMPARE_VIEW = """
+CREATE OR REPLACE VIEW public.sku_page_compare AS
+WITH anchor AS (
+    SELECT MAX(day) AS day FROM public.shopify_landing_page_analysis
+    WHERE day < current_date
+),
+slots AS (
+    SELECT m.master_sku, m.page_type, m.page_path, m.page_title,
+           m.skus_on_page, m.product_status,
+           a.sessions, a.sessions_with_cart_additions AS atc,
+           CASE
+             WHEN a.day = an.day                              THEN 'anchor'
+             WHEN a.day = an.day - 1                          THEN 'prev_day'
+             WHEN a.day = an.day - 7                          THEN 'prev_week'
+             WHEN a.day = (an.day - INTERVAL '1 month')::date THEN 'prev_month'
+           END AS slot,
+           an.day AS anchor_day
+    FROM public.sku_page_map m
+    JOIN public.sku_price_change c ON c.master_sku = m.master_sku
+    CROSS JOIN anchor an
+    JOIN public.shopify_landing_page_analysis a
+      ON a.landing_page_path = m.page_path
+     AND a.day IN (an.day, an.day - 1, an.day - 7,
+                   (an.day - INTERVAL '1 month')::date)
+)
+SELECT
+    s.master_sku,
+    c.direction, c.old_price, c.new_price, c.price_change, c.hidden,
+    MAX(s.anchor_day) AS anchor_day,
+    s.page_type, s.page_path, s.page_title,
+    -- 1 on a product page; higher on a collection, which is shared. A
+    -- collection's sessions are NOT this SKU's sessions.
+    MAX(s.skus_on_page) AS skus_on_page,
+    MAX(s.product_status) AS product_status,
+    SUM(s.sessions) FILTER (WHERE s.slot='anchor')     AS sessions_today,
+    SUM(s.sessions) FILTER (WHERE s.slot='prev_day')   AS sessions_prev_day,
+    SUM(s.sessions) FILTER (WHERE s.slot='prev_week')  AS sessions_prev_week,
+    SUM(s.sessions) FILTER (WHERE s.slot='prev_month') AS sessions_prev_month,
+    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='anchor')
+        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='anchor'),0), 3)     AS atc_rate_today,
+    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_day')
+        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_day'),0), 3)   AS atc_rate_prev_day,
+    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_week')
+        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_week'),0), 3)  AS atc_rate_prev_week,
+    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_month')
+        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_month'),0), 3) AS atc_rate_prev_month,
+    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='anchor')
+          / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='anchor'),0)
+        - 100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_week')
+          / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_week'),0), 3)
+      AS atc_delta_vs_prev_week
+FROM slots s
+JOIN public.sku_price_change c ON c.master_sku = s.master_sku
+GROUP BY s.master_sku, c.direction, c.old_price, c.new_price,
+         c.price_change, c.hidden, s.page_type, s.page_path, s.page_title
+"""
+
+# ── Everything that is not a product or collection page ──────────────
+#
+# Site level, with no SKU column, because there is no product-to-page
+# link to report. Checked directly: of 111 Shopify custom pages, ZERO
+# reference a product or collection anywhere in their HTML body -- they
+# are assembled from dynamic blocks, so nothing in the stored page names
+# what it merchandises. The homepage is not any one SKU's page either.
+#
+# The tab exists so the traffic is visible rather than silently dropped,
+# and so the reason it cannot be split by SKU is on the page instead of
+# in somebody's memory.
+OTHER_PAGES_VIEW = """
+CREATE OR REPLACE VIEW public.other_page_compare AS
+WITH anchor AS (
+    SELECT MAX(day) AS day FROM public.shopify_landing_page_analysis
+    WHERE day < current_date
+),
+slots AS (
+    SELECT a.landing_page_type, a.landing_page_path,
+           a.sessions, a.sessions_with_cart_additions AS atc,
+           CASE
+             WHEN a.day = an.day                              THEN 'anchor'
+             WHEN a.day = an.day - 1                          THEN 'prev_day'
+             WHEN a.day = an.day - 7                          THEN 'prev_week'
+             WHEN a.day = (an.day - INTERVAL '1 month')::date THEN 'prev_month'
+           END AS slot,
+           an.day AS anchor_day
+    FROM public.shopify_landing_page_analysis a CROSS JOIN anchor an
+    WHERE a.landing_page_type NOT IN ('Product', 'Collection')
+      AND a.day IN (an.day, an.day - 1, an.day - 7,
+                    (an.day - INTERVAL '1 month')::date)
+)
+SELECT
+    landing_page_type AS page_type,
+    landing_page_path AS page_path,
+    MAX(anchor_day) AS anchor_day,
+    'not attributable to a SKU'::text AS sku_note,
+    SUM(sessions) FILTER (WHERE slot='anchor')     AS sessions_today,
+    SUM(sessions) FILTER (WHERE slot='prev_day')   AS sessions_prev_day,
+    SUM(sessions) FILTER (WHERE slot='prev_week')  AS sessions_prev_week,
+    SUM(sessions) FILTER (WHERE slot='prev_month') AS sessions_prev_month,
+    ROUND(100.0*SUM(atc) FILTER (WHERE slot='anchor')
+        / NULLIF(SUM(sessions) FILTER (WHERE slot='anchor'),0), 3)    AS atc_rate_today,
+    ROUND(100.0*SUM(atc) FILTER (WHERE slot='prev_week')
+        / NULLIF(SUM(sessions) FILTER (WHERE slot='prev_week'),0), 3) AS atc_rate_prev_week
+FROM slots
+GROUP BY landing_page_type, landing_page_path
+HAVING SUM(sessions) FILTER (WHERE slot='anchor') > 0
+"""
+
 # Which exact pages a SKU is on, so a reader can check the mapping
 # rather than trust it.
 PAGES_VIEW = """
@@ -294,9 +407,12 @@ GROUP BY 1,2,3,4,5,6,7,8,9
 
 def _rebuild_views(cur) -> None:
     for name, sql in (("daily", DAILY_VIEW), ("compare", COMPARE_VIEW),
-                      ("summary", SUMMARY_VIEW), ("pages", PAGES_VIEW)):
+                      ("summary", SUMMARY_VIEW), ("pages", PAGES_VIEW),
+                      ("sku_page_compare", PAGE_COMPARE_VIEW),
+                      ("other_page_compare", OTHER_PAGES_VIEW)):
         cur.execute(sql)
-        print(f"  view sku_price_impact_{name} ready")
+        label = name if "_compare" in name else f"sku_price_impact_{name}"
+        print(f"  view {label} ready")
 
 
 def main() -> int:

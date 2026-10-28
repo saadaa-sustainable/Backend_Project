@@ -278,17 +278,47 @@ enough** — verified by reading all three views as the `anon` role.
 | Tab | Supabase view | Rows | One row per |
 |---|---|---|---|
 | Summary | `sku_price_impact_summary` | 4 | price direction — **read this first** |
-| Increased | `sku_price_impact_compare` | 16 | master SKU, price up |
-| Decreased | `sku_price_impact_compare` | 27 | master SKU, price down |
-| Unchanged | `sku_price_impact_compare` | 41 | master SKU, untouched — **the control** |
-| Hidden | `sku_price_impact_compare` | 9 | master SKU pulled from sale |
-| All SKUs | `sku_price_impact_compare` | 93 | every master SKU |
-| Daily | `sku_price_impact_daily` | ~11k | master SKU × day (last 60) |
-| Pages | `sku_price_impact_pages` | 4,339 | master SKU × page it appears on |
+| Product | `sku_page_compare` | 326 | repriced SKU × one of its product pages |
+| Collection | `sku_page_compare` | 1,043 | repriced SKU × a collection it sits on |
+| Other | `other_page_compare` | 63 | page — **no SKU column, see below** |
+| *one per SKU* | `sku_page_compare` | 43 tabs | every page that SKU appears on |
+
+48 tabs in all. The per-SKU tabs are **discovered from the data**, not
+listed in the script, so a later repricing needs no edit: whatever has a
+direction other than Unchanged gets a tab, and a SKU that stops being
+repriced has its tab removed rather than left showing a reversed
+decision. The removal is anchored to the catalogue's own master-SKU
+pattern (`SD|SM|SU` + 1–4 letters) so a tab you named yourself cannot be
+caught by it.
+
+A SKU tab reads as that SKU's whole surface. `SDCP`, for instance:
+
+| page_type | page_path | skus_on_page | sessions_today |
+|---|---|---|---|
+| Collection | `/collections/cotton-trousers` | 1 | 6,787 |
+| Collection | `/collections/best-sellers-women` | 58 | 535 |
+| Collection | `/collections/shop-all-bottoms` | 22 | 521 |
+| Product | `/products/beige-solid-regular-fit-cotton-trouser` | 1 | 498 |
+
+`skus_on_page` is what stops that table being misread. `cotton-trousers`
+is SDCP's own collection; `best-sellers-women` is shared with 57 other
+SKUs and its traffic is not SDCP's.
 
 `setupPriceImpactTrigger()` refreshes at 07:00 daily, after the nightly
-has rebuilt the source tables. No resume state: ~16,000 rows finish in
-one execution, and each view costs ~1.3s.
+has rebuilt the source tables. Writes are paced to stay under the Sheets
+quota of 60 per minute.
+
+### Why the Other tab has no SKU column
+
+Checked directly rather than assumed: of **111 Shopify custom pages,
+zero** reference a product or a collection anywhere in their HTML body.
+They are assembled from dynamic blocks, so nothing stored in Shopify
+says what any of them merchandises, and the homepage belongs to no SKU
+in the first place.
+
+The tab therefore carries the pages and their traffic — 63 pages, ~8,100
+sessions on the anchor day — with the reason printed on the Status tab,
+rather than dropping the traffic or inventing an attribution for it.
 
 ### Unchanged is the control, not filler
 
