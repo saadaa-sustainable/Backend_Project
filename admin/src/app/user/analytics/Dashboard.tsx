@@ -33,25 +33,30 @@ const SOURCE_KEY = "analytics-dashboard-session-source";
  *  session counts would count a visitor twice and halve cost per
  *  session. "Both" therefore compares them rather than combining them,
  *  and the gap between them is the useful part. */
-type SessionSource = "meta" | "google" | "both";
+type SessionSource = "meta" | "shopify" | "google" | "both";
 
+//: Meta is a SUBSET of Shopify, not an alternative to it. Shopify
+//: records every session the shop gets; the Meta tab keeps the
+//: 74.5 per cent of them that carry a Meta utm_source. They are
+//: separate tabs because they answer separate questions -- "how does
+//: the traffic we pay for behave" and "how does the shop behave" --
+//: and one is not a substitute for the other.
 const SOURCE_OPTIONS: { value: string; label: string; title: string }[] = [
   { value: "meta", label: "Meta",
-    title: "Meta-driven traffic, measured by Shopify: its own sessions narrowed by utm_source." },
+    title: "Meta-driven traffic only: Shopify's sessions narrowed by utm_source. A subset of the Shopify tab." },
+  { value: "shopify", label: "Shopify",
+    title: "Every session and every order Shopify records, all traffic sources." },
   { value: "google", label: "Google",
-    title: "Measured by GA4 — the analytics property, not Google Ads. All traffic, because GA4 cannot be narrowed to Meta." },
+    title: "Measured by GA4 — the analytics property, not Google Ads. All traffic." },
   { value: "both", label: "Both",
-    title: "The two side by side, with the gap between them." },
+    title: "All three side by side, with the gap between the two all-traffic readings." },
 ];
 
 function loadSource(): SessionSource {
   if (typeof window === "undefined") return "meta";
   try {
     const v = window.localStorage.getItem(SOURCE_KEY);
-    // "shopify" was this tab's name until the label moved to what the
-    // figures describe. An old stored preference still means this tab.
-    if (v === "shopify" || v === "meta") return "meta";
-    if (v === "google" || v === "both") return v;
+    if (v === "meta" || v === "shopify" || v === "google" || v === "both") return v;
   } catch {
     // Private windows and blocked site data throw on read. The default
     // is correct, so there is nothing to recover.
@@ -77,19 +82,21 @@ interface SourceMetrics {
  *  and GA4 cannot. The footnote says so rather than letting the number
  *  be read as if the two counted the same population.
  */
-function SourceComparison({ meta, google }: { meta: SourceMetrics; google: SourceMetrics }) {
+function SourceComparison(
+  { meta, shopify, google }:
+  { meta: SourceMetrics; shopify: SourceMetrics; google: SourceMetrics },
+) {
   const rows: {
     label: string;
-    a: number | null;
-    b: number | null;
+    pick: (m: SourceMetrics) => number | null;
     fmt: (n: number | null) => string;
     /** Percentage points, not per cent: a rate's gap is a subtraction. */
     points?: boolean;
   }[] = [
-    { label: "Cost / session", a: meta.costPerSession, b: google.costPerSession, fmt: formatPerSession },
-    { label: "Revenue / session", a: meta.revenuePerSession, b: google.revenuePerSession, fmt: formatPerSession },
-    { label: "Conversion rate", a: meta.conversionRate, b: google.conversionRate, fmt: formatConversionRate, points: true },
-    { label: "ARPU", a: meta.arpu, b: google.arpu, fmt: formatPerSession },
+    { label: "Cost / session", pick: (m) => m.costPerSession, fmt: formatPerSession },
+    { label: "Revenue / session", pick: (m) => m.revenuePerSession, fmt: formatPerSession },
+    { label: "Conversion rate", pick: (m) => m.conversionRate, fmt: formatConversionRate, points: true },
+    { label: "ARPU", pick: (m) => m.arpu, fmt: formatPerSession },
   ];
 
   function gap(a: number | null, b: number | null, points: boolean): string {
@@ -107,12 +114,14 @@ function SourceComparison({ meta, google }: { meta: SourceMetrics; google: Sourc
           <tr className="text-left text-xs text-text-secondary">
             <th className="border-b border-border-primary pb-2 font-normal">Metric</th>
             <th className="border-b border-border-primary pb-2 text-right font-normal"
-                title="Meta-driven traffic as Shopify measures it.">Meta (Shopify)</th>
+                title="Meta-driven traffic only — a subset of the Shopify column beside it.">Meta</th>
+            <th className="border-b border-border-primary pb-2 text-right font-normal"
+                title="Every session and order Shopify records, all traffic sources.">Shopify</th>
             <th className="border-b border-border-primary pb-2 text-right font-normal"
                 title="All traffic as GA4 measures it. GA4 the analytics property, not Google Ads.">Google (GA4)</th>
             <th className="border-b border-border-primary pb-2 text-right font-normal"
-                title="How far GA4 sits from Shopify. Partly a measurement difference and partly a scope one -- see the note below.">
-              Gap
+                title="GA4 against Shopify: the only pair here covering the same population, so this gap is measurement, not scope.">
+              GA4 vs Shopify
             </th>
           </tr>
         </thead>
@@ -120,38 +129,37 @@ function SourceComparison({ meta, google }: { meta: SourceMetrics; google: Sourc
           {rows.map((r) => (
             <tr key={r.label}>
               <td className="border-b border-border-soft py-2 text-text-secondary">{r.label}</td>
-              <td className="border-b border-border-soft py-2 text-right tabular-nums font-medium text-text-primary">
-                {r.fmt(r.a)}
-              </td>
-              <td className="border-b border-border-soft py-2 text-right tabular-nums font-medium text-text-primary">
-                {r.fmt(r.b)}
-              </td>
+              {[meta, shopify, google].map((m, i) => (
+                <td key={i} className="border-b border-border-soft py-2 text-right tabular-nums font-medium text-text-primary">
+                  {r.fmt(r.pick(m))}
+                </td>
+              ))}
               <td className="border-b border-border-soft py-2 text-right tabular-nums text-text-secondary">
-                {gap(r.a, r.b, !!r.points)}
+                {gap(r.pick(shopify), r.pick(google), !!r.points)}
               </td>
             </tr>
           ))}
           <tr>
             <td className="py-2 text-text-secondary">Sessions</td>
+            {[meta, shopify, google].map((m, i) => (
+              <td key={i} className="py-2 text-right tabular-nums text-text-secondary">
+                {m.sessions?.toLocaleString("en-IN") ?? "\u2014"}
+              </td>
+            ))}
             <td className="py-2 text-right tabular-nums text-text-secondary">
-              {meta.sessions?.toLocaleString("en-IN") ?? "\u2014"}
-            </td>
-            <td className="py-2 text-right tabular-nums text-text-secondary">
-              {google.sessions?.toLocaleString("en-IN") ?? "\u2014"}
-            </td>
-            <td className="py-2 text-right tabular-nums text-text-secondary">
-              {gap(meta.sessions, google.sessions, false)}
+              {gap(shopify.sessions, google.sessions, false)}
             </td>
           </tr>
         </tbody>
       </table>
       <p className="mt-3 text-xs text-text-secondary">
-        The two columns do not cover the same population, so part of every gap is scope rather
-        than disagreement. The Meta column is Shopify&rsquo;s own sessions narrowed to Meta-driven
-        traffic by <code>utm_source</code>;
-        GA4 is all traffic, because it cannot be narrowed — its landing pages carry no query
-        string and it files most Meta traffic under Organic Social. ARPU is blank for Shopify:
-        it counts sessions and customers, never users.
+        Meta is a <strong>subset</strong> of Shopify, not an alternative to it: the same sessions,
+        narrowed by <code>utm_source</code> to the traffic Meta sent. Only Shopify and GA4 cover
+        the same population, which is why the gap is measured between those two — there it is a
+        real disagreement between two systems watching one shop, not a difference in scope. GA4
+        cannot be narrowed to Meta at all: its landing pages carry no query string and it files
+        most Meta traffic under Organic Social. ARPU is blank for both Shopify columns because
+        Shopify counts sessions and customers, never users.
       </p>
     </div>
   );
@@ -357,6 +365,15 @@ function DashboardContent() {
   // sessions). Both halves are now selected by one utm_source rule.
   const metaRevenue = kpis.data?.meta_shopify_revenue ?? null;
   const metaOrders = kpis.data?.meta_shopify_orders ?? null;
+  // Shopify's whole shop: all traffic over all sessions. Both halves
+  // all-traffic, so it is self-consistent, and it is the figure that
+  // compares like for like with GA4 beside it.
+  const allRevenuePerSession = kpis.data && allSessionCount !== null && allSessionCount > 0
+    ? kpis.data.total_shopify_revenue / allSessionCount : null;
+  const allConversionRate = kpis.data && allSessionCount !== null && allSessionCount > 0
+    ? kpis.data.total_shopify_orders / allSessionCount : null;
+  const allCostPerSession = kpis.data && allSessionCount !== null && allSessionCount > 0
+    ? kpis.data.total_spend / allSessionCount : null;
   const revenuePerSession = metaRevenue !== null && sessionCount !== null && sessionCount > 0
     ? metaRevenue / sessionCount : null;
   const conversionRate = metaOrders !== null && sessionCount !== null && sessionCount > 0
@@ -516,10 +533,12 @@ function DashboardContent() {
                     property, not Google Ads. */}
                 <span className="text-[11px] text-text-tertiary">
                   {source === "meta"
-                    ? "Meta-driven traffic \u00b7 measured by Shopify"
-                    : source === "google"
-                      ? "All traffic \u00b7 measured by GA4, not Google Ads"
-                      : "Two readings of the same traffic, not two traffic sources"}
+                    ? "Meta-driven sessions only \u00b7 a subset of the Shopify tab"
+                    : source === "shopify"
+                      ? "Every session Shopify records \u00b7 all traffic sources"
+                      : source === "google"
+                        ? "All traffic \u00b7 measured by GA4, not Google Ads"
+                        : "Three readings, one shop"}
                 </span>
               </div>
 
@@ -528,6 +547,12 @@ function DashboardContent() {
                   meta={{
                     costPerSession, revenuePerSession, conversionRate,
                     arpu: null, sessions: sessionCount,
+                  }}
+                  shopify={{
+                    costPerSession: allCostPerSession,
+                    revenuePerSession: allRevenuePerSession,
+                    conversionRate: allConversionRate,
+                    arpu: null, sessions: allSessionCount,
                   }}
                   google={{
                     costPerSession: ga4CostPerSession,
@@ -542,36 +567,46 @@ function DashboardContent() {
                 <div>
                   <dt className="text-xs text-text-secondary">Cost / session</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">
-                    {formatPerSession(source === "google" ? ga4CostPerSession : costPerSession)}
+                    {formatPerSession(source === "google" ? ga4CostPerSession
+                      : source === "shopify" ? allCostPerSession : costPerSession)}
                   </dd>
                   <dd className="mt-1 text-xs text-text-secondary">
                     {source === "google"
                       ? "Meta ad spend \u00f7 all GA4 sessions \u2014 GA4 cannot isolate Meta traffic"
-                      : "Ad spend \u00f7 Meta-driven Shopify sessions"}
+                      : source === "shopify"
+                        ? "Meta ad spend \u00f7 all Shopify sessions \u2014 the spend is Meta's, this traffic is not"
+                        : "Ad spend \u00f7 Meta-driven Shopify sessions"}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-text-secondary">Revenue / session</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">
-                    {formatPerSession(source === "google" ? ga4RevenuePerSession : revenuePerSession)}
+                    {formatPerSession(source === "google" ? ga4RevenuePerSession
+                      : source === "shopify" ? allRevenuePerSession : revenuePerSession)}
                   </dd>
                   <dd className="mt-1 text-xs text-text-secondary">
                     {source === "google"
                       ? "GA4 revenue \u00f7 GA4 sessions"
-                      : "Meta-driven Shopify revenue \u00f7 Meta-driven Shopify sessions"}
+                      : source === "shopify"
+                        ? "All Shopify revenue \u00f7 all Shopify sessions"
+                        : "Meta-driven Shopify revenue \u00f7 Meta-driven Shopify sessions"}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-text-secondary">
-                    Conversion rate{source === "google" ? " (GA4)" : " (attributed)"}
+                    Conversion rate{source === "google" ? " (GA4)"
+                      : source === "shopify" ? "" : " (attributed)"}
                   </dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">
-                    {formatConversionRate(source === "google" ? ga4ConversionRate : conversionRate)}
+                    {formatConversionRate(source === "google" ? ga4ConversionRate
+                      : source === "shopify" ? allConversionRate : conversionRate)}
                   </dd>
                   <dd className="mt-1 text-xs text-text-secondary">
                     {source === "google"
                       ? "GA4 purchases \u00f7 GA4 sessions \u00d7 100"
-                      : "Meta-driven Shopify orders \u00f7 Meta-driven Shopify sessions \u00d7 100"}
+                      : source === "shopify"
+                        ? "All Shopify orders \u00f7 all Shopify sessions \u00d7 100"
+                        : "Meta-driven Shopify orders \u00f7 Meta-driven Shopify sessions \u00d7 100"}
                   </dd>
                 </div>
                 {/* ARPU is GA4's end to end -- its revenue over its own
@@ -624,10 +659,10 @@ function DashboardContent() {
                   for one metric on one tab, and the reader has no way
                   to tell which is meant. These are the raw figures the
                   Meta slice is a part of, with that part named. */}
-              {source === "meta" && (
+              {source === "shopify" && (
                 <div className="mt-4 border-t border-border-primary pt-3">
                   <p className="text-xs font-medium text-text-secondary">
-                    Shopify totals &middot; every traffic source
+                    Totals &middot; every traffic source
                   </p>
                   <dl className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
@@ -665,9 +700,16 @@ function DashboardContent() {
                   ? (ga4Sessions === null
                       ? "No GA4 session data is available for this period."
                       : `${ga4Sessions.toLocaleString("en-IN")} GA4 sessions across all traffic sources.`
-                        + (sessionCount !== null
-                            ? ` Shopify counted ${sessionCount.toLocaleString("en-IN")} Meta-driven sessions over the same days.`
+                        + (allSessionCount !== null
+                            ? ` Shopify counted ${allSessionCount.toLocaleString("en-IN")} over the same days.`
                             : ""))
+                  : source === "shopify"
+                    ? (allSessionCount === null
+                        ? "No Shopify session data is available for this period."
+                        : `${allSessionCount.toLocaleString("en-IN")} Shopify sessions across all traffic sources`
+                          + (sessionCount !== null && metaShare !== null
+                              ? ` \u2014 ${sessionCount.toLocaleString("en-IN")} of them Meta-driven (${metaShare.toFixed(1)}%).`
+                              : "."))
                   : sessionCount === null
                     ? "No Shopify session data is available for this period."
                     : sessionCount === 0

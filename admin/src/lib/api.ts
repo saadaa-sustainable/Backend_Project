@@ -2388,6 +2388,14 @@ export interface DashboardSessionTrendPoint {
   ga4_cost_per_session?: number | null;
   ga4_revenue_per_session?: number | null;
   ga4_conversion_rate?: number | null;
+  /** Shopify's whole shop -- every traffic source, the superset the
+   *  Meta figures above are a part of. */
+  all_sessions?: number | null;
+  all_revenue?: number;
+  all_orders?: number;
+  all_cost_per_session?: number | null;
+  all_revenue_per_session?: number | null;
+  all_conversion_rate?: number | null;
 }
 
 export interface DashboardSessionTrend {
