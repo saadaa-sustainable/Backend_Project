@@ -36,7 +36,7 @@ const percent = (n: number | null) => n === null ? "—"
 const shortDay = (day: string) => new Date(`${day}T12:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 
 /** Which source's lines to draw. Matches the tab above the chart. */
-export type TrendSource = "shopify" | "google" | "both";
+export type TrendSource = "meta" | "google" | "both";
 
 /** The three ratios, per source. Colour carries the METRIC and dash
  *  carries the SOURCE -- so on "both" a pair sits in one colour, solid
@@ -49,9 +49,9 @@ const SERIES: Record<Exclude<TrendSource, "both">, {
   label: string;
   dash?: string;
 }> = {
-  shopify: {
+  meta: {
     cost: "cost_per_session", revenue: "revenue_per_session",
-    rate: "conversion_rate", label: "Shopify", dash: undefined,
+    rate: "conversion_rate", label: "Meta", dash: undefined,
   },
   google: {
     cost: "ga4_cost_per_session", revenue: "ga4_revenue_per_session",
@@ -61,7 +61,7 @@ const SERIES: Record<Exclude<TrendSource, "both">, {
 
 /** Aligned plots keep rupees and percentages on separate, labelled scales. */
 export function SessionTrendChart({
-  points, source = "shopify",
+  points, source = "meta",
 }: { points: DashboardSessionTrendPoint[]; source?: TrendSource }) {
   const titleId = useId();
   const [selected, setSelected] = useState<number | null>(null);
@@ -69,9 +69,9 @@ export function SessionTrendChart({
   const point = points[active];
   // Which sources are drawn, in draw order.
   const sources: Exclude<TrendSource, "both">[] =
-    source === "both" ? ["shopify", "google"] : [source];
-  // ARPU is GA4's alone, so it has no band on the Shopify tab.
-  const showArpu = source !== "shopify";
+    source === "both" ? ["meta", "google"] : [source];
+  // ARPU is GA4's alone, so it has no band on the Meta tab.
+  const showArpu = source !== "meta";
 
   const num = (p: DashboardSessionTrendPoint, k: keyof DashboardSessionTrendPoint) => {
     const v = p[k];
@@ -178,7 +178,7 @@ export function SessionTrendChart({
           }}>
           <title id={titleId}>Daily cost and revenue per session in rupees, ARPU in rupees per GA4 active user, and attributed conversion rate in percent. Use the day slider below to inspect values.</title>
           <text x={LEFT} y={CURRENCY.top - 14} fontSize="11" fill={theme.textSecondary}>
-            Cost and revenue / session · ₹{source === "both" ? " · solid Shopify, dashed GA4" : ""}
+            Cost and revenue / session · ₹{source === "both" ? " · solid Meta, dashed GA4" : ""}
           </text>
           {showArpu && (
             <text x={LEFT} y={ARPU.top - 14} fontSize="11" fill={theme.textSecondary}>ARPU · ₹ per GA4 active user that day</text>
@@ -240,11 +240,11 @@ export function SessionTrendChart({
         onChange={(event) => setSelected(Number(event.target.value))} className="mt-3 h-5 w-full cursor-pointer accent-[var(--accent-yellow)]" />}
       <p className="mt-1 text-xs text-text-secondary">
         Daily ratios use the same definitions as the cards above, and follow the source tab.{" "}
-        {source === "shopify"
+        {source === "meta"
           ? "Meta's orders over Meta-driven Shopify sessions."
           : source === "google"
             ? "GA4's revenue and purchases over GA4 sessions — all traffic, since GA4 cannot be narrowed to Meta. Cost per session is the one line that mixes sources: Meta spend over every GA4 session."
-            : "Shopify is Meta-driven only; GA4 is all traffic. Part of the gap between a solid line and its dashed twin is that difference in scope, not disagreement."}
+            : "Meta's column is Meta-driven only; GA4's is all traffic. Part of the gap between a solid line and its dashed twin is that difference in scope, not disagreement."}
         {showArpu && " ARPU sits on its own scale because it divides by something else entirely — GA4's deduplicated count of users active that day, so each visitor is counted once however many times they came back. That makes a point on the ARPU line exact, unlike the figure on the card above, which adds those daily counts together."}
         {" "}Gaps mark days with no data.
       </p>

@@ -33,27 +33,30 @@ const SOURCE_KEY = "analytics-dashboard-session-source";
  *  session counts would count a visitor twice and halve cost per
  *  session. "Both" therefore compares them rather than combining them,
  *  and the gap between them is the useful part. */
-type SessionSource = "shopify" | "google" | "both";
+type SessionSource = "meta" | "google" | "both";
 
 const SOURCE_OPTIONS: { value: string; label: string; title: string }[] = [
-  { value: "shopify", label: "Shopify",
-    title: "Shopify's own sessions, narrowed to Meta-driven traffic by utm_source." },
+  { value: "meta", label: "Meta",
+    title: "Meta-driven traffic, measured by Shopify: its own sessions narrowed by utm_source." },
   { value: "google", label: "Google",
-    title: "GA4's sessions, revenue and purchases. All traffic -- GA4 cannot be narrowed to Meta." },
+    title: "Measured by GA4 — the analytics property, not Google Ads. All traffic, because GA4 cannot be narrowed to Meta." },
   { value: "both", label: "Both",
     title: "The two side by side, with the gap between them." },
 ];
 
 function loadSource(): SessionSource {
-  if (typeof window === "undefined") return "shopify";
+  if (typeof window === "undefined") return "meta";
   try {
     const v = window.localStorage.getItem(SOURCE_KEY);
-    if (v === "shopify" || v === "google" || v === "both") return v;
+    // "shopify" was this tab's name until the label moved to what the
+    // figures describe. An old stored preference still means this tab.
+    if (v === "shopify" || v === "meta") return "meta";
+    if (v === "google" || v === "both") return v;
   } catch {
     // Private windows and blocked site data throw on read. The default
     // is correct, so there is nothing to recover.
   }
-  return "shopify";
+  return "meta";
 }
 
 /** One source's four figures, for the comparison table. */
@@ -74,7 +77,7 @@ interface SourceMetrics {
  *  and GA4 cannot. The footnote says so rather than letting the number
  *  be read as if the two counted the same population.
  */
-function SourceComparison({ shopify, google }: { shopify: SourceMetrics; google: SourceMetrics }) {
+function SourceComparison({ meta, google }: { meta: SourceMetrics; google: SourceMetrics }) {
   const rows: {
     label: string;
     a: number | null;
@@ -83,10 +86,10 @@ function SourceComparison({ shopify, google }: { shopify: SourceMetrics; google:
     /** Percentage points, not per cent: a rate's gap is a subtraction. */
     points?: boolean;
   }[] = [
-    { label: "Cost / session", a: shopify.costPerSession, b: google.costPerSession, fmt: formatPerSession },
-    { label: "Revenue / session", a: shopify.revenuePerSession, b: google.revenuePerSession, fmt: formatPerSession },
-    { label: "Conversion rate", a: shopify.conversionRate, b: google.conversionRate, fmt: formatConversionRate, points: true },
-    { label: "ARPU", a: shopify.arpu, b: google.arpu, fmt: formatPerSession },
+    { label: "Cost / session", a: meta.costPerSession, b: google.costPerSession, fmt: formatPerSession },
+    { label: "Revenue / session", a: meta.revenuePerSession, b: google.revenuePerSession, fmt: formatPerSession },
+    { label: "Conversion rate", a: meta.conversionRate, b: google.conversionRate, fmt: formatConversionRate, points: true },
+    { label: "ARPU", a: meta.arpu, b: google.arpu, fmt: formatPerSession },
   ];
 
   function gap(a: number | null, b: number | null, points: boolean): string {
@@ -103,8 +106,10 @@ function SourceComparison({ shopify, google }: { shopify: SourceMetrics; google:
         <thead>
           <tr className="text-left text-xs text-text-secondary">
             <th className="border-b border-border-primary pb-2 font-normal">Metric</th>
-            <th className="border-b border-border-primary pb-2 text-right font-normal">Shopify</th>
-            <th className="border-b border-border-primary pb-2 text-right font-normal">Google (GA4)</th>
+            <th className="border-b border-border-primary pb-2 text-right font-normal"
+                title="Meta-driven traffic as Shopify measures it.">Meta (Shopify)</th>
+            <th className="border-b border-border-primary pb-2 text-right font-normal"
+                title="All traffic as GA4 measures it. GA4 the analytics property, not Google Ads.">Google (GA4)</th>
             <th className="border-b border-border-primary pb-2 text-right font-normal"
                 title="How far GA4 sits from Shopify. Partly a measurement difference and partly a scope one -- see the note below.">
               Gap
@@ -129,20 +134,21 @@ function SourceComparison({ shopify, google }: { shopify: SourceMetrics; google:
           <tr>
             <td className="py-2 text-text-secondary">Sessions</td>
             <td className="py-2 text-right tabular-nums text-text-secondary">
-              {shopify.sessions?.toLocaleString("en-IN") ?? "\u2014"}
+              {meta.sessions?.toLocaleString("en-IN") ?? "\u2014"}
             </td>
             <td className="py-2 text-right tabular-nums text-text-secondary">
               {google.sessions?.toLocaleString("en-IN") ?? "\u2014"}
             </td>
             <td className="py-2 text-right tabular-nums text-text-secondary">
-              {gap(shopify.sessions, google.sessions, false)}
+              {gap(meta.sessions, google.sessions, false)}
             </td>
           </tr>
         </tbody>
       </table>
       <p className="mt-3 text-xs text-text-secondary">
         The two columns do not cover the same population, so part of every gap is scope rather
-        than disagreement. Shopify is narrowed to Meta-driven sessions by <code>utm_source</code>;
+        than disagreement. The Meta column is Shopify&rsquo;s own sessions narrowed to Meta-driven
+        traffic by <code>utm_source</code>;
         GA4 is all traffic, because it cannot be narrowed — its landing pages carry no query
         string and it files most Meta traffic under Organic Social. ARPU is blank for Shopify:
         it counts sessions and customers, never users.
@@ -490,6 +496,7 @@ function DashboardContent() {
           ) : (
             <>
               <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+                <div className="overflow-hidden rounded-md border border-border-primary">
                 <Segmented
                   options={SOURCE_OPTIONS}
                   value={source}
@@ -502,18 +509,23 @@ function DashboardContent() {
                     }
                   }}
                 />
+                </div>
+                {/* Names the measuring system as well as the slice: on
+                    its own, "Meta" beside "Google" reads as two ad
+                    channels, and the Google tab is GA4 the analytics
+                    property, not Google Ads. */}
                 <span className="text-[11px] text-text-tertiary">
-                  {source === "shopify"
-                    ? "Shopify sessions, Meta-driven only"
+                  {source === "meta"
+                    ? "Meta-driven traffic \u00b7 measured by Shopify"
                     : source === "google"
-                      ? "GA4 sessions, all traffic"
+                      ? "All traffic \u00b7 measured by GA4, not Google Ads"
                       : "Two readings of the same traffic, not two traffic sources"}
                 </span>
               </div>
 
               {source === "both" ? (
                 <SourceComparison
-                  shopify={{
+                  meta={{
                     costPerSession, revenuePerSession, conversionRate,
                     arpu: null, sessions: sessionCount,
                   }}
@@ -612,7 +624,7 @@ function DashboardContent() {
                   for one metric on one tab, and the reader has no way
                   to tell which is meant. These are the raw figures the
                   Meta slice is a part of, with that part named. */}
-              {source === "shopify" && (
+              {source === "meta" && (
                 <div className="mt-4 border-t border-border-primary pt-3">
                   <p className="text-xs font-medium text-text-secondary">
                     Shopify totals &middot; every traffic source
