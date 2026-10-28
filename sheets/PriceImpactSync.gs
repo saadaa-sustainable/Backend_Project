@@ -21,6 +21,11 @@
  * The SKU tabs are discovered from the data, not listed here, so a later
  * repricing needs no edit to this file.
  */
+/** The four dates the columns cover, filled in as the first tab is
+ *  written and reported on Status. Derived from the data's own anchor,
+ *  so it cannot disagree with the headers. */
+var priCoverage_ = '(not yet determined)';
+
 var PRICE_IMPACT = {
   // Fixed tabs, in reading order.
   fixed: [
@@ -155,13 +160,16 @@ function priWriteTab_(ss, tabName, rows) {
   }
   // A per-SKU tab uses the curated order; everything else keeps the
   // view's own columns.
-  var headers = rows[0].hasOwnProperty('master_sku') && SKU_TAB_RE.test(tabName)
+  // `keys` addresses the data; `headers` is what the reader sees. They
+  // stop being the same list once the slot names carry their dates.
+  var keys = rows[0].hasOwnProperty('master_sku') && SKU_TAB_RE.test(tabName)
     ? SKU_TAB_COLUMNS.filter(function (h) { return rows[0].hasOwnProperty(h); })
     : Object.keys(rows[0]);
+  var headers = priDateHeaders_(keys, rows);
 
   var values = [headers];
   rows.forEach(function (r) {
-    values.push(headers.map(function (h) {
+    values.push(keys.map(function (h) {
       var v = r[h];
       return (v === null || v === undefined) ? '' : v;
     }));
@@ -170,7 +178,7 @@ function priWriteTab_(ss, tabName, rows) {
   priPace_();
   sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
-  priApplyFormats_(sheet, headers, values.length);
+  priApplyFormats_(sheet, keys, values.length);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
 }
@@ -224,7 +232,8 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   });
   groups.sort(function (a, b) { return b.sessions - a.sessions; });
 
-  var headers = GROUP_SKU_COLUMNS.concat(GROUP_PAGE_COLUMNS);
+  var keys = GROUP_SKU_COLUMNS.concat(GROUP_PAGE_COLUMNS);
+  var headers = priDateHeaders_(keys, rows);
   var values = [headers];
   var headerRows = [];
 
@@ -245,7 +254,7 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   priPace_();
   sheet.clear();  // clear() not clearContents(): formats must go too
   sheet.getRange(1, 1, values.length, headers.length).setValues(values);
-  priApplyFormats_(sheet, headers, values.length);
+  priApplyFormats_(sheet, keys, values.length);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
   // Bold each SKU header so the blocks are findable while scrolling.
@@ -319,6 +328,52 @@ function priBlendedAtc_(pages, sessionKey, rateKey) {
   return sess ? Math.round(adds / sess * 100 * 1000) / 1000 : '';
 }
 
+/** Rewrite slot names into the dates they actually mean.
+ *
+ *  `sessions_prev_month` tells a reader nothing about which day it is,
+ *  and the answer moves every morning as the anchor rolls forward.
+ *  Headers therefore carry the date itself -- `sessions 27 Sep (Sun)`
+ *  -- so a tab copied into a deck or mailed on is still legible a week
+ *  later, when "prev_month" would mean a different day.
+ *
+ *  The anchor comes from the rows themselves, never from the script's
+ *  clock: the sheet is written from whatever day the pipeline last
+ *  completed, which is not always yesterday. */
+function priDateHeaders_(headers, rows) {
+  var anchor = null;
+  for (var i = 0; i < rows.length && !anchor; i++) {
+    if (rows[i].anchor_day) anchor = rows[i].anchor_day;
+  }
+  if (!anchor) return headers.slice();
+
+  var d = new Date(anchor + 'T00:00:00Z');
+  function shift(days, months) {
+    var x = new Date(d.getTime());
+    if (months) x.setUTCMonth(x.getUTCMonth() - months);
+    if (days) x.setUTCDate(x.getUTCDate() - days);
+    return Utilities.formatDate(x, 'UTC', 'dd MMM (EEE)');
+  }
+  var label = {
+    today: shift(0, 0), prev_day: shift(1, 0),
+    prev_week: shift(7, 0), prev_month: shift(0, 1)
+  };
+  // Stashed for the Status tab, which otherwise would have to re-derive
+  // the anchor and could disagree with the headers it is describing.
+  priCoverage_ = 'anchor ' + label.today + '  ·  vs ' + label.prev_day +
+                 '  ·  vs ' + label.prev_week + '  ·  vs ' + label.prev_month;
+
+  return headers.map(function (h) {
+    // The delta is checked FIRST: it ends in `_prev_week` and would
+    // otherwise be caught by the generic rule below and come out as
+    // "atc delta vs · 20 Oct", with a separator where a word belongs.
+    if (h === 'atc_delta_vs_prev_week') return 'atc delta vs ' + label.prev_week;
+    var m = h.match(/^(.*)_(today|prev_day|prev_week|prev_month)$/);
+    if (m) return m[1].replace(/_/g, ' ') + ' · ' + label[m[2]];
+    if (h === 'anchor_day') return 'anchor day';
+    return h.replace(/_/g, ' ');
+  });
+}
+
 /** Number format per column, applied explicitly on every write.
  *
  *  clearContents() clears VALUES and leaves formats behind, so when the
@@ -337,10 +392,11 @@ function priNumberFormat_(header) {
   return '@';  // text, so a SKU code or a path is never guessed at
 }
 
-/** Apply formats column by column, over the data rows only. */
-function priApplyFormats_(sheet, headers, rowCount) {
+/** Apply formats column by column, over the data rows only.
+ *  Keyed on the ORIGINAL column names, never the date-labelled ones. */
+function priApplyFormats_(sheet, keys, rowCount) {
   if (rowCount < 2) return;
-  headers.forEach(function (h, i) {
+  keys.forEach(function (h, i) {
     sheet.getRange(2, i + 1, rowCount - 1, 1).setNumberFormat(priNumberFormat_(h));
   });
 }
@@ -380,6 +436,7 @@ function priWriteStatus_(ss, summary) {
               ss.insertSheet(PRICE_IMPACT.statusTab);
   var notes = [
     ['Last sync', new Date()],
+    ['Columns cover', priCoverage_],
     ['Anchor day', 'the latest COMPLETE day. Today is partial until the nightly runs, ' +
                    'so comparing it against full days would show every SKU down ~80%.'],
     ['Headline metric', 'product-page add-to-cart rate (%)'],

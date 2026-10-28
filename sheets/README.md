@@ -375,6 +375,31 @@ unaffected, since the same share is missing from each. And on a
 collection row it is **shared**, exactly as the sessions are: SDCP's 31
 collections total ₹30,042, earned alongside every other SKU on them.
 
+### Headers carry the date, not the slot name
+
+`sessions_prev_month` says nothing about which day it is, and the answer
+moves every morning as the anchor rolls forward. Columns are labelled
+with the date itself, so a tab copied into a deck or mailed on is still
+legible a week later:
+
+```
+sessions · 27 Oct (Tue)   sessions · 26 Oct (Mon)
+sessions · 20 Oct (Tue)   sessions · 27 Sep (Sun)
+atc delta vs 20 Oct (Tue)
+```
+
+The weekday is there on purpose — it shows at a glance that the
+week-ago column is the same weekday, so the comparison is like for like.
+
+The anchor comes from the rows themselves, never from the script's
+clock: the sheet is written from whatever day the pipeline last
+completed, and that is not always yesterday. Number formats stay keyed
+to the original column names, so relabelling the headers cannot
+misformat a column.
+
+The Status tab repeats the four dates in one line, so the sheet always
+states which days it is showing.
+
 ### Blank means missing, zero means zero
 
 Of the 1,163 pages the repriced SKUs sit on, only about 650–740 get any
