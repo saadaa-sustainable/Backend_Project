@@ -351,6 +351,14 @@ function DashboardContent() {
   // sessions). Both halves are now selected by one utm_source rule.
   const metaRevenue = kpis.data?.meta_shopify_revenue ?? null;
   const metaOrders = kpis.data?.meta_shopify_orders ?? null;
+  // The same two ratios over ALL of Shopify -- every source, not just
+  // Meta. Both halves are all-traffic, so this one is self-consistent
+  // too, and it is what makes the Shopify tab comparable to the Google
+  // tab beside it, which can only ever be all-traffic.
+  const allRevenuePerSession = kpis.data && allSessionCount !== null && allSessionCount > 0
+    ? kpis.data.total_shopify_revenue / allSessionCount : null;
+  const allConversionRate = kpis.data && allSessionCount !== null && allSessionCount > 0
+    ? kpis.data.total_shopify_orders / allSessionCount : null;
   const revenuePerSession = metaRevenue !== null && sessionCount !== null && sessionCount > 0
     ? metaRevenue / sessionCount : null;
   const conversionRate = metaOrders !== null && sessionCount !== null && sessionCount > 0
@@ -601,6 +609,71 @@ function DashboardContent() {
                   </dd>
                 </div>
               </dl>
+              )}
+
+              {/* Shopify's whole shop, every traffic source. The tiles
+                  above are narrowed to Meta, which is the right basis
+                  for a ratio against Meta spend but answers only "how
+                  does Meta's traffic behave" -- not "how does the shop
+                  behave". Both halves here are all-traffic, so this is
+                  self-consistent in its own right, and it is the row
+                  that lines up with the Google tab, which can only ever
+                  be all-traffic.
+
+                  Cost per session is deliberately absent: the spend is
+                  Meta's and this denominator is not, so the one number
+                  that would mix them is left out rather than printed
+                  with a caveat nobody reads. */}
+              {source === "shopify" && (
+                <div className="mt-4 border-t border-border-primary pt-3">
+                  <p className="text-xs font-medium text-text-secondary">
+                    All traffic &middot; every source Shopify records
+                  </p>
+                  <dl className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                      <dt className="text-xs text-text-secondary">Revenue / session</dt>
+                      <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
+                        {formatPerSession(allRevenuePerSession)}
+                      </dd>
+                      <dd className="mt-1 text-xs text-text-secondary">
+                        All Shopify revenue &divide; all Shopify sessions
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-text-secondary">Conversion rate</dt>
+                      <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
+                        {formatConversionRate(allConversionRate)}
+                      </dd>
+                      <dd className="mt-1 text-xs text-text-secondary">
+                        All Shopify orders &divide; all Shopify sessions &times; 100
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-text-secondary">Total revenue</dt>
+                      <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
+                        {kpis.data.total_shopify_revenue == null
+                          ? "\u2014" : formatCurrency(kpis.data.total_shopify_revenue)}
+                      </dd>
+                      <dd className="mt-1 text-xs text-text-secondary">
+                        {kpis.data.total_shopify_orders.toLocaleString("en-IN")} orders
+                        {metaRevenue !== null && kpis.data.total_shopify_revenue > 0 && (
+                          <> &middot; Meta drove {(100 * metaRevenue / kpis.data.total_shopify_revenue).toFixed(1)}%</>
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-text-secondary">Total sessions</dt>
+                      <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
+                        {allSessionCount === null ? "\u2014" : allSessionCount.toLocaleString("en-IN")}
+                      </dd>
+                      <dd className="mt-1 text-xs text-text-secondary">
+                        {metaShare === null
+                          ? "Across all traffic sources"
+                          : `${metaShare.toFixed(1)}% of them Meta-driven`}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
               )}
               <p className="mt-3 border-t border-border-primary pt-3 text-xs text-text-secondary">
                 {/* The denominator the tiles above actually used, named
