@@ -137,7 +137,13 @@ var SKU_TAB_COLUMNS = [
   'page_type', 'page_path', 'page_title', 'skus_on_page',
   'sessions_today', 'sessions_prev_day', 'sessions_prev_week', 'sessions_prev_month',
   'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
-  'atc_delta_vs_prev_week', 'product_status', 'anchor_day'
+  'atc_delta_vs_prev_week',
+  // Revenue of the orders whose converting session landed on this page,
+  // from real orders rather than the landing-page table's own count.
+  'revenue_today', 'revenue_prev_day', 'revenue_prev_week', 'revenue_prev_month',
+  'orders_today', 'orders_prev_week',
+  'revenue_per_1k_today', 'revenue_per_1k_prev_week',
+  'product_status', 'anchor_day'
 ];
 
 function priWriteTab_(ss, tabName, rows) {
@@ -176,7 +182,9 @@ var GROUP_PAGE_COLUMNS = [
   'page_type', 'page_path', 'page_title', 'skus_on_page',
   'sessions_today', 'sessions_prev_day', 'sessions_prev_week', 'sessions_prev_month',
   'atc_rate_today', 'atc_rate_prev_day', 'atc_rate_prev_week', 'atc_rate_prev_month',
-  'atc_delta_vs_prev_week'
+  'atc_delta_vs_prev_week',
+  'revenue_today', 'revenue_prev_day', 'revenue_prev_week', 'revenue_prev_month',
+  'orders_today', 'orders_prev_week'
 ];
 
 /** One header row per SKU, then its pages beneath it.
@@ -224,6 +232,9 @@ function priWriteGroupedTab_(ss, tabName, rows) {
     var atcNow = priBlendedAtc_(g.pages, 'sessions_today', 'atc_rate_today');
     var atcWeek = priBlendedAtc_(g.pages, 'sessions_prev_week', 'atc_rate_prev_week');
 
+    var rev = priSum_(g.pages, 'revenue_today');
+    var revWeek = priSum_(g.pages, 'revenue_prev_week');
+
     headerRows.push(values.length + 1);
     values.push([
       g.sku, g.head.direction, g.head.old_price, g.head.new_price, g.head.price_change,
@@ -231,14 +242,16 @@ function priWriteGroupedTab_(ss, tabName, rows) {
       // Spelt out per tab, because the two totals do not mean the same
       // thing. Product pages belong to this SKU; collection pages are
       // shared with every other SKU on them, so the block total is not
-      // this SKU's traffic and must not be read as if it were.
+      // this SKU's traffic or revenue and must not be read as if it were.
       tabName === 'Collection'
-        ? 'ALL COLLECTIONS - SHARED TRAFFIC, NOT THIS SKU ALONE'
+        ? 'ALL COLLECTIONS - SHARED TRAFFIC AND REVENUE, NOT THIS SKU ALONE'
         : 'ALL PRODUCT PAGES FOR THIS SKU',
       '', '',
       g.sessions, '', prevWeek, '',
       atcNow, '', atcWeek, '',
-      (atcNow !== '' && atcWeek !== '') ? Math.round((atcNow - atcWeek) * 1000) / 1000 : ''
+      (atcNow !== '' && atcWeek !== '') ? Math.round((atcNow - atcWeek) * 1000) / 1000 : '',
+      rev, '', revWeek, '',
+      priSum_(g.pages, 'orders_today'), priSum_(g.pages, 'orders_prev_week')
     ]);
 
     g.pages.forEach(function (r) {
@@ -258,6 +271,19 @@ function priWriteGroupedTab_(ss, tabName, rows) {
   headerRows.forEach(function (row) {
     sheet.getRange(row, 1, 1, headers.length).setFontWeight('bold');
   });
+}
+
+/** Total of one numeric column across a block, blank when the block
+ *  has none of it at all -- a zero would claim the pages were measured
+ *  and returned nothing. */
+function priSum_(pages, key) {
+  var any = false, total = 0;
+  pages.forEach(function (r) {
+    if (r[key] !== null && r[key] !== undefined && r[key] !== '') {
+      any = true; total += Number(r[key]);
+    }
+  });
+  return any ? Math.round(total * 100) / 100 : '';
 }
 
 /** Sessions-weighted add-to-cart rate across a block's pages.

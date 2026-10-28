@@ -280,6 +280,39 @@ WITH anchor AS (
     SELECT MAX(day) AS day FROM public.shopify_landing_page_analysis
     WHERE day < current_date
 ),
+page_revenue AS (
+    -- Every order carries the page its converting session started on,
+    -- as a full URL with the whole UTM tail attached. Strip scheme,
+    -- host and query and it joins straight onto landing_page_path --
+    -- verified: 29,280 of 29,280 orders normalise, and the homepage
+    -- lands on '/' like every other path.
+    --
+    -- This is REAL order revenue, not the landing-page table's own
+    -- figure, which sees under a tenth of conversions. It is still a
+    -- floor: ga4_order_attribution holds ~76% of Shopify orders, so
+    -- every revenue number here is roughly a quarter light in absolute
+    -- terms. Day-over-day ratios are unaffected, since the same share
+    -- is missing from each.
+    --
+    -- Pivoted to ONE ROW PER PATH here rather than joined per day. The
+    -- landing-page table carries several rows per path per day (one per
+    -- referrer and matched campaign), so a day-wise join multiplies the
+    -- revenue by however many of those there happen to be.
+    SELECT COALESCE(NULLIF(regexp_replace(
+               regexp_replace(g.last_landing, '^https?://[^/]+', ''),
+               '[?].*$', ''), ''), '/') AS path,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day)     AS rev_anchor,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 1) AS rev_prev_day,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 7) AS rev_prev_week,
+           SUM(g.revenue) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
+                                        = (an.day - INTERVAL '1 month')::date)                       AS rev_prev_month,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day)     AS ord_anchor,
+           COUNT(*) FILTER (WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date = an.day - 7) AS ord_prev_week
+    FROM public.ga4_order_attribution g, anchor an
+    WHERE (g.order_at AT TIME ZONE 'Asia/Kolkata')::date
+          IN (an.day, an.day - 1, an.day - 7, (an.day - INTERVAL '1 month')::date)
+    GROUP BY 1
+),
 slots AS (
     SELECT m.master_sku, m.page_type, m.page_path, m.page_title,
            m.skus_on_page, m.product_status,
@@ -298,37 +331,60 @@ slots AS (
       ON a.landing_page_path = m.page_path
      AND a.day IN (an.day, an.day - 1, an.day - 7,
                    (an.day - INTERVAL '1 month')::date)
+),
+agg AS (
+    SELECT
+        s.master_sku, s.page_type, s.page_path, s.page_title,
+        MAX(s.anchor_day) AS anchor_day,
+        MAX(s.skus_on_page) AS skus_on_page,
+        MAX(s.product_status) AS product_status,
+        SUM(s.sessions) FILTER (WHERE s.slot='anchor')     AS sessions_today,
+        SUM(s.sessions) FILTER (WHERE s.slot='prev_day')   AS sessions_prev_day,
+        SUM(s.sessions) FILTER (WHERE s.slot='prev_week')  AS sessions_prev_week,
+        SUM(s.sessions) FILTER (WHERE s.slot='prev_month') AS sessions_prev_month,
+        SUM(s.atc) FILTER (WHERE s.slot='anchor')     AS atc_anchor,
+        SUM(s.atc) FILTER (WHERE s.slot='prev_day')   AS atc_prev_day,
+        SUM(s.atc) FILTER (WHERE s.slot='prev_week')  AS atc_prev_week,
+        SUM(s.atc) FILTER (WHERE s.slot='prev_month') AS atc_prev_month
+    FROM slots s
+    GROUP BY s.master_sku, s.page_type, s.page_path, s.page_title
 )
 SELECT
-    s.master_sku,
+    a.master_sku,
     c.direction, c.old_price, c.new_price, c.price_change, c.hidden,
-    MAX(s.anchor_day) AS anchor_day,
-    s.page_type, s.page_path, s.page_title,
+    a.anchor_day, a.page_type, a.page_path, a.page_title,
     -- 1 on a product page; higher on a collection, which is shared. A
-    -- collection's sessions are NOT this SKU's sessions.
-    MAX(s.skus_on_page) AS skus_on_page,
-    MAX(s.product_status) AS product_status,
-    SUM(s.sessions) FILTER (WHERE s.slot='anchor')     AS sessions_today,
-    SUM(s.sessions) FILTER (WHERE s.slot='prev_day')   AS sessions_prev_day,
-    SUM(s.sessions) FILTER (WHERE s.slot='prev_week')  AS sessions_prev_week,
-    SUM(s.sessions) FILTER (WHERE s.slot='prev_month') AS sessions_prev_month,
-    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='anchor')
-        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='anchor'),0), 3)     AS atc_rate_today,
-    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_day')
-        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_day'),0), 3)   AS atc_rate_prev_day,
-    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_week')
-        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_week'),0), 3)  AS atc_rate_prev_week,
-    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_month')
-        / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_month'),0), 3) AS atc_rate_prev_month,
-    ROUND(100.0*SUM(s.atc) FILTER (WHERE s.slot='anchor')
-          / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='anchor'),0)
-        - 100.0*SUM(s.atc) FILTER (WHERE s.slot='prev_week')
-          / NULLIF(SUM(s.sessions) FILTER (WHERE s.slot='prev_week'),0), 3)
-      AS atc_delta_vs_prev_week
-FROM slots s
-JOIN public.sku_price_change c ON c.master_sku = s.master_sku
-GROUP BY s.master_sku, c.direction, c.old_price, c.new_price,
-         c.price_change, c.hidden, s.page_type, s.page_path, s.page_title
+    -- collection's sessions and revenue are NOT this SKU's alone.
+    a.skus_on_page, a.product_status,
+    a.sessions_today, a.sessions_prev_day, a.sessions_prev_week, a.sessions_prev_month,
+    ROUND(100.0*a.atc_anchor     / NULLIF(a.sessions_today, 0), 3)      AS atc_rate_today,
+    ROUND(100.0*a.atc_prev_day   / NULLIF(a.sessions_prev_day, 0), 3)   AS atc_rate_prev_day,
+    ROUND(100.0*a.atc_prev_week  / NULLIF(a.sessions_prev_week, 0), 3)  AS atc_rate_prev_week,
+    ROUND(100.0*a.atc_prev_month / NULLIF(a.sessions_prev_month, 0), 3) AS atc_rate_prev_month,
+    ROUND(100.0*a.atc_anchor / NULLIF(a.sessions_today, 0)
+        - 100.0*a.atc_prev_week / NULLIF(a.sessions_prev_week, 0), 3)   AS atc_delta_vs_prev_week,
+    -- Revenue of orders whose converting session LANDED on this page.
+    ROUND(rv.rev_anchor, 2)     AS revenue_today,
+    ROUND(rv.rev_prev_day, 2)   AS revenue_prev_day,
+    ROUND(rv.rev_prev_week, 2)  AS revenue_prev_week,
+    ROUND(rv.rev_prev_month, 2) AS revenue_prev_month,
+    rv.ord_anchor    AS orders_today,
+    rv.ord_prev_week AS orders_prev_week,
+    -- What the page returned for the traffic it got: the only figure
+    -- that compares a 66-session page with a 6,787-session one.
+    --
+    -- Suppressed under 50 sessions, the same reflex as the ROAS floor
+    -- elsewhere in this codebase. /collections/all-whites took ten
+    -- sessions and one Rs 4,397 order, which reads as Rs 4,39,700 per
+    -- thousand and would top any sort on this column. One order is not
+    -- a rate.
+    CASE WHEN a.sessions_today >= 50
+         THEN ROUND(1000.0 * rv.rev_anchor / a.sessions_today, 2) END     AS revenue_per_1k_today,
+    CASE WHEN a.sessions_prev_week >= 50
+         THEN ROUND(1000.0 * rv.rev_prev_week / a.sessions_prev_week, 2) END AS revenue_per_1k_prev_week
+FROM agg a
+JOIN public.sku_price_change c ON c.master_sku = a.master_sku
+LEFT JOIN page_revenue rv ON rv.path = a.page_path
 """
 
 # ── Everything that is not a product or collection page ──────────────
@@ -405,7 +461,21 @@ GROUP BY 1,2,3,4,5,6,7,8,9
 """
 
 
+#: CREATE OR REPLACE VIEW refuses to change an existing column's type,
+#: so a rebuild that narrows numeric to bigint fails on an older copy.
+#: Nothing depends on these views but the sheet, which reads them fresh
+#: each run, so dropping first is cheaper than versioning the columns.
+_VIEW_NAMES = (
+    "public.sku_price_impact_daily", "public.sku_price_impact_compare",
+    "public.sku_price_impact_summary", "public.sku_price_impact_pages",
+    "public.sku_page_compare", "public.other_page_compare",
+)
+
+
 def _rebuild_views(cur) -> None:
+    # Reverse order: compare and summary read daily, so they go first.
+    for name in reversed(_VIEW_NAMES):
+        cur.execute(f"DROP VIEW IF EXISTS {name} CASCADE")
     for name, sql in (("daily", DAILY_VIEW), ("compare", COMPARE_VIEW),
                       ("summary", SUMMARY_VIEW), ("pages", PAGES_VIEW),
                       ("sku_page_compare", PAGE_COMPARE_VIEW),

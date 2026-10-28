@@ -335,6 +335,40 @@ SHARED TRAFFIC, NOT THIS SKU ALONE*, because SDCP's 31 collections total
 8,276 sessions that it shares with other SKUs. `skus_on_page` stays on
 every row so the distinction survives a copy-paste.
 
+### Revenue per page
+
+Every order records the page its converting session landed on, as a full
+URL with the UTM tail attached. Stripped of scheme, host and query it
+joins straight onto `landing_page_path` — all 29,280 orders in a 30-day
+window normalise, and the reconstructed per-page totals match the source
+exactly (51 of 51 pages, revenue and order count both).
+
+So `revenue_today` is **real order revenue**, not the landing-page
+table's own count, which sees under a tenth of conversions. Columns:
+`revenue_today / prev_day / prev_week / prev_month`, `orders_today`,
+`orders_prev_week`, and `revenue_per_1k_today` — what a page returned
+for the traffic it got, which is the only figure that compares a
+66-session page with a 6,787-session one.
+
+| page | sessions | revenue | orders | per 1k |
+|---|---|---|---|---|
+| `/collections/cotton-trousers` | 6,787 | ₹17,916 | 13 | ₹2,640 |
+| `/collections/all-whites` | 10 | ₹4,397 | 1 | — |
+| `/collections/best-sellers-women` | 535 | ₹4,030 | 3 | ₹7,534 |
+| `/products/wine-solid-regular-fit-cotton-trouser` | 104 | ₹1,498 | 1 | ₹14,404 |
+
+`revenue_per_1k` is suppressed under 50 sessions, the same reflex as the
+ROAS floor elsewhere in this codebase. `all-whites` took ten sessions
+and one ₹4,397 order, which works out at ₹4,39,700 per thousand and
+would have topped any sort on that column. One order is not a rate.
+
+**Two things the number is not.** It is a floor: `ga4_order_attribution`
+holds about 76% of Shopify orders, so every revenue figure here is
+roughly a quarter light in absolute terms — day-over-day ratios are
+unaffected, since the same share is missing from each. And on a
+collection row it is **shared**, exactly as the sessions are: SDCP's 31
+collections total ₹30,042, earned alongside every other SKU on them.
+
 ### Why the Other tab has no SKU column
 
 Checked directly rather than assumed: of **111 Shopify custom pages,
