@@ -351,14 +351,6 @@ function DashboardContent() {
   // sessions). Both halves are now selected by one utm_source rule.
   const metaRevenue = kpis.data?.meta_shopify_revenue ?? null;
   const metaOrders = kpis.data?.meta_shopify_orders ?? null;
-  // The same two ratios over ALL of Shopify -- every source, not just
-  // Meta. Both halves are all-traffic, so this one is self-consistent
-  // too, and it is what makes the Shopify tab comparable to the Google
-  // tab beside it, which can only ever be all-traffic.
-  const allRevenuePerSession = kpis.data && allSessionCount !== null && allSessionCount > 0
-    ? kpis.data.total_shopify_revenue / allSessionCount : null;
-  const allConversionRate = kpis.data && allSessionCount !== null && allSessionCount > 0
-    ? kpis.data.total_shopify_orders / allSessionCount : null;
   const revenuePerSession = metaRevenue !== null && sessionCount !== null && sessionCount > 0
     ? metaRevenue / sessionCount : null;
   const conversionRate = metaOrders !== null && sessionCount !== null && sessionCount > 0
@@ -611,53 +603,31 @@ function DashboardContent() {
               </dl>
               )}
 
-              {/* Shopify's whole shop, every traffic source. The tiles
-                  above are narrowed to Meta, which is the right basis
-                  for a ratio against Meta spend but answers only "how
-                  does Meta's traffic behave" -- not "how does the shop
-                  behave". Both halves here are all-traffic, so this is
-                  self-consistent in its own right, and it is the row
-                  that lines up with the Google tab, which can only ever
-                  be all-traffic.
+              {/* Shopify's own totals, every traffic source.
 
-                  Cost per session is deliberately absent: the spend is
-                  Meta's and this denominator is not, so the one number
-                  that would mix them is left out rather than printed
-                  with a caveat nobody reads. */}
+                  Totals, NOT a second set of ratios. The tiles above
+                  are Meta-driven on both halves and that is what makes
+                  them correct; printing an all-traffic revenue per
+                  session beside them would put two different numbers
+                  for one metric on one tab, and the reader has no way
+                  to tell which is meant. These are the raw figures the
+                  Meta slice is a part of, with that part named. */}
               {source === "shopify" && (
                 <div className="mt-4 border-t border-border-primary pt-3">
                   <p className="text-xs font-medium text-text-secondary">
-                    All traffic &middot; every source Shopify records
+                    Shopify totals &middot; every traffic source
                   </p>
-                  <dl className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    <div>
-                      <dt className="text-xs text-text-secondary">Revenue / session</dt>
-                      <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
-                        {formatPerSession(allRevenuePerSession)}
-                      </dd>
-                      <dd className="mt-1 text-xs text-text-secondary">
-                        All Shopify revenue &divide; all Shopify sessions
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-xs text-text-secondary">Conversion rate</dt>
-                      <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
-                        {formatConversionRate(allConversionRate)}
-                      </dd>
-                      <dd className="mt-1 text-xs text-text-secondary">
-                        All Shopify orders &divide; all Shopify sessions &times; 100
-                      </dd>
-                    </div>
+                  <dl className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
                       <dt className="text-xs text-text-secondary">Total revenue</dt>
                       <dd className="mt-1 tabular-nums text-xl font-semibold text-text-primary">
-                        {kpis.data.total_shopify_revenue == null
-                          ? "\u2014" : formatCurrency(kpis.data.total_shopify_revenue)}
+                        {formatCurrency(kpis.data.total_shopify_revenue)}
                       </dd>
                       <dd className="mt-1 text-xs text-text-secondary">
                         {kpis.data.total_shopify_orders.toLocaleString("en-IN")} orders
                         {metaRevenue !== null && kpis.data.total_shopify_revenue > 0 && (
-                          <> &middot; Meta drove {(100 * metaRevenue / kpis.data.total_shopify_revenue).toFixed(1)}%</>
+                          <> &middot; {formatCurrency(metaRevenue)} of it Meta-driven
+                            {" "}({(100 * metaRevenue / kpis.data.total_shopify_revenue).toFixed(1)}%)</>
                         )}
                       </dd>
                     </div>
@@ -667,9 +637,9 @@ function DashboardContent() {
                         {allSessionCount === null ? "\u2014" : allSessionCount.toLocaleString("en-IN")}
                       </dd>
                       <dd className="mt-1 text-xs text-text-secondary">
-                        {metaShare === null
+                        {sessionCount === null || metaShare === null
                           ? "Across all traffic sources"
-                          : `${metaShare.toFixed(1)}% of them Meta-driven`}
+                          : `${sessionCount.toLocaleString("en-IN")} of them Meta-driven (${metaShare.toFixed(1)}%)`}
                       </dd>
                     </div>
                   </dl>
