@@ -36,7 +36,7 @@ const percent = (n: number | null) => n === null ? "—"
 const shortDay = (day: string) => new Date(`${day}T12:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 
 /** Which source's lines to draw. Matches the tab above the chart. */
-export type TrendSource = "shopify" | "google" | "both";
+export type TrendSource = "meta" | "shopify" | "google" | "both";
 
 /** The three ratios, per source. Colour carries the METRIC and dash
  *  carries the SOURCE -- so on "both" a pair sits in one colour, solid
@@ -49,9 +49,13 @@ const SERIES: Record<Exclude<TrendSource, "both">, {
   label: string;
   dash?: string;
 }> = {
-  shopify: {
+  meta: {
     cost: "cost_per_session", revenue: "revenue_per_session",
-    rate: "conversion_rate", label: "Shopify", dash: undefined,
+    rate: "conversion_rate", label: "Meta", dash: undefined,
+  },
+  shopify: {
+    cost: "all_cost_per_session", revenue: "all_revenue_per_session",
+    rate: "all_conversion_rate", label: "Shopify", dash: undefined,
   },
   google: {
     cost: "ga4_cost_per_session", revenue: "ga4_revenue_per_session",
@@ -61,17 +65,23 @@ const SERIES: Record<Exclude<TrendSource, "both">, {
 
 /** Aligned plots keep rupees and percentages on separate, labelled scales. */
 export function SessionTrendChart({
-  points, source = "shopify",
+  points, source = "meta",
 }: { points: DashboardSessionTrendPoint[]; source?: TrendSource }) {
   const titleId = useId();
   const [selected, setSelected] = useState<number | null>(null);
   const active = Math.min(selected ?? points.length - 1, points.length - 1);
   const point = points[active];
   // Which sources are drawn, in draw order.
+  // "both" draws the two ALL-TRAFFIC readings against each other --
+  // Shopify and GA4 watching the same population. Meta is a subset of
+  // Shopify, so laying it beside GA4 would compare a part with a whole
+  // and most of the gap would be scope rather than measurement.
   const sources: Exclude<TrendSource, "both">[] =
     source === "both" ? ["shopify", "google"] : [source];
-  // ARPU is GA4's alone, so it has no band on the Shopify tab.
-  const showArpu = source !== "shopify";
+  // ARPU is GA4's alone: its band belongs on the tabs where GA4 is
+  // actually drawn. "Not Meta" was the wrong test -- it put a GA4 line
+  // on the Shopify tab, which has no GA4 figure on it anywhere.
+  const showArpu = sources.includes("google");
 
   const num = (p: DashboardSessionTrendPoint, k: keyof DashboardSessionTrendPoint) => {
     const v = p[k];
@@ -220,12 +230,13 @@ export function SessionTrendChart({
         <span className="font-medium text-text-primary">{point.day}</span>
         {sources.map((src) => {
           const sfx = source === "both" ? ` · ${SERIES[src].label}` : "";
-          const sess = src === "google" ? point.ga4_sessions ?? null : point.sessions;
+          const sess = src === "google" ? point.ga4_sessions ?? null
+            : src === "shopify" ? point.all_sessions ?? null : point.sessions;
           return (
             <Fragment key={src}>
               <span>
                 {sess === null ? "Sessions unavailable"
-                  : `${sess.toLocaleString("en-IN")} ${src === "google" ? "GA4" : "Meta"} sessions`}
+                  : `${sess.toLocaleString("en-IN")} ${SERIES[src].label} sessions`}
               </span>
               <span>Cost / session{sfx}: <strong className="font-medium text-text-primary">{money(num(point, SERIES[src].cost))}</strong></span>
               <span>Revenue / session{sfx}: <strong className="font-medium text-text-primary">{money(num(point, SERIES[src].revenue))}</strong></span>
@@ -240,11 +251,13 @@ export function SessionTrendChart({
         onChange={(event) => setSelected(Number(event.target.value))} className="mt-3 h-5 w-full cursor-pointer accent-[var(--accent-yellow)]" />}
       <p className="mt-1 text-xs text-text-secondary">
         Daily ratios use the same definitions as the cards above, and follow the source tab.{" "}
-        {source === "shopify"
+        {source === "meta"
           ? "Meta's orders over Meta-driven Shopify sessions."
-          : source === "google"
-            ? "GA4's revenue and purchases over GA4 sessions — all traffic, since GA4 cannot be narrowed to Meta. Cost per session is the one line that mixes sources: Meta spend over every GA4 session."
-            : "Shopify is Meta-driven only; GA4 is all traffic. Part of the gap between a solid line and its dashed twin is that difference in scope, not disagreement."}
+          : source === "shopify"
+            ? "All of Shopify's orders over all of its sessions. Cost per session is the one line that mixes sources: the spend is Meta's and this traffic is not."
+            : source === "google"
+              ? "GA4's revenue and purchases over GA4 sessions — all traffic, since GA4 cannot be narrowed to Meta. Cost per session is the one line that mixes sources: Meta spend over every GA4 session."
+              : "Two systems watching the same all-traffic population, so a solid line and its dashed twin should roughly agree — where they do not, one of them is mismeasuring."}
         {showArpu && " ARPU sits on its own scale because it divides by something else entirely — GA4's deduplicated count of users active that day, so each visitor is counted once however many times they came back. That makes a point on the ARPU line exact, unlike the figure on the card above, which adds those daily counts together."}
         {" "}Gaps mark days with no data.
       </p>

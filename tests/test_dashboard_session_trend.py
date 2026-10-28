@@ -210,3 +210,44 @@ async def test_ga4_daily_ratios_divide_ga4_by_ga4(session):
     assert last.ga4_revenue_per_session == 16
     assert last.ga4_conversion_rate == 0.016
     assert last.ga4_cost_per_session == 0
+
+
+async def test_all_traffic_ratios_use_the_whole_shop(session):
+    """The Shopify tab's lines: every order over every session.
+
+    Meta is a SUBSET of this, not an alternative to it, so both must be
+    carried per day -- the fixture's 1 Oct has a 500-rupee Google order
+    that belongs here and not in the Meta figures beside it.
+    """
+    result = await analytics.get_dashboard_session_trend(
+        session, date(2026, 10, 1), date(2026, 10, 3))
+    first, _gap, last = result.points
+
+    # 1 Oct: meta 25 + 75 = 100 over 2 orders; all adds the Google 500,
+    # so 600 over 3. Sessions 100 Meta of 900 all -- the Shopify
+    # rollup's own counts, NOT the 250 GA4 reports for the same day.
+    assert (first.attributed_revenue, first.attributed_orders) == (100, 2)
+    assert (first.all_revenue, first.all_orders) == (600, 3)
+    assert first.all_sessions == 900
+    assert first.ga4_sessions == 250
+    assert first.all_revenue_per_session == 600 / 900
+    assert first.all_conversion_rate == 3 / 900
+    assert first.all_cost_per_session == 150 / 900
+
+    # The Meta ratios on the same day divide by the 100-session subset,
+    # so the two tabs genuinely differ.
+    assert first.revenue_per_session == 1
+
+    # 3 Oct has one order, Meta's, so the two agree there.
+    assert (last.attributed_revenue, last.all_revenue) == (100, 100)
+
+
+async def test_all_traffic_sessions_gap_where_the_rollup_has_no_row(session):
+    """A missing session row is unknown, not zero -- for both counts."""
+    result = await analytics.get_dashboard_session_trend(session)
+    missing = result.points[4]
+    assert missing.sessions is None
+    assert missing.all_sessions is None
+    assert missing.all_revenue_per_session is None
+    # The orders are still reported; only the denominator is absent.
+    assert missing.all_revenue == 800

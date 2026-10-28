@@ -8285,6 +8285,16 @@ class DashboardSessionTrendPoint(BaseModel):
     ga4_cost_per_session: float | None = None
     ga4_revenue_per_session: float | None = None
     ga4_conversion_rate: float | None = None
+    #: Shopify's whole shop -- every traffic source, the superset that
+    #: `sessions` and `attributed_revenue` above are the Meta part of.
+    #: `all_cost_per_session` is the one that mixes sources: the spend
+    #: is Meta's and this denominator is not.
+    all_sessions: int | None = None
+    all_revenue: float = 0.0
+    all_orders: int = 0
+    all_cost_per_session: float | None = None
+    all_revenue_per_session: float | None = None
+    all_conversion_rate: float | None = None
 
 
 class DashboardSessionTrendResponse(BaseModel):
@@ -8319,7 +8329,11 @@ async def get_dashboard_session_trend(
                        COALESCE(CAST(:dt AS date), MAX(day)) AS hi
                 FROM public.shopify_sessions_daily
             ), session_days AS (
-                SELECT s.day, s.meta_sessions AS sessions
+                -- Both counts. meta_sessions is a SUBSET of sessions:
+                -- the Meta tab divides by the subset, the Shopify tab
+                -- by the whole, and they are different questions.
+                SELECT s.day, s.meta_sessions AS sessions,
+                       s.sessions AS all_sessions
                 FROM public.shopify_sessions_daily s, bounds b
                 WHERE s.day BETWEEN b.lo AND b.hi
             ), arpu_days AS (
@@ -8341,10 +8355,12 @@ async def get_dashboard_session_trend(
                 -- read 97 per cent high, exactly as the cards did.
                 -- Same rule as the cards and as meta_sessions itself.
                 SELECT CAST(o.created_at AS date) AS day,
-                       SUM(o.total_price) AS revenue, COUNT(*) AS orders
+                       SUM(o.total_price) FILTER (WHERE {_META_ORDER_SQL}) AS revenue,
+                       COUNT(*) FILTER (WHERE {_META_ORDER_SQL}) AS orders,
+                       SUM(o.total_price) AS all_revenue,
+                       COUNT(*) AS all_orders
                 FROM shopify_order_attribution o, bounds b
                 WHERE o.created_at >= b.lo AND o.created_at < (b.hi + 1)
-                  AND {_META_ORDER_SQL}
                 GROUP BY CAST(o.created_at AS date)
             ), days AS (
                 SELECT day FROM session_days UNION SELECT day FROM ad_days
@@ -8355,7 +8371,8 @@ async def get_dashboard_session_trend(
             SELECT d.day, s.sessions, a.spend, o.revenue, o.orders,
                    sb.first_day, sb.last_day,
                    g.active_users, g.total_revenue,
-                   g.sessions AS ga4_sessions, g.purchases AS ga4_purchases
+                   g.sessions AS ga4_sessions, g.purchases AS ga4_purchases,
+                   s.all_sessions, o.all_revenue, o.all_orders
             FROM days d
             LEFT JOIN session_days s ON s.day = d.day
             LEFT JOIN ad_days a ON a.day = d.day
@@ -8400,6 +8417,12 @@ async def get_dashboard_session_trend(
         g_sess = int(row[9]) if row and row[9] is not None else None
         g_buys = int(row[10]) if row and row[10] is not None else None
         g_denom = g_sess if g_sess and g_sess > 0 else None
+        # Shopify's whole shop. Same shape as the Meta figures beside
+        # them, over the superset they are a part of.
+        a_sess = int(row[11]) if row and row[11] is not None else None
+        a_rev = float((row[12] if row else 0) or 0)
+        a_orders = int((row[13] if row else 0) or 0)
+        a_denom = a_sess if a_sess and a_sess > 0 else None
         points.append(DashboardSessionTrendPoint(
             day=day, sessions=sessions, ad_spend=spend,
             ga4_active_users=g_users,
@@ -8412,6 +8435,12 @@ async def get_dashboard_session_trend(
             ga4_cost_per_session=(spend / g_denom) if g_denom and spend is not None else None,
             ga4_revenue_per_session=(g_rev / g_denom) if g_denom and g_rev is not None else None,
             ga4_conversion_rate=(g_buys / g_denom) if g_denom and g_buys is not None else None,
+            all_sessions=a_sess,
+            all_revenue=a_rev,
+            all_orders=a_orders,
+            all_cost_per_session=(spend / a_denom) if a_denom and spend is not None else None,
+            all_revenue_per_session=(a_rev / a_denom) if a_denom else None,
+            all_conversion_rate=(a_orders / a_denom) if a_denom else None,
         ))
     return DashboardSessionTrendResponse(points=points, spend_data_from=spend_from, spend_data_to=spend_to)
 
