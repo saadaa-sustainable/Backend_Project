@@ -40,13 +40,14 @@ def session():
     # day would be counted twice.
     connection.executescript("""
         CREATE TABLE ga4_arpu_daily (
-            day TEXT, device_category TEXT, active_users INTEGER, total_revenue NUMERIC);
+            day TEXT, device_category TEXT, active_users INTEGER, total_revenue NUMERIC,
+            sessions INTEGER, purchases INTEGER);
         INSERT INTO ga4_arpu_daily VALUES
-            ('2026-01-01','(all)',   100, 2000),
-            ('2026-01-01','mobile',   90, 1800),
-            ('2026-01-02','(all)',   150, 3000),
-            ('2026-01-02','mobile',  140, 2900),
-            ('2026-01-03','(all)',    50, 1000);
+            ('2026-01-01','(all)',   100, 2000, 200,  4),
+            ('2026-01-01','mobile',   90, 1800, 180,  3),
+            ('2026-01-02','(all)',   150, 3000, 300,  6),
+            ('2026-01-02','mobile',  140, 2900, 280,  5),
+            ('2026-01-03','(all)',    50, 1000, 100,  2);
     """)
     connection.execute(_CREATE.replace("public.", ""))
     # btrim is Postgres' name for the standard no-argument trim.
@@ -133,6 +134,11 @@ async def test_http_response_contract_reads_summary(session):
         # rows (230 users, Rs 4,700) are excluded, which is the whole
         # point of reading only `(all)`.
         "ga4_arpu": 20.0, "ga4_active_users": 250, "ga4_revenue": 5000.0,
+        # GA4's own session and purchase counts, for the Google tab:
+        # 1-2 Jan `(all)` rows are 200 + 300 sessions and 4 + 6
+        # purchases. The mobile rows are excluded here too, so the
+        # Google tab divides the same population it counts.
+        "ga4_sessions": 500, "ga4_purchases": 10,
     }
 
 
@@ -174,3 +180,26 @@ async def test_uninitialized_summary_is_explicit_and_errors_never_fallback(sqlst
     # never reached and nothing was cached.
     session.execute.assert_awaited_once()
     assert not analytics.get_dashboard_sessions.analytics_cache.entries
+
+
+async def test_ga4_session_counts_exclude_the_per_device_rows(session):
+    """The Google tab's denominator must read `(all)` only.
+
+    The per-device rows sit beside it in the same table and summing
+    them in would count anyone who used two devices in a day twice --
+    the same trap the ARPU numerator already avoids.
+    """
+    result = await analytics.get_dashboard_sessions(
+        session=session, date_from=date(2026, 1, 1), date_to=date(2026, 1, 3))
+    # `(all)`: 200 + 300 + 100 sessions, 4 + 6 + 2 purchases. With the
+    # mobile rows it would be 980 and 18.
+    assert result.ga4_sessions == 600
+    assert result.ga4_purchases == 12
+
+
+async def test_ga4_session_counts_follow_the_date_range(session):
+    """A narrower window must not quietly return the whole table."""
+    result = await analytics.get_dashboard_sessions(
+        session=session, date_from=date(2026, 1, 3), date_to=date(2026, 1, 3))
+    assert result.ga4_sessions == 100
+    assert result.ga4_purchases == 2

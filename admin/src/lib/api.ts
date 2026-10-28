@@ -2341,6 +2341,12 @@ export interface DashboardSessions {
   /** User-days over the range, not unique users. */
   ga4_active_users?: number | null;
   ga4_revenue?: number | null;
+  /** GA4's own session and purchase counts, for the Google tab.
+   *  ALL traffic: GA4 cannot be narrowed to Meta from the data we
+   *  hold -- its landing pages carry no query string and its
+   *  channel_group files most Meta traffic under Organic Social. */
+  ga4_sessions?: number | null;
+  ga4_purchases?: number | null;
   session_data_from: string | null;
   session_data_to: string | null;
   available_days: number;

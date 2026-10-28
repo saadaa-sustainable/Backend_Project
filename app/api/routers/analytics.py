@@ -8218,6 +8218,20 @@ class DashboardSessionsResponse(BaseModel):
     #: User-DAYS over the range, not unique users.
     ga4_active_users: int | None = None
     ga4_revenue: float | None = None
+    #: GA4's own session and purchase counts, so the Google tab can
+    #: divide GA4 by GA4 rather than borrowing Shopify's denominator.
+    #:
+    #: ALL traffic, not Meta-driven -- GA4 cannot be narrowed to Meta
+    #: with the data we hold. Its landing_page column is stripped of
+    #: query strings (0 of 68,241 rows over 30 days carry a utm_source),
+    #: and its own channel_group files the bulk of Meta traffic under
+    #: Organic Social: 1,194,834 sessions there against 20,242 in Paid
+    #: Social, while Shopify's utm_source rule finds 1,504,827 Meta
+    #: sessions over the same days. So the Google tab is all-traffic by
+    #: necessity and the UI says so -- the alternative is a Meta share
+    #: invented from a channel grouping that demonstrably misfiles it.
+    ga4_sessions: int | None = None
+    ga4_purchases: int | None = None
     session_data_from: date | None
     session_data_to: date | None
     available_days: int
@@ -8707,13 +8721,19 @@ async def get_dashboard_sessions(
             where += " AND day BETWEEN :af AND :at"
             aparams = {"af": date_from, "at": date_to}
         a = (await session.execute(text(
-            "SELECT COALESCE(SUM(active_users), 0), COALESCE(SUM(total_revenue), 0) "
+            "SELECT COALESCE(SUM(active_users), 0), COALESCE(SUM(total_revenue), 0), "
+            "       COALESCE(SUM(sessions), 0), COALESCE(SUM(purchases), 0) "
             f"FROM public.ga4_arpu_daily {where}"
         ), aparams)).first()
         if a and a[0]:
             arpu = {"ga4_arpu": float(a[1]) / int(a[0]),
                     "ga4_active_users": int(a[0]),
                     "ga4_revenue": float(a[1])}
+        # Sessions can be present on days active_users is not, so these
+        # are kept outside the ARPU guard rather than hidden by it.
+        if a and a[2]:
+            arpu["ga4_sessions"] = int(a[2])
+            arpu["ga4_purchases"] = int(a[3])
     except DBAPIError:
         # Table not built yet. The session figures are still good.
         pass
