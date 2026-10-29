@@ -217,7 +217,11 @@ SELECT al.account_name,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
-       shop.utm_campaign
+       shop.utm_campaign,
+       -- Meta's attribution window for this ad, so a sheet can split
+       -- last-click revenue by the setting that produced it. NULL where
+       -- none is recorded: today that is every account but Fourth.
+       al.attribution_setting
   FROM metrics m
   JOIN public.ad_lifecycle al USING (ad_id)
   LEFT JOIN reach_u r USING (ad_id)
@@ -378,7 +382,11 @@ SELECT al.account_name,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
-       shop.utm_campaign
+       shop.utm_campaign,
+       -- Meta's attribution window for this ad, so a sheet can split
+       -- last-click revenue by the setting that produced it. NULL where
+       -- none is recorded: today that is every account but Fourth.
+       al.attribution_setting
   FROM metrics m
   JOIN public.ad_lifecycle al USING (ad_id)
   LEFT JOIN reach_u r USING (ad_id)
@@ -491,7 +499,8 @@ SELECT i.day                                             AS date,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
-       shop.utm_campaign
+       shop.utm_campaign,
+       al.attribution_setting
   FROM public.insights_daily_by_ad i
   CROSS JOIN win
   JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id
@@ -605,7 +614,8 @@ SELECT i.day                                             AS date,
        shop.matched_tier,
        shop.utm_content,
        shop.utm_term,
-       shop.utm_campaign
+       shop.utm_campaign,
+       al.attribution_setting
   FROM public.insights_daily_by_ad i
   CROSS JOIN win
   JOIN public.ad_lifecycle al ON al.ad_id = i.ad_id
@@ -792,10 +802,23 @@ SELECT s.account_name,
             THEN ROUND(COALESCE(shop.d7_lc_revenue, 0) / m.d7_spend, 4)
             END                                                 AS d7_lc_roas,
        m.date_start,
-       m.date_stop
+       m.date_stop,
+       -- One setting per ad set: measured 2026-10-29, 0 of 502 ad sets
+       -- hold ads with more than one. Still aggregated rather than
+       -- picked from an arbitrary ad, so the day that stops being true
+       -- the column says 'Multiple' instead of silently choosing.
+       attr.attribution_setting
   FROM metrics m
   JOIN public.meta_adsets s USING (adset_id)
-  LEFT JOIN shop USING (adset_id);
+  LEFT JOIN shop USING (adset_id)
+  LEFT JOIN (
+    SELECT a.adset_id,
+           CASE WHEN COUNT(DISTINCT a.attribution_setting) > 1 THEN 'Multiple'
+                ELSE MIN(a.attribution_setting) END AS attribution_setting
+      FROM public.meta_ad_attribution a
+     WHERE a.adset_id IS NOT NULL
+     GROUP BY a.adset_id
+  ) attr USING (adset_id);
 
 COMMENT ON MATERIALIZED VIEW public.meta_direct_adset_30d IS
   'One row per ad set over the last 30 days of DATA. Orders map through utm_term, the same mapping Ads Analyse uses. repeat_customers is DISTINCT people and must not be summed across rows; repeat_customer_orders is the additive column. d3/d7 ROAS is last-click revenue over spend across the same window, NULL when nothing was spent.';
@@ -907,10 +930,24 @@ SELECT c.account_name,
             THEN ROUND(COALESCE(shop.d7_lc_revenue, 0) / m.d7_spend, 4)
             END                                                 AS d7_lc_roas,
        m.date_start,
-       m.date_stop
+       m.date_stop,
+       -- 12 of 87 campaigns run ads on more than one setting, so this
+       -- cannot be a single value for every row. 'Multiple' is Meta's
+       -- own label for the case, and is the honest answer: a campaign
+       -- mixing windows has no one window.
+       attr.attribution_setting
   FROM metrics m
   JOIN public.meta_campaigns c USING (campaign_id)
-  LEFT JOIN shop USING (campaign_id);
+  LEFT JOIN shop USING (campaign_id)
+  LEFT JOIN (
+    SELECT l.campaign_id,
+           CASE WHEN COUNT(DISTINCT a.attribution_setting) > 1 THEN 'Multiple'
+                ELSE MIN(a.attribution_setting) END AS attribution_setting
+      FROM public.meta_ad_attribution a
+      JOIN public.ad_lifecycle l ON l.ad_id = a.ad_id
+     WHERE l.campaign_id IS NOT NULL
+     GROUP BY l.campaign_id
+  ) attr USING (campaign_id);
 
 COMMENT ON MATERIALIZED VIEW public.meta_direct_campaign_30d IS
   'One row per campaign over the last 30 days of DATA. Orders map through matched_campaign_id, the same mapping Ads Analyse uses. repeat_customers is DISTINCT people and must not be summed across rows. d3/d7 ROAS is last-click revenue over spend across the same window, NULL when nothing was spent.';
