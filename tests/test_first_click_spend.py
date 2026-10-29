@@ -159,3 +159,23 @@ def test_source_grain_retains_revenue_without_inventing_channel_spend(db):
     assert row["first_click_revenue"] == row["last_click_revenue"] == 1640
     for field in ("spend", "first_click_spend", "last_click_spend", "first_click_roas", "last_click_roas"):
         assert row[field] is None
+
+
+def test_the_headline_totals_do_not_depend_on_the_row_limit(db):
+    """A figure that moves when you change a page size is a trap.
+
+    The table sorts by first-click revenue, so the top N by that measure
+    are not the top N by last-click revenue. Summed over the page the
+    two disagree -- on live data, Rs 56,746 apart at 200 rows while all
+    2,156 entities totalled identically, which read as an attribution
+    error and was a sampling artifact. The cards therefore report the
+    window, and the window is what this pins.
+    """
+    rows = query(db, "ad")
+    first = sum(r["first_click_revenue"] for r in rows.values())
+    last = sum(r["last_click_revenue"] for r in rows.values())
+    # Over EVERY entity the two sides cover the same orders, so they
+    # agree exactly. That is the property the headline figures rely on.
+    assert first == last
+    # And it is a real number, not two zeroes agreeing.
+    assert first > 0

@@ -2856,6 +2856,17 @@ class FirstClickResponse(BaseModel):
     #: rather than let a reader assume the table covers every order.
     orders_unpaired: int = 0
     revenue_unpaired: float = 0.0
+    #: The window's revenue over EVERY matching entity, not just the
+    #: rows on this page.
+    #:
+    #: A headline figure must not move when somebody changes the row
+    #: limit. Summed over the page these two disagree -- the table sorts
+    #: by first-click revenue, so the top 200 by that measure are not
+    #: the top 200 by last-click revenue, and at limit=200 the pair came
+    #: out Rs 56,746 apart while all 2,156 entities totalled identically.
+    #: That read as an attribution error and was a sampling artifact.
+    first_click_revenue_total: float = 0.0
+    last_click_revenue_total: float = 0.0
 
 
 class UtmOrderResponse(BaseModel):
@@ -3044,7 +3055,16 @@ async def get_first_click(
                  AS orders_unpaired,
                COALESCE(SUM(revenue) FILTER (
                    WHERE ({first_k} IS NULL) <> ({last_k} IS NULL)), 0)
-                 AS revenue_unpaired
+                 AS revenue_unpaired,
+               -- Over every entity, on the same paired rule the table
+               -- uses, so the cards describe the window rather than
+               -- whatever slice the row limit happened to return.
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
+                 AS first_click_revenue_total,
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
+                 AS last_click_revenue_total
           FROM public.ga4_order_attribution
           {"LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id" if grain == "ad" else ""}
           {"LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id" if grain == "ad" else ""}
@@ -3058,6 +3078,8 @@ async def get_first_click(
         orders_total=head.orders_total,
         orders_unpaired=head.orders_unpaired,
         revenue_unpaired=float(head.revenue_unpaired or 0),
+        first_click_revenue_total=float(head.first_click_revenue_total or 0),
+        last_click_revenue_total=float(head.last_click_revenue_total or 0),
     )
 
 

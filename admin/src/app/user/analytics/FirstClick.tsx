@@ -159,6 +159,10 @@ export function FirstClick() {
   const [matched, setMatched] = useState(0);
   const [reattributed, setReattributed] = useState(0);
   const [ordersTotal, setOrdersTotal] = useState(0);
+  const [unpairedOrders, setUnpairedOrders] = useState(0);
+  const [unpairedRevenue, setUnpairedRevenue] = useState(0);
+  const [windowFirst, setWindowFirst] = useState(0);
+  const [windowLast, setWindowLast] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -191,6 +195,10 @@ export function FirstClick() {
         setMatched(res.matched ?? res.rows.length);
         setReattributed(res.orders_reattributed);
         setOrdersTotal(res.orders_total);
+        setUnpairedOrders(res.orders_unpaired ?? 0);
+        setUnpairedRevenue(res.revenue_unpaired ?? 0);
+        setWindowFirst(res.first_click_revenue_total ?? 0);
+        setWindowLast(res.last_click_revenue_total ?? 0);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -217,16 +225,6 @@ export function FirstClick() {
 
   const pct = ordersTotal ? (reattributed * 100) / ordersTotal : 0;
   const grainNoun = grain === "ad" ? "Ad" : grain === "adset" ? "Ad set" : "Source";
-
-  const totals = useMemo(() => {
-    let first = 0;
-    let last = 0;
-    for (const r of rows) {
-      first += r.first_click_revenue;
-      last += r.last_click_revenue;
-    }
-    return { first, last };
-  }, [rows]);
 
   /** One scale for both series, so a day's opened and closed columns are
    *  read against each other rather than each against its own max.
@@ -379,15 +377,22 @@ export function FirstClick() {
         <>
           <FigureBand
             figures={[
+              // The WINDOW's totals, not the page's. Summed over the
+              // rows on screen the two disagree — the table sorts by
+              // first-click revenue, so the top 200 by that measure are
+              // not the top 200 by last-click revenue, and at 200 rows
+              // the pair came out ₹56,746 apart while every entity
+              // totalled identically. A headline that moves when you
+              // change the row limit is a trap, so these do not.
               {
                 label: "First-click revenue",
-                value: rupees(totals.first),
-                basis: `full value of every order opened by the ${rows.length.toLocaleString()} ${grainNoun.toLowerCase()}s shown`,
+                value: rupees(windowFirst),
+                basis: `full value of every order opened by any of the ${matched.toLocaleString()} ${grainNoun.toLowerCase()}s in this window`,
               },
               {
                 label: "Last-click revenue",
-                value: rupees(totals.last),
-                basis: "overlaps the figure beside it — do not add the two",
+                value: rupees(windowLast),
+                basis: "equal to the figure beside it by construction — the same orders counted at their other end, so never add the two",
               },
               {
                 label: "Orders",
@@ -398,6 +403,16 @@ export function FirstClick() {
                 label: "Reattributed",
                 value: reattributed.toLocaleString(),
                 basis: `${pct.toFixed(1)}% of orders change hands between the first and last click`,
+              },
+              // The cost of making the two revenue columns agree. An
+              // order with an ad at one end only cannot appear on both
+              // sides, so counting it would reopen the gap — but it is
+              // real revenue, and a section that drops it without
+              // saying so reads as if it covered every order.
+              {
+                label: "Not attributed",
+                value: rupees(unpairedRevenue),
+                basis: `${unpairedOrders.toLocaleString()} orders carried an ad at one end only, so neither column counts them`,
               },
             ]}
           />
