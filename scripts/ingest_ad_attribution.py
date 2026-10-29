@@ -64,8 +64,19 @@ SETTING_CODES = {
     "7-day click or 1-day view": "1d_view_7d_click",
     "7-day click or 1-day engaged view": "7d_click_1d_ev",
     "7-day click, 1-day view or 1-day engaged view": "1d_view_7d_click_1d_ev",
+    # Follows the 7-day form's naming. Rare -- 3 ads of 13,292 in the
+    # Raho Saadaa export -- but a real setting, not a placeholder.
+    "1-day click or 1-day engaged view": "1d_click_1d_ev",
     "Incremental": "incrementality",
 }
+
+#: Ads Manager writes a bare dash where an ad has no attribution window
+#: at all, which is most of a non-conversion objective. 2,136 of the
+#: 13,292 Raho Saadaa ads are these. They are SKIPPED rather than stored
+#: as a setting called "-": the views already render an ad with no row
+#: here as '(none)', and inventing a seventh setting out of Meta's
+#: placeholder would put a tab in the sheet that means "not applicable".
+UNSET_LABELS = {"-", "", "--"}
 
 DDL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -141,9 +152,13 @@ def main() -> int:
                          f"e.g. {dupes[0]}. One row per ad is expected.")
 
     unknown = Counter()
+    unset = 0
     tuples = []
     for r in rows:
         label = (r.get("Attribution setting") or "").strip()
+        if label in UNSET_LABELS:
+            unset += 1
+            continue
         code = SETTING_CODES.get(label)
         if code is None:
             unknown[label] += 1
@@ -158,7 +173,8 @@ def main() -> int:
             code, label or "(unset)", args.csv_path.name,
         ))
 
-    print(f"{args.csv_path.name}: {len(tuples):,} ads")
+    print(f"{args.csv_path.name}: {len(tuples):,} ads with a setting"
+          + (f", {unset:,} with none (skipped)" if unset else ""))
     for label, n in Counter(r[5] for r in tuples).most_common():
         print(f"   {n:>5}  {label}  ->  {SETTING_CODES.get(label, '(no code)')}")
     if unknown:
