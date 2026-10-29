@@ -39,12 +39,16 @@ def test_only_the_ad_grain_resolves_tokens():
 
 @pytest.mark.parametrize("basis", ["order", "first_touch"])
 def test_both_journey_ends_resolve_independently(basis):
-    # Each side joins its own alias: a shared one would make the first
-    # side's resolution decide the last side's entity.
+    # Separate aliases, so the first side's resolution cannot decide the
+    # last side's entity. BOTH appear on BOTH sides: each side needs
+    # only its own to build an entity, but the paired-only predicate
+    # names the other, and a side joining only its own raised "missing
+    # FROM-clause entry for rl".
     sql = analytics._first_click_sql("ad", basis)
     assert "ad_token_resolution rf ON rf.token = first_ad_id" in sql
     assert "ad_token_resolution rl ON rl.token = last_ad_id" in sql
-    assert sql.count("ad_token_resolution") == 2
+    assert sql.count("ad_token_resolution rf") == 2
+    assert sql.count("ad_token_resolution rl") == 2
 
 
 def test_an_unresolved_token_keeps_its_own_id():

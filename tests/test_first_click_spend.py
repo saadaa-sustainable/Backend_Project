@@ -112,13 +112,36 @@ def test_only_one_journey_side_does_not_claim_both_spends(db, grain):
 
 
 def test_missing_spend_and_zero_revenue_do_not_change_order_presence(db):
+    # `idle` has orders but no spend inside the range, and `e` has an
+    # order worth nothing. Neither fact may remove a row or invent a
+    # ROAS out of a cost of zero.
     rows = query(db, "ad")
-    for entity in ("unknown", "idle"):
-        assert rows[entity]["first_click_spend"] is None
-        assert rows[entity]["last_click_spend"] is None
-        assert rows[entity]["first_click_roas"] is None
+    assert rows["idle"]["first_click_spend"] is None
+    assert rows["idle"]["last_click_spend"] is None
+    assert rows["idle"]["first_click_roas"] is None
     assert rows["e"]["first_click_spend"] == 1500
     assert rows["e"]["first_click_roas"] == 0
+
+
+def test_an_order_with_an_entity_at_one_end_only_is_excluded(db):
+    """The section counts a PAIR or nothing.
+
+    `unknown` opened one order that closed with no ad at all. Counting
+    it would put its revenue in the first-click column and nothing in
+    the last-click column, and the two totals would stop matching --
+    on live data that one-ended revenue came to Rs 52.1 L and left a
+    Rs 6.3 L gap between the columns that read as an error and was not.
+
+    The exclusion is real money, so the endpoint reports what it
+    dropped rather than quietly shrinking; this only pins that the row
+    is gone from the table.
+    """
+    rows = query(db, "ad")
+    assert "unknown" not in rows
+    # And the two columns now total the same over what remains.
+    first = sum(r["first_click_revenue"] for r in rows.values())
+    last = sum(r["last_click_revenue"] for r in rows.values())
+    assert first == last
 
 
 def test_changing_range_changes_orders_and_both_spend_columns(db):

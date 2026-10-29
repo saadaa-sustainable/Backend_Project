@@ -2484,7 +2484,8 @@ _FIRST_CLICK_GRAINS = {
 #: looking authoritative.
 
 
-def _first_click_sql(grain: str, basis: str = "order") -> str:
+def _first_click_sql(grain: str, basis: str = "order",
+                     paired_only: bool = True) -> str:
     """Both ends of each order, aggregated per entity at one grain.
 
     Unions the two ENDS rather than joining an entity list back onto the
@@ -2509,13 +2510,32 @@ def _first_click_sql(grain: str, basis: str = "order") -> str:
     zero would claim the orders were free.
     """
     first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    # Count an order only when BOTH ends resolve to an entity.
+    #
+    # Without this the two columns cover different sets of orders, so
+    # their totals differ by whatever lands at one end only -- measured
+    # over 30 days, Rs 29.2 L opened by an ad and closed without one
+    # against Rs 22.9 L the other way, a Rs 6.3 L gap that reads as an
+    # error and is not one. Requiring a pair makes the totals identical
+    # by construction, so the whole first-versus-last difference lives
+    # where it is useful: per entity.
+    #
+    # It is not free. Orders with one end only leave the section
+    # entirely -- Rs 52.1 L of real revenue over that window -- which is
+    # why the endpoint reports what it dropped instead of quietly
+    # shrinking.
+    pair = (f"     AND {first_k} IS NOT NULL AND {last_k} IS NOT NULL\n"
+            if paired_only else "")
     # ad_token_resolution carries no column named like the ones the
     # SELECTs reference unqualified (revenue, first_source, ...), so the
     # join needs no table alias on ga4_order_attribution itself.
-    first_join = ("  LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id\n"
-                  if grain == "ad" else "")
-    last_join = ("  LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id\n"
-                 if grain == "ad" else "")
+    # BOTH aliases on BOTH sides. Each side only needs its own to build
+    # its entity, but the pair predicate names the other one, so a side
+    # that joined only its own raised "missing FROM-clause entry for rl".
+    both = ("  LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id\n"
+            "  LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id\n"
+            if grain == "ad" else "")
+    first_join = last_join = both
     roas_min = _ROAS_MIN_SPEND
     # Source is never NULL after the COALESCE above; every id grain can
     # be, when an order's journey never touched a paid click at that end.
@@ -2662,12 +2682,14 @@ WITH {life_cte}ends AS (
          'first'::text AS side, revenue, days_to_convert, total_sessions
     FROM public.ga4_order_attribution
 {first_join}{first_window}     AND {first_k} IS NOT NULL
+{pair}
   UNION ALL
   SELECT {last_k},
          COALESCE(NULLIF(btrim(last_source), ''), '(none)'),
          'last'::text, revenue, days_to_convert, total_sessions
     FROM public.ga4_order_attribution
 {last_join}{order_window}     AND {last_k} IS NOT NULL
+{pair}
 ), agg AS (
   SELECT entity,
          -- One entity can carry rows from two spellings of its channel
@@ -2813,6 +2835,13 @@ class FirstClickResponse(BaseModel):
     #: reader of the payload alone cannot mistake a cohort view for the
     #: default one -- they answer different questions.
     basis: Literal["order", "first_touch"] = "order"
+    #: Orders left OUT because they carried an entity at one end only,
+    #: and what they were worth. The section counts a pair or nothing,
+    #: which is what makes the two revenue columns total the same -- but
+    #: that exclusion is real money and the UI has to be able to say so
+    #: rather than let a reader assume the table covers every order.
+    orders_unpaired: int = 0
+    revenue_unpaired: float = 0.0
 
 
 class UtmOrderResponse(BaseModel):
@@ -2980,13 +3009,24 @@ async def get_first_click(
     # One statement for both headline numbers: a second round trip to
     # count the same rows twice over is what the landing-page endpoint
     # was just corrected for.
-    head = (await session.execute(text("""
+    # One statement for the headline counts AND the exclusion, so the
+    # page cannot report a total it did not also measure the gap for.
+    first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    head = (await session.execute(text(f"""
         SELECT COUNT(*)::int AS orders_total,
                COUNT(*) FILTER (WHERE COALESCE(NULLIF(btrim(first_source),''),'(none)')
                              IS DISTINCT FROM
                                 COALESCE(NULLIF(btrim(last_source),''),'(none)'))::int
-                 AS orders_reattributed
+                 AS orders_reattributed,
+               COUNT(*) FILTER (
+                   WHERE ({first_k} IS NULL) <> ({last_k} IS NULL))::int
+                 AS orders_unpaired,
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE ({first_k} IS NULL) <> ({last_k} IS NULL)), 0)
+                 AS revenue_unpaired
           FROM public.ga4_order_attribution
+          {"LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id" if grain == "ad" else ""}
+          {"LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id" if grain == "ad" else ""}
          WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
            AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
     """), params)).one()
@@ -2995,6 +3035,8 @@ async def get_first_click(
         rows=rows, total=len(rows), matched=matched, basis=basis,
         orders_reattributed=head.orders_reattributed,
         orders_total=head.orders_total,
+        orders_unpaired=head.orders_unpaired,
+        revenue_unpaired=float(head.revenue_unpaired or 0),
     )
 
 
