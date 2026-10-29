@@ -270,6 +270,27 @@ query Orders($first: Int!, $after: String, $query: String) {
         processedAt
         displayFinancialStatus
         displayFulfillmentStatus
+        # Returns, refunds and cancellations. Absent until 2026-10-30,
+        # which is why the only return signal available was
+        # financial_status='REFUNDED' -- money going back, which is not
+        # the same event as goods coming back and says nothing at all
+        # about an exchange.
+        #
+        # returnStatus is Shopify's own per-order answer: NO_RETURN,
+        # RETURN_REQUESTED, IN_PROGRESS, RETURNED, INSPECTION_COMPLETE,
+        # RETURN_FAILED. tags carries the Return Prime marks, since that
+        # is the partner that actually processes a return here and
+        # writes its state back onto the order.
+        returnStatus
+        tags
+        cancelReason
+        cancelledAt
+        refunds(first: 10) {
+          id
+          createdAt
+          note
+          totalRefundedSet { shopMoney { amount currencyCode } }
+        }
         currentTotalPriceSet {
           shopMoney { amount currencyCode }
         }

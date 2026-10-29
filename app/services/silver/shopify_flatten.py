@@ -81,6 +81,30 @@ CREATE TABLE IF NOT EXISTS shopify_orders (
     email text,
     financial_status text,
     fulfillment_status text,
+    -- Shopify's own return state: NO_RETURN, RETURN_REQUESTED,
+    -- IN_PROGRESS, RETURNED, INSPECTION_COMPLETE, RETURN_FAILED.
+    --
+    -- DO NOT COUNT RETURNS WITH THIS COLUMN. Returns here are processed
+    -- by Return Prime, which does not use Shopify's native returns API,
+    -- so this field never hears about them. Measured on 500 orders from
+    -- 2026-10-20 onward: 47 tagged 'Return' and 38 tagged 'Exchange',
+    -- and EVERY ONE of them reads NO_RETURN here. The single order this
+    -- field called RETURNED carried no Return Prime tag at all. The two
+    -- signals are disjoint; `tags` is the real one.
+    return_status text,
+    -- Order tags, and the only trustworthy return signal on this store.
+    -- Return Prime writes its state here:
+    --   Return, Exchange, Exchange_order, Return_Prime,
+    --   Refund_initiated, Refund_credited,
+    --   Non_Returnable, Non_Exchangeable, return_window_closed
+    -- RTO is separate -- the courier returning an undelivered parcel,
+    -- not a customer returning a delivered one.
+    tags jsonb,
+    cancel_reason text,
+    cancelled_at timestamptz,
+    -- Refund events with their amounts, newest first from the API.
+    refunds jsonb,
+    refunded_amount numeric,
     subtotal_price numeric,
     total_price numeric,
     currency text,
@@ -111,6 +135,13 @@ _ORDERS_COLUMN_MIGRATIONS = [
     "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS utm_campaign text",
     "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS utm_content text",
     "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS utm_term text",
+    # Added 2026-10-30 with the return/refund fields on ORDERS_QUERY.
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS return_status text",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS tags jsonb",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS cancel_reason text",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS cancelled_at timestamptz",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS refunds jsonb",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS refunded_amount numeric",
 ]
 
 _ORDERS_INSERT = f"""
@@ -129,7 +160,9 @@ WITH latest AS (
     ORDER BY source_id, extracted_at DESC, id DESC
 )
 INSERT INTO shopify_orders (
-    order_id, name, email, financial_status, fulfillment_status, subtotal_price, total_price,
+    order_id, name, email, financial_status, fulfillment_status,
+    return_status, tags, cancel_reason, cancelled_at, refunds, refunded_amount,
+    subtotal_price, total_price,
     currency, customer_id, customer_email, line_items, customer_journey, custom_attributes,
     utm_source, utm_medium, utm_campaign, utm_content, utm_term,
     created_at, updated_at, processed_at, extracted_at, flattened_at
@@ -140,6 +173,20 @@ SELECT
     a.raw_payload ->> 'email' AS email,
     a.raw_payload ->> 'displayFinancialStatus' AS financial_status,
     a.raw_payload ->> 'displayFulfillmentStatus' AS fulfillment_status,
+    a.raw_payload ->> 'returnStatus' AS return_status,
+    a.raw_payload -> 'tags' AS tags,
+    a.raw_payload ->> 'cancelReason' AS cancel_reason,
+    NULLIF(a.raw_payload ->> 'cancelledAt', '')::timestamptz AS cancelled_at,
+    a.raw_payload -> 'refunds' AS refunds,
+    -- Summed, not taken from the first element: an order can be
+    -- refunded in several events and only the total is comparable to
+    -- total_price beside it.
+    (
+      SELECT SUM(NULLIF(r -> 'totalRefundedSet' -> 'shopMoney' ->> 'amount', '')::numeric)
+      FROM jsonb_array_elements(
+             CASE WHEN jsonb_typeof(a.raw_payload -> 'refunds') = 'array'
+                  THEN a.raw_payload -> 'refunds' ELSE '[]'::jsonb END) r
+    ) AS refunded_amount,
     NULLIF(a.raw_payload -> 'subtotalPriceSet' -> 'shopMoney' ->> 'amount', '')::numeric AS subtotal_price,
     NULLIF(a.raw_payload -> 'totalPriceSet' -> 'shopMoney' ->> 'amount', '')::numeric AS total_price,
     a.raw_payload -> 'totalPriceSet' -> 'shopMoney' ->> 'currencyCode' AS currency,
