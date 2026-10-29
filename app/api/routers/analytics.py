@@ -2455,7 +2455,16 @@ class SourceBreakdown(BaseModel):
 _FIRST_CLICK_GRAINS = {
     "source": ("COALESCE(NULLIF(btrim(first_source), ''), '(none)')",
                "COALESCE(NULLIF(btrim(last_source), ''), '(none)')"),
-    "ad":      ("first_ad_id",      "last_ad_id"),
+    # Resolved, not raw. utm_content is whatever the ad's URL template
+    # produced, so the column holds ad ids, ad NAMES, third-party tokens
+    # and the occasional unexpanded {{ad.id}}. A name never matched
+    # ad_lifecycle, so those orders sat under a row labelled with the
+    # raw name, carrying no spend and therefore no ROAS, while the real
+    # ad's row was missing that revenue. ad_token_resolution maps a name
+    # back to its id where that is unambiguous and leaves it alone where
+    # it is not -- see scripts/refresh_ad_token_resolution.py.
+    "ad":      ("COALESCE(rf.resolved_ad_id, first_ad_id)",
+                "COALESCE(rl.resolved_ad_id, last_ad_id)"),
     "adset":   ("first_adset_id",   "last_adset_id"),
 }
 
@@ -2500,6 +2509,13 @@ def _first_click_sql(grain: str, basis: str = "order") -> str:
     zero would claim the orders were free.
     """
     first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    # ad_token_resolution carries no column named like the ones the
+    # SELECTs reference unqualified (revenue, first_source, ...), so the
+    # join needs no table alias on ga4_order_attribution itself.
+    first_join = ("  LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id\n"
+                  if grain == "ad" else "")
+    last_join = ("  LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id\n"
+                 if grain == "ad" else "")
     roas_min = _ROAS_MIN_SPEND
     # Source is never NULL after the COALESCE above; every id grain can
     # be, when an order's journey never touched a paid click at that end.
@@ -2645,13 +2661,13 @@ WITH {life_cte}ends AS (
          COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS channel,
          'first'::text AS side, revenue, days_to_convert, total_sessions
     FROM public.ga4_order_attribution
-{first_window}     AND {first_k} IS NOT NULL
+{first_join}{first_window}     AND {first_k} IS NOT NULL
   UNION ALL
   SELECT {last_k},
          COALESCE(NULLIF(btrim(last_source), ''), '(none)'),
          'last'::text, revenue, days_to_convert, total_sessions
     FROM public.ga4_order_attribution
-{order_window}     AND {last_k} IS NOT NULL
+{last_join}{order_window}     AND {last_k} IS NOT NULL
 ), agg AS (
   SELECT entity,
          -- One entity can carry rows from two spellings of its channel
