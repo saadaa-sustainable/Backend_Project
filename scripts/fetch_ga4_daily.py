@@ -476,6 +476,37 @@ def fetch_span(client, property_id: str, since: date, until: date):
     return rows, sampled, thresholded
 
 
+def _collapse_duplicates(rows: list[tuple]) -> list[tuple]:
+    """Merge rows sharing the upsert key, which GA4 can return.
+
+    `landing_page` folds both an empty value and a literal "(not set)"
+    onto "(not set)", so a day carrying both arrives with two rows on
+    one key and the upsert dies: "ON CONFLICT DO UPDATE command cannot
+    affect row a second time". Settled days are dropped before the
+    write, which is why this only ever surfaced on an unsettled one.
+
+    Counts add. The two rates do NOT -- they are session-weighted back
+    together, because the mean of two rates over different session
+    counts is not the rate of their union.
+    """
+    merged: dict[tuple, list] = {}
+    for r in rows:
+        key = (r[0], r[1], r[2], r[3])
+        prev = merged.get(key)
+        if prev is None:
+            merged[key] = list(r)
+            continue
+        a_sess, b_sess = prev[4], r[4]
+        both = a_sess + b_sess
+        for i in (4, 5, 6, 7, 8, 9, 10, 13):   # counts and revenue
+            prev[i] += r[i]
+        for i in (11, 12):                      # bounce rate, key-event rate
+            prev[i] = ((prev[i] * a_sess + r[i] * b_sess) / both) if both else 0.0
+        prev[15] = prev[15] or r[15]            # sampled
+        prev[16] = prev[16] or r[16]            # thresholded
+    return [tuple(v) for v in merged.values()]
+
+
 def _to_tuples(rows, *, property_id: str, tz: str, sampled: bool,
                thresholded: bool) -> list[tuple]:
     now = datetime.now(timezone.utc)
@@ -498,6 +529,7 @@ def _to_tuples(rows, *, property_id: str, tz: str, sampled: bool,
             f(m[6]), f(m[7]), f(m[8]), i(m[9]),
             tz, sampled, thresholded, now,
         ))
+    out = _collapse_duplicates(out)
     return out
 
 
@@ -585,6 +617,12 @@ def main() -> int:
                     help="Trailing window ending yesterday. Overrides --from/--to.")
     ap.add_argument("--allow-tz-mismatch", action="store_true",
                     help=f"Proceed even if the property is not on {WAREHOUSE_TZ}.")
+    ap.add_argument("--allow-unsettled", action="store_true",
+                    help="Write days GA4 is still attributing, instead of "
+                         "skipping them. The figures come in SHORT -- a page "
+                         "missing 15 per cent of its sessions looks like a "
+                         "15 per cent drop, not like missing data -- so the "
+                         "day must be re-fetched once GA4 settles it.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Fetch and report, write nothing.")
     args = ap.parse_args()
@@ -677,11 +715,28 @@ def main() -> int:
         # A day GA4 is still processing is worse than an absent one: it
         # arrives inflated, overwrites the row that was right, and every
         # ratio built on it reads wrong until the next window re-fetch.
-        tuples, unsettled = _drop_unsettled_days(tuples)
-        for day, tot, unset in unsettled:
-            print(f"  {day}  SKIPPED -- still processing: {unset:,} of {tot:,} "
-                  f"sessions ({100.0 * unset / tot:.0f}%) have no landing page. "
-                  f"Re-run once GA4 settles the day.")
+        if args.allow_unsettled:
+            # Asked for explicitly: the day is written as it stands.
+            #
+            # Deliberately NOT flagged. `thresholded` means GA4 withheld
+            # rows for privacy, and borrowing it to mean "still
+            # processing" would make that flag answer two questions with
+            # one bit -- the next reader could not tell which. The day
+            # is announced here instead, and re-fetching it once GA4
+            # settles overwrites it in place.
+            _keep, unsettled = _drop_unsettled_days(tuples)
+            for day, tot, unset in unsettled:
+                print(f"  {day}  WRITTEN UNSETTLED -- {unset:,} of {tot:,} "
+                      f"sessions ({100.0 * unset / tot:.0f}%) have no landing "
+                      f"page yet, so every page and channel on this day reads "
+                      f"roughly {100.0 * unset / tot:.0f}% low. Re-fetch once "
+                      f"GA4 settles it.")
+        else:
+            tuples, unsettled = _drop_unsettled_days(tuples)
+            for day, tot, unset in unsettled:
+                print(f"  {day}  SKIPPED -- still processing: {unset:,} of {tot:,} "
+                      f"sessions ({100.0 * unset / tot:.0f}%) have no landing page. "
+                      f"Re-run once GA4 settles the day, or pass --allow-unsettled.")
         n = 0 if args.dry_run else _write(_conn, tuples)
         total += len(tuples)
         any_sampled = any_sampled or sampled
