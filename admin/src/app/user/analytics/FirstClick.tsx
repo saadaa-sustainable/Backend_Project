@@ -376,6 +376,7 @@ export function FirstClick() {
       ) : (
         <>
           <FigureBand
+            singleRow
             figures={[
               // The WINDOW's totals, not the page's. Summed over the
               // rows on screen the two disagree — the table sorts by
@@ -387,12 +388,12 @@ export function FirstClick() {
               {
                 label: "First-click revenue",
                 value: rupees(windowFirst),
-                basis: `full value of every order opened by any of the ${matched.toLocaleString()} ${grainNoun.toLowerCase()}s in this window`,
+                basis: `every order opened by any of the ${matched.toLocaleString()} ${grainNoun.toLowerCase()}s in this window`,
               },
               {
                 label: "Last-click revenue",
                 value: rupees(windowLast),
-                basis: "equal to the figure beside it by construction — the same orders counted at their other end, so never add the two",
+                basis: "the same orders counted at their other end — equal by construction, never add the two",
               },
               {
                 label: "Orders",
@@ -412,7 +413,7 @@ export function FirstClick() {
               {
                 label: "Not attributed",
                 value: rupees(unpairedRevenue),
-                basis: `${unpairedOrders.toLocaleString()} orders carried an ad at one end only, so neither column counts them`,
+                basis: `${unpairedOrders.toLocaleString()} orders had an ad at one end only, so neither column counts them`,
               },
             ]}
           />
