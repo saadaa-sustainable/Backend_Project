@@ -20,6 +20,7 @@ const LandingPageAnalysis = dynamic(() => import("./LandingPageAnalysis").then((
 const ShopifyExplorer = dynamic(() => import("./ShopifyExplorer").then((m) => m.ShopifyExplorer), { loading: TabLoading });
 const MetaExplorer = dynamic(() => import("./MetaExplorer").then((m) => m.MetaExplorer), { loading: TabLoading });
 const Cpis = dynamic(() => import("./Cpis").then((m) => m.Cpis), { loading: TabLoading });
+const MetaHypothesis = dynamic(() => import("./MetaHypothesis").then((m) => m.MetaHypothesis), { loading: TabLoading });
 const ComparativeAnalysis = dynamic(
   () => import("./ComparativeAnalysis").then((m) => m.ComparativeAnalysis),
   { loading: TabLoading });
@@ -28,6 +29,7 @@ const BlendedMerSection = dynamic(
   { loading: TabLoading });
 const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), { loading: TabLoading });
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
+const CampaignTracker = dynamic(() => import("./CampaignTracker").then((m) => m.CampaignTracker), { loading: TabLoading });
 const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
 const Help = dynamic(() => import("./Help").then((m) => m.Help), { loading: TabLoading });
 const AssetAnalysis = dynamic(() => import("./AssetAnalysis").then((m) => m.AssetAnalysis), { loading: TabLoading });
@@ -56,7 +58,9 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "customer-journey": { label: "Customer Journey", render: () => <CustomerJourney /> },
   "landing-page": { label: "Landing Page Analysis", render: () => <LandingPageAnalysis /> },
   cpis: { label: "CPIS", render: () => <Cpis /> },
+  "meta-hypothesis": { label: "Meta Hypothesis", render: () => <MetaHypothesis /> },
   "untested-assets": { label: "Untested Assets", render: () => <UntestedAssets /> },
+  "campaign-tracker": { label: "Campaign Tracker", render: () => <CampaignTracker /> },
   instagram: { label: "Instagram", render: () => <Instagram /> },
   "shopify-analytics": { label: "Shopify Analytics", render: () => <ShopifyAnalytics /> },
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },

@@ -372,8 +372,13 @@ function DashboardContent() {
     ? kpis.data.total_shopify_revenue / allSessionCount : null;
   const allConversionRate = kpis.data && allSessionCount !== null && allSessionCount > 0
     ? kpis.data.total_shopify_orders / allSessionCount : null;
-  const allCostPerSession = kpis.data && allSessionCount !== null && allSessionCount > 0
-    ? kpis.data.total_spend / allSessionCount : null;
+  // Blended spend over all-traffic denominators. Meta spend over all
+  // of Shopify's sessions answered nothing: it charged one channel's
+  // cost against everybody's visits. The Meta tab keeps Meta spend,
+  // because there the sessions are Meta's too.
+  const blendedSpend = kpis.data?.blended_spend ?? null;
+  const allCostPerSession = blendedSpend !== null && allSessionCount !== null && allSessionCount > 0
+    ? blendedSpend / allSessionCount : null;
   const revenuePerSession = metaRevenue !== null && sessionCount !== null && sessionCount > 0
     ? metaRevenue / sessionCount : null;
   const conversionRate = metaOrders !== null && sessionCount !== null && sessionCount > 0
@@ -393,10 +398,11 @@ function DashboardContent() {
   const ga4Sessions = sessions.data?.ga4_sessions ?? null;
   const ga4Revenue = sessions.data?.ga4_revenue ?? null;
   const ga4Purchases = sessions.data?.ga4_purchases ?? null;
-  const ga4CostPerSession = kpis.data && ga4Sessions !== null && ga4Sessions > 0
-    ? kpis.data.total_spend / ga4Sessions : null;
+
   const ga4RevenuePerSession = ga4Revenue !== null && ga4Sessions !== null && ga4Sessions > 0
     ? ga4Revenue / ga4Sessions : null;
+  const ga4BlendedCostPerSession = blendedSpend !== null && ga4Sessions !== null && ga4Sessions > 0
+    ? blendedSpend / ga4Sessions : null;
   const ga4ConversionRate = ga4Purchases !== null && ga4Sessions !== null && ga4Sessions > 0
     ? ga4Purchases / ga4Sessions : null;
 
@@ -555,7 +561,7 @@ function DashboardContent() {
                     arpu: null, sessions: allSessionCount,
                   }}
                   google={{
-                    costPerSession: ga4CostPerSession,
+                    costPerSession: ga4BlendedCostPerSession,
                     revenuePerSession: ga4RevenuePerSession,
                     conversionRate: ga4ConversionRate,
                     arpu: sessions.data.ga4_arpu ?? null,
@@ -567,15 +573,16 @@ function DashboardContent() {
                 <div>
                   <dt className="text-xs text-text-secondary">Cost / session</dt>
                   <dd className="mt-1 tabular-nums text-2xl font-semibold text-text-primary">
-                    {formatPerSession(source === "google" ? ga4CostPerSession
+                    {formatPerSession(source === "google" ? ga4BlendedCostPerSession
                       : source === "shopify" ? allCostPerSession : costPerSession)}
                   </dd>
                   <dd className="mt-1 text-xs text-text-secondary">
-                    {source === "google"
-                      ? "Meta ad spend \u00f7 all GA4 sessions \u2014 GA4 cannot isolate Meta traffic"
-                      : source === "shopify"
-                        ? "Meta ad spend \u00f7 all Shopify sessions \u2014 the spend is Meta's, this traffic is not"
-                        : "Ad spend \u00f7 Meta-driven Shopify sessions"}
+                    {source === "meta"
+                      ? "Meta ad spend \u00f7 Meta-driven Shopify sessions"
+                      : <>All spend ÷ {source === "google" ? "GA4" : "Shopify"} sessions
+                          {" · "}Meta + Google + Kwikchat
+                          {kpis.data.kwikchat_estimated_days
+                            ? ", Kwikchat estimated" : ""}</>}
                   </dd>
                 </div>
                 <div>

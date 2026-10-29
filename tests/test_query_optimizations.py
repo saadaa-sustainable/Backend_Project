@@ -47,6 +47,9 @@ class _Result:
     def all(self):
         return self._rows
 
+    def scalar(self):
+        return self._rows[0][0] if self._rows else None
+
     def __iter__(self):
         return iter(self._rows)
 
@@ -59,6 +62,15 @@ def session():
     # uses it, so the harness has to answer to it.
     db.create_function("btrim", 1, lambda value: value.strip() if value is not None else None)
     db.executescript("""
+        -- Blended spend sources. Google reports a day behind; the
+        -- Kwikchat row is the flat placeholder, and days past its last
+        -- one are filled at the same rate by the endpoint.
+        CREATE TABLE google_ads_spend_daily(day TEXT, spend NUMERIC);
+        INSERT INTO google_ads_spend_daily VALUES
+            ('2026-09-02', 10), ('2026-09-03', 20);
+        CREATE TABLE kwikchat_spend_daily(day TEXT, spend NUMERIC, is_estimate INT);
+        INSERT INTO kwikchat_spend_daily VALUES
+            ('2026-09-02', 30000, 1);
         CREATE TABLE shopify_order_attribution (
             order_id TEXT PRIMARY KEY, created_at TEXT, total_price NUMERIC,
             utm_source TEXT, utm_content TEXT);
@@ -128,7 +140,10 @@ async def test_dashboard_widgets_share_one_scan_and_include_end_day(session):
     # scan would make BOTH widgets pay for a join only one of them
     # reads. What this assertion protects is the shared scan: still one
     # pass over shopify_order_attribution for two widgets.
-    assert len(statements) == 4
+    # Five: the ad aggregate, the shared order scan, the acquisition
+    # count, the Meta-source classification, and one statement that
+    # reads Google and Kwikchat spend together for the blended figure.
+    assert len(statements) == 5
     assert sum("FROM shopify_order_attribution" in q for q in statements) == 1
     assert sum("FROM public.order_customer_type" in q for q in statements) == 1
     assert all("created_at::date" not in q for q in statements)
@@ -152,18 +167,19 @@ async def test_dashboard_cache_keeps_ranges_separate_and_empty_counts_zero(sessi
     assert result.new_customers == 1
     repeated = await analytics.get_dashboard_kpis(session, date_from="2026-09-02", date_to="2026-09-02")
     assert repeated == result
-    # 4 per windowed call: ad aggregate, order aggregate, acquisition
-    # count, and the Meta-source classification -- which reads no table,
+    # 5 per windowed call: ad aggregate, order aggregate, acquisition
+    # count, the Meta-source classification -- which reads no table,
     # only the handful of utm_source keys the order aggregate already
-    # returned. The repeat is served from cache and costs none.
-    assert session.execute.await_count == 4
+    # returned -- and the blended spend read. The repeat is served from
+    # cache and costs none.
+    assert session.execute.await_count == 5
     empty = await analytics.get_dashboard_kpis(session, date_from="2026-10-01", date_to="2026-10-01")
     assert empty.total_shopify_orders == empty.total_shopify_revenue == empty.total_spend == 0
     assert empty.new_customers == 0
-    # 7, not 8: an empty window returns no order groups, so there are no
-    # utm_source values left to classify and that query is skipped
+    # 9, not 10: an empty window returns no order groups, so there are
+    # no utm_source values left to classify and that query is skipped
     # rather than run against an empty list.
-    assert session.execute.await_count == 7
+    assert session.execute.await_count == 9
 
 
 async def test_lifetime_keeps_gold_totals_and_spend_floor_stays_visible(session):
@@ -172,12 +188,12 @@ async def test_lifetime_keeps_gold_totals_and_spend_floor_stays_visible(session)
     # Lifetime counts every acquisition ever, including 'older' outside
     # any window the other tests use.
     assert lifetime.new_customers == 3
-    # Three: the gold table, the acquisition count, and the Meta order
-    # slice. Lifetime takes its headline from ad_performance_summary,
-    # which is per-AD and so already Meta's, but the session band's
-    # numerator is still read from the orders table under the session
-    # rule rather than assumed equal to it.
-    assert session.execute.await_count == 3
+    # Four: the gold table, the acquisition count, the Meta order
+    # slice, and the blended spend. Lifetime takes its headline from
+    # ad_performance_summary, which is per-AD and so already Meta's,
+    # but the session band's numerator is still read from the orders
+    # table under the session rule rather than assumed equal to it.
+    assert session.execute.await_count == 4
     window = await analytics.get_dashboard_kpis(session, date_from="2026-08-01", date_to="2026-09-03")
     assert window.spend_data_from == "2026-09-01"
 

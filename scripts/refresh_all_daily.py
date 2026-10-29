@@ -525,6 +525,12 @@ PHASE_SILVER = [
     # product moving between collections, or a new launch, silently
     # stops matching until this runs again. Everything else the sheet
     # reads is a view over tables this pipeline already rebuilds.
+    # Maps the ad NAMES and third-party tokens GA4 leaves in utm_content
+    # back to real ad ids where that is unambiguous, so the First Click
+    # ad grain stops splitting one creative across a token row and an id
+    # row. Must follow ad_lifecycle (the name source) and the insights
+    # rebuild (the spend tie-break). A view, so this is cheap.
+    ("ad_token_resolution",   ["scripts/refresh_ad_token_resolution.py"],    300),
     ("sku_page_map",          ["scripts/fetch_product_collection_map.py"],   600),
     # Rebuilds the price-impact views on top of it. Cheap -- CREATE OR
     # REPLACE VIEW only, no scan -- but it has to follow sku_page_map so

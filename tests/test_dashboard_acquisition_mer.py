@@ -28,6 +28,10 @@ def clear_cache():
 def session():
     db = sqlite3.connect(":memory:")
     db.executescript("""
+        -- Blended spend sources. Acquisition MER does not read these,
+        -- but the KPI endpoint it shares a response with does.
+        CREATE TABLE google_ads_spend_daily(day TEXT, spend NUMERIC);
+        CREATE TABLE kwikchat_spend_daily(day TEXT, spend NUMERIC, is_estimate INT);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC, impressions NUMERIC);
         INSERT INTO insights_daily_by_ad VALUES
             ('a','2026-10-01',1000,10000), ('a','2026-10-02',1000,10000),
