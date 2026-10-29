@@ -8229,6 +8229,57 @@ class OverviewSummaryResponse(BaseModel):
     top_cpis_skus: list[TopCpisSku]
 
 
+#: Kwikchat's flat daily figure, the same one `kwikchat_spend_daily`
+#: carries on every row it has -- all 292 of them are is_estimate at
+#: exactly this number. Used to fill days the table has not reached
+#: yet: it stopped at 2026-10-19, so a window ending later would
+#: otherwise contribute nothing for the tail and read the blended cost
+#: low. A placeholder either way; the UI says how many days are it.
+KWIKCHAT_DAILY_ESTIMATE = 30_000.0
+
+
+async def _blended_spend(
+    session: AsyncSession, date_from: date | None, date_to: date | None,
+) -> tuple[float, float, float, int]:
+    """Google Ads and Kwikchat spend for the window, with Kwikchat filled.
+
+    Returns (google, kwikchat, blended_extra, kwikchat_estimated_days),
+    where blended_extra is the sum of the two -- what gets added to Meta
+    spend to make the blended figure the Shopify and Google tabs divide
+    by. Meta's own total is already fetched beside this.
+
+    Composed the same way as the Blended MER section: Meta + Google +
+    Kwikchat. The difference is the fill -- MER sums only the rows
+    Kwikchat has, so its denominator runs short past 2026-10-19 too.
+    """
+    where, params = "", {}
+    if date_from and date_to:
+        where = "WHERE day BETWEEN :df AND :dt"
+        params = {"df": date_from, "dt": date_to}
+
+    # One statement, three scalars. Both tables are tiny -- a few
+    # hundred daily rows each -- and the dashboard already makes
+    # several round trips per request without adding two more.
+    row = (await session.execute(text(
+        "SELECT"
+        f" (SELECT COALESCE(SUM(spend), 0) FROM public.google_ads_spend_daily {where}),"
+        f" (SELECT COALESCE(SUM(spend), 0) FROM public.kwikchat_spend_daily {where}),"
+        f" (SELECT COUNT(DISTINCT day) FROM public.kwikchat_spend_daily {where})"
+    ), params)).one()
+    google, kwik, covered = float(row[0] or 0), float(row[1] or 0), int(row[2] or 0)
+
+    # Only a bounded window can be filled: lifetime has no last day to
+    # fill up to, so it reports what the table holds.
+    estimated_days = covered
+    if date_from and date_to:
+        window_days = (date_to - date_from).days + 1
+        missing = max(0, window_days - covered)
+        kwik += missing * KWIKCHAT_DAILY_ESTIMATE
+        estimated_days = window_days
+
+    return google, kwik, google + kwik, estimated_days
+
+
 class KpisResponse(BaseModel):
     total_spend: float
     total_impressions: float
@@ -8246,6 +8297,18 @@ class KpisResponse(BaseModel):
     #: 2.36cr, against a session count narrowed to Meta alone.
     meta_shopify_revenue: float = 0.0
     meta_shopify_orders: int = 0
+    #: Every platform's spend, not Meta's alone: Meta + Google Ads +
+    #: Kwikchat, composed as the Blended MER section composes it.
+    #:
+    #: The Meta tab divides by Meta spend, because its sessions are
+    #: Meta's. The Shopify and Google tabs cover ALL traffic, so a
+    #: Meta-only numerator over them answered nothing -- it read the
+    #: cost of one channel against everybody's visits.
+    google_spend: float = 0.0
+    kwikchat_spend: float = 0.0
+    blended_spend: float = 0.0
+    #: Days of the window whose Kwikchat figure is the flat estimate.
+    kwikchat_estimated_days: int = 0
     #: Customers whose FIRST EVER Shopify order falls inside the
     #: selected window -- newly acquired in that window, not merely
     #: active in it. Read off `order_customer_type.is_new_customer`,
@@ -8347,6 +8410,10 @@ class DashboardSessionTrendPoint(BaseModel):
     #: `sessions` and `attributed_revenue` above are the Meta part of.
     #: `all_cost_per_session` is the one that mixes sources: the spend
     #: is Meta's and this denominator is not.
+    #: Meta + Google Ads + Kwikchat for the day. What the all-traffic
+    #: tabs divide by -- their sessions are everyone's, so their
+    #: numerator cannot be one platform's.
+    blended_spend: float | None = None
     all_sessions: int | None = None
     all_revenue: float = 0.0
     all_orders: int = 0
@@ -8406,6 +8473,16 @@ async def get_dashboard_session_trend(
                 SELECT d.day, SUM(d.spend) AS spend
                 FROM insights_daily_by_ad d, bounds b
                 WHERE d.day BETWEEN b.lo AND b.hi GROUP BY d.day
+            ), goog_days AS (
+                SELECT g.day, SUM(g.spend) AS spend
+                FROM public.google_ads_spend_daily g, bounds b
+                WHERE g.day BETWEEN b.lo AND b.hi GROUP BY g.day
+            ), kwik_days AS (
+                -- Days this table has not reached are filled in Python
+                -- at the flat rate every row it does have already uses.
+                SELECT k.day, SUM(k.spend) AS spend
+                FROM public.kwikchat_spend_daily k, bounds b
+                WHERE k.day BETWEEN b.lo AND b.hi GROUP BY k.day
             ), order_days AS (
                 -- Meta's orders only. `session_days` above is
                 -- meta_sessions, so an unfiltered numerator here
@@ -8430,12 +8507,15 @@ async def get_dashboard_session_trend(
                    sb.first_day, sb.last_day,
                    g.active_users, g.total_revenue,
                    g.sessions AS ga4_sessions, g.purchases AS ga4_purchases,
-                   s.all_sessions, o.all_revenue, o.all_orders
+                   s.all_sessions, o.all_revenue, o.all_orders,
+                   gd.spend AS google_spend, kd.spend AS kwikchat_spend
             FROM days d
             LEFT JOIN session_days s ON s.day = d.day
             LEFT JOIN ad_days a ON a.day = d.day
             LEFT JOIN order_days o ON o.day = d.day
             LEFT JOIN arpu_days g ON g.day = d.day
+            LEFT JOIN goog_days gd ON gd.day = d.day
+            LEFT JOIN kwik_days kd ON kd.day = d.day
             CROSS JOIN spend_bounds sb
             ORDER BY d.day
         """), {"df": date_from, "dt": date_to})).all()
@@ -8481,6 +8561,17 @@ async def get_dashboard_session_trend(
         a_rev = float((row[12] if row else 0) or 0)
         a_orders = int((row[13] if row else 0) or 0)
         a_denom = a_sess if a_sess and a_sess > 0 else None
+        # Blended spend: every platform, not Meta's alone. The Shopify
+        # and GA4 denominators are all-traffic, so the numerator over
+        # them has to be too. Kwikchat falls back to its flat rate on
+        # days its table has not reached; Google to zero, which is what
+        # a day it has not reported yet contributes.
+        blended = None
+        if spend is not None:
+            g_sp = float(row[14]) if row and row[14] is not None else 0.0
+            k_sp = (float(row[15]) if row and row[15] is not None
+                    else KWIKCHAT_DAILY_ESTIMATE)
+            blended = spend + g_sp + k_sp
         points.append(DashboardSessionTrendPoint(
             day=day, sessions=sessions, ad_spend=spend,
             ga4_active_users=g_users,
@@ -8490,13 +8581,14 @@ async def get_dashboard_session_trend(
             revenue_per_session=revenue / denominator if denominator else None,
             conversion_rate=orders / denominator if denominator else None,
             ga4_sessions=g_sess,
-            ga4_cost_per_session=(spend / g_denom) if g_denom and spend is not None else None,
+            ga4_cost_per_session=(blended / g_denom) if g_denom and blended is not None else None,
             ga4_revenue_per_session=(g_rev / g_denom) if g_denom and g_rev is not None else None,
             ga4_conversion_rate=(g_buys / g_denom) if g_denom and g_buys is not None else None,
             all_sessions=a_sess,
             all_revenue=a_rev,
             all_orders=a_orders,
-            all_cost_per_session=(spend / a_denom) if a_denom and spend is not None else None,
+            blended_spend=blended,
+            all_cost_per_session=(blended / a_denom) if a_denom and blended is not None else None,
             all_revenue_per_session=(a_rev / a_denom) if a_denom else None,
             all_conversion_rate=(a_orders / a_denom) if a_denom else None,
         ))
@@ -8972,6 +9064,7 @@ async def get_dashboard_kpis(
             "FROM shopify_order_attribution "
             f"WHERE {META_SOURCE_SQL}"
         ))).one()
+        g_spend, k_spend, _extra, k_days = await _blended_spend(session, None, None)
         return KpisResponse(
             total_spend=float(totals[0]),
             total_impressions=float(totals[1]),
@@ -8979,6 +9072,10 @@ async def get_dashboard_kpis(
             total_shopify_orders=int(totals[3]),
             meta_shopify_revenue=float(meta[0]),
             meta_shopify_orders=int(meta[1]),
+            google_spend=round(g_spend, 2),
+            kwikchat_spend=round(k_spend, 2),
+            blended_spend=round(float(totals[0]) + g_spend + k_spend, 2),
+            kwikchat_estimated_days=k_days,
             new_customers=int(acq[0]),
             new_customer_revenue=float(acq[1]),
         )
@@ -8990,6 +9087,7 @@ async def get_dashboard_kpis(
     ), {"df": df, "dt": dt})).one()
     shop = await _get_dashboard_order_groups(session, df, dt)
     meta_srcs = await _meta_sources(session, (row[0] for row in shop))
+    g_spend, k_spend, _extra, k_days = await _blended_spend(session, df, dt)
     # `order_day` is a date, so BETWEEN is inclusive on both ends and
     # matches the spend window above exactly -- the two halves of
     # Acquisition MER must cover the same days or the ratio is a
@@ -9007,6 +9105,10 @@ async def get_dashboard_kpis(
         total_shopify_orders=sum(row[3] for row in shop),
         meta_shopify_revenue=float(sum(row[2] or 0 for row in shop if row[0] in meta_srcs)),
         meta_shopify_orders=sum(row[3] for row in shop if row[0] in meta_srcs),
+        google_spend=round(g_spend, 2),
+        kwikchat_spend=round(k_spend, 2),
+        blended_spend=round(float(ads[0]) + g_spend + k_spend, 2),
+        kwikchat_estimated_days=k_days,
         new_customers=int(acq[0]),
         new_customer_revenue=float(acq[1]),
         spend_data_from=floor.isoformat() if floor and df < floor else None,

@@ -32,6 +32,15 @@ def session():
         -- deliberately larger on every row so a regression that reads
         -- the all-traffic column again fails loudly on the ratios
         -- rather than quietly returning a plausible smaller number.
+        -- Blended spend sources. Google reports a day behind; the
+        -- Kwikchat row is the flat placeholder, and days past its last
+        -- one are filled at the same rate by the endpoint.
+        CREATE TABLE google_ads_spend_daily(day TEXT, spend NUMERIC);
+        INSERT INTO google_ads_spend_daily VALUES
+            ('2026-10-01', 10), ('2026-10-03', 20);
+        CREATE TABLE kwikchat_spend_daily(day TEXT, spend NUMERIC, is_estimate INT);
+        INSERT INTO kwikchat_spend_daily VALUES
+            ('2026-10-01', 30000, 1);
         CREATE TABLE shopify_sessions_daily(
             day TEXT PRIMARY KEY, sessions NUMERIC, meta_sessions NUMERIC);
         INSERT INTO shopify_sessions_daily VALUES
@@ -193,7 +202,11 @@ async def test_ga4_daily_ratios_divide_ga4_by_ga4(session):
     assert first.ga4_sessions == 250
     assert first.ga4_revenue_per_session == 10
     assert first.ga4_conversion_rate == 0.02
-    assert first.ga4_cost_per_session == 150 / 250
+    # Cost is BLENDED -- Meta 150 + Google 10 + Kwikchat 30,000 -- not
+    # Meta's alone. GA4 counts all traffic, so charging it Meta's spend
+    # would price everybody's visits against one channel.
+    assert first.blended_spend == 150 + 10 + 30_000
+    assert first.ga4_cost_per_session == (150 + 10 + 30_000) / 250
 
     # Shopify's lines for the same day divide Meta's orders by Meta's
     # 100 sessions, so the two sources genuinely disagree here.
@@ -206,10 +219,13 @@ async def test_ga4_daily_ratios_divide_ga4_by_ga4(session):
     assert gap.ga4_conversion_rate is None
     assert gap.ga4_cost_per_session is None
 
-    # 3 Oct: 125 sessions, Rs 2,000, 2 purchases, and no spend that day.
+    # 3 Oct: 125 sessions, Rs 2,000, 2 purchases, no Meta spend. The
+    # Kwikchat table has no row for this day either, so it is filled at
+    # the flat rate -- blended is Google's 20 plus that 30,000.
     assert last.ga4_revenue_per_session == 16
     assert last.ga4_conversion_rate == 0.016
-    assert last.ga4_cost_per_session == 0
+    assert last.blended_spend == 0 + 20 + 30_000
+    assert last.ga4_cost_per_session == (20 + 30_000) / 125
 
 
 async def test_all_traffic_ratios_use_the_whole_shop(session):
@@ -232,7 +248,8 @@ async def test_all_traffic_ratios_use_the_whole_shop(session):
     assert first.ga4_sessions == 250
     assert first.all_revenue_per_session == 600 / 900
     assert first.all_conversion_rate == 3 / 900
-    assert first.all_cost_per_session == 150 / 900
+    # Blended again: all of Shopify's sessions, so all of the spend.
+    assert first.all_cost_per_session == (150 + 10 + 30_000) / 900
 
     # The Meta ratios on the same day divide by the 100-session subset,
     # so the two tabs genuinely differ.

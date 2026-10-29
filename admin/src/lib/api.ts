@@ -2180,6 +2180,13 @@ export interface OverviewSummaryResponse {
    *  and not the all-traffic totals. */
   meta_shopify_revenue?: number;
   meta_shopify_orders?: number;
+  /** Meta + Google Ads + Kwikchat. The all-traffic tabs divide by
+   *  this; only the Meta tab divides by `total_spend` alone. */
+  google_spend?: number;
+  kwikchat_spend?: number;
+  blended_spend?: number;
+  /** Days of the window whose Kwikchat figure is the flat estimate. */
+  kwikchat_estimated_days?: number;
   category_breakdown: BreakdownItem[];
   channel_breakdown: BreakdownItem[];
   top_landing_pages: TopLandingPage[];
@@ -2312,6 +2319,13 @@ export interface DashboardKpis {
    *  and not the all-traffic totals. */
   meta_shopify_revenue?: number;
   meta_shopify_orders?: number;
+  /** Meta + Google Ads + Kwikchat. The all-traffic tabs divide by
+   *  this; only the Meta tab divides by `total_spend` alone. */
+  google_spend?: number;
+  kwikchat_spend?: number;
+  blended_spend?: number;
+  /** Days of the window whose Kwikchat figure is the flat estimate. */
+  kwikchat_estimated_days?: number;
   /** Customers whose FIRST EVER Shopify order falls inside the selected
    *  window — acquired in it, not merely active in it. Windowed on the
    *  same calendar as `total_spend`, so Acquisition MER divides two
@@ -2390,6 +2404,8 @@ export interface DashboardSessionTrendPoint {
   ga4_conversion_rate?: number | null;
   /** Shopify's whole shop -- every traffic source, the superset the
    *  Meta figures above are a part of. */
+  /** Meta + Google Ads + Kwikchat for the day. */
+  blended_spend?: number | null;
   all_sessions?: number | null;
   all_revenue?: number;
   all_orders?: number;

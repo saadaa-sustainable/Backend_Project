@@ -254,9 +254,9 @@ export function SessionTrendChart({
         {source === "meta"
           ? "Meta's orders over Meta-driven Shopify sessions."
           : source === "shopify"
-            ? "All of Shopify's orders over all of its sessions. Cost per session is the one line that mixes sources: the spend is Meta's and this traffic is not."
+            ? "All of Shopify's orders over all of its sessions, against blended spend — Meta plus Google Ads plus Kwikchat — because the traffic is everyone's and so is the cost."
             : source === "google"
-              ? "GA4's revenue and purchases over GA4 sessions — all traffic, since GA4 cannot be narrowed to Meta. Cost per session is the one line that mixes sources: Meta spend over every GA4 session."
+              ? "GA4's revenue and purchases over GA4 sessions — all traffic, since GA4 cannot be narrowed to Meta. Cost per session uses blended spend: Meta plus Google Ads plus Kwikchat."
               : "Two systems watching the same all-traffic population, so a solid line and its dashed twin should roughly agree — where they do not, one of them is mismeasuring."}
         {showArpu && " ARPU sits on its own scale because it divides by something else entirely — GA4's deduplicated count of users active that day, so each visitor is counted once however many times they came back. That makes a point on the ARPU line exact, unlike the figure on the card above, which adds those daily counts together."}
         {" "}Gaps mark days with no data.
