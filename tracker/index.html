@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hourly Tracker</title>
+<!--
+  A standalone campaign tracker. Deliberately ONE file with no build
+  step and no framework: it ships during a live campaign, when the main
+  admin app's build may be broken for unrelated reasons, and the cost of
+  that independence is a few hundred lines of plain DOM.
+
+  It reads the same /admin/analytics/hourly-tracker endpoint the admin
+  app does, so the two can never disagree about a number.
+
+  The API base is NOT baked in. A static site has no server to inject an
+  env var, so it comes from ?api=... (remembered afterwards), which also
+  makes the same file work against localhost and production without a
+  rebuild.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --surface: #ffffff; --muted: #f6f7f9;
+    --border: #e3e6ea; --border-soft: #eef0f3;
+    --text: #15181c; --text-2: #5b6470; --text-3: #8b94a1;
+    --good: #0f7b3f; --bad: #b4341f; --flat: #8b94a1;
+    --sessions: #8a6d1f; --cost: #1f5fd0; --rev: #0f8a4d; --amer: #6b3fd4;
+    --s1: #1f5fd0; --s2: #0f8a4d; --s3: #8a6d1f; --s4: #6b3fd4; --s5: #b4341f; --s6: #0f6f86;
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --bg: #0f1115; --surface: #161a20; --muted: #1b2027;
+      --border: #272d36; --border-soft: #1f252d;
+      --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
+      --good: #4ade80; --bad: #f87171;
+      --sessions: #d6b25f; --cost: #6ea8ff; --rev: #4ade80; --amer: #b08cff;
+      --s1: #6ea8ff; --s2: #4ade80; --s3: #d6b25f; --s4: #b08cff; --s5: #f87171; --s6: #4fb3cc;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --surface: #161a20; --muted: #1b2027;
+    --border: #272d36; --border-soft: #1f252d;
+    --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
+    --good: #4ade80; --bad: #f87171;
+    --sessions: #d6b25f; --cost: #6ea8ff; --rev: #4ade80; --amer: #b08cff;
+    --s1: #6ea8ff; --s2: #4ade80; --s3: #d6b25f; --s4: #b08cff; --s5: #f87171; --s6: #4fb3cc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1500px; margin: 0 auto; padding: 20px 16px 56px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; margin-bottom: 4px; }
+  h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-3); font-size: 12px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+          color: var(--text-2); border: 1px solid var(--border); border-radius: 999px;
+          padding: 3px 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0 18px; }
+  label.f { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2);
+            border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--surface); }
+  input[type=date], input[type=url] {
+    background: transparent; border: 0; color: var(--text); font: inherit; font-size: 13px; outline: none;
+  }
+  button { font: inherit; font-size: 13px; cursor: pointer; background: var(--surface);
+           color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; }
+  button:hover { background: var(--muted); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .heroes { display: grid; gap: 18px 14px; grid-template-columns: repeat(2, minmax(0,1fr)); margin-top: 12px; }
+  @media (min-width: 720px) { .heroes { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+  @media (min-width: 1100px) { .heroes { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+  .h-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
+  .h-value { font-size: 25px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums;
+             letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .h-prev { font-size: 11.5px; color: var(--text-2); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .h-delta { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .h-parts { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 4px;
+             font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .flat { color: var(--flat); }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { padding: 7px 11px; text-align: right; white-space: nowrap;
+           border-bottom: 1px solid var(--border-soft); }
+  th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
+       color: var(--text-3); font-weight: 600; position: sticky; top: 0; background: var(--surface); z-index: 2; }
+  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface); z-index: 1; }
+  th:first-child { z-index: 3; }
+  tbody tr:hover td { background: var(--muted); }
+  tr.live td, tr.live th { background: var(--muted); }
+  /* The day's aggregate, pinned under the header: the hours below are
+     its breakdown, and showing the two apart invites adding a column
+     up by hand and getting a different answer. */
+  tr.total td { background: var(--muted); font-weight: 650;
+                border-bottom: 2px solid var(--border); position: sticky; top: 29px; z-index: 2; }
+  tr.total td:first-child { z-index: 3; }
+  .tag { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
+         border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; margin-left: 6px; }
+  .d { font-size: 10.5px; margin-left: 7px; font-variant-numeric: tabular-nums; }
+  /* Today over the baseline, one line each, rather than a value with a
+     percentage hung off it. The eye reads DOWN a stacked pair without
+     having to hold the baseline in its head. */
+  .l1 { display: block; }
+  .l2 { display: block; color: var(--text-3); margin-top: 2px; }
+  .l3 { display: block; margin-top: 2px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  tr.total td .l1 { font-weight: 650; }
+  tr.total td .l2 { font-weight: 400; }
+  td .l1, td .l2 { font-variant-numeric: tabular-nums; }
+  .note { color: var(--text-3); font-size: 11.5px; margin-top: 10px; line-height: 1.6; }
+  .err { border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 13px; }
+  /* The chart and the donut sit side by side on a desktop and stack on
+     a phone. The donut gets the narrower column: a ring reads fine
+     small, the 24-hour curve does not. */
+  .charts { display: grid; gap: 16px; margin-top: 16px; }
+  @media (min-width: 1040px) { .charts { grid-template-columns: 1fr minmax(330px, 0.52fr); } }
+  .donutbody { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; margin-top: 12px; }
+  .donutbody svg { flex: 0 0 auto; }
+  .srclist { flex: 1 1 190px; min-width: 190px; margin: 0; padding: 0; list-style: none; }
+  .srclist li { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; padding: 1.5px 0; cursor: default; }
+  .srclist i { width: 10px; height: 10px; border-radius: 2px; flex: 0 0 auto; }
+  .srclist .nm { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srclist .vl { color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .srclist .sh { color: var(--text-3); font-variant-numeric: tabular-nums; width: 46px; text-align: right; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--text-2); }
+  .legend i { display: inline-block; width: 16px; height: 2px; vertical-align: middle; margin-right: 6px; }
+  svg text { fill: var(--text-3); }
+  .chartbox { position: relative; }
+  #chart { cursor: crosshair; }
+  .tip {
+    position: absolute; pointer-events: none; z-index: 5;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 9px; padding: 9px 11px; min-width: 212px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.28); font-size: 12px;
+    opacity: 0; transition: opacity .08s linear;
+  }
+  .tip.on { opacity: 1; }
+  .tip h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 650; }
+  .tip table { width: 100%; font-size: 11.5px; }
+  .tip td { padding: 2px 0; border: 0; white-space: nowrap; }
+  .tip td.k { text-align: left; color: var(--text-2); padding-right: 10px; }
+  .tip td.v { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .tip td.p { text-align: right; color: var(--text-3); font-variant-numeric: tabular-nums;
+              padding-left: 10px; font-weight: 400; }
+  .tip .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+             margin-right: 6px; vertical-align: middle; }
+  .tip .hdr { color: var(--text-3); font-size: 10px; text-transform: uppercase;
+              letter-spacing: .05em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Hourly Tracker</h1>
+    <span class="pill"><span class="dot"></span><span id="status">loading…</span></span>
+    <span class="sub" id="sub"></span>
+  </header>
+
+  <div class="controls">
+    <label class="f">Day <input type="date" id="day"></label>
+    <label class="f">Compare to <input type="date" id="cmp"></label>
+    <label class="f"><input type="checkbox" id="deltas" checked> % change</label>
+    <button id="refresh">Refresh</button>
+    <button id="theme">Light / dark</button>
+    <label class="f" style="flex:1 1 320px">API
+      <input type="url" id="api" style="flex:1" placeholder="https://your-backend.onrender.com">
+    </label>
+  </div>
+
+  <div id="error"></div>
+
+  <div class="card" id="totals" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:baseline">
+      <strong style="font-size:13px" id="ttl-title"></strong>
+      <span class="sub" id="ttl-vs"></span>
+    </div>
+    <div class="heroes" id="heroes"></div>
+  </div>
+
+  <div class="charts">
+  <div class="card" id="chartcard" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">Hour by hour</strong>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="chartbox" id="chartbox">
+      <div style="overflow-x:auto">
+        <svg id="chart" viewBox="0 0 1000 360" style="width:100%;min-width:620px"></svg>
+      </div>
+      <div class="tip" id="tip"></div>
+    </div>
+  </div>
+
+  <div class="card" id="donutcard" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">Sessions by utm_source</strong>
+      <span class="sub" id="donut-total"></span>
+    </div>
+    <div class="donutbody" id="donutbody"></div>
+    <p class="note" id="donut-note"></p>
+  </div>
+
+  </div>
+
+  <div style="margin-top:16px" class="tablewrap" id="tablewrap" hidden>
+    <table><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+  </div>
+
+  <p class="note" id="footnote"></p>
+</div>
+
+<script>
+"use strict";
+
+// --- config -----------------------------------------------------------
+// A static site has no server to inject an env var, so the API base
+// comes from ?api= and is remembered. Same file, any environment.
+const qs = new URLSearchParams(location.search);
+function apiBase() {
+  const fromUrl = qs.get("api");
+  if (fromUrl) { try { localStorage.setItem("tracker_api", fromUrl); } catch {} return fromUrl.replace(/\/+$/, ""); }
+  try { const v = localStorage.getItem("tracker_api"); if (v) return v.replace(/\/+$/, ""); } catch {}
+  // Only a sensible guess while developing. On a deployed origin it is
+  // not: a first-time visitor would get a connection error pointing at
+  // their OWN machine, which reads as "the dashboard is broken" rather
+  // than "nobody has told it where the API lives".
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  return local ? "http://localhost:8002" : "";
+}
+
+const IST_MIN = 330;
+function istToday() {
+  const n = new Date();
+  return new Date(n.getTime() + (IST_MIN + n.getTimezoneOffset()) * 60000)
+    .toISOString().slice(0, 10);
+}
+
+const inr = (n, dp = 2) => n === null || n === undefined ? "—"
+  : n.toLocaleString("en-IN", { style: "currency", currency: "INR",
+      minimumFractionDigits: dp, maximumFractionDigits: dp });
+const num = n => n === null || n === undefined ? "—" : n.toLocaleString("en-IN");
+const pc  = (n, dp = 1) => n === null || n === undefined ? "—" : (n * 100).toFixed(dp) + "%";
+const xx  = n => n === null || n === undefined ? "—" : n.toFixed(2) + "x";
+
+// utm_source is whatever was in the URL that sent the session, so it is
+// attacker-controlled text arriving through the API. Anything built into
+// innerHTML or an SVG attribute goes through here first.
+const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
+  ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+
+// Up is good, except where it is not. Getting this backwards would
+// paint a saving red, which is worse than showing no colour at all.
+//
+// "flat" is the third case, for the traffic-MIX figures. Whether a
+// rising paid share is good depends on what you were trying to do that
+// hour -- buy harder, or let organic carry it -- so the change is shown
+// and the judgement left to the reader rather than guessed in colour.
+// Shopify's own hourly comparison labels every line with its full
+// date, which is what makes a stacked pair readable: two bare "12:00"
+// rows do not say which day each belongs to.
+const dayLabel = iso => new Date(iso + "T00:00:00Z").toLocaleDateString("en-US",
+  { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+const hourLabel = (iso, h) =>
+  dayLabel(iso) + ", " + ((h % 12) || 12) + ":00 " + (h < 12 ? "AM" : "PM");
+
+// The change as its own line: an arrow and a rounded figure, not the
+// signed decimal that belongs beside a value.
+function changeHTML(now, was, dir = "up", points = false) {
+  if (now == null || was == null || !was) return '<span class="flat">\u2014</span>';
+  if (points) {
+    const pts = (now - was) * 100;
+    const cls = Math.abs(pts) < 0.05 || dir === "flat" ? "flat"
+      : (dir === "up" ? pts > 0 : pts < 0) ? "good" : "bad";
+    return '<span class="' + cls + '">' + (pts > 0 ? "\u2197 +" : pts < 0 ? "\u2198 " : "")
+           + pts.toFixed(1) + " pt</span>";
+  }
+  const ch = (now - was) / Math.abs(was);
+  const cls = Math.abs(ch) < 0.005 || dir === "flat" ? "flat"
+    : (dir === "up" ? ch > 0 : ch < 0) ? "good" : "bad";
+  const arrow = Math.abs(ch) < 0.005 ? "" : ch > 0 ? "\u2197 " : "\u2198 ";
+  return '<span class="' + cls + '">' + arrow + Math.abs(ch * 100).toFixed(0) + "%</span>";
+}
+
+function deltaHTML(now, was, dir = "up", points = false) {
+  if (now == null || was == null || !was) return '<span class="flat">—</span>';
+  // A share moves in POINTS. "90.2% is 2% up on 88.4%" is a different
+  // and much smaller claim than "up 1.8 points", and the second is what
+  // anyone reading a traffic mix means.
+  if (points) {
+    const pts = (now - was) * 100;
+    const cls = Math.abs(pts) < 0.05 || dir === "flat" ? "flat"
+      : (dir === "up" ? pts > 0 : pts < 0) ? "good" : "bad";
+    return '<span class="' + cls + '">' + (pts > 0 ? "+" : "") + pts.toFixed(1) + " pt</span>";
+  }
+  const ch = (now - was) / Math.abs(was);
+  if (Math.abs(ch) < 0.005 || dir === "flat")
+    return '<span class="flat">' + (ch >= 0 ? "+" : "") + (ch * 100).toFixed(1) + "%</span>";
+  const good = dir === "up" ? ch > 0 : ch < 0;
+  return '<span class="' + (good ? "good" : "bad") + '">' +
+         (ch > 0 ? "+" : "") + (ch * 100).toFixed(1) + "%</span>";
+}
+
+const METRICS = [
+  ["sessions", "Sessions", num, "up"],
+  ["pct_paid", "% paid", pc, "flat", true],
+  ["pct_direct", "% direct", pc, "flat", true],
+  // Orders / sessions, split on the same denominators as the two
+  // shares above. A rising paid share that does not lift CR / paid is
+  // traffic bought at the wrong quality -- which is the whole reason
+  // to carry the split rather than one site-wide number.
+  ["conversion_rate", "CR", v => pc(v, 2), "up", true],
+  ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "up", true],
+  ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
+  ["meta_impressions", "Impressions", num, "up"],
+  ["spend", "Spend", v => inr(v, 0), "up"],
+  ["cost_per_session", "Cost / session", v => inr(v), "down"],
+  ["cost_per_paid_session", "Cost / paid sess", v => inr(v), "down"],
+  // The numerator of both CR and AOV, which had no column of its own.
+  ["orders", "Orders", num, "up"],
+  ["revenue", "Revenue", v => inr(v, 0), "up"],
+  // Basket size, not traffic quality: the one revenue column whose
+  // denominator is ORDERS rather than sessions. An hour can lift
+  // Rev / session by converting more of the same traffic while AOV
+  // sits still -- the two moving apart is the useful signal.
+  ["aov", "AOV", v => inr(v), "up"],
+  ["revenue_per_session", "Rev / session", v => inr(v), "up"],
+  // Per-channel revenue columns are deliberately NOT here. Google Ads
+  // spend comes from a BigQuery export that cannot run hourly, so a
+  // revenue-per-Google-session sitting beside a spend figure that
+  // excludes Google invites exactly the comparison it cannot support.
+  // Rev / paid session stays: it is revenue over the traffic we bought,
+  // and it pairs with Cost / paid session on the same denominator.
+  ["revenue_per_paid_session", "Rev / paid sess", v => inr(v), "up"],
+  ["amer", "AMER", xx, "up"],
+  ["ga4_arpu", "ARPU (GA4)", v => inr(v), "up"],
+];
+
+const HEROES = [
+  ["sessions", "Sessions", num, "up"],
+  ["spend", "Spend", v => inr(v, 0), "up"],
+  ["revenue", "Revenue", v => inr(v, 0), "up"],
+  ["cost_per_session", "Cost / session", v => inr(v), "down"],
+  ["revenue_per_session", "Rev / session", v => inr(v), "up"],
+  ["aov", "AOV", v => inr(v), "up"],
+  // The same two rates over bought traffic only -- paid sessions being
+  // every session with a utm_source that is not direct or none. They
+  // sit together, and next to AMER, because that is the row anyone
+  // judging a campaign day actually reads.
+  ["cost_per_paid_session", "Cost / paid session", v => inr(v), "down"],
+  ["revenue_per_paid_session", "Rev / paid session", v => inr(v), "up"],
+  ["amer", "AMER", xx, "up"],
+  ["conversion_rate", "Conversion rate", v => pc(v, 2), "up", true],
+  ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "up", true],
+  ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
+  // The traffic mix, as first-class KPIs rather than a footnote: on a
+  // campaign day the share you are buying is the lever, and a paid
+  // share sliding while spend holds is the thing worth catching early.
+  ["pct_paid", "% paid sessions", pc, "flat", true],
+  ["pct_direct", "% direct sessions", pc, "flat", true],
+];
+
+const $ = id => document.getElementById(id);
+let timer = null;
+
+async function load() {
+  const day = $("day").value || istToday();
+  const cmp = $("cmp").value;
+  const base = apiBase();
+  $("api").value = base;
+  // Nothing configured yet. Say so plainly instead of firing a request
+  // at a relative path and reporting whatever 404 the static host gives
+  // back, which tells the reader nothing about what to do next.
+  if (!base) {
+    $("status").textContent = "no API set";
+    $("error").innerHTML = '<div class="err"><strong>No backend configured.</strong> ' +
+      'Put the backend URL in the API box above, or open this page with ' +
+      '<code>?api=https://your-backend.example.com</code>. It is remembered ' +
+      'per browser. The backend must also list this origin in ' +
+      '<code>EXTRA_APP_ORIGINS</code>.</div>';
+    return;
+  }
+  const url = base + "/admin/analytics/hourly-tracker?day=" + day +
+              (cmp ? "&compare_to=" + cmp : "");
+  $("status").textContent = "loading…";
+  try {
+    const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
+    if (!res.ok) throw new Error("HTTP " + res.status + " from " + base);
+    render(await res.json(), day);
+    $("error").innerHTML = "";
+  } catch (e) {
+    $("status").textContent = "failed";
+    $("error").innerHTML = '<div class="err"><strong>Could not load.</strong> ' +
+      String(e.message || e) +
+      '<br>Check the API box above points at the backend, and that this origin is in EXTRA_APP_ORIGINS on it.</div>';
+  }
+}
+
+//: The last payload, so the % toggle can redraw without another fetch.
+let LAST = null;
+
+function render(d, day) {
+  LAST = { d, day };
+  const isToday = day === istToday();
+  const rows = d.rows || [];
+  const prev = new Map((d.compare_rows || []).map(r => [r.hour_of_day, r]));
+  const t = d.today, c = d.compare;
+
+  $("status").textContent = d.latest_hour != null
+    ? String(d.latest_hour).padStart(2, "0") + ":00 IST"
+    : "no data";
+  $("sub").textContent = rows.length
+    ? rows.length + " hours" + (isToday ? " · auto-refreshes hourly" : "")
+    : "nothing recorded for " + day;
+
+  if (!rows.length) {
+    $("totals").hidden = $("chartcard").hidden = $("tablewrap").hidden = true;
+    $("donutcard").hidden = true;
+    $("footnote").textContent =
+      (d.first_day && d.last_day
+        ? "This tracker holds " + d.first_day + " to " + d.last_day + ". "
+        : "") +
+      "Run scripts/fetch_hourly_tracker.py --date " + day + " to populate this day.";
+    return;
+  }
+
+  // --- totals ---
+  if (t) {
+    const base = c || {};                  // no baseline: every read is undefined
+    const baselineDay = $("cmp").value ||
+      new Date(new Date(day + "T00:00:00Z").getTime() - 86400000).toISOString().slice(0, 10);
+
+    $("totals").hidden = false;
+    $("ttl-title").textContent = "Day to date · " + t.hours + " hours";
+    $("ttl-vs").textContent = c
+      ? "against the same " + c.hours + " hours of " + c.day
+      : baselineDay + " is not in the tracker, so there is nothing to compare against";
+    // Spend adds three numbers that are not the same KIND of number --
+    // Meta is measured hourly, Google is a daily total shared across
+    // the hours, Kwikchat is a flat placeholder -- so the total alone
+    // hides what it is made of. It is the only KPI with components
+    // worth naming, hence the special case rather than a general one.
+    const partsFor = k => k !== "spend" ? "" :
+      '<div class="h-parts">' +
+      [["Meta", t.meta_spend], ["Google", t.google_spend], ["Kwikchat", t.kwikchat_spend]]
+        .map(([n, v]) => '<span>' + esc(n) + ' ' + inr(v, 0) + '</span>').join("") +
+      '</div>';
+
+    $("heroes").innerHTML = HEROES.map(([k, label, fmt, dir, points]) =>
+      '<div><div class="h-label">' + label + '</div>' +
+      '<div class="h-value">' + fmt(t[k]) + '</div>' +
+      '<div class="h-prev">' + (c ? fmt(base[k]) + ' ' : '') + '<span class="h-delta">' +
+      deltaHTML(t[k], base[k], dir, points) + '</span></div>' +
+      partsFor(k) + '</div>').join("");
+  }
+
+  drawChart(rows, d.compare_rows || [], c ? c.day : "");
+  drawDonut(d.sources || []);
+
+  // --- table ---
+  $("tablewrap").hidden = false;
+  $("thead").innerHTML = "<tr><th>Hour</th>" +
+    METRICS.map(m => "<th>" + m[1] + "</th>").join("") + "</tr>";
+
+  // Every cell stacks: the day being looked at on top, the baseline
+  // under it in grey, and -- when asked for -- the change under that.
+  // `baseDay` is the label for line two even when that day holds no
+  // rows, so the column still says what is missing.
+  const baseDay = c ? c.day : baselineDay;
+  const showPct = $("deltas") ? $("deltas").checked : true;
+
+  const cell = (now, was, fmt, dir, points, suppress) =>
+    '<td><span class="l1">' + fmt(now) + '</span>' +
+    '<span class="l2">' + fmt(was) + '</span>' +
+    (showPct && !suppress
+      ? '<span class="l3">' + changeHTML(now, was, dir, points) + '</span>' : '') +
+    '</td>';
+
+  // The aggregate first, then its breakdown. Ratios come from the API,
+  // recomputed from the summed counts -- NOT averaged down the column,
+  // which would weight a dead 04:00 the same as a 21:00 peak.
+  const totalRow = !t ? "" :
+    '<tr class="total"><td><span class="l1">' + dayLabel(t.day) +
+    '<span class="tag">' + t.hours + 'h</span></span>' +
+    '<span class="l2">' + dayLabel(baseDay) + '</span>' +
+    (showPct ? '<span class="l3">% change</span>' : '') + '</td>' +
+    METRICS.map(([k, , fmt, dir, points]) =>
+      cell(t[k], c ? c[k] : null, fmt, dir, points, false)).join("") + '</tr>';
+
+  $("tbody").innerHTML = totalRow + rows.slice().reverse().map(r => {
+    // The newest hour of today is still filling. Its figures are real;
+    // its change against a COMPLETE hour yesterday is not, and reads as
+    // a collapse that never happened -- so the pair is shown and the
+    // percentage withheld.
+    const live = isToday && r.hour_of_day === d.latest_hour;
+    const p = prev.get(r.hour_of_day);
+    return '<tr class="' + (live ? "live" : "") + '">' +
+      '<td><span class="l1">' + hourLabel(r.day_ist, r.hour_of_day) +
+      (live ? '<span class="tag">live</span>' : "") + '</span>' +
+      '<span class="l2">' + hourLabel(baseDay, r.hour_of_day) + '</span>' +
+      (showPct && !live ? '<span class="l3">&nbsp;</span>' : '') + '</td>' +
+      METRICS.map(([k, , fmt, dir, points]) =>
+        cell(r[k], p ? p[k] : null, fmt, dir, points, live)).join("") + '</tr>';
+  }).join("");
+
+  $("footnote").textContent =
+    "Same definitions as the Overview's session band, bucketed by hour. Revenue is the sum of " +
+    "order totals, which is why the per-channel columns add up to it. Cancelled and returned " +
+    "orders are left out; EXCHANGES are counted, because the customer swapped for equal value " +
+    "and the money stayed — the Overview drops those too, so the two will not match. Most of " +
+    "today's returns are not tagged yet either: they arrive over the following days, so a past " +
+    "day here will drift down as they land. Spend is Meta plus Google plus Kwikchat, but only " +
+    "Meta is measured by the hour. Google arrives as one daily total from a BigQuery export and " +
+    "is shared across the hours in proportion to that hour's Google-driven sessions; Kwikchat is " +
+    "a flat ₹30,000 a day over 24. The totals are real — the hourly SHAPE of them is inferred, so " +
+    "read an hour's Google figure as an allocation rather than a measurement. On a day still " +
+    "running, Google's total is whatever had been spent when the export ran this morning, so it " +
+    "reaches only the hours before that; later hours show a dash rather than a false zero. " +
+    "The baseline is cut to the hours today has reached — " +
+    "a part-finished day against a complete one flatters the complete one every time. " +
+    "The Today row is the aggregate of the hours beneath it, with every ratio recomputed from the " +
+    "summed counts rather than averaged down the column — averaging would weight a dead 04:00 " +
+    "the same as a 21:00 peak.";
+}
+
+// --- sessions by source ----------------------------------------------
+// The table's Meta / Google / direct session columns are BUCKETS: a
+// classifier folds forty-odd tags into four numbers. This is the same
+// sessions unfolded, which is the only place you can see a channel
+// nobody is watching start to send traffic, or a tag drifting.
+//
+// Six slices at most. The server ranks the sources and sums the tail
+// into one "other" entry, so the palette is never asked for a seventh
+// hue and no slice is too thin to point at.
+const DONUT_INKS = ["var(--s1)", "var(--s2)", "var(--s3)",
+                    "var(--s4)", "var(--s5)", "var(--s6)"];
+let DONUT = [];
+
+function donutInk(src, i) {
+  // "other" always takes the last ink, so a named source does not
+  // change colour when the day's ranking shifts under it.
+  return src === "other" ? DONUT_INKS[DONUT_INKS.length - 1]
+                         : DONUT_INKS[i % DONUT_INKS.length];
+}
+
+// One slice as a filled annulus wedge. A lone 100% slice would put
+// start and end on the same point and the arc would vanish, so it is
+// drawn as two halves.
+function wedgePath(from, to, cx, cy, rOut, rIn) {
+  if (to - from >= 0.9999) {
+    return wedgePath(0, 0.5, cx, cy, rOut, rIn) + " " +
+           wedgePath(0.5, 1, cx, cy, rOut, rIn);
+  }
+  const ang = f => (f * 2 - 0.5) * Math.PI;         // 0 = 12 o'clock
+  const pt = (a, r) => (cx + r * Math.cos(a)).toFixed(2) + "," +
+                       (cy + r * Math.sin(a)).toFixed(2);
+  const a0 = ang(from), a1 = ang(to), big = to - from > 0.5 ? 1 : 0;
+  return "M" + pt(a0, rOut) +
+         "A" + rOut + "," + rOut + " 0 " + big + " 1 " + pt(a1, rOut) +
+         "L" + pt(a1, rIn) +
+         "A" + rIn + "," + rIn + " 0 " + big + " 0 " + pt(a0, rIn) + "Z";
+}
+
+function drawDonut(sources) {
+  if (!sources.length) { $("donutcard").hidden = true; return; }
+  const total = sources.reduce((a, s) => a + s.sessions, 0);
+  let cursor = 0;
+  DONUT = sources.map((s, i) => {
+    const from = cursor;
+    cursor += s.share;
+    return { src: s.source, n: s.sessions, share: s.share,
+             from: from, to: cursor, ink: donutInk(s.source, i), total: total };
+  });
+
+  $("donutcard").hidden = false;
+  $("donut-total").textContent = num(total) + " sessions";
+  $("donut-note").innerHTML =
+    "Raw tags, case-folded. The Meta and Google session columns are buckets built " +
+    "from these by a classifier, so a source here can land in a bucket whose name it " +
+    "does not share — <code>facebook</code> counts as Meta. Anything past the top " +
+    "five is summed into <em>other</em>.";
+  paintDonut(null);
+}
+
+function paintDonut(hover) {
+  const SZ = 192, C = SZ / 2, RO = 90, RI = 57;
+  const on = s => hover === null || hover === s.src;
+  const centre = hover === null ? null : DONUT.find(s => s.src === hover);
+  const total = DONUT.length ? DONUT[0].total : 0;
+
+  let svg = '<svg viewBox="0 0 ' + SZ + ' ' + SZ + '" width="' + SZ + '" height="' + SZ +
+            '" role="img" aria-label="Sessions by utm_source">';
+  DONUT.forEach(s => {
+    svg += '<path d="' + wedgePath(s.from, s.to, C, C, RO, RI) + '" fill="' + s.ink +
+           '" opacity="' + (on(s) ? 1 : 0.28) + '" stroke="var(--surface)" stroke-width="1.5"' +
+           ' data-src="' + esc(s.src) + '"></path>';
+  });
+  svg += '<text x="' + C + '" y="' + (C - 5) + '" text-anchor="middle" font-size="17" ' +
+         'font-weight="600" fill="var(--text)">' +
+         (centre ? pc(centre.share) : num(total)) + '</text>';
+  svg += '<text x="' + C + '" y="' + (C + 14) + '" text-anchor="middle" font-size="10.5" ' +
+         'fill="var(--text-2)">' + esc(centre ? centre.src : "sessions") + '</text>';
+  svg += '</svg>';
+
+  svg += '<ul class="srclist">' + DONUT.map(s =>
+    '<li data-src="' + esc(s.src) + '">' +
+    '<i style="background:' + s.ink + ';opacity:' + (on(s) ? 1 : 0.28) + '"></i>' +
+    '<span class="nm">' + esc(s.src) + '</span>' +
+    '<span class="vl">' + num(s.n) + '</span>' +
+    '<span class="sh">' + pc(s.share) + '</span></li>').join("") + '</ul>';
+
+  $("donutbody").innerHTML = svg;
+}
+
+// Delegated, and wired once at load like the rest of this file: the
+// script runs at the end of the body, so the node is already there.
+// Delegation is the point -- paintDonut replaces the whole subtree on
+// every hover, and per-node handlers would not survive it.
+$("donutbody").addEventListener("pointerover", e => {
+  const el = e.target.closest("[data-src]");
+  if (el) paintDonut(el.getAttribute("data-src"));
+});
+$("donutbody").addEventListener("pointerleave", () => {
+  if (DONUT.length) paintDonut(null);
+});
+
+// --- chart ------------------------------------------------------------
+// Three bands, because sessions run in thousands, the two ratios in tens
+// of rupees and AMER around 2 — one axis would flatten two of them.
+let CHART = null;   // geometry from the last draw, for the crosshair
+
+function drawChart(rows, base, baseDay) {
+  const W = 1000, L = 54, R = 16, PLOT = W - L - R;
+  const bands = [
+    { top: 22, h: 80, label: "Sessions", money: false,
+      series: [["sessions", "var(--sessions)", "Sessions"]] },
+    { top: 142, h: 80, label: "Cost and revenue / session · ₹", money: true,
+      series: [["cost_per_session", "var(--cost)", "Cost / session"],
+               ["revenue_per_session", "var(--rev)", "Revenue / session"]] },
+    { top: 262, h: 64, label: "AMER", money: false,
+      series: [["amer", "var(--amer)", "AMER"]] },
+  ];
+  const byHour = rs => new Map(rs.map(r => [r.hour_of_day, r]));
+  const now = byHour(rows), was = byHour(base), all = rows.concat(base);
+  const maxOf = keys => Math.max(1e-9, ...all.flatMap(r => keys.map(k => r[k] ?? 0))) * 1.12;
+
+  const x = h => L + (h / 23) * PLOT;
+  let svg = "";
+  $("legend").innerHTML = bands.flatMap(b => b.series.map(
+      s => '<span><i style="background:' + s[1] + '"></i>' + s[2] + "</span>")).join("") +
+    '<span><i style="background:var(--text-3);height:0;border-top:2px dashed var(--text-3)"></i>' +
+    (baseDay || "previous day") + "</span>";
+
+  for (const b of bands) {
+    const max = maxOf(b.series.map(s => s[0]));
+    const y = v => b.top + b.h * (1 - v / max);
+    svg += '<text x="' + L + '" y="' + (b.top - 7) + '" font-size="10.5">' + b.label + "</text>";
+    for (const f of [0, 0.5, 1]) {
+      const v = max * f;
+      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) +
+             '" stroke="var(--border-soft)"/>' +
+             '<text x="' + (L - 7) + '" y="' + y(v) + '" text-anchor="end" dominant-baseline="middle" font-size="10">' +
+             (b.money ? "₹" + Math.round(v) : max > 50 ? Math.round(v) : v.toFixed(1)) + "</text>";
+    }
+    const line = (map, key, stroke, dash) => {
+      let dstr = "", started = false;
+      for (let h = 0; h <= 23; h++) {
+        const r = map.get(h), v = r ? r[key] : null;
+        // A gap breaks the line. An hour with no data is not an hour of
+        // zero, and bridging it would draw a trend nobody measured.
+        if (v == null) { started = false; continue; }
+        dstr += (started ? "L" : "M") + x(h) + "," + y(v) + " ";
+        started = true;
+      }
+      return dstr ? '<path d="' + dstr + '" fill="none" stroke="' + stroke +
+        '" stroke-width="' + (dash ? 1.4 : 2) + '" stroke-linejoin="round"' +
+        (dash ? ' stroke-dasharray="3 3" opacity="0.8"' : "") + "/>" : "";
+    };
+    for (const s of b.series) svg += line(was, s[0], "var(--text-3)", true);
+    for (const s of b.series) svg += line(now, s[0], s[1], false);
+  }
+  for (const h of [0, 4, 8, 12, 16, 20, 23]) {
+    svg += '<text x="' + x(h) + '" y="350" font-size="10.5" text-anchor="' +
+      (h === 0 ? "start" : h === 23 ? "end" : "middle") + '">' +
+      String(h).padStart(2, "0") + ":00</text>";
+  }
+  // A layer the crosshair draws into, so hovering never re-renders the
+  // lines underneath -- redrawing them on every pointer move is what
+  // makes a chart feel heavy.
+  svg += '<g id="xhair"></g>';
+  $("chart").innerHTML = svg;
+  $("chartcard").hidden = false;
+
+  const yFor = {};
+  for (const b of bands) {
+    const max = maxOf(b.series.map(s => s[0]));
+    for (const sdef of b.series) yFor[sdef[0]] = v => b.top + b.h * (1 - v / max);
+  }
+  CHART = { W, L, PLOT, bands, now, was, x, yFor, baseDay,
+            series: bands.flatMap(b => b.series.map(sv => ({ key: sv[0], color: sv[1], name: sv[2] }))) };
+}
+
+// --- crosshair --------------------------------------------------------
+const TIP_ROWS = [
+  ["sessions", "Sessions", num],
+  ["cost_per_session", "Cost / session", v => inr(v)],
+  ["revenue_per_session", "Revenue / session", v => inr(v)],
+  ["amer", "AMER", xx],
+  ["spend", "Spend", v => inr(v, 0)],
+  ["revenue", "Revenue", v => inr(v, 0)],
+  ["pct_paid", "% paid", v => pc(v)],
+];
+
+function hoverAt(evt) {
+  if (!CHART) return;
+  const svgEl = $("chart");
+  const box = svgEl.getBoundingClientRect();
+  // The SVG scales to its container, so client pixels have to be mapped
+  // back through the viewBox before they mean anything in chart space.
+  const vx = ((evt.clientX - box.left) / box.width) * CHART.W;
+  const h = Math.round(((vx - CHART.L) / CHART.PLOT) * 23);
+  if (h < 0 || h > 23 || !CHART.now.has(h)) return hideTip();
+
+  const r = CHART.now.get(h), p = CHART.was.get(h);
+  const gx = CHART.x(h);
+  let marks = '<line x1="' + gx + '" x2="' + gx + '" y1="' + CHART.bands[0].top +
+    '" y2="' + (CHART.bands[CHART.bands.length - 1].top + CHART.bands[CHART.bands.length - 1].h) +
+    '" stroke="var(--text-3)" stroke-dasharray="2 3" opacity="0.65"/>';
+  for (const sv of CHART.series) {
+    const v = r[sv.key];
+    if (v == null) continue;
+    marks += '<circle cx="' + gx + '" cy="' + CHART.yFor[sv.key](v) +
+             '" r="3.5" fill="' + sv.color + '" stroke="var(--surface)" stroke-width="1.5"/>';
+    const pv = p ? p[sv.key] : null;
+    if (pv != null) {
+      marks += '<circle cx="' + gx + '" cy="' + CHART.yFor[sv.key](pv) +
+               '" r="2.5" fill="none" stroke="var(--text-3)" stroke-width="1.5" opacity="0.8"/>';
+    }
+  }
+  document.getElementById("xhair").innerHTML = marks;
+
+  const tip = $("tip");
+  tip.innerHTML =
+    "<h4>" + String(h).padStart(2, "0") + ":00</h4>" +
+    '<table><tr><td class="k hdr"></td><td class="v hdr">today</td>' +
+    '<td class="p hdr">' + (CHART.baseDay || "prev") + "</td></tr>" +
+    TIP_ROWS.map(([k, label, fmt]) => {
+      const sv = CHART.series.find(x => x.key === k);
+      return "<tr><td class=\"k\">" +
+        (sv ? '<span class="sw" style="background:' + sv.color + '"></span>' : "") +
+        label + '</td><td class="v">' + fmt(r[k]) + '</td><td class="p">' +
+        (p ? fmt(p[k]) : "—") + "</td></tr>";
+    }).join("") + "</table>";
+
+  // Flip to the left of the cursor near the right edge, so the tooltip
+  // never hangs off the card and clips.
+  const cb = $("chartbox").getBoundingClientRect();
+  const px = evt.clientX - cb.left;
+  const w = tip.offsetWidth || 220;
+  tip.style.left = (px + 16 + w > cb.width ? Math.max(4, px - w - 16) : px + 16) + "px";
+  tip.style.top = Math.max(4, Math.min(evt.clientY - cb.top - 20, cb.height - (tip.offsetHeight || 170) - 4)) + "px";
+  tip.classList.add("on");
+}
+
+function hideTip() {
+  const x = document.getElementById("xhair");
+  if (x) x.innerHTML = "";
+  $("tip").classList.remove("on");
+}
+
+// --- wiring -----------------------------------------------------------
+$("day").value = qs.get("day") || istToday();
+$("cmp").value = qs.get("compare_to") || "";
+$("api").value = apiBase();
+$("day").max = $("cmp").max = istToday();
+
+$("chart").addEventListener("pointermove", hoverAt);
+$("chart").addEventListener("pointerleave", hideTip);
+
+$("refresh").onclick = load;
+$("day").onchange = load;
+$("cmp").onchange = load;
+// A re-render, not a re-fetch: the figures are already in hand and the
+// toggle only decides whether the third line is drawn.
+$("deltas").onchange = () => { if (LAST) render(LAST.d, LAST.day); };
+$("api").onchange = () => {
+  try { localStorage.setItem("tracker_api", $("api").value.trim()); } catch {}
+  load();
+};
+$("theme").onclick = () => {
+  const el = document.documentElement;
+  const next = el.getAttribute("data-theme") === "dark" ? "light" : "dark";
+  el.setAttribute("data-theme", next);
+  try { localStorage.setItem("tracker_theme", next); } catch {}
+};
+try {
+  const th = localStorage.getItem("tracker_theme");
+  if (th) document.documentElement.setAttribute("data-theme", th);
+} catch {}
+
+load();
+// Once an hour, because the data arrives once an hour: the ingest cron
+// fires at minute 5, and polling twelve times an hour simply fetched
+// the same rows eleven times over. The offset puts the refresh a few
+// minutes after the write rather than racing it.
+timer = setInterval(load, 60 * 60000);
+</script>
+</body>
+</html>

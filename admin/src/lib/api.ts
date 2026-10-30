@@ -1193,6 +1193,11 @@ export interface FirstClickRow {
   /** What to show: the source name, or the ad/ad set name where the id
    *  resolves, falling back to the raw id where it does not. */
   label: string;
+  /** Meta's own ad id, at ad grain, where the entity is an id Meta has told
+   *  us about. Null at source and ad set grain, and null for the kwikengage,
+   *  sagepilot-ai, affiliate and google tokens that share utm_content with
+   *  real ad ids — a dash there, never a token dressed up as an ad id. */
+  ad_id: string | null;
   /** The channel the entity belongs to — what explains an unresolved id. */
   channel: string;
   /** Meta spend for this entity over the selected window. Null at source
@@ -3590,4 +3595,151 @@ export function createMetaHypothesis(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/* ---------------------------------------------------------------- *
+ * Hourly campaign tracker                                           *
+ * ---------------------------------------------------------------- */
+
+export interface HourlyRow {
+  hour: string;
+  day_ist: string;
+  hour_of_day: number;
+  sessions: number | null;
+  sessions_paid: number | null;
+  sessions_direct: number | null;
+  sessions_meta: number | null;
+  sessions_google: number | null;
+  /** utm_source -> sessions. The buckets above are lossy; this is what
+   *  they were bucketed from. */
+  sessions_by_source: Record<string, number> | null;
+  /** Summed from order totals — the same basis the Overview uses. */
+  revenue: number | null;
+  orders: number | null;
+  /** Orders on the same denominators as the session buckets. Sum to orders. */
+  orders_paid: number | null;
+  orders_direct: number | null;
+  /** Cancelled or returned, and therefore NOT in revenue/orders above. */
+  orders_excluded: number | null;
+  revenue_excluded: number | null;
+  /** ShopifyQL's own total, a different measure kept as a cross-check. */
+  revenue_shopifyql: number | null;
+  revenue_meta: number | null;
+  revenue_google: number | null;
+  revenue_paid: number | null;
+  orders_meta: number | null;
+  new_customers: number | null;
+  new_customer_revenue: number | null;
+  /** The only genuinely hourly one. */
+  meta_spend: number | null;
+  meta_impressions: number | null;
+  kwikchat_spend: number | null;
+  /** A daily total shared across the hours by each hour's share of the
+   *  day's Google-driven sessions. NULL for an hour its daily capture
+   *  does not reach — which is not the same as zero. */
+  google_spend: number | null;
+  google_spend_as_of: string | null;
+  ga4_sessions: number | null;
+  ga4_revenue: number | null;
+  ga4_active_users: number | null;
+  /** Derived server-side, never stored: a stored ratio cannot be re-summed. */
+  spend: number | null;
+  cost_per_session: number | null;
+  cost_per_paid_session: number | null;
+  pct_paid: number | null;
+  pct_direct: number | null;
+  revenue_per_session: number | null;
+  revenue_per_meta_session: number | null;
+  revenue_per_google_session: number | null;
+  revenue_per_paid_session: number | null;
+  /** Revenue ÷ orders — basket size, not traffic quality. */
+  aov: number | null;
+  /** Orders ÷ sessions. The paid and direct variants divide the matching
+   *  order count by the matching session count, never the whole-site
+   *  numerator over a slice of traffic. */
+  conversion_rate: number | null;
+  conversion_rate_paid: number | null;
+  conversion_rate_direct: number | null;
+  amer: number | null;
+  ga4_arpu: number | null;
+}
+
+export interface HourlyTotals {
+  day: string;
+  hours: number;
+  sessions: number;
+  sessions_paid: number;
+  sessions_direct: number;
+  sessions_meta: number;
+  sessions_google: number;
+  revenue: number;
+  orders: number;
+  orders_paid: number;
+  orders_direct: number;
+  orders_excluded: number;
+  revenue_excluded: number;
+  spend: number;
+  meta_impressions: number;
+  meta_spend: number;
+  kwikchat_spend: number;
+  google_spend: number;
+  /** The oldest Google capture in the range — worst-case staleness. */
+  google_spend_as_of: string | null;
+  new_customers: number;
+  new_customer_revenue: number;
+  cost_per_session: number | null;
+  cost_per_paid_session: number | null;
+  pct_paid: number | null;
+  pct_direct: number | null;
+  revenue_per_session: number | null;
+  revenue_per_meta_session: number | null;
+  revenue_per_google_session: number | null;
+  revenue_per_paid_session: number | null;
+  /** Re-divided from the day's summed revenue and orders. */
+  aov: number | null;
+  conversion_rate: number | null;
+  conversion_rate_paid: number | null;
+  conversion_rate_direct: number | null;
+  amer: number | null;
+  ga4_arpu: number | null;
+}
+
+export interface SourceSlice {
+  source: string;
+  sessions: number;
+  /** Fraction of the day's sessions, 0..1. Summed server-side so the
+   *  admin page and the standalone tracker cannot disagree. */
+  share: number;
+}
+
+export interface HourlyTrackerResponse {
+  rows: HourlyRow[];
+  /** The day's sessions by utm_source, biggest first, tail folded into
+   *  a single "other" entry. */
+  sources: SourceSlice[];
+  compare_rows: HourlyRow[];
+  today: HourlyTotals | null;
+  /** The baseline clamped to the hours today has reached — the only
+   *  honest mid-day comparison. */
+  compare: HourlyTotals | null;
+  compare_full: HourlyTotals | null;
+  latest_hour: number | null;
+  fetched_at: string | null;
+  /** The span the table actually holds. A day outside it has not been
+   *  ingested, which is a different thing from a day that had no
+   *  traffic — the page needs to be able to say which. */
+  first_day: string | null;
+  last_day: string | null;
+}
+
+export function fetchHourlyTracker(
+  params: { day?: string; compare_to?: string } = {},
+): Promise<HourlyTrackerResponse> {
+  const qs = new URLSearchParams();
+  if (params.day) qs.set("day", params.day);
+  if (params.compare_to) qs.set("compare_to", params.compare_to);
+  const q = qs.toString();
+  return request<HourlyTrackerResponse>(
+    `/admin/analytics/hourly-tracker${q ? `?${q}` : ""}`,
+  );
 }

@@ -140,6 +140,121 @@ services:
   #   3. Copy the FastAPI service's URL into
   #      NEXT_PUBLIC_API_BASE_URL below (or set it in the dashboard)
   # ------------------------------------------------------------------
+  # ------------------------------------------------------------------
+  # Hourly Tracker -- the fetch that feeds it.
+  #
+  # A Render cron rather than a GitHub Action, because the credentials
+  # are already here: this service reads the same META_ACCESS_TOKEN,
+  # SHOP_DOMAIN and ADMIN_ACCESS_TOKEN the API does, from the same
+  # dashboard, instead of a second copy living in repo secrets that
+  # drifts from the first the next time a token is rotated.
+  #
+  # Every hour at :05. Not :00 -- Shopify and Meta both need a few
+  # minutes to settle the hour that just closed, and a fetch on the
+  # stroke of the hour reads the previous hour short, which looks like
+  # a collapse in traffic rather than a job that ran too early.
+  #
+  # It refetches TODAY in full each run, not just the newest hour.
+  # Both sources restate recent hours as conversions and sessions land,
+  # so the hour before last is still moving; re-reading the whole day
+  # costs one extra API call and keeps every hour correct rather than
+  # frozen at whatever it was when it was first written.
+  # ------------------------------------------------------------------
+  - type: cron
+    name: hourly-tracker-fetch
+    runtime: python
+    plan: starter
+    region: singapore
+    branch: master
+    schedule: "5 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/fetch_hourly_tracker.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      # --- database -------------------------------------------------
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_SYNC
+        sync: false
+      # --- Meta: spend and impressions ------------------------------
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_API_VERSION
+        value: v21.0
+      - key: META_ACCOUNT_1_ID
+        sync: false
+      - key: META_ACCOUNT_1_NAME
+        sync: false
+      - key: META_ACCOUNT_2_ID
+        sync: false
+      - key: META_ACCOUNT_2_NAME
+        sync: false
+      - key: META_ACCOUNT_3_ID
+        sync: false
+      - key: META_ACCOUNT_3_NAME
+        sync: false
+      # --- Shopify: sessions, sales and the orders behind the channel
+      # split. Same pair scripts/shopify_client.py reads locally.
+      - key: SHOP_DOMAIN
+        sync: false
+      - key: ADMIN_ACCESS_TOKEN
+        sync: false
+      - key: SHOP_NAME
+        sync: false
+      - key: SHOPIFY_API_VERSION
+        sync: false
+      # --- GA4: ARPU. Optional -- the fetch reports the hour without
+      # it rather than failing, because ARPU is one column of fourteen.
+      #
+      # A PATH, not the JSON itself: scripts/fetch_ga4_daily.py's
+      # credential chain does `Path(sa).exists()` on this value, so an
+      # inline key would be read as a filename, fail that test, and
+      # fall through to ADC -- which carries no Analytics scope and
+      # dies with ACCESS_TOKEN_SCOPE_INSUFFICIENT. Upload the service
+      # account JSON as a Render Secret File and point this at where
+      # Render mounts it.
+      - key: GA4_PROPERTY_ID
+        value: "383126449"
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/ga4-service-account.json
+      - key: APP_ENV
+        value: production
+
+  # ------------------------------------------------------------------
+  # Hourly Tracker -- its own static site, on purpose.
+  #
+  # It ships during a live campaign, when the admin app's build can be
+  # red for reasons that have nothing to do with it. One HTML file, no
+  # build step, no node_modules: there is almost nothing here that can
+  # fail to deploy.
+  #
+  # It reads the SAME /admin/analytics/hourly-tracker endpoint the admin
+  # app does, so the two cannot disagree about a number.
+  #
+  # The API base is not baked in -- a static site has no server to
+  # inject one. It comes from ?api=https://... on first load and is
+  # remembered, which also lets the same file run against localhost.
+  #
+  # Add this site's origin to EXTRA_APP_ORIGINS on backend-project or
+  # every request it makes is refused by CORS -- and a refused request
+  # renders as an empty page rather than an error.
+  # ------------------------------------------------------------------
+  - type: web
+    name: hourly-tracker
+    runtime: static
+    plan: free
+    branch: master
+    autoDeploy: true
+    staticPublishPath: ./tracker
+    headers:
+      - path: /*
+        name: Cache-Control
+        # The page is a shell; its data is fetched live. Caching the
+        # shell for an hour would hand someone a stale build during the
+        # one day it matters.
+        value: no-cache
+
   - type: web
     name: backend-project-admin
     runtime: node
