@@ -102,7 +102,7 @@ CREATE INDEX IF NOT EXISTS ix_google_ads_spend_daily_day
 UPSERT = """
 INSERT INTO public.google_ads_spend_daily
   (day, campaign_id, campaign_name, campaign_status, channel_type,
-   spend, clicks, impressions, conversions, conv_value, fetched_at)
+   spend, clicks, impressions, conversions, conv_value, data_as_of, fetched_at)
 VALUES %s
 ON CONFLICT (day, campaign_id) DO UPDATE SET
   campaign_name = EXCLUDED.campaign_name,
@@ -113,6 +113,7 @@ ON CONFLICT (day, campaign_id) DO UPDATE SET
   impressions = EXCLUDED.impressions,
   conversions = EXCLUDED.conversions,
   conv_value = EXCLUDED.conv_value,
+  data_as_of = EXCLUDED.data_as_of,
   fetched_at = EXCLUDED.fetched_at
 -- Do not overwrite a FRESH row the Google Ads API wrote. Both feeds
 -- land in this table and the API is the authority: MapleMonk's copy of
@@ -152,6 +153,8 @@ WHERE public.google_ads_spend_daily.source <> 'google_ads_api'
 MIGRATIONS = [
     "ALTER TABLE public.google_ads_spend_daily "
     "  ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'maplemonk'",
+    "ALTER TABLE public.google_ads_spend_daily "
+    "  ADD COLUMN IF NOT EXISTS data_as_of timestamptz",
 ]
 
 #: GROUP BY because the source is an Airbyte landing table and can hold
@@ -169,7 +172,14 @@ SELECT
   SUM(metrics_clicks)                              AS clicks,
   SUM(metrics_impressions)                         AS impressions,
   SUM(metrics_conversions)                         AS conversions,
-  SUM(metrics_conversions_value)                   AS conv_value
+  SUM(metrics_conversions_value)                   AS conv_value,
+  -- When the SOURCE was last current for this day, which is not when
+  -- we fetched it. Re-running this script moves fetched_at forward
+  -- without the numbers getting any fresher: MapleMonk syncs once each
+  -- morning, so a day still running is only covered up to that sync.
+  -- Anything that needs to know how much of a day a figure covers has
+  -- to read this and not fetched_at.
+  MAX(_airbyte_emitted_at)                         AS data_as_of
 FROM `{table}`
 WHERE segments_date BETWEEN @since AND @until
 GROUP BY segments_date, campaign_id
@@ -230,7 +240,7 @@ def main() -> int:
     payload = [(r["day"], r["campaign_id"], r["campaign_name"], r["campaign_status"],
                 r["channel_type"], float(r["spend"] or 0), int(r["clicks"] or 0),
                 int(r["impressions"] or 0), float(r["conversions"] or 0),
-                float(r["conv_value"] or 0)) for r in rows]
+                float(r["conv_value"] or 0), r["data_as_of"]) for r in rows]
     print(f"Fetched:   {len(payload):,} campaign-days in {time.time() - t0:.1f}s")
 
     with connect(autocommit=False, statement_timeout="300s") as conn:
@@ -244,7 +254,7 @@ def main() -> int:
                 # rows the same way for freshness checks to mean anything.
                 psycopg2.extras.execute_values(
                     cur, UPSERT, payload,
-                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+                    template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
                     page_size=1000)
         conn.commit()
 

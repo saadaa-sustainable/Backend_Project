@@ -515,13 +515,22 @@ def fetch_google_spend(day: date) -> tuple[float | None, datetime | None]:
     the Ads API would deliver the same daily grain. So the total is
     read here and shared out by `distribute_daily` below.
 
+    The second value is when the SOURCE was last current for this day,
+    which is not when we fetched it -- re-running the fetcher moves
+    fetched_at forward without the numbers getting any fresher.
+    MapleMonk syncs once each morning, so a day still running is only
+    covered up to that sync, and `data_as_of` carries it. Rows written
+    by the Google Ads API have no sync to speak of (the API answers
+    live), so for those the fetch time IS the as-of, hence the
+    COALESCE.
+
     Returns (None, None) when the day has no row at all, which is the
     honest answer for a day the export has not reached yet. A zero
     would read as "Google spent nothing", which is a different claim.
     """
     with connect() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT SUM(spend), MAX(fetched_at)
+            SELECT SUM(spend), MAX(COALESCE(data_as_of, fetched_at))
             FROM public.google_ads_spend_daily
             WHERE day = %s
         """, (day,))
