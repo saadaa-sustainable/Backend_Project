@@ -330,6 +330,17 @@ PHASE_INGEST = [
     # Google restates recent days as conversions land.
     ("google_ads_spend",      ["scripts/fetch_google_ads_spend.py",
                                "--days", "35"],                              900),
+    # The third spend channel, and the only one with no feed. A flat
+    # placeholder, so it has to be EXTENDED rather than fetched: without
+    # this the table simply stops on the day somebody last seeded it and
+    # every ratio that divides by blended spend starts reading high
+    # again. Found 11 days stale on 2026-10-30, which had Blended MER
+    # understating spend by about Rs 3.3L.
+    #
+    # Safe to run every night: the upsert only ever overwrites a row
+    # that is itself an estimate, so a real figure landing for a day is
+    # never undone by the placeholder.
+    ("kwikchat_spend",        ["scripts/seed_kwikchat_spend.py"],            300),
     # The SAME table, from Google's own API, and it runs AFTER MapleMonk
     # on purpose: the API is the authority and must have the last word.
     #
