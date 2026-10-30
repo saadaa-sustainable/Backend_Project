@@ -69,6 +69,7 @@ def last_click_results(*, total: int = 2):
         "matched_ad_id": "789",
         "matched_ad_name": "Autumn creative",
         "matched_adset_id": "adset-1",
+        "attribution_setting": "7d_click",
         "matched_campaign_id": "campaign-1",
         "matched_campaign_name": "Autumn",
         "matched_value": "789",
@@ -77,7 +78,15 @@ def last_click_results(*, total: int = 2):
     }
     count = MagicMock()
     count.scalar_one.return_value = total
-    return [summary, [SimpleNamespace(_mapping=row)], count]
+    # The attribution facet: one GROUP BY after the count, giving each
+    # tab its order and revenue total. Its own filter is excluded from
+    # that query, so every tab keeps a count while one is selected.
+    facets = MagicMock()
+    facets.mappings.return_value.all.return_value = [
+        {"setting": "7d_click", "n": 1, "sales": Decimal("1999.50")},
+        {"setting": "(none)", "n": 1, "sales": Decimal("100.00")},
+    ]
+    return [summary, [SimpleNamespace(_mapping=row)], count, facets]
 
 
 def landing_page_results():
@@ -176,7 +185,9 @@ async def test_last_click_http_response_serializes_rows_summaries_and_reuses_cac
     second = await client.get("/admin/analytics/last-click-utm")
     assert second.status_code == 200
     assert second.json() == payload
-    assert session.execute.await_count == 3
+    # Four, not three: summary, rows, count, and the attribution facet.
+    # The second request is served from cache and runs none of them.
+    assert session.execute.await_count == 4
 
 
 @pytest.mark.parametrize("filters", [
@@ -192,9 +203,12 @@ async def test_last_click_filter_changes_have_separate_cache_entries(client, ses
     assert first.status_code == filtered.status_code == 200
     assert first.json()["total"] == 2
     assert filtered.json()["total"] == 1
-    assert session.execute.await_count == 6
+    # Four per uncached request now, not three: the attribution facet
+    # runs after the count.
+    assert session.execute.await_count == 8
 
-    row_query, row_params = session.execute.await_args_list[4].args
+    # Index 5, not 4: the second request's rows sit one further along.
+    row_query, row_params = session.execute.await_args_list[5].args
     if "from_date" in filters:
         assert row_params["from_date"] == date(2026, 9, 18)
         assert row_params["to_date"] == date(2026, 9, 19)
@@ -207,7 +221,9 @@ async def test_last_click_filter_changes_have_separate_cache_entries(client, ses
 
     original_again = await client.get("/admin/analytics/last-click-utm")
     assert original_again.json()["total"] == 2
-    assert session.execute.await_count == 6
+    # Still 8: the unfiltered request is served from its own cache entry,
+    # which the filtered one in between did not evict.
+    assert session.execute.await_count == 8
 
 
 async def test_landing_pages_http_response_and_cache(client, session):
@@ -252,7 +268,8 @@ async def test_landing_pages_http_response_and_cache(client, session):
 
 
 @pytest.mark.parametrize(("path", "results", "successful_query_count"), [
-    ("/admin/analytics/last-click-utm", last_click_results, 3),
+    # 4: summary, rows, count, attribution facet.
+    ("/admin/analytics/last-click-utm", last_click_results, 4),
     # 1, not 2: the landing-pages endpoint no longer runs a separate COUNT(*).
     ("/admin/analytics/landing-pages", landing_page_results, 1),
 ])

@@ -193,7 +193,11 @@ a series of REST requests alone cannot guarantee it.
 | `removeNightlyTrigger` | Remove this account's daily trigger; an in-progress continuation is not cancelled |
 
 Do not manually edit `META_DIRECT_SYNC_V2` or hidden `__md_stage_…` tabs. If you
-change the configured view list/tab names, restart the run first. Do not change
+change the configured view list/tab names, restart the run first. The same
+applies after a **column** is added to a snapshot view: the sync reads
+`select=*` and takes its headers from the first row, so a new column arrives on
+its own — but a run already checkpointed mid-download is still writing the old
+header width, so `restartMetaDirect` rather than `resumeMetaDirect`. Do not change
 connection properties while a run is incomplete. Checkpoints older than 12
 hours require `restartMetaDirect` so yesterday's partial download cannot be
 silently continued into today's export.

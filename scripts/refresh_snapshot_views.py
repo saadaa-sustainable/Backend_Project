@@ -109,6 +109,14 @@ def main() -> int:
     ap.add_argument("--no-concurrent", action="store_true",
                     help="Plain REFRESH. Faster, but locks readers out for its "
                          "duration. Only for a first build or a repair.")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="Re-apply sql/snapshot_views.sql before refreshing, "
+                         "which DROPs and re-CREATEs every snapshot. Needed "
+                         "after the DDL changes -- a REFRESH re-runs the "
+                         "STORED definition, so a new column in the file is "
+                         "invisible until the view is recreated. Readers get "
+                         "an error for the ~1 minute the rebuild takes, so "
+                         "this is not the nightly path.")
     args = ap.parse_args()
     mode = "" if args.no_concurrent else "CONCURRENTLY "
 
@@ -121,7 +129,11 @@ def main() -> int:
             cur.execute("SET statement_timeout = '3600s'")
             # A refresh of a view bound to a stale table succeeds and
             # publishes stale numbers, so rebind first.
-            if _verify_bindings(cur):
+            if args.rebuild:
+                print(f"[ddl]  re-applying {DDL_PATH.name} (DROP + CREATE)", flush=True)
+                cur.execute(DDL_PATH.read_text())
+                print("[ddl]  rebuilt", flush=True)
+            elif _verify_bindings(cur):
                 print(f"[fix]  re-applying {DDL_PATH.name} to rebind", flush=True)
                 cur.execute(DDL_PATH.read_text())
                 still = _verify_bindings(cur)

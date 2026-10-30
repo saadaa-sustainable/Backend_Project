@@ -493,6 +493,33 @@ SELECT 1 FROM information_schema.tables
 WHERE table_schema = 'public' AND table_name = 'ad_metrics_external'
 """
 
+#: Per-ad attribution setting, overlaid from `meta_ad_attribution`.
+#:
+#: The column is filled by the insights flatten when Meta returns the
+#: field, which it has not since 2026-08-13 -- `_INSIGHTS_METRICS` in
+#: scripts/ingest_last_15_days.py stopped requesting it, so every ad
+#: newer than that, including all the ACTIVE ones, flattens to null.
+#: This overlay fills those from an Ads Manager export.
+#:
+#: COALESCE the other way round from the external mirror above: the
+#: flattened API value wins where there is one, because it came from
+#: Meta directly and tracks a change in the setting. The export is a
+#: snapshot of the day it was taken and only fills what is missing.
+#: Put the field back in the insights fetch and this becomes a no-op
+#: rather than something to unpick.
+_ATTRIBUTION_OVERLAY = """
+UPDATE ad_lifecycle
+SET attribution_setting = a.attribution_setting
+FROM public.meta_ad_attribution a
+WHERE a.ad_id = ad_lifecycle.ad_id
+  AND ad_lifecycle.attribution_setting IS NULL
+"""
+
+_ATTRIBUTION_TABLE_EXISTS = """
+SELECT 1 FROM information_schema.tables
+WHERE table_schema = 'public' AND table_name = 'meta_ad_attribution'
+"""
+
 
 async def ensure_ad_lifecycle_table(session: AsyncSession) -> None:
     for statement in _ddl_statements():
@@ -598,6 +625,10 @@ async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
         overlaid = (await session.execute(text(_EXTERNAL_OVERLAY_UPDATE))).rowcount or 0
         added = (await session.execute(text(_EXTERNAL_OVERLAY_INSERT))).rowcount or 0
 
+    attributed = 0
+    if (await session.execute(text(_ATTRIBUTION_TABLE_EXISTS))).scalar_one_or_none():
+        attributed = (await session.execute(text(_ATTRIBUTION_OVERLAY))).rowcount or 0
+
     # LAST, so it wins over anything the insights flatten or the external
     # mirror put in this column -- both carry the same frozen snapshot,
     # and the roster is the only source that tracks a rename.
@@ -606,6 +637,8 @@ async def refresh_ad_lifecycle(session: AsyncSession) -> dict[str, int]:
     awaited = (await session.execute(text(_RESULT_AWAITED_FIX))).rowcount or 0
     await session.commit()
 
+    if attributed:
+        logger.info("ad_lifecycle_attribution_overlay", ads=attributed)
     if renamed:
         logger.info("ad_lifecycle_roster_identity_overlay", ads=renamed)
 

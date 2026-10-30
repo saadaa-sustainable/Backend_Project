@@ -53,7 +53,8 @@ _SORT_COLUMNS = {
 _DASHBOARD_COLUMNS = (
     "ad_id, ad_name, account_name, campaign_name, ad_effective_status, category, "
     "spend, roas, cost_per_ncp, cost_per_ftewv, purchases, ncp_count, ftewv_count, "
-    "impressions, ctr_pct, f1_pass, f2_pass, f3_pass, f4_pass, lifecycle_refreshed_at"
+    "impressions, ctr_pct, f1_pass, f2_pass, f3_pass, f4_pass, attribution_setting, "
+    "lifecycle_refreshed_at"
 )
 
 
@@ -62,6 +63,9 @@ class AdLifecycleRow(BaseModel):
     ad_name: str | None
     account_name: str | None
     campaign_name: str | None
+    #: Meta's attribution window code for this ad -- 7d_click,
+    #: 7d_click_1d_ev and so on. NULL where none is recorded.
+    attribution_setting: str | None = None
     ad_effective_status: str | None
     category: str | None
     spend: float | None
@@ -2353,6 +2357,10 @@ _UTM_ORDER_COLUMNS = (
     # (Backend_Project's Silver flatten only kept ad/campaign IDs) -- join
     # ad_lifecycle to recover it for the row-level drill-down.
     "al.adset_id AS matched_adset_id, "
+    # The ad's Meta attribution setting, for reading last-click revenue
+    # one setting at a time. Already on ad_lifecycle, which is joined
+    # here anyway, so this costs no extra table.
+    "al.attribution_setting AS attribution_setting, "
     # Contact info from shopify_customer_analytics (same GID-strip join as
     # the Customer Journey endpoint). Left-joined so orders whose customer
     # never made it to shopify_customer_analytics still appear.
@@ -2382,6 +2390,12 @@ class UtmOrderRow(BaseModel):
     matched_ad_id: str | None
     matched_ad_name: str | None
     matched_adset_id: str | None
+    #: Meta's code for the ad's attribution window -- 7d_click,
+    #: 7d_click_1d_ev, 1d_click and so on. NULL where the ad has no
+    #: setting recorded, which today is every account but Fourth: the
+    #: insights fetch stopped requesting the field in Aug 2026 and the
+    #: gap is filled from an Ads Manager export that covers one account.
+    attribution_setting: str | None
     matched_campaign_id: str | None
     matched_campaign_name: str | None
     #: The value the cascade matched ON (utm_content / utm_term /
@@ -2842,6 +2856,17 @@ class FirstClickResponse(BaseModel):
     #: rather than let a reader assume the table covers every order.
     orders_unpaired: int = 0
     revenue_unpaired: float = 0.0
+    #: The window's revenue over EVERY matching entity, not just the
+    #: rows on this page.
+    #:
+    #: A headline figure must not move when somebody changes the row
+    #: limit. Summed over the page these two disagree -- the table sorts
+    #: by first-click revenue, so the top 200 by that measure are not
+    #: the top 200 by last-click revenue, and at limit=200 the pair came
+    #: out Rs 56,746 apart while all 2,156 entities totalled identically.
+    #: That read as an attribution error and was a sampling artifact.
+    first_click_revenue_total: float = 0.0
+    last_click_revenue_total: float = 0.0
 
 
 class UtmOrderResponse(BaseModel):
@@ -2860,6 +2885,13 @@ class UtmOrderResponse(BaseModel):
     #: Per-source breakdown per channel, for the click-to-drill-down UI.
     #: Sources within a channel are ordered by count desc.
     channel_sources: dict[str, list[SourceBreakdown]]
+    #: Meta attribution code -> (orders, sales), over the same filters as
+    #: `rows` EXCEPT the attribution filter itself -- so a tab strip
+    #: built from this keeps every tab's count visible while one is
+    #: selected. '(none)' carries orders whose matched ad has no setting
+    #: recorded; today that is every account but Fourth, so it is the
+    #: largest bucket and has to be shown rather than hidden.
+    attribution_counts: dict[str, ChannelSummary] = {}
 
 
 def _parse_text_filter(raw: str | None, key_prefix: str) -> tuple[list[str], dict[str, str]]:
@@ -3023,7 +3055,16 @@ async def get_first_click(
                  AS orders_unpaired,
                COALESCE(SUM(revenue) FILTER (
                    WHERE ({first_k} IS NULL) <> ({last_k} IS NULL)), 0)
-                 AS revenue_unpaired
+                 AS revenue_unpaired,
+               -- Over every entity, on the same paired rule the table
+               -- uses, so the cards describe the window rather than
+               -- whatever slice the row limit happened to return.
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
+                 AS first_click_revenue_total,
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
+                 AS last_click_revenue_total
           FROM public.ga4_order_attribution
           {"LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id" if grain == "ad" else ""}
           {"LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id" if grain == "ad" else ""}
@@ -3037,6 +3078,8 @@ async def get_first_click(
         orders_total=head.orders_total,
         orders_unpaired=head.orders_unpaired,
         revenue_unpaired=float(head.revenue_unpaired or 0),
+        first_click_revenue_total=float(head.first_click_revenue_total or 0),
+        last_click_revenue_total=float(head.last_click_revenue_total or 0),
     )
 
 
@@ -3250,6 +3293,14 @@ async def get_last_click_utm(
         "AI", "Organic (Direct)", "Loyalty", "Other",
     ] | None = Query(default=None),
     tier: str | None = Query(default=None),
+    attribution_setting: str | None = Query(
+        default=None,
+        description=(
+            "Meta attribution window code -- 7d_click, 7d_click_1d_ev, 1d_click, "
+            "1d_view_7d_click, 1d_view_7d_click_1d_ev, incrementality. "
+            "Pass '(none)' for orders whose matched ad has no setting recorded."
+        ),
+    ),
     utm_source: str | None = Query(
         default=None,
         description="Comma-separated list of utm_source values to include (CTD's multi-select popover pattern).",
@@ -3369,6 +3420,14 @@ async def get_last_click_utm(
     if tier:
         where_clauses.append("soa.tier = :tier")
         params["tier"] = tier
+    if attribution_setting:
+        # '(none)' is a real choice, not an absent filter: it selects the
+        # orders a per-setting tab would otherwise silently drop.
+        if attribution_setting == "(none)":
+            where_clauses.append("al.attribution_setting IS NULL")
+        else:
+            where_clauses.append("al.attribution_setting = :attribution_setting")
+            params["attribution_setting"] = attribution_setting
     if only_matched:
         where_clauses.append("soa.matched_ad_id IS NOT NULL")
     if only_unmatched:
@@ -3474,6 +3533,22 @@ async def get_last_click_utm(
         )
     ).scalar_one()
 
+    # Every tab's count, under every filter EXCEPT the attribution one.
+    # Counting under its own filter would leave each tab showing only
+    # itself and zeroes beside it, which is useless for choosing a tab.
+    facet_where = [c for c in where_clauses
+                   if "al.attribution_setting" not in c]
+    facet_sql = f"WHERE {' AND '.join(facet_where)}" if facet_where else ""
+    facet_params = {k: v for k, v in params.items() if k != "attribution_setting"}
+    facet_rows = (await session.execute(text(
+        "SELECT COALESCE(al.attribution_setting, '(none)') AS setting, "
+        "       COUNT(*) AS n, COALESCE(SUM(soa.total_price), 0) AS sales "
+        f"{_UTM_ORDER_FROM} {facet_sql} GROUP BY 1"), facet_params)).mappings().all()
+    attribution_counts = {
+        r["setting"]: ChannelSummary(count=int(r["n"]), sales=float(r["sales"]))
+        for r in facet_rows
+    }
+
     return UtmOrderResponse(
         rows=rows,
         total=total,
@@ -3481,6 +3556,7 @@ async def get_last_click_utm(
         tier_summary=tier_summary,
         tier_by_channel=tier_by_channel,
         channel_sources=channel_sources,
+        attribution_counts=attribution_counts,
     )
 
 
@@ -8607,14 +8683,55 @@ async def _get_dashboard_order_groups(
         where = ("WHERE created_at >= CAST(:df AS date) "
                  "AND created_at < (CAST(:dt AS date) + 1) ")
         params = {"df": date_from, "dt": date_to}
+    # Returned and cancelled orders are dropped here, at the one scan
+    # both the KPI cards and the channel widget read, so every figure
+    # built on it is net rather than gross without either widget having
+    # to know. LEFT JOIN, not INNER: an attributed order with no row in
+    # shopify_orders yet must still count, and a NULL on the right side
+    # fails the exclusion test, which keeps it.
     result = await session.execute(text(
-        "SELECT utm_source, "
-        "       (lower(COALESCE(utm_content, '')) IN "
+        "SELECT a.utm_source, "
+        "       (lower(COALESCE(a.utm_content, '')) IN "
         "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
-        "       SUM(total_price), COUNT(*) FROM shopify_order_attribution "
-        + where + "GROUP BY utm_source, 2"
+        "       SUM(a.total_price), COUNT(*) "
+        "  FROM shopify_order_attribution a "
+        "  LEFT JOIN shopify_orders o ON o.order_id = a.order_id "
+        + (where.replace("created_at", "a.created_at") if where else "WHERE ")
+        + ("AND " if where else "")
+        + f"NOT COALESCE({_EXCLUDED_ORDER_SQL}, FALSE) "
+        + "GROUP BY a.utm_source, 2"
     ), params)
     return [tuple(row) for row in result.all()]
+
+
+#: Orders whose revenue never really arrived, excluded from the
+#: Overview's revenue and conversion figures.
+#:
+#: CANCELLED: the order was called off, so no goods and no money.
+#:
+#: RETURNED, but only where the customer did NOT also take an exchange.
+#: An exchange here is swapped for an item of equivalent value, so the
+#: revenue stands and excluding it would understate the shop. 152 orders
+#: over 30 Sep - 30 Oct carry both tags and are KEPT for that reason:
+#: the return happened, but the value stayed.
+#:
+#: Return Prime is the source of truth, not Shopify's returnStatus.
+#: That field reads NO_RETURN on every one of these -- the partner does
+#: not use Shopify's native returns API, so Shopify never hears about a
+#: return it processed. See shopify_flatten's column comment.
+#:
+#: RTO is deliberately NOT here. A courier returning an undelivered
+#: parcel is a delivery failure, a different question from a customer
+#: sending goods back, and folding it in would take the exclusion from
+#: 14.8 per cent of revenue to over 19.
+#: jsonb_exists(), not the `?` operator. `?` is a parameter placeholder
+#: in several drivers -- sqlite, which these endpoints are tested
+#: against, fails to parse the statement at all -- and the function form
+#: means exactly the same thing to Postgres.
+_EXCLUDED_ORDER_SQL = """(
+    o.cancelled_at IS NOT NULL
+ OR (jsonb_exists(o.tags, 'Return') AND NOT jsonb_exists(o.tags, 'Exchange'))
+)"""
 
 
 async def _meta_sources(session: AsyncSession, sources: Iterable[Any]) -> set[str]:

@@ -1239,6 +1239,20 @@ export interface FirstClickResponse {
   orders_total: number;
   /** Which date the window meant for the FIRST-click side. */
   basis?: "order" | "first_touch";
+  /** Orders left OUT because they carried an entity at one end only,
+   *  and what they were worth. The section counts a pair or nothing,
+   *  which is what makes the two revenue columns total the same — but
+   *  that exclusion is real money and has to be shown, or the section
+   *  silently got smaller and nobody reading it knows why. */
+  orders_unpaired?: number;
+  revenue_unpaired?: number;
+  /** The window's revenue over EVERY matching entity, not the page.
+   *  A headline figure must not move when the row limit changes: summed
+   *  over the page these two disagree, because the table sorts by
+   *  first-click revenue and the top 200 by that measure are not the top
+   *  200 by last-click revenue. */
+  first_click_revenue_total?: number;
+  last_click_revenue_total?: number;
 }
 
 export interface FirstClickParams {

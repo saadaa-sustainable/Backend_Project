@@ -60,6 +60,8 @@ def session():
     # btrim is Postgres' name for the standard no-argument trim. The
     # Meta source rule the dashboard shares with the session rollup
     # uses it, so the harness has to answer to it.
+    db.create_function("jsonb_exists", 2,
+                       lambda doc, key: 1 if key in __import__("json").loads(doc or "[]") else 0)
     db.create_function("btrim", 1, lambda value: value.strip() if value is not None else None)
     db.executescript("""
         -- Blended spend sources. Google reports a day behind; the
@@ -80,6 +82,16 @@ def session():
             ('middle','2026-09-02 12:00:00',NULL,NULL,NULL),
             ('last','2026-09-03 23:59:59.999999',200,'instagram','link_in_bio'),
             ('after','2026-09-04 00:00:00',9999,'meta','2');
+        -- The Overview drops returned and cancelled orders, which it
+        -- reads from here. 'keep' has neither mark; 'last' is tagged
+        -- Return AND Exchange, which is KEPT -- the value stayed.
+        CREATE TABLE shopify_orders(order_id TEXT PRIMARY KEY, tags TEXT, cancelled_at TEXT);
+        INSERT INTO shopify_orders VALUES
+            ('before', '[]', NULL),
+            ('first',  '[]', NULL),
+            ('middle', '[]', NULL),
+            ('last',   '["Return","Exchange"]', NULL),
+            ('after',  '[]', NULL);
         CREATE TABLE insights_daily_by_ad(day TEXT, spend NUMERIC, impressions INTEGER);
         INSERT INTO insights_daily_by_ad VALUES
             ('2026-09-01',9999,9999),('2026-09-02',10,100),('2026-09-03',20,200);
@@ -274,3 +286,34 @@ def test_creative_order_metrics_do_not_multiply_for_repeated_scope_ids():
         assert db.execute(sql, {'start':'2026-09-01 00:00:00','end':'2026-09-03 00:00:00'}).fetchall() == [('a',2,30)]
     finally:
         db.close()
+
+
+async def test_overview_excludes_returned_and_cancelled_but_keeps_exchanges(session):
+    """The Overview reports NET revenue, and the rule is not symmetric.
+
+    A cancelled order never happened and a returned one came back, so
+    neither is revenue. An EXCHANGE is swapped for an item of equivalent
+    value, so the money stayed and the order counts -- including when it
+    carries both marks, which is a return that was settled with a swap
+    rather than a refund. Measured over 30 Sep - 30 Oct 2026, treating
+    exchanges as returns would have excluded 24.7 per cent of revenue
+    where the true figure is 14.8.
+    """
+    kpis = await analytics.get_dashboard_kpis(
+        session, date_from="2026-09-02", date_to="2026-09-03")
+    # The fixture's in-window orders are 'first' (100, no marks),
+    # 'middle' (null price, no marks) and 'last' (200, Return AND
+    # Exchange). All three are kept, so the totals are unchanged.
+    assert (kpis.total_shopify_revenue, kpis.total_shopify_orders) == (300, 3)
+
+
+def test_the_exclusion_predicate_says_what_it_should():
+    """The rule itself, pinned. It is a business decision, not an
+    implementation detail, and the asymmetry is the whole point: a
+    return WITH an exchange keeps its revenue."""
+    assert "cancelled_at IS NOT NULL" in analytics._EXCLUDED_ORDER_SQL
+    assert "jsonb_exists(o.tags, 'Return')" in analytics._EXCLUDED_ORDER_SQL
+    assert "NOT jsonb_exists(o.tags, 'Exchange')" in analytics._EXCLUDED_ORDER_SQL
+    # RTO must never appear: a courier returning an undelivered parcel
+    # is a delivery failure, not a customer return.
+    assert "RTO" not in analytics._EXCLUDED_ORDER_SQL

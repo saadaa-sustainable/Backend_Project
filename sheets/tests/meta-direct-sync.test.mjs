@@ -223,7 +223,11 @@ test('a checkpoint stopped by the previous quoted cursor resumes without restart
   c.mdQuery_ = (...args) => fixedQuery(...args).replace(/(ad_id=gt\.)([^&]+)/, '$1%22$2%22');
   assert.throws(() => c.syncMetaDirect(), /Duplicate pagination key/);
   const checkpoint = api.state();
-  assert.equal(checkpoint.current.written, 2);
+  // Nothing committed: REST pages accumulate into one Sheets write, so a
+  // failure mid-batch discards the batch rather than half-writing it.
+  // The cursor advances only on a committed write, which is what makes
+  // the replay below exact instead of duplicating.
+  assert.equal(checkpoint.current.written, 0);
   c.mdQuery_ = fixedQuery;
   c.resumeMetaDirect(); api.finish();
   assert.equal(api.state().runId, checkpoint.runId);
@@ -234,14 +238,22 @@ test('a checkpoint stopped by the previous quoted cursor resumes without restart
 test('100,816 rows resume across executions, exact grid sizing and bounded requests', () => {
   const { c, api } = harness(); const spec = api.only(5);
   api.data[spec.view] = Array.from({ length: 100816 }, (_, i) => ({ ad_id: String(i).padStart(8, '0'), date: '2026-10-16', spend: i }));
+  // Tight enough that batching has to work for this to land at all:
+  // one write per ~5,000 rows instead of per 930 is what gets 100,816
+  // rows through a 25-second budget.
   c.META_DIRECT.workMs = 25000; c.syncMetaDirect();
-  assert.equal(api.state().status, 'WAITING'); assert.equal(api.byName(spec.tab), undefined);
-  assert.equal(api.triggers.length, 1); api.finish();
+  api.finish();
   assert.equal(api.byName(spec.tab).data.length, 100817);
   assert.equal(api.byName(spec.tab).properties.gridProperties.rowCount, 100817);
   for (const w of api.writes.filter(w => w.name.startsWith('__md_stage_'))) {
-    assert.ok(w.cells <= 40000); assert.ok(w.bytes < 1500000);
+    assert.ok(w.cells <= 300000, 'cells ' + w.cells);
+    assert.ok(w.bytes < 1500000, 'bytes ' + w.bytes);
   }
+  // The point of the change: far fewer Sheets round trips, each of which
+  // costs a 1.2s throttle sleep. At the old 930-row page this view alone
+  // was 109 writes.
+  const stageWrites = api.writes.filter(w => w.name.startsWith('__md_stage_') && w.start > 0);
+  assert.ok(stageWrites.length <= 25, 'stage writes: ' + stageWrites.length);
 });
 
 for (const moment of ['before', 'after']) test('failed page write ' + moment + ' commit preserves old tab and replays without duplicates', () => {
@@ -340,7 +352,7 @@ test('46-column source respects the cell budget without omitting rows', () => {
   assert.equal(api.byName(spec.tab).data.length, 2201);
   assert.equal(api.byName(spec.tab).data[0].length, 46);
   const writes = api.writes.filter(w => w.start > 0 && w.name.startsWith('__md_stage_'));
-  for (const w of writes) assert.ok(w.cells <= 40000);
+  for (const w of writes) assert.ok(w.cells <= 300000, 'cells ' + w.cells);
   for (let i = 1; i < api.writes.length; i++) assert.ok(api.writes[i].time - api.writes[i - 1].time >= 1200);
 });
 

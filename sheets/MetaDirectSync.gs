@@ -13,10 +13,28 @@ var META_DIRECT = {
     { view: 'meta_direct_daily_30d', tab: 'Daily 30d', keys: ['ad_id', 'date'] },
     { view: 'meta_direct_daily_90d', tab: 'Daily 90d', keys: ['ad_id', 'date'] }
   ],
+  // Rows per PostgREST request. The server may return fewer -- Supabase
+  // caps this with db-max-rows -- which costs nothing: pagination is by
+  // cursor, so a short page just advances less far.
   pageRows: 1000,
-  writeCells: 40000,
+  // Rows accumulated across REST pages before ONE Sheets write. The old
+  // code wrote every REST page, so a 43-column view wrote 930 rows at a
+  // time (40000/43) and paid a 1.2s throttle sleep plus a round trip for
+  // each. Measured 2026-10-29 the six views are 100,430 rows and ~53MB,
+  // which is 111 writes and 133s of pure sleeping. At ~553 bytes a row
+  // those 930 rows are 514KB against a 1.5MB budget, so two thirds of
+  // every request was wasted. Filling the budget takes it to ~42.
+  // Bounded on purpose. Bytes bind first on the real views (~2,700 rows
+  // of a 43-column daily page fills 1.5MB), so this only caps narrow
+  // ones -- and it bounds what a mid-batch failure throws away, since
+  // the cursor advances only on a committed write.
+  writeRows: 5000,
   // Conservative UTF-8 bound: 3 bytes per UTF-16 code unit, including JSON escaping.
   writeBytes: 1500000,
+  // Cells per write, a second ceiling for very wide views. Sheets rejects
+  // an oversized request outright, and bytes alone would not catch a view
+  // of mostly short columns.
+  writeCells: 300000,
   workMs: 150000, // Leave room for a slow final request inside the 6-minute limit.
   writeIntervalMs: 1200, // Under the Sheets per-user quota of 60 writes/minute.
   maxCells: 20000000,
@@ -284,12 +302,49 @@ function mdWriteValues_(cfg, tab, row, values) {
 }
 function mdPage_(cfg, state, spec) {
   var c = state.current;
-  var limit = Math.min(META_DIRECT.pageRows, Math.max(1, Math.floor(META_DIRECT.writeCells / c.headers.length)), c.total - c.written);
-  var rows = mdRest_(cfg, mdQuery_(spec, c.cursor, limit), false).rows;
-  if (!Array.isArray(rows) || !rows.length) throw new Error('Unexpected end of ' + spec.view + ' after ' + c.written + '/' + c.total + ' rows. Run restartMetaDirect after refresh.');
-  if (rows.length > limit) throw new Error('Supabase returned more rows than requested.');
   var values = [], bytes = 64, cursor = c.cursor, seen = {};
   if (cursor) seen[JSON.stringify(cursor)] = true;
+  // Fetch until the write budget is full, then write once. Decoupling
+  // the two is the whole optimisation: a REST page is cheap and may be
+  // capped server-side, a Sheets write costs a round trip and a 1.2s
+  // throttle sleep, so the second should not be paid per the first.
+  var budgetRows = Math.min(META_DIRECT.writeRows,
+                            Math.max(1, Math.floor(META_DIRECT.writeCells / c.headers.length)));
+  var full = false;
+  while (!full && values.length < budgetRows && c.written + values.length < c.total) {
+    var want = Math.min(META_DIRECT.pageRows, budgetRows - values.length,
+                        c.total - c.written - values.length);
+    var rows = mdRest_(cfg, mdQuery_(spec, cursor, want), false).rows;
+    if (!Array.isArray(rows) || !rows.length) throw new Error('Unexpected end of ' + spec.view + ' after ' + (c.written + values.length) + '/' + c.total + ' rows. Run restartMetaDirect after refresh.');
+    if (rows.length > want) throw new Error('Supabase returned more rows than requested.');
+    var before = values.length;
+    var result = mdCollect_(rows, c, spec, values, bytes, cursor, seen);
+    bytes = result.bytes; cursor = result.cursor; full = result.full;
+    // A short page means the server has no more to give at this cursor;
+    // only an exhausted budget or a genuinely empty tail stops the loop.
+    if (!full && values.length === before) break;
+    if (rows.length < want) {
+      // Server-side cap, not the end of the view: keep going from the
+      // new cursor unless the budget is now full.
+      if (values.length >= budgetRows) break;
+    }
+  }
+  if (!values.length) throw new Error('No rows accumulated for ' + spec.view + '.');
+  // Deterministic range: replay after an uncertain write overwrites, never appends.
+  mdWriteValues_(cfg, c.stageName, c.written + 2, values);
+  c.written += values.length;
+  c.cursor = cursor;
+  state.reports[state.index].rows = c.written;
+  if (c.written === c.total) c.phase = 'publish';
+  mdSave_(state);
+}
+
+/** Validate and append one REST page onto the pending write batch.
+ *  Returns the running byte count, the last accepted key, and whether
+ *  the byte budget filled mid-page -- in which case the remaining rows
+ *  are simply re-fetched next time from the last COMMITTED cursor. */
+function mdCollect_(rows, c, spec, values, bytes, cursor, seen) {
+  var full = false;
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
     if (Object.keys(row).length !== c.headers.length || c.headers.some(function (h) { return !Object.prototype.hasOwnProperty.call(row, h); })) {
@@ -307,17 +362,12 @@ function mdPage_(cfg, state, spec) {
     var size = JSON.stringify(cells).length * 3 + 3;
     if (bytes + size > META_DIRECT.writeBytes) {
       if (!values.length) throw new Error('One row exceeds the configured write payload. Reduce exported text sizes.');
+      full = true;
       break; // Fetch the unwritten tail again using the last COMMITTED key.
     }
     values.push(cells); bytes += size; cursor = key;
   }
-  // Deterministic range: replay after an uncertain write overwrites, never appends.
-  mdWriteValues_(cfg, c.stageName, c.written + 2, values);
-  c.written += values.length;
-  c.cursor = cursor;
-  state.reports[state.index].rows = c.written;
-  if (c.written === c.total) c.phase = 'publish';
-  mdSave_(state);
+  return { bytes: bytes, cursor: cursor, full: full };
 }
 function mdPublish_(cfg, state, spec) {
   var c = state.current;

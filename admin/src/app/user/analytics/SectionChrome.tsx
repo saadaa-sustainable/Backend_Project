@@ -240,15 +240,66 @@ export interface Figure {
  * grammar, one step down in the hierarchy, so the panel's figures do
  * not shout over the section's own.
  */
+/** Literal class names, not `lg:grid-cols-${n}`.
+ *
+ *  Tailwind scans source statically and only emits classes it can see
+ *  written out, so an interpolated name produces no CSS at all and the
+ *  grid silently keeps its mobile column count. Spelling them out is
+ *  what makes the class exist. */
+const FIGURE_COLUMNS: Record<number, string> = {
+  1: "lg:grid-cols-1",
+  2: "lg:grid-cols-2",
+  3: "lg:grid-cols-3",
+  4: "lg:grid-cols-4",
+  5: "lg:grid-cols-5",
+  6: "lg:grid-cols-6",
+};
+
 export function FigureBand({
   figures,
   className = "",
   compact = false,
+  singleRow = false,
 }: {
   figures: Figure[];
   className?: string;
   compact?: boolean;
+  /** Lay the figures out as equal columns on one row instead of letting
+   *  them wrap.
+   *
+   *  The default is flex-wrap, where each figure is as wide as its own
+   *  content — fine for three or four, but a long `basis` line makes one
+   *  figure wide enough to push the rest onto a second row. Opt in where
+   *  the set is meant to be read across, and keep the default for the
+   *  nine other sections that rely on wrapping.
+   *
+   *  Still wraps at phone width: the columns collapse to two, because
+   *  five 26px figures on a 400px screen would be unreadable. */
+  singleRow?: boolean;
 }) {
+  if (singleRow) {
+    return (
+      <div
+        className={`grid grid-cols-2 items-start border-b border-border-primary sm:grid-cols-3 ${
+          FIGURE_COLUMNS[figures.length] ?? "lg:grid-cols-4"
+        } ${compact ? "gap-x-6 gap-y-4 pb-3" : "gap-x-8 gap-y-5 pb-4"} ${className}`}
+      >
+        {figures.map((f) => (
+          <div key={f.label} className="min-w-0" title={f.title}>
+            <FieldLabel>{f.label}</FieldLabel>
+            <div
+              className={`mt-1 font-medium leading-none tracking-[-0.02em] text-text-primary tabular-nums ${
+                compact ? "text-[20px]" : "text-[26px]"
+              }`}
+            >
+              {f.value}
+            </div>
+            {f.basis && <div className="mt-1.5 text-[11.5px] text-text-tertiary">{f.basis}</div>}
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div
       className={`flex flex-wrap items-start border-b border-border-primary ${
