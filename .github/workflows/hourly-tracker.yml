@@ -98,6 +98,50 @@ jobs:
             || { echo "::warning::GOOGLE_CREDS_JSON is not valid JSON -- GA4 columns will be null."; exit 0; }
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
 
+      # Both spend sources are refreshed BEFORE the tracker runs, because
+      # the tracker READS them: it shares Google's daily total across the
+      # hours and divides Kwikchat's by 24. Running them afterwards would
+      # publish an hour costed against yesterday's spend.
+      - name: Refresh Google Ads spend
+        # Cheap: a few days of one BigQuery table, ~0.001 GiB a run.
+        #
+        # MapleMonk syncs once each morning, so most hourly runs re-read
+        # the same numbers. That is the point -- when the sync does land,
+        # the tracker picks it up within the hour instead of waiting for
+        # tomorrow's daily refresh. The three-day window also lets a
+        # partial same-day capture be corrected once the full day exports.
+        #
+        # Not allowed to fail the job. Google is a minority of spend and
+        # the tracker stores NULL for an uncovered hour rather than
+        # inventing one, so a stale Google figure costs less than a run
+        # that fetches nothing at all.
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+            echo "::warning::No Google credentials -- keeping the existing Google spend."
+            exit 0
+          fi
+          python scripts/fetch_google_ads_spend.py --days 3
+
+      - name: Refresh Kwikchat spend
+        # Still a flat placeholder until a real feed exists, but it now
+        # lives in kwikchat_spend_daily and the tracker reads THAT table
+        # -- so changing the figure is a row, not a code change and a
+        # redeploy. Seeding today keeps the row present; the tracker
+        # falls back to its constant if it is ever missing, because
+        # silently dropping a spend component makes every ratio that
+        # divides by spend read flatteringly.
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          TODAY=$(TZ=Asia/Kolkata date +%F)
+          python scripts/seed_kwikchat_spend.py --from "$TODAY" --to "$TODAY"
+
       - name: Fetch
         env:
           # --- database -------------------------------------------------

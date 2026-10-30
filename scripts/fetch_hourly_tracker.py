@@ -507,6 +507,30 @@ def fetch_ga4(day: date) -> dict[datetime, dict]:
 
 
 # ----------------------------------------------------------------------
+def fetch_kwikchat_spend(day: date) -> float:
+    """The day's Kwikchat spend, read from the table rather than assumed.
+
+    It used to be the module constant, which meant the figure could only
+    be changed by editing this file and redeploying -- and the table the
+    rest of the warehouse reads (`kwikchat_spend_daily`, filled by
+    scripts/seed_kwikchat_spend.py) had no effect on the tracker at all.
+    Updating the placeholder in one place left the two disagreeing.
+
+    Still a placeholder until a real feed exists; this only makes it a
+    placeholder with ONE home. Falls back to the constant when the day
+    has no row, because a tracker that silently drops a spend component
+    reads flatteringly on every ratio that divides by spend.
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT spend FROM public.kwikchat_spend_daily WHERE day = %s", (day,))
+        row = cur.fetchone()
+    if row and row[0] is not None:
+        return float(row[0])
+    print(f"  [warn] no kwikchat_spend_daily row for {day}; "
+          f"falling back to {KWIKCHAT_DAILY:,.0f}/day")
+    return KWIKCHAT_DAILY
+
+
 def fetch_google_spend(day: date) -> tuple[float | None, datetime | None]:
     """The day's Google Ads spend, and when that figure was captured.
 
@@ -573,6 +597,7 @@ async def build_day(client, store, day: date) -> list[dict]:
     )
     ga4 = fetch_ga4(day)
     google_total, google_as_of = fetch_google_spend(day)
+    kwikchat_total = fetch_kwikchat_spend(day)
 
     hours = sorted(set(sessions) | set(sales) | set(orders) | set(meta) | set(ga4))
 
@@ -601,7 +626,10 @@ async def build_day(client, store, day: date) -> list[dict]:
             # The placeholder, spread evenly. Only for hours that have
             # actually happened -- giving a future hour its share would
             # make cost per session read high all day.
-            "kwikchat_spend": round(KWIKCHAT_DAILY / 24.0, 4),
+            # A rate, not a budget poured into the hours so far: the
+            # divisor is the day's length, so a part-finished day
+            # accumulates proportionally.
+            "kwikchat_spend": round(kwikchat_total / 24.0, 4),
         }
         if google_total is not None:
             if hour in google_by_hour:
