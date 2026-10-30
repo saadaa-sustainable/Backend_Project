@@ -3649,6 +3649,7 @@ export interface HourlyTotals {
   sessions_paid: number;
   sessions_direct: number;
   sessions_meta: number;
+  sessions_google: number;
   revenue: number;
   orders: number;
   spend: number;
@@ -3661,6 +3662,8 @@ export interface HourlyTotals {
   pct_direct: number | null;
   revenue_per_session: number | null;
   revenue_per_meta_session: number | null;
+  revenue_per_google_session: number | null;
+  revenue_per_paid_session: number | null;
   amer: number | null;
   ga4_arpu: number | null;
 }

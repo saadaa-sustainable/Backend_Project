@@ -55,23 +55,42 @@ const ratio = (n: number | null | undefined) =>
 
 /** Where a bigger number is the GOOD outcome. Cost per session is the
  *  obvious exception, and getting it backwards would colour a saving
- *  red. */
-type Dir = "up" | "down";
+ *  red.
+ *
+ *  "flat" is for the traffic-mix figures. Whether a rising paid share
+ *  is good depends entirely on what you were trying to do that hour --
+ *  buying harder, or letting organic carry the day -- so the change is
+ *  shown and the judgement is left to the reader rather than guessed
+ *  at in colour. */
+type Dir = "up" | "down" | "flat";
 
-function Delta({ now, was, dir = "up", suffix = "" }:
-  { now: number | null; was: number | null; dir?: Dir; suffix?: string }) {
+function Delta({ now, was, dir = "up", points = false }:
+  { now: number | null; was: number | null; dir?: Dir; points?: boolean }) {
   if (now === null || was === null || !was) {
     return <span className="text-text-tertiary">—</span>;
   }
+  // A share moves in POINTS. "90.2% is 2% up on 88.4%" is a different
+  // and much smaller claim than "up 1.8 points", and the second is the
+  // one anyone reading a traffic mix means.
+  if (points) {
+    const pts = (now - was) * 100;
+    const tone = Math.abs(pts) < 0.05 || dir === "flat" ? "text-text-tertiary"
+      : (dir === "up" ? pts > 0 : pts < 0) ? "text-success-text" : "text-warning-text";
+    return (
+      <span className={`tabular-nums ${tone}`}>
+        {pts > 0 ? "+" : ""}{pts.toFixed(1)} pt
+      </span>
+    );
+  }
   const change = (now - was) / Math.abs(was);
   // Within half a per cent is noise at hour grain, not a move.
-  const flat = Math.abs(change) < 0.005;
+  const noise = Math.abs(change) < 0.005;
   const good = dir === "up" ? change > 0 : change < 0;
-  const tone = flat ? "text-text-tertiary"
+  const tone = noise || dir === "flat" ? "text-text-tertiary"
     : good ? "text-success-text" : "text-warning-text";
   return (
     <span className={`tabular-nums ${tone}`}>
-      {change > 0 ? "+" : ""}{(change * 100).toFixed(1)}%{suffix}
+      {change > 0 ? "+" : ""}{(change * 100).toFixed(1)}%
     </span>
   );
 }
@@ -106,10 +125,12 @@ const METRICS: {
   fmt: (n: number | null) => string;
   dir: Dir;
   w: number;
+  /** A share: its change is points, not per cent of a per cent. */
+  points?: boolean;
 }[] = [
   { key: "sessions", label: "Sessions", fmt: compact, dir: "up", w: 90 },
-  { key: "pct_paid", label: "% paid", fmt: (n) => pct(n), dir: "up", w: 80 },
-  { key: "pct_direct", label: "% direct", fmt: (n) => pct(n), dir: "down", w: 85 },
+  { key: "pct_paid", label: "% paid", fmt: (n) => pct(n), dir: "flat", w: 95, points: true },
+  { key: "pct_direct", label: "% direct", fmt: (n) => pct(n), dir: "flat", w: 95, points: true },
   { key: "meta_impressions", label: "Impressions", fmt: compact, dir: "up", w: 110 },
   { key: "spend", label: "Spend", fmt: (n) => money(n, 0), dir: "up", w: 105 },
   { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
@@ -224,7 +245,7 @@ export function HourlyTracker() {
                   against the same {c.hours} hours of {c.day}
                 </span>
               </div>
-              <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-6">
+              <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-4">
                 <Hero label="Sessions" value={compact(t.sessions)} was={compact(c.sessions)} />
                 <Hero label="Spend" value={money(t.spend, 0)} was={money(c.spend, 0)}
                       hint="Meta + Kwikchat. Google Ads has no hourly feed." />
@@ -235,6 +256,10 @@ export function HourlyTracker() {
                       was={money(c.revenue_per_session)} />
                 <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
                       hint="New-customer revenue ÷ spend." />
+                <Hero label="% paid sessions" value={pct(t.pct_paid)} was={pct(c.pct_paid)}
+                      hint="Sessions carrying a utm_source that is not direct or none." />
+                <Hero label="% direct sessions" value={pct(t.pct_direct)} was={pct(c.pct_direct)}
+                      hint="Sessions with no utm_source, or one that says direct/none. The complement of % paid." />
               </dl>
               <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-border-soft pt-3 text-[12px] text-text-secondary">
                 <span>Sessions <Delta now={t.sessions} was={c.sessions} /></span>
@@ -243,9 +268,8 @@ export function HourlyTracker() {
                 <span>Cost / session <Delta now={t.cost_per_session} was={c.cost_per_session} dir="down" /></span>
                 <span>Rev / session <Delta now={t.revenue_per_session} was={c.revenue_per_session} /></span>
                 <span>AMER <Delta now={t.amer} was={c.amer} /></span>
-                <span className="text-text-tertiary">
-                  {pct(t.pct_paid)} paid · {pct(t.pct_direct)} direct
-                </span>
+                <span>% paid <Delta now={t.pct_paid} was={c.pct_paid} dir="flat" points /></span>
+                <span>% direct <Delta now={t.pct_direct} was={c.pct_direct} dir="flat" points /></span>
               </div>
             </div>
           )}
@@ -282,6 +306,26 @@ export function HourlyTracker() {
                   </tr>
                 </thead>
                 <tbody>
+                  {/* The aggregate, then its breakdown. Every ratio here
+                      comes from the API, recomputed from the summed
+                      counts -- NOT averaged down the column, which would
+                      weight a dead 04:00 the same as a 21:00 peak. */}
+                  {t && (
+                    <tr className="bg-bg-muted/60 align-top font-semibold">
+                      <td className="sticky left-0 z-10 border-b-2 border-r border-border-primary bg-bg-muted px-3 py-2 font-mono text-[11.5px] text-text-primary">
+                        Today
+                        <span className="ml-1.5 font-sans text-[9.5px] uppercase tracking-wide text-text-tertiary">
+                          {t.hours}h
+                        </span>
+                      </td>
+                      {METRICS.map((m) => (
+                        <td key={m.key} style={{ minWidth: m.w }}
+                            className="border-b-2 border-r border-border-primary px-3 py-2 text-right tabular-nums text-text-primary last:border-r-0">
+                          {m.fmt((t as unknown as Record<string, number | null>)[m.key] ?? null)}
+                        </td>
+                      ))}
+                    </tr>
+                  )}
                   {[...rows].reverse().map((r) => {
                     const prev = baseline.get(r.hour_of_day);
                     // The newest hour of TODAY is still filling. Showing
@@ -311,7 +355,7 @@ export function HourlyTracker() {
                               {m.fmt(v)}
                               {showDeltas && !partial && (
                                 <span className="ml-2 text-[10.5px]">
-                                  <Delta now={v} was={was} dir={m.dir} />
+                                  <Delta now={v} was={was} dir={m.dir} points={m.points} />
                                 </span>
                               )}
                             </td>
@@ -328,6 +372,9 @@ export function HourlyTracker() {
       )}
 
       <p className="text-[11.5px] text-text-tertiary">
+        The Today row is the aggregate of the hours beneath it, with every ratio recomputed
+        from the summed counts rather than averaged down the column &mdash; averaging would
+        weight a dead 04:00 the same as a 21:00 peak.
         Same definitions as the Overview&rsquo;s session band, bucketed by hour, so a day
         summed here agrees with the daily figures. Revenue is the sum of order totals, which
         is what makes the per-channel columns add up to it. Spend is Meta plus Kwikchat:

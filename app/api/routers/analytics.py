@@ -13860,6 +13860,7 @@ class HourlyTotals(BaseModel):
     sessions_paid: int
     sessions_direct: int
     sessions_meta: int
+    sessions_google: int
     revenue: float
     orders: int
     spend: float
@@ -13872,6 +13873,8 @@ class HourlyTotals(BaseModel):
     pct_direct: float | None
     revenue_per_session: float | None
     revenue_per_meta_session: float | None
+    revenue_per_google_session: float | None
+    revenue_per_paid_session: float | None
     amer: float | None
     ga4_arpu: float | None
 
@@ -13902,7 +13905,8 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
     return HourlyTotals(
         day=day, hours=len(rows),
         sessions=sessions, sessions_paid=paid, sessions_direct=s("sessions_direct"),
-        sessions_meta=s("sessions_meta"), revenue=revenue, orders=s("orders"),
+        sessions_meta=s("sessions_meta"), sessions_google=s("sessions_google"),
+        revenue=revenue, orders=s("orders"),
         spend=spend, meta_impressions=s("meta_impressions"),
         new_customers=s("new_customers"), new_customer_revenue=ncr,
         cost_per_session=(spend / sessions) if sessions else None,
@@ -13912,6 +13916,9 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         revenue_per_session=(revenue / sessions) if sessions else None,
         revenue_per_meta_session=(s("revenue_meta") / s("sessions_meta"))
                                  if s("sessions_meta") else None,
+        revenue_per_google_session=(s("revenue_google") / s("sessions_google"))
+                                   if s("sessions_google") else None,
+        revenue_per_paid_session=(s("revenue_paid") / paid) if paid else None,
         amer=(ncr / spend) if spend else None,
         ga4_arpu=(s("ga4_revenue") / users) if users else None,
     )
