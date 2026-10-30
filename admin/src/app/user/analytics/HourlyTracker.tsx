@@ -65,6 +65,43 @@ const ratio = (n: number | null | undefined) =>
  *  at in colour. */
 type Dir = "up" | "down" | "flat";
 
+/** "Oct 30, 2026" — each stacked line carries its own full date,
+ *  because two bare "12:00" rows do not say which day each belongs to. */
+const dayLabel = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-US",
+    { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+
+const hourLabel = (iso: string, h: number) =>
+  `${dayLabel(iso)}, ${(h % 12) || 12}:00 ${h < 12 ? "AM" : "PM"}`;
+
+/** The change on a line of its own: an arrow and a rounded figure,
+ *  rather than the signed decimal that belongs beside a value. */
+function Change({ now, was, dir = "up", points = false }:
+  { now: number | null | undefined; was: number | null | undefined;
+    dir?: Dir; points?: boolean }) {
+  if (now === null || now === undefined || !was) {
+    return <span className="text-text-tertiary">—</span>;
+  }
+  if (points) {
+    const pts = (now - was) * 100;
+    const flat = Math.abs(pts) < 0.05 || dir === "flat";
+    const good = dir === "up" ? pts > 0 : pts < 0;
+    return (
+      <span className={flat ? "text-text-tertiary" : good ? "text-success-text" : "text-warning-text"}>
+        {pts > 0 ? "↗ +" : pts < 0 ? "↘ " : ""}{pts.toFixed(1)} pt
+      </span>
+    );
+  }
+  const ch = (now - was) / Math.abs(was);
+  const flat = Math.abs(ch) < 0.005 || dir === "flat";
+  const good = dir === "up" ? ch > 0 : ch < 0;
+  return (
+    <span className={flat ? "text-text-tertiary" : good ? "text-success-text" : "text-warning-text"}>
+      {flat ? "" : ch > 0 ? "↗ " : "↘ "}{Math.abs(ch * 100).toFixed(0)}%
+    </span>
+  );
+}
+
 function Delta({ now, was, dir = "up", points = false }:
   { now: number | null | undefined; was: number | null | undefined;
     dir?: Dir; points?: boolean }) {
@@ -226,6 +263,12 @@ export function HourlyTracker() {
 
   const t: HourlyTotals | null = data?.today ?? null;
   const c: HourlyTotals | null = data?.compare ?? null;
+  /** The label for line two of every stacked cell. Falls back to the
+   *  day the baseline WOULD have been, so a missing day still says
+   *  which day is missing rather than leaving the line blank. */
+  const baseDay = c?.day ?? (compareTo
+    || new Date(new Date(`${day}T00:00:00Z`).getTime() - 86400000)
+         .toISOString().slice(0, 10));
   /** The day the baseline WOULD have been, for when it is not there. */
   const baselineDay = compareTo
     || new Date(new Date(`${day}T00:00:00Z`).getTime() - 86400000)
@@ -256,7 +299,7 @@ export function HourlyTracker() {
         <label className="flex items-center gap-2 pb-1.5 text-[13px] text-text-secondary">
           <input type="checkbox" checked={showDeltas}
                  onChange={(e) => setShowDeltas(e.target.checked)} />
-          Show hour-on-hour change
+          Show % change
         </label>
         <button type="button" onClick={() => setTick((n) => n + 1)}
                 className="ml-auto rounded-md border border-border-primary bg-bg-white px-3 py-1.5 text-[13px] text-text-primary hover:bg-bg-muted/60">
@@ -392,7 +435,8 @@ export function HourlyTracker() {
               <table className="border-collapse bg-bg-white text-[12.5px]">
                 <thead>
                   <tr className="bg-bg-white text-left text-[11px] uppercase tracking-wide text-text-tertiary">
-                    <th className="sticky left-0 z-10 border-b border-r border-border-soft bg-bg-white px-3 py-2 font-medium">
+                    <th style={{ minWidth: 172 }}
+                        className="sticky left-0 z-10 whitespace-nowrap border-b border-r border-border-soft bg-bg-white px-3 py-2 font-medium">
                       Hour
                     </th>
                     {METRICS.map((m) => (
@@ -409,19 +453,40 @@ export function HourlyTracker() {
                       counts -- NOT averaged down the column, which would
                       weight a dead 04:00 the same as a 21:00 peak. */}
                   {t && (
-                    <tr className="bg-bg-muted/60 align-top font-semibold">
-                      <td className="sticky left-0 z-10 border-b-2 border-r border-border-primary bg-bg-muted px-3 py-2 font-mono text-[11.5px] text-text-primary">
-                        Today
-                        <span className="ml-1.5 font-sans text-[9.5px] uppercase tracking-wide text-text-tertiary">
-                          {t.hours}h
+                    <tr className="bg-bg-muted/60 align-top">
+                      <td style={{ minWidth: 172 }}
+                          className="sticky left-0 z-10 whitespace-nowrap border-b-2 border-r border-border-primary bg-bg-muted px-3 py-2 font-mono text-[11.5px] text-text-primary">
+                        <span className="block font-semibold">
+                          {dayLabel(t.day)}
+                          <span className="ml-1.5 font-sans text-[9.5px] uppercase tracking-wide text-text-tertiary">
+                            {t.hours}h
+                          </span>
                         </span>
+                        <span className="mt-0.5 block text-text-tertiary">{dayLabel(baseDay)}</span>
+                        {showDeltas && (
+                          <span className="mt-0.5 block font-sans text-[11px] text-text-tertiary">
+                            % change
+                          </span>
+                        )}
                       </td>
-                      {METRICS.map((m) => (
-                        <td key={m.key} style={{ minWidth: m.w }}
-                            className="border-b-2 border-r border-border-primary px-3 py-2 text-right tabular-nums text-text-primary last:border-r-0">
-                          {m.fmt((t as unknown as Record<string, number | null>)[m.key] ?? null)}
-                        </td>
-                      ))}
+                      {METRICS.map((m) => {
+                        const now = (t as unknown as Record<string, number | null>)[m.key] ?? null;
+                        const was = c
+                          ? (c as unknown as Record<string, number | null>)[m.key] ?? null
+                          : null;
+                        return (
+                          <td key={m.key} style={{ minWidth: m.w }}
+                              className="border-b-2 border-r border-border-primary px-3 py-2 text-right tabular-nums text-text-primary last:border-r-0">
+                            <span className="block font-semibold">{m.fmt(now)}</span>
+                            <span className="mt-0.5 block text-text-tertiary">{m.fmt(was)}</span>
+                            {showDeltas && (
+                              <span className="mt-0.5 block text-[11px]">
+                                <Change now={now} was={was} dir={m.dir} points={m.points} />
+                              </span>
+                            )}
+                          </td>
+                        );
+                      })}
                     </tr>
                   )}
                   {[...rows].reverse().map((r) => {
@@ -435,13 +500,22 @@ export function HourlyTracker() {
                     return (
                       <tr key={r.hour}
                           className={`align-top hover:bg-bg-muted/40 ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
-                        <td className={`sticky left-0 z-10 border-b border-r border-border-soft px-3 py-1.5 font-mono text-[11.5px] text-text-primary ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
-                          {String(r.hour_of_day).padStart(2, "0")}:00
-                          {partial && (
-                            <span className="ml-1.5 font-sans text-[9.5px] uppercase tracking-wide text-text-tertiary"
-                                  title="This hour is still filling. Comparing it with a complete hour yesterday would read as a fall that has not happened.">
-                              live
-                            </span>
+                        <td style={{ minWidth: 172 }}
+                            className={`sticky left-0 z-10 whitespace-nowrap border-b border-r border-border-soft px-3 py-1.5 font-mono text-[11.5px] text-text-primary ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
+                          <span className="block">
+                            {hourLabel(r.day_ist, r.hour_of_day)}
+                            {partial && (
+                              <span className="ml-1.5 font-sans text-[9.5px] uppercase tracking-wide text-text-tertiary"
+                                    title="This hour is still filling. Comparing it with a complete hour yesterday would read as a fall that has not happened.">
+                                live
+                              </span>
+                            )}
+                          </span>
+                          <span className="mt-0.5 block text-text-tertiary">
+                            {hourLabel(baseDay, r.hour_of_day)}
+                          </span>
+                          {showDeltas && !partial && (
+                            <span className="mt-0.5 block text-[11px]">&nbsp;</span>
                           )}
                         </td>
                         {METRICS.map((m) => {
@@ -450,10 +524,11 @@ export function HourlyTracker() {
                           return (
                             <td key={m.key} style={{ minWidth: m.w }}
                                 className="border-b border-r border-border-soft px-3 py-1.5 text-right tabular-nums text-text-primary last:border-r-0">
-                              {m.fmt(v)}
+                              <span className="block">{m.fmt(v)}</span>
+                              <span className="mt-0.5 block text-text-tertiary">{m.fmt(was)}</span>
                               {showDeltas && !partial && (
-                                <span className="ml-2 text-[10.5px]">
-                                  <Delta now={v} was={was} dir={m.dir} points={m.points} />
+                                <span className="mt-0.5 block text-[11px]">
+                                  <Change now={v} was={was} dir={m.dir} points={m.points} />
                                 </span>
                               )}
                             </td>

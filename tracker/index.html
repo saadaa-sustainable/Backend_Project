@@ -99,6 +99,15 @@
   .tag { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3);
          border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; margin-left: 6px; }
   .d { font-size: 10.5px; margin-left: 7px; font-variant-numeric: tabular-nums; }
+  /* Today over the baseline, one line each, rather than a value with a
+     percentage hung off it. The eye reads DOWN a stacked pair without
+     having to hold the baseline in its head. */
+  .l1 { display: block; }
+  .l2 { display: block; color: var(--text-3); margin-top: 2px; }
+  .l3 { display: block; margin-top: 2px; font-size: 11px; font-variant-numeric: tabular-nums; }
+  tr.total td .l1 { font-weight: 650; }
+  tr.total td .l2 { font-weight: 400; }
+  td .l1, td .l2 { font-variant-numeric: tabular-nums; }
   .note { color: var(--text-3); font-size: 11.5px; margin-top: 10px; line-height: 1.6; }
   .err { border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 13px; }
   /* The chart and the donut sit side by side on a desktop and stack on
@@ -151,6 +160,7 @@
   <div class="controls">
     <label class="f">Day <input type="date" id="day"></label>
     <label class="f">Compare to <input type="date" id="cmp"></label>
+    <label class="f"><input type="checkbox" id="deltas" checked> % change</label>
     <button id="refresh">Refresh</button>
     <button id="theme">Light / dark</button>
     <label class="f" style="flex:1 1 320px">API
@@ -241,6 +251,32 @@ const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
 // rising paid share is good depends on what you were trying to do that
 // hour -- buy harder, or let organic carry it -- so the change is shown
 // and the judgement left to the reader rather than guessed in colour.
+// Shopify's own hourly comparison labels every line with its full
+// date, which is what makes a stacked pair readable: two bare "12:00"
+// rows do not say which day each belongs to.
+const dayLabel = iso => new Date(iso + "T00:00:00Z").toLocaleDateString("en-US",
+  { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+const hourLabel = (iso, h) =>
+  dayLabel(iso) + ", " + ((h % 12) || 12) + ":00 " + (h < 12 ? "AM" : "PM");
+
+// The change as its own line: an arrow and a rounded figure, not the
+// signed decimal that belongs beside a value.
+function changeHTML(now, was, dir = "up", points = false) {
+  if (now == null || was == null || !was) return '<span class="flat">\u2014</span>';
+  if (points) {
+    const pts = (now - was) * 100;
+    const cls = Math.abs(pts) < 0.05 || dir === "flat" ? "flat"
+      : (dir === "up" ? pts > 0 : pts < 0) ? "good" : "bad";
+    return '<span class="' + cls + '">' + (pts > 0 ? "\u2197 +" : pts < 0 ? "\u2198 " : "")
+           + pts.toFixed(1) + " pt</span>";
+  }
+  const ch = (now - was) / Math.abs(was);
+  const cls = Math.abs(ch) < 0.005 || dir === "flat" ? "flat"
+    : (dir === "up" ? ch > 0 : ch < 0) ? "good" : "bad";
+  const arrow = Math.abs(ch) < 0.005 ? "" : ch > 0 ? "\u2197 " : "\u2198 ";
+  return '<span class="' + cls + '">' + arrow + Math.abs(ch * 100).toFixed(0) + "%</span>";
+}
+
 function deltaHTML(now, was, dir = "up", points = false) {
   if (now == null || was == null || !was) return '<span class="flat">—</span>';
   // A share moves in POINTS. "90.2% is 2% up on 88.4%" is a different
@@ -343,7 +379,11 @@ async function load() {
   }
 }
 
+//: The last payload, so the % toggle can redraw without another fetch.
+let LAST = null;
+
 function render(d, day) {
+  LAST = { d, day };
   const isToday = day === istToday();
   const rows = d.rows || [];
   const prev = new Map((d.compare_rows || []).map(r => [r.hour_of_day, r]));
@@ -404,26 +444,46 @@ function render(d, day) {
   $("tablewrap").hidden = false;
   $("thead").innerHTML = "<tr><th>Hour</th>" +
     METRICS.map(m => "<th>" + m[1] + "</th>").join("") + "</tr>";
+
+  // Every cell stacks: the day being looked at on top, the baseline
+  // under it in grey, and -- when asked for -- the change under that.
+  // `baseDay` is the label for line two even when that day holds no
+  // rows, so the column still says what is missing.
+  const baseDay = c ? c.day : baselineDay;
+  const showPct = $("deltas") ? $("deltas").checked : true;
+
+  const cell = (now, was, fmt, dir, points, suppress) =>
+    '<td><span class="l1">' + fmt(now) + '</span>' +
+    '<span class="l2">' + fmt(was) + '</span>' +
+    (showPct && !suppress
+      ? '<span class="l3">' + changeHTML(now, was, dir, points) + '</span>' : '') +
+    '</td>';
+
   // The aggregate first, then its breakdown. Ratios come from the API,
   // recomputed from the summed counts -- NOT averaged down the column,
   // which would weight a dead 04:00 the same as a 21:00 peak.
-  const totalRow = t ? '<tr class="total"><td>Today' +
-    '<span class="tag">' + t.hours + 'h</span></td>' +
-    METRICS.map(([k, , fmt]) => "<td>" + fmt(t[k]) + "</td>").join("") + "</tr>" : "";
+  const totalRow = !t ? "" :
+    '<tr class="total"><td><span class="l1">' + dayLabel(t.day) +
+    '<span class="tag">' + t.hours + 'h</span></span>' +
+    '<span class="l2">' + dayLabel(baseDay) + '</span>' +
+    (showPct ? '<span class="l3">% change</span>' : '') + '</td>' +
+    METRICS.map(([k, , fmt, dir, points]) =>
+      cell(t[k], c ? c[k] : null, fmt, dir, points, false)).join("") + '</tr>';
 
   $("tbody").innerHTML = totalRow + rows.slice().reverse().map(r => {
     // The newest hour of today is still filling. Its figures are real;
     // its change against a COMPLETE hour yesterday is not, and reads as
-    // a collapse that never happened.
+    // a collapse that never happened -- so the pair is shown and the
+    // percentage withheld.
     const live = isToday && r.hour_of_day === d.latest_hour;
     const p = prev.get(r.hour_of_day);
-    return '<tr class="' + (live ? "live" : "") + '"><td>' +
-      String(r.hour_of_day).padStart(2, "0") + ":00" +
-      (live ? '<span class="tag">live</span>' : "") + "</td>" +
+    return '<tr class="' + (live ? "live" : "") + '">' +
+      '<td><span class="l1">' + hourLabel(r.day_ist, r.hour_of_day) +
+      (live ? '<span class="tag">live</span>' : "") + '</span>' +
+      '<span class="l2">' + hourLabel(baseDay, r.hour_of_day) + '</span>' +
+      (showPct && !live ? '<span class="l3">&nbsp;</span>' : '') + '</td>' +
       METRICS.map(([k, , fmt, dir, points]) =>
-        "<td>" + fmt(r[k]) +
-        (live ? "" : '<span class="d">' + deltaHTML(r[k], p ? p[k] : null, dir, points) + "</span>") +
-        "</td>").join("") + "</tr>";
+        cell(r[k], p ? p[k] : null, fmt, dir, points, live)).join("") + '</tr>';
   }).join("");
 
   $("footnote").textContent =
@@ -703,6 +763,9 @@ $("chart").addEventListener("pointerleave", hideTip);
 $("refresh").onclick = load;
 $("day").onchange = load;
 $("cmp").onchange = load;
+// A re-render, not a re-fetch: the figures are already in hand and the
+// toggle only decides whether the third line is drawn.
+$("deltas").onchange = () => { if (LAST) render(LAST.d, LAST.day); };
 $("api").onchange = () => {
   try { localStorage.setItem("tracker_api", $("api").value.trim()); } catch {}
   load();
