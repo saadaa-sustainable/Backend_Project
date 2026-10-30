@@ -13786,6 +13786,7 @@ SELECT hour, day_ist, hour_of_day,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
+       google_spend, google_spend_as_of,
        ga4_sessions, ga4_revenue, ga4_active_users
   FROM public.hourly_campaign_tracker
  WHERE day_ist = ANY(:days)
@@ -13832,6 +13833,14 @@ class HourlyRow(BaseModel):
     meta_spend: float | None
     meta_impressions: int | None
     kwikchat_spend: float | None
+    #: A daily total shared out across the hours by that hour's share of
+    #: the day's Google-driven sessions. The total is measured; the
+    #: shape is inferred. NULL for an hour its daily capture does not
+    #: reach, which is not the same as zero.
+    google_spend: float | None = None
+    #: When that daily total was captured. On a day still running it is
+    #: this morning, so the figure is the spend placed up to then.
+    google_spend_as_of: datetime | None = None
     ga4_sessions: int | None
     ga4_revenue: float | None
     ga4_active_users: int | None
@@ -13867,7 +13876,12 @@ def _derive_hourly(m: dict) -> HourlyRow:
     def over(num, den):
         return (float(num) / float(den)) if (num is not None and den) else None
 
-    spend = (m.get("meta_spend") or 0) + (m.get("kwikchat_spend") or 0)
+    # All three channels. Meta is measured hourly; Google and Kwikchat
+    # are daily figures shared across the hours, so this is a mix of a
+    # measurement and two allocations and the page says as much.
+    spend = ((m.get("meta_spend") or 0)
+             + (m.get("kwikchat_spend") or 0)
+             + (m.get("google_spend") or 0))
     sessions = m.get("sessions") or 0
     return HourlyRow(
         **m,
@@ -13908,6 +13922,12 @@ class HourlyTotals(BaseModel):
     revenue_excluded: float
     spend: float
     meta_impressions: int
+    meta_spend: float
+    kwikchat_spend: float
+    google_spend: float
+    #: The oldest Google capture in the range -- how stale the Google
+    #: part of `spend` is, worst case.
+    google_spend_as_of: datetime | None
     new_customers: int
     new_customer_revenue: float
     cost_per_session: float | None
@@ -13979,6 +13999,10 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
         spend=spend, meta_impressions=s("meta_impressions"),
+        meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
+        google_spend=s("google_spend"),
+        google_spend_as_of=min((r.google_spend_as_of for r in rows
+                                if r.google_spend_as_of is not None), default=None),
         new_customers=s("new_customers"), new_customer_revenue=ncr,
         cost_per_session=(spend / sessions) if sessions else None,
         cost_per_paid_session=(spend / paid) if paid else None,

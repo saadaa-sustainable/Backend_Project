@@ -270,6 +270,11 @@ const METRICS = [
   ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
   ["meta_impressions", "Impressions", num, "up"],
   ["spend", "Spend", v => inr(v, 0), "up"],
+  // Broken out because the three have different standing: Meta is
+  // measured by the hour, Google is a daily total shared across the
+  // hours, Kwikchat is a flat placeholder. A dash means the hour is
+  // past the moment Google's daily figure was captured.
+  ["google_spend", "Google", v => inr(v, 0), "up"],
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["cost_per_paid_session", "Cost / paid sess", v => inr(v), "down"],
   // The numerator of both CR and AOV, which had no column of its own.
@@ -401,11 +406,13 @@ function render(d, day) {
     "orders are left out; EXCHANGES are counted, because the customer swapped for equal value " +
     "and the money stayed — the Overview drops those too, so the two will not match. Most of " +
     "today's returns are not tagged yet either: they arrive over the following days, so a past " +
-    "day here will drift down as they land. Spend is Meta plus Kwikchat: " +
-    "Google Ads is excluded: it arrives in a BigQuery export that cannot run hourly, and " +
-    "spreading a day over 24 hours would be an invention. That makes Cost / paid session a FLOOR " +
-    "rather than the true figure — its denominator counts every paid session, Google's among " +
-    "them, while its numerator counts only what Meta and Kwikchat cost. " +
+    "day here will drift down as they land. Spend is Meta plus Google plus Kwikchat, but only " +
+    "Meta is measured by the hour. Google arrives as one daily total from a BigQuery export and " +
+    "is shared across the hours in proportion to that hour's Google-driven sessions; Kwikchat is " +
+    "a flat ₹30,000 a day over 24. The totals are real — the hourly SHAPE of them is inferred, so " +
+    "read an hour's Google figure as an allocation rather than a measurement. On a day still " +
+    "running, Google's total is whatever had been spent when the export ran this morning, so it " +
+    "reaches only the hours before that; later hours show a dash rather than a false zero. " +
     "The baseline is cut to the hours today has reached — " +
     "a part-finished day against a complete one flatters the complete one every time. " +
     "The Today row is the aggregate of the hours beneath it, with every ratio recomputed from the " +

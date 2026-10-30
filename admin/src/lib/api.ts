@@ -3630,10 +3630,15 @@ export interface HourlyRow {
   orders_meta: number | null;
   new_customers: number | null;
   new_customer_revenue: number | null;
-  /** Meta only. Google Ads has no hourly feed. */
+  /** The only genuinely hourly one. */
   meta_spend: number | null;
   meta_impressions: number | null;
   kwikchat_spend: number | null;
+  /** A daily total shared across the hours by each hour's share of the
+   *  day's Google-driven sessions. NULL for an hour its daily capture
+   *  does not reach — which is not the same as zero. */
+  google_spend: number | null;
+  google_spend_as_of: string | null;
   ga4_sessions: number | null;
   ga4_revenue: number | null;
   ga4_active_users: number | null;
@@ -3675,6 +3680,11 @@ export interface HourlyTotals {
   revenue_excluded: number;
   spend: number;
   meta_impressions: number;
+  meta_spend: number;
+  kwikchat_spend: number;
+  google_spend: number;
+  /** The oldest Google capture in the range — worst-case staleness. */
+  google_spend_as_of: string | null;
   new_customers: number;
   new_customer_revenue: number;
   cost_per_session: number | null;

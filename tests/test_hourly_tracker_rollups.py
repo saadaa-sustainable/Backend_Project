@@ -5,7 +5,7 @@ the hourly figures, and neither would raise if it were -- the page
 would just quietly show a number nobody could reconcile against the
 table under it.
 """
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -17,7 +17,7 @@ from app.api.routers.analytics import (
     _rank_sources,
     _totals,
 )
-from scripts.fetch_hourly_tracker import is_excluded_order
+from scripts.fetch_hourly_tracker import distribute_daily, is_excluded_order
 
 
 def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
@@ -38,6 +38,11 @@ def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
     })
 
 
+def _h(n: int) -> datetime:
+    """The UTC instant starting IST hour n, which is how hours are keyed."""
+    return datetime(2026, 10, 30, n, tzinfo=timezone.utc)
+
+
 def _blank() -> dict:
     """The raw mapping _derive_hourly expects: every stored column, none
     of the derived ones (it fills those itself)."""
@@ -46,6 +51,7 @@ def _blank() -> dict:
                "revenue_per_google_session", "revenue_per_paid_session", "aov",
                "conversion_rate", "conversion_rate_paid", "conversion_rate_direct",
                "amer", "ga4_arpu"}
+    # `spend` is derived, but its three components are stored columns.
     m = {k: None for k in HourlyRow.model_fields if k not in derived}
     m.update(hour="2026-10-30T01:00:00+00:00", day_ist="2026-10-30", hour_of_day=1)
     return m
@@ -238,3 +244,56 @@ def test_a_day_that_genuinely_sold_nothing_to_paid_reports_zero():
                             "orders_paid": 0, "orders_direct": 5})]
     t = _totals(date(2026, 10, 30), rows)
     assert t is not None and t.conversion_rate_paid == 0.0
+
+
+# --- spend distribution -----------------------------------------------
+# Google and Kwikchat are DAILY totals. Only Meta is measured hourly,
+# so the other two are shared out -- and a share-out that does not sum
+# back to the total is just a wrong number with extra steps.
+
+def test_distribution_sums_back_to_the_daily_total():
+    w = {_h(0): 100.0, _h(1): 300.0, _h(2): 50.0}
+    out = distribute_daily(10_932.0, w)
+    assert sum(out.values()) == pytest.approx(10_932.0)
+
+
+def test_distribution_follows_the_weights():
+    out = distribute_daily(1000.0, {_h(0): 100.0, _h(1): 300.0})
+    assert out[_h(0)] == pytest.approx(250.0)
+    assert out[_h(1)] == pytest.approx(750.0)
+
+
+def test_an_hour_with_no_google_traffic_gets_no_google_spend():
+    out = distribute_daily(1000.0, {_h(0): 0.0, _h(1): 1.0})
+    assert out[_h(0)] == 0.0
+    assert out[_h(1)] == pytest.approx(1000.0)
+
+
+def test_a_day_with_no_google_traffic_falls_back_to_an_even_split():
+    """A worse answer, but the only one left -- and it still totals."""
+    out = distribute_daily(900.0, {_h(0): 0.0, _h(1): 0.0, _h(2): 0.0})
+    assert set(out.values()) == {300.0}
+    assert sum(out.values()) == pytest.approx(900.0)
+
+
+def test_distributing_over_no_hours_yields_nothing():
+    assert distribute_daily(1000.0, {}) == {}
+
+
+def test_spend_is_all_three_channels():
+    r = _derive_hourly({**_blank(), "sessions": 100, "meta_spend": 1000.0,
+                        "kwikchat_spend": 1250.0, "google_spend": 450.0})
+    assert r.spend == pytest.approx(2700.0)
+    assert r.cost_per_session == pytest.approx(27.0)
+
+
+def test_an_hour_past_the_google_capture_still_has_a_spend():
+    """google_spend NULL means 'not told yet', not 'everything is null'.
+
+    The hour still spent on Meta and Kwikchat, and dropping its whole
+    spend because one component is unknown would put a hole in the
+    middle of the cost curve.
+    """
+    r = _derive_hourly({**_blank(), "sessions": 100, "meta_spend": 1000.0,
+                        "kwikchat_spend": 1250.0, "google_spend": None})
+    assert r.spend == pytest.approx(2250.0)

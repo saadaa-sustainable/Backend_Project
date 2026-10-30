@@ -141,6 +141,11 @@ const METRICS: {
   { key: "conversion_rate_direct", label: "CR / direct", fmt: (n) => pct(n, 2), dir: "up", w: 105, points: true },
   { key: "meta_impressions", label: "Impressions", fmt: compact, dir: "up", w: 110 },
   { key: "spend", label: "Spend", fmt: (n) => money(n, 0), dir: "up", w: 105 },
+  // Broken out because the three have different standing: Meta is
+  // measured by the hour, Google is a daily total shared across the
+  // hours, Kwikchat is a flat placeholder. A dash means that hour is
+  // past the moment Google's daily figure was captured.
+  { key: "google_spend", label: "Google", fmt: (n) => money(n, 0), dir: "up", w: 95 },
   { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
   { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
   { key: "orders", label: "Orders", fmt: compact, dir: "up", w: 85 },
@@ -266,7 +271,9 @@ export function HourlyTracker() {
               <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-3">
                 <Hero label="Sessions" value={compact(t.sessions)} was={compact(c.sessions)} />
                 <Hero label="Spend" value={money(t.spend, 0)} was={money(c.spend, 0)}
-                      hint="Meta + Kwikchat. Google Ads has no hourly feed." />
+                      hint={`Meta ${money(t.meta_spend, 0)} + Google ${money(t.google_spend, 0)}`
+                            + ` + Kwikchat ${money(t.kwikchat_spend, 0)}.`
+                            + " Meta is hourly; the other two are daily totals shared across the hours."} />
                 <Hero label="Revenue" value={money(t.revenue, 0)} was={money(c.revenue, 0)} />
                 <Hero label="Cost / session" value={money(t.cost_per_session)}
                       was={money(c.cost_per_session)} />
@@ -319,7 +326,13 @@ export function HourlyTracker() {
                   {isToday ? " · the live hour shows no change, it is still filling" : ""}
                 </span>
                 <span className="text-[11.5px] text-text-tertiary">
-                  Spend is Meta + Kwikchat · Google Ads has no hourly feed
+                  Spend is Meta + Google + Kwikchat · only Meta is measured hourly
+                  {t?.google_spend_as_of
+                    ? ` · Google captured ${new Date(t.google_spend_as_of)
+                        .toLocaleString("en-IN", { timeZone: "Asia/Kolkata",
+                                                   hour: "2-digit", minute: "2-digit",
+                                                   day: "2-digit", month: "short" })} IST`
+                    : ""}
                 </span>
                 <span className="text-[11.5px] text-text-tertiary">
                   Cancelled and returned orders excluded · exchanges counted, unlike the
@@ -415,12 +428,14 @@ export function HourlyTracker() {
         weight a dead 04:00 the same as a 21:00 peak.
         Same definitions as the Overview&rsquo;s session band, bucketed by hour, so a day
         summed here agrees with the daily figures. Revenue is the sum of order totals, which
-        is what makes the paid column add up against it. Spend is Meta plus Kwikchat at its flat
-        &#8377;30,000 a day, over 24. Google Ads is excluded: it arrives in a BigQuery export that
-        cannot run hourly, and spreading a day across 24 hours would be an invention rather than a
-        measurement. That makes Cost / paid session a <strong>floor</strong> rather than the true
-        figure &mdash; its denominator counts every paid session, Google&rsquo;s among them, while
-        its numerator counts only what Meta and Kwikchat cost.
+        is what makes the paid column add up against it. Spend is all three channels, but only
+        Meta is measured by the hour. Google arrives as one daily total from a BigQuery export
+        and is shared across the hours in proportion to that hour&rsquo;s Google-driven sessions;
+        Kwikchat is a flat &#8377;30,000 a day over 24. Both totals are real &mdash; the hourly
+        <em>shape</em> of them is inferred, so read an individual hour&rsquo;s Google figure as an
+        allocation, not a measurement. On a day still running, Google&rsquo;s total is whatever
+        had been spent when the export ran this morning, so it only reaches the hours before
+        that; later hours show a dash rather than a false zero.
       </p>
     </div>
   );

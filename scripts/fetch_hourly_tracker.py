@@ -146,10 +146,15 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     new_customers           integer,
     new_customer_revenue    numeric,
 
-    -- Spend. Meta is real; kwikchat is the flat placeholder / 24.
+    -- Spend. Meta is real and genuinely hourly. The other two are a
+    -- DAILY total shared out across the hours, and neither pretends
+    -- otherwise: google_spend_as_of carries the moment its daily total
+    -- was captured, so a partial day can be seen rather than guessed at.
     meta_spend              numeric,
     meta_impressions        bigint,
     kwikchat_spend          numeric,
+    google_spend            numeric,
+    google_spend_as_of      timestamptz,
 
     -- GA4, best effort.
     ga4_sessions            integer,
@@ -170,6 +175,8 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS orders_direct integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS orders_excluded integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS revenue_excluded numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS google_spend numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS google_spend_as_of timestamptz",
 ]
 
 COLUMNS = [
@@ -181,6 +188,7 @@ COLUMNS = [
     "orders_excluded", "revenue_excluded",
     "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
+    "google_spend", "google_spend_as_of",
     "ga4_sessions", "ga4_revenue", "ga4_active_users",
 ]
 
@@ -499,6 +507,54 @@ def fetch_ga4(day: date) -> dict[datetime, dict]:
 
 
 # ----------------------------------------------------------------------
+def fetch_google_spend(day: date) -> tuple[float | None, datetime | None]:
+    """The day's Google Ads spend, and when that figure was captured.
+
+    Google arrives as ONE NUMBER PER DAY from a BigQuery export that
+    refreshes each morning -- there is no hourly feed to be had, and
+    the Ads API would deliver the same daily grain. So the total is
+    read here and shared out by `distribute_daily` below.
+
+    Returns (None, None) when the day has no row at all, which is the
+    honest answer for a day the export has not reached yet. A zero
+    would read as "Google spent nothing", which is a different claim.
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT SUM(spend), MAX(fetched_at)
+            FROM public.google_ads_spend_daily
+            WHERE day = %s
+        """, (day,))
+        total, as_of = cur.fetchone()
+    return (float(total) if total is not None else None), as_of
+
+
+def distribute_daily(total: float, weights: dict[datetime, float]) -> dict[datetime, float]:
+    """Share one daily figure across hours, in proportion to `weights`.
+
+    The weight used for Google is that hour's GOOGLE-DRIVEN SESSIONS,
+    not an even 24th. Ad delivery follows demand, and the two curves
+    agree closely: on 29 Oct the Google session share and the Meta
+    spend share tracked each other within about a point and a half at
+    every hour, troughing together at 03:00 and peaking together in the
+    evening. An even split would put as much spend at 4am as at 8pm.
+
+    This is an ALLOCATION, not a measurement. The day's total is real;
+    its shape is inferred, and every caller labels it as such.
+
+    With no weights to go on -- a day with no Google sessions at all --
+    it falls back to an even split, which is a worse answer but is the
+    only one left and still sums to the right total.
+    """
+    hours = list(weights)
+    if not hours:
+        return {}
+    denom = sum(weights.values())
+    if denom <= 0:
+        return {h: total / len(hours) for h in hours}
+    return {h: total * (w / denom) for h, w in weights.items()}
+
+
 async def build_day(client, store, day: date) -> list[dict]:
     sessions, sales, orders, meta = await asyncio.gather(
         fetch_sessions(client, store, day),
@@ -507,8 +563,27 @@ async def build_day(client, store, day: date) -> list[dict]:
         fetch_meta(client, day),
     )
     ga4 = fetch_ga4(day)
+    google_total, google_as_of = fetch_google_spend(day)
 
     hours = sorted(set(sessions) | set(sales) | set(orders) | set(meta) | set(ga4))
+
+    # Spread over the hours that HAVE HAPPENED, not all 24. Giving a
+    # future hour its share would silently inflate the day's spend and
+    # make cost per session read high from the first hour onward.
+    #
+    # Only across the hours the capture COVERS. Today's total is read
+    # from an export that ran this morning, so it is the spend placed
+    # up to that moment -- spreading it over the evening too would move
+    # money into hours it demonstrably was not spent in. For a finished
+    # day the export ran after midnight and every hour qualifies, so
+    # this is a no-op there.
+    google_by_hour: dict[datetime, float] = {}
+    if google_total is not None:
+        covered = [h for h in hours if google_as_of is None or h < google_as_of]
+        google_by_hour = distribute_daily(
+            google_total,
+            {h: float(sessions.get(h, {}).get("sessions_google") or 0) for h in covered},
+        )
     rows = []
     for hour in hours:
         local = hour.astimezone(IST)
@@ -519,6 +594,10 @@ async def build_day(client, store, day: date) -> list[dict]:
             # make cost per session read high all day.
             "kwikchat_spend": round(KWIKCHAT_DAILY / 24.0, 4),
         }
+        if google_total is not None:
+            if hour in google_by_hour:
+                row["google_spend"] = round(google_by_hour[hour], 4)
+            row["google_spend_as_of"] = google_as_of
         for source in (sessions, sales, orders, meta, ga4):
             row.update(source.get(hour, {}))
         rows.append(row)

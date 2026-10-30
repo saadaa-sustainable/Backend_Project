@@ -129,8 +129,20 @@ ON CONFLICT (day, campaign_id) DO UPDATE SET
 -- success. Letting MapleMonk take an API row back once it is three
 -- days stale makes the API preferred rather than absolute, so a dead
 -- feed degrades to the slightly laggier source instead of to nothing.
+--
+-- The third clause is for PARTIAL captures. A row for day D written
+-- before D was over holds only the spend placed up to that moment, and
+-- the staleness clause alone does not rescue it: measured 2026-10-30,
+-- 27 Oct was still carrying Rs 13,733 captured at 11:50 IST that day,
+-- against ~Rs 40,000 on every neighbouring day. The API run refreshed
+-- it 2 days 23h 40m later -- twenty minutes inside the three-day bar --
+-- and it then froze for good, understating that day by two thirds.
+-- A same-day row is provisional by construction, so it is always
+-- replaceable regardless of which source wrote it.
 WHERE public.google_ads_spend_daily.source <> 'google_ads_api'
    OR public.google_ads_spend_daily.fetched_at < now() - interval '3 days'
+   OR public.google_ads_spend_daily.fetched_at
+        < ((public.google_ads_spend_daily.day + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
 """
 
 #: The DDL above is CREATE TABLE IF NOT EXISTS, so it will not add a
