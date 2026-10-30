@@ -8,6 +8,7 @@ customer" means acquired-in-the-window rather than active-in-it.
 """
 
 from datetime import date
+import json
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -27,11 +28,25 @@ def clear_cache():
 @pytest.fixture
 def session():
     db = sqlite3.connect(":memory:")
+    # jsonb_exists is Postgres-only; the Overview's return/cancel
+    # exclusion uses it, so the harness has to answer to it.
+    db.create_function("jsonb_exists", 2,
+                       lambda doc, key: 1 if key in json.loads(doc or "[]") else 0)
     db.executescript("""
         -- Blended spend sources. Acquisition MER does not read these,
         -- but the KPI endpoint it shares a response with does.
         CREATE TABLE google_ads_spend_daily(day TEXT, spend NUMERIC);
         CREATE TABLE kwikchat_spend_daily(day TEXT, spend NUMERIC, is_estimate INT);
+        -- The Overview drops returned and cancelled orders, which it
+        -- reads from here. 'keep' has neither mark; 'last' is tagged
+        -- Return AND Exchange, which is KEPT -- the value stayed.
+        CREATE TABLE shopify_orders(order_id TEXT PRIMARY KEY, tags TEXT, cancelled_at TEXT);
+        INSERT INTO shopify_orders VALUES
+            ('before', '[]', NULL),
+            ('first',  '[]', NULL),
+            ('middle', '[]', NULL),
+            ('last',   '["Return","Exchange"]', NULL),
+            ('after',  '[]', NULL);
         CREATE TABLE insights_daily_by_ad(ad_id TEXT, day TEXT, spend NUMERIC, impressions NUMERIC);
         INSERT INTO insights_daily_by_ad VALUES
             ('a','2026-10-01',1000,10000), ('a','2026-10-02',1000,10000),

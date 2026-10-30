@@ -8683,14 +8683,55 @@ async def _get_dashboard_order_groups(
         where = ("WHERE created_at >= CAST(:df AS date) "
                  "AND created_at < (CAST(:dt AS date) + 1) ")
         params = {"df": date_from, "dt": date_to}
+    # Returned and cancelled orders are dropped here, at the one scan
+    # both the KPI cards and the channel widget read, so every figure
+    # built on it is net rather than gross without either widget having
+    # to know. LEFT JOIN, not INNER: an attributed order with no row in
+    # shopify_orders yet must still count, and a NULL on the right side
+    # fails the exclusion test, which keeps it.
     result = await session.execute(text(
-        "SELECT utm_source, "
-        "       (lower(COALESCE(utm_content, '')) IN "
+        "SELECT a.utm_source, "
+        "       (lower(COALESCE(a.utm_content, '')) IN "
         "        ('link_in_bio','linkinbio','link-in-bio','linkin_bio')) AS organic_ig, "
-        "       SUM(total_price), COUNT(*) FROM shopify_order_attribution "
-        + where + "GROUP BY utm_source, 2"
+        "       SUM(a.total_price), COUNT(*) "
+        "  FROM shopify_order_attribution a "
+        "  LEFT JOIN shopify_orders o ON o.order_id = a.order_id "
+        + (where.replace("created_at", "a.created_at") if where else "WHERE ")
+        + ("AND " if where else "")
+        + f"NOT COALESCE({_EXCLUDED_ORDER_SQL}, FALSE) "
+        + "GROUP BY a.utm_source, 2"
     ), params)
     return [tuple(row) for row in result.all()]
+
+
+#: Orders whose revenue never really arrived, excluded from the
+#: Overview's revenue and conversion figures.
+#:
+#: CANCELLED: the order was called off, so no goods and no money.
+#:
+#: RETURNED, but only where the customer did NOT also take an exchange.
+#: An exchange here is swapped for an item of equivalent value, so the
+#: revenue stands and excluding it would understate the shop. 152 orders
+#: over 30 Sep - 30 Oct carry both tags and are KEPT for that reason:
+#: the return happened, but the value stayed.
+#:
+#: Return Prime is the source of truth, not Shopify's returnStatus.
+#: That field reads NO_RETURN on every one of these -- the partner does
+#: not use Shopify's native returns API, so Shopify never hears about a
+#: return it processed. See shopify_flatten's column comment.
+#:
+#: RTO is deliberately NOT here. A courier returning an undelivered
+#: parcel is a delivery failure, a different question from a customer
+#: sending goods back, and folding it in would take the exclusion from
+#: 14.8 per cent of revenue to over 19.
+#: jsonb_exists(), not the `?` operator. `?` is a parameter placeholder
+#: in several drivers -- sqlite, which these endpoints are tested
+#: against, fails to parse the statement at all -- and the function form
+#: means exactly the same thing to Postgres.
+_EXCLUDED_ORDER_SQL = """(
+    o.cancelled_at IS NOT NULL
+ OR (jsonb_exists(o.tags, 'Return') AND NOT jsonb_exists(o.tags, 'Exchange'))
+)"""
 
 
 async def _meta_sources(session: AsyncSession, sources: Iterable[Any]) -> set[str]:
