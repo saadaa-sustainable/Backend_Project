@@ -261,10 +261,19 @@ const METRICS = [
   ["sessions", "Sessions", num, "up"],
   ["pct_paid", "% paid", pc, "flat", true],
   ["pct_direct", "% direct", pc, "flat", true],
+  // Orders / sessions, split on the same denominators as the two
+  // shares above. A rising paid share that does not lift CR / paid is
+  // traffic bought at the wrong quality -- which is the whole reason
+  // to carry the split rather than one site-wide number.
+  ["conversion_rate", "CR", v => pc(v, 2), "up", true],
+  ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "up", true],
+  ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
   ["meta_impressions", "Impressions", num, "up"],
   ["spend", "Spend", v => inr(v, 0), "up"],
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["cost_per_paid_session", "Cost / paid sess", v => inr(v), "down"],
+  // The numerator of both CR and AOV, which had no column of its own.
+  ["orders", "Orders", num, "up"],
   ["revenue", "Revenue", v => inr(v, 0), "up"],
   // Basket size, not traffic quality: the one revenue column whose
   // denominator is ORDERS rather than sessions. An hour can lift
@@ -290,6 +299,9 @@ const HEROES = [
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["revenue_per_session", "Rev / session", v => inr(v), "up"],
   ["aov", "AOV", v => inr(v), "up"],
+  ["conversion_rate", "Conversion rate", v => pc(v, 2), "up", true],
+  ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "up", true],
+  ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
   ["amer", "AMER", xx, "up"],
   // The traffic mix, as first-class KPIs rather than a footnote: on a
   // campaign day the share you are buying is the lever, and a paid
@@ -385,7 +397,11 @@ function render(d, day) {
 
   $("footnote").textContent =
     "Same definitions as the Overview's session band, bucketed by hour. Revenue is the sum of " +
-    "order totals, which is why the per-channel columns add up to it. Spend is Meta plus Kwikchat: " +
+    "order totals, which is why the per-channel columns add up to it. Cancelled and returned " +
+    "orders are left out; EXCHANGES are counted, because the customer swapped for equal value " +
+    "and the money stayed — the Overview drops those too, so the two will not match. Most of " +
+    "today's returns are not tagged yet either: they arrive over the following days, so a past " +
+    "day here will drift down as they land. Spend is Meta plus Kwikchat: " +
     "Google Ads is excluded: it arrives in a BigQuery export that cannot run hourly, and " +
     "spreading a day over 24 hours would be an invention. That makes Cost / paid session a FLOOR " +
     "rather than the true figure — its denominator counts every paid session, Google's among " +

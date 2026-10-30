@@ -10,12 +10,14 @@ from datetime import date
 import pytest
 
 from app.api.routers.analytics import (
+    _EXCLUDED_ORDER_SQL,
     _TOP_SOURCES,
     HourlyRow,
     _derive_hourly,
     _rank_sources,
     _totals,
 )
+from scripts.fetch_hourly_tracker import is_excluded_order
 
 
 def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
@@ -42,6 +44,7 @@ def _blank() -> dict:
     derived = {"spend", "cost_per_session", "cost_per_paid_session", "pct_paid",
                "pct_direct", "revenue_per_session", "revenue_per_meta_session",
                "revenue_per_google_session", "revenue_per_paid_session", "aov",
+               "conversion_rate", "conversion_rate_paid", "conversion_rate_direct",
                "amer", "ga4_arpu"}
     m = {k: None for k in HourlyRow.model_fields if k not in derived}
     m.update(hour="2026-10-30T01:00:00+00:00", day_ist="2026-10-30", hour_of_day=1)
@@ -154,3 +157,84 @@ def test_day_with_orders_but_no_revenue_still_has_an_aov():
 def test_day_with_no_orders_has_no_aov():
     t = _totals(date(2026, 10, 30), [order_row(1, 500.0, 0)])
     assert t is not None and t.aov is None
+
+
+# --- what the tracker counts as revenue -------------------------------
+# Deliberately NOT the dashboard's rule. The tracker asks what a
+# campaign hour brought in, so an equal-value exchange still counts;
+# the dashboard asks what we ended up keeping, so it does not.
+
+@pytest.mark.parametrize("cancelled, tags, excluded, why", [
+    (None, [], False, "a plain order"),
+    ("2026-10-30T10:00:00Z", [], True, "cancelled"),
+    ("2026-10-30T10:00:00Z", ["Exchange"], True, "cancelled beats every tag"),
+    (None, ["Return"], True, "returned -- the money went back"),
+    (None, ["Exchange"], False, "swapped for equal value, money stayed"),
+    (None, ["Return", "Exchange"], False, "the exchange leg of a swap"),
+    (None, ["return"], True, "Shopify tags are not case-stable"),
+    (None, ["Prepaid", " RETURN "], True, "tag lists carry unrelated tags"),
+    (None, None, False, "an order with no tags at all"),
+])
+def test_tracker_exclusion_rule(cancelled, tags, excluded, why):
+    assert is_excluded_order(cancelled, tags) is excluded, why
+
+
+def test_tracker_and_dashboard_disagree_on_exchanges_on_purpose():
+    """A guard on the one case the two products answer differently.
+
+    If someone ever makes these agree, it should be a decision, not a
+    quiet edit -- so the divergence is asserted rather than assumed.
+    """
+    assert is_excluded_order(None, ["Exchange"]) is False
+    assert "jsonb_exists(o.tags, 'Exchange')" in _EXCLUDED_ORDER_SQL
+
+
+# --- conversion rate --------------------------------------------------
+
+def test_hourly_conversion_rates_use_matching_denominators():
+    r = _derive_hourly({**_blank(), "sessions": 1000, "sessions_paid": 800,
+                        "sessions_direct": 200, "orders": 20,
+                        "orders_paid": 12, "orders_direct": 8})
+    assert r.conversion_rate == pytest.approx(0.02)
+    assert r.conversion_rate_paid == pytest.approx(12 / 800)
+    assert r.conversion_rate_direct == pytest.approx(8 / 200)
+
+
+def test_an_hour_with_no_sessions_has_no_conversion_rate():
+    r = _derive_hourly({**_blank(), "sessions": 0, "orders": 0})
+    assert r.conversion_rate is None
+
+
+def test_day_conversion_rate_is_redivided():
+    rows = [_derive_hourly({**_blank(), "sessions": 100, "orders": 10}),
+            _derive_hourly({**_blank(), "sessions": 900, "orders": 9})]
+    t = _totals(date(2026, 10, 30), rows)
+    assert t is not None
+    assert t.conversion_rate == pytest.approx(19 / 1000)
+    # Averaging the two hourly rates would give 5.5%, nearly triple.
+    assert t.conversion_rate != pytest.approx(sum(r.conversion_rate for r in rows) / 2)
+
+
+def test_a_day_ingested_before_the_split_existed_reports_no_split_cr():
+    """Absent is not zero.
+
+    Hours written before orders_paid existed are NULL, and summing
+    NULLs gives 0 -- which would render as a confident "0.00%" and look
+    like a day that sold nothing to paid traffic.
+    """
+    rows = [_derive_hourly({**_blank(), "sessions": 1000, "sessions_paid": 800,
+                            "sessions_direct": 200, "orders": 20})]
+    t = _totals(date(2026, 10, 29), rows)
+    assert t is not None
+    assert t.conversion_rate == pytest.approx(0.02)
+    assert t.conversion_rate_paid is None
+    assert t.conversion_rate_direct is None
+
+
+def test_a_day_that_genuinely_sold_nothing_to_paid_reports_zero():
+    """The other side of it: a real 0 must survive."""
+    rows = [_derive_hourly({**_blank(), "sessions": 1000, "sessions_paid": 800,
+                            "sessions_direct": 200, "orders": 5,
+                            "orders_paid": 0, "orders_direct": 5})]
+    t = _totals(date(2026, 10, 30), rows)
+    assert t is not None and t.conversion_rate_paid == 0.0

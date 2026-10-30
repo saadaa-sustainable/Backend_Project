@@ -8761,9 +8761,20 @@ async def _get_dashboard_order_groups(
 #: in several drivers -- sqlite, which these endpoints are tested
 #: against, fails to parse the statement at all -- and the function form
 #: means exactly the same thing to Postgres.
+#: What the DASHBOARD does not count: cancelled, returned, or
+#: exchanged. The dashboard answers "what did we end up keeping", and
+#: an exchange means the original order's goods came back.
+#:
+#: The hourly tracker uses a deliberately different rule -- it keeps
+#: exchanges, because it is asking what a campaign hour brought in and
+#: an equal-value swap did not cost that hour anything. See
+#: `is_excluded_order` in scripts/fetch_hourly_tracker.py. The two are
+#: separate products and are allowed to disagree; what is not allowed
+#: is for either to be unclear about which rule it used.
 _EXCLUDED_ORDER_SQL = """(
     o.cancelled_at IS NOT NULL
- OR (jsonb_exists(o.tags, 'Return') AND NOT jsonb_exists(o.tags, 'Exchange'))
+ OR jsonb_exists(o.tags, 'Return')
+ OR jsonb_exists(o.tags, 'Exchange')
 )"""
 
 
@@ -13769,7 +13780,9 @@ _HOURLY_TRACKER_SQL = """
 SELECT hour, day_ist, hour_of_day,
        sessions, sessions_paid, sessions_direct, sessions_meta, sessions_google,
        sessions_by_source,
-       revenue, orders, revenue_shopifyql,
+       revenue, orders, orders_paid, orders_direct,
+       orders_excluded, revenue_excluded,
+       revenue_shopifyql,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
@@ -13796,6 +13809,14 @@ class HourlyRow(BaseModel):
     #: by, so the channel figures below reconcile to it exactly.
     revenue: float | None
     orders: int | None
+    #: Orders on the same denominators as the session buckets, so a
+    #: conversion rate can be taken per channel. These two sum to orders.
+    orders_paid: int | None = None
+    orders_direct: int | None = None
+    #: Cancelled or returned, and therefore NOT in revenue/orders above.
+    #: Surfaced so a gap against Shopify's own admin has an explanation.
+    orders_excluded: int | None = None
+    revenue_excluded: float | None = None
     #: ShopifyQL's own total for the hour, a deliberately different
     #: measure kept as a cross-check. Typically within half a per cent.
     revenue_shopifyql: float | None
@@ -13829,6 +13850,12 @@ class HourlyRow(BaseModel):
     #: quality. Same revenue basis as the rest of the row: order totals
     #: net of cancellations and Return-tagged orders.
     aov: float | None = None
+    #: Orders over sessions. The paid and direct variants use the
+    #: matching order count, never the whole-site one over a slice of
+    #: traffic -- that ratio is not a conversion rate of anything.
+    conversion_rate: float | None = None
+    conversion_rate_paid: float | None = None
+    conversion_rate_direct: float | None = None
     amer: float | None = None
     ga4_arpu: float | None = None
 
@@ -13854,6 +13881,9 @@ def _derive_hourly(m: dict) -> HourlyRow:
         revenue_per_google_session=over(m.get("revenue_google"), m.get("sessions_google")),
         revenue_per_paid_session=over(m.get("revenue_paid"), m.get("sessions_paid")),
         aov=over(m.get("revenue"), m.get("orders")),
+        conversion_rate=over(m.get("orders"), sessions),
+        conversion_rate_paid=over(m.get("orders_paid"), m.get("sessions_paid")),
+        conversion_rate_direct=over(m.get("orders_direct"), m.get("sessions_direct")),
         amer=over(m.get("new_customer_revenue"), spend),
         ga4_arpu=over(m.get("ga4_revenue"), m.get("ga4_active_users")),
     )
@@ -13872,6 +13902,10 @@ class HourlyTotals(BaseModel):
     sessions_google: int
     revenue: float
     orders: int
+    orders_paid: int
+    orders_direct: int
+    orders_excluded: int
+    revenue_excluded: float
     spend: float
     meta_impressions: int
     new_customers: int
@@ -13885,6 +13919,9 @@ class HourlyTotals(BaseModel):
     revenue_per_google_session: float | None
     revenue_per_paid_session: float | None
     aov: float | None
+    conversion_rate: float | None
+    conversion_rate_paid: float | None
+    conversion_rate_direct: float | None
     amer: float | None
     ga4_arpu: float | None
 
@@ -13920,6 +13957,17 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
     if not rows:
         return None
     s = lambda k: sum(getattr(r, k) or 0 for r in rows)  # noqa: E731
+
+    def have(k: str) -> bool:
+        """Did any hour actually report this column?
+
+        A column added after a day was ingested is NULL for every hour
+        of it, and summing those gives 0 -- which a ratio then renders
+        as a confident "0.00%". Absent and zero are different answers
+        and the page has to be able to tell them apart.
+        """
+        return any(getattr(r, k) is not None for r in rows)
+
     sessions, paid = s("sessions"), s("sessions_paid")
     spend, revenue, orders = s("spend"), s("revenue"), s("orders")
     ncr, users = s("new_customer_revenue"), s("ga4_active_users")
@@ -13928,6 +13976,8 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         sessions=sessions, sessions_paid=paid, sessions_direct=s("sessions_direct"),
         sessions_meta=s("sessions_meta"), sessions_google=s("sessions_google"),
         revenue=revenue, orders=orders,
+        orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
+        orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
         spend=spend, meta_impressions=s("meta_impressions"),
         new_customers=s("new_customers"), new_customer_revenue=ncr,
         cost_per_session=(spend / sessions) if sessions else None,
@@ -13944,6 +13994,11 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         # other ratio here. Averaging the hourly AOVs would weight an
         # hour with one order the same as an hour with four hundred.
         aov=(revenue / orders) if orders else None,
+        conversion_rate=(orders / sessions) if sessions else None,
+        conversion_rate_paid=(s("orders_paid") / paid)
+                             if (paid and have("orders_paid")) else None,
+        conversion_rate_direct=(s("orders_direct") / s("sessions_direct"))
+                               if (s("sessions_direct") and have("orders_direct")) else None,
         amer=(ncr / spend) if spend else None,
         ga4_arpu=(s("ga4_revenue") / users) if users else None,
     )

@@ -132,10 +132,18 @@ const METRICS: {
   { key: "sessions", label: "Sessions", fmt: compact, dir: "up", w: 90 },
   { key: "pct_paid", label: "% paid", fmt: (n) => pct(n), dir: "flat", w: 95, points: true },
   { key: "pct_direct", label: "% direct", fmt: (n) => pct(n), dir: "flat", w: 95, points: true },
+  // Orders ÷ sessions, split on the same denominators as the two
+  // shares above. A rising paid share that does not lift CR / paid is
+  // traffic bought at the wrong quality, and that is the whole reason
+  // to carry the split rather than one site-wide number.
+  { key: "conversion_rate", label: "CR", fmt: (n) => pct(n, 2), dir: "up", w: 90, points: true },
+  { key: "conversion_rate_paid", label: "CR / paid", fmt: (n) => pct(n, 2), dir: "up", w: 100, points: true },
+  { key: "conversion_rate_direct", label: "CR / direct", fmt: (n) => pct(n, 2), dir: "up", w: 105, points: true },
   { key: "meta_impressions", label: "Impressions", fmt: compact, dir: "up", w: 110 },
   { key: "spend", label: "Spend", fmt: (n) => money(n, 0), dir: "up", w: 105 },
   { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
   { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
+  { key: "orders", label: "Orders", fmt: compact, dir: "up", w: 85 },
   { key: "revenue", label: "Revenue", fmt: (n) => money(n, 0), dir: "up", w: 115 },
   // Basket size, not traffic quality: the one revenue column here whose
   // denominator is orders rather than sessions. An hour can lift
@@ -266,6 +274,15 @@ export function HourlyTracker() {
                       was={money(c.revenue_per_session)} />
                 <Hero label="AOV" value={money(t.aov)} was={money(c.aov)}
                       hint="Revenue ÷ orders, re-divided from the day's totals — not the average of the hourly AOVs." />
+                <Hero label="Conversion rate" value={pct(t.conversion_rate, 2)}
+                      was={pct(c.conversion_rate, 2)}
+                      hint="Orders ÷ sessions. Cancelled and returned orders are not counted; exchanges are." />
+                <Hero label="CR / paid" value={pct(t.conversion_rate_paid, 2)}
+                      was={pct(c.conversion_rate_paid, 2)}
+                      hint="Orders from a utm_source that is not direct, over paid sessions." />
+                <Hero label="CR / direct" value={pct(t.conversion_rate_direct, 2)}
+                      was={pct(c.conversion_rate_direct, 2)}
+                      hint="Orders with no utm_source, over direct sessions." />
                 <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
                       hint="New-customer revenue ÷ spend." />
                 <Hero label="% paid sessions" value={pct(t.pct_paid)} was={pct(c.pct_paid)}
@@ -280,6 +297,7 @@ export function HourlyTracker() {
                 <span>Cost / session <Delta now={t.cost_per_session} was={c.cost_per_session} dir="down" /></span>
                 <span>Rev / session <Delta now={t.revenue_per_session} was={c.revenue_per_session} /></span>
                 <span>AOV <Delta now={t.aov} was={c.aov} /></span>
+                <span>CR <Delta now={t.conversion_rate} was={c.conversion_rate} points /></span>
                 <span>AMER <Delta now={t.amer} was={c.amer} /></span>
                 <span>% paid <Delta now={t.pct_paid} was={c.pct_paid} dir="flat" points /></span>
                 <span>% direct <Delta now={t.pct_direct} was={c.pct_direct} dir="flat" points /></span>
@@ -302,6 +320,10 @@ export function HourlyTracker() {
                 </span>
                 <span className="text-[11.5px] text-text-tertiary">
                   Spend is Meta + Kwikchat · Google Ads has no hourly feed
+                </span>
+                <span className="text-[11.5px] text-text-tertiary">
+                  Cancelled and returned orders excluded · exchanges counted, unlike the
+                  Overview · today&rsquo;s returns are mostly not tagged yet, so past days drift down
                 </span>
               </>
             }

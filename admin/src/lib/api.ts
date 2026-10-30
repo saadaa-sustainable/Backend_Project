@@ -3616,6 +3616,12 @@ export interface HourlyRow {
   /** Summed from order totals — the same basis the Overview uses. */
   revenue: number | null;
   orders: number | null;
+  /** Orders on the same denominators as the session buckets. Sum to orders. */
+  orders_paid: number | null;
+  orders_direct: number | null;
+  /** Cancelled or returned, and therefore NOT in revenue/orders above. */
+  orders_excluded: number | null;
+  revenue_excluded: number | null;
   /** ShopifyQL's own total, a different measure kept as a cross-check. */
   revenue_shopifyql: number | null;
   revenue_meta: number | null;
@@ -3643,6 +3649,12 @@ export interface HourlyRow {
   revenue_per_paid_session: number | null;
   /** Revenue ÷ orders — basket size, not traffic quality. */
   aov: number | null;
+  /** Orders ÷ sessions. The paid and direct variants divide the matching
+   *  order count by the matching session count, never the whole-site
+   *  numerator over a slice of traffic. */
+  conversion_rate: number | null;
+  conversion_rate_paid: number | null;
+  conversion_rate_direct: number | null;
   amer: number | null;
   ga4_arpu: number | null;
 }
@@ -3657,6 +3669,10 @@ export interface HourlyTotals {
   sessions_google: number;
   revenue: number;
   orders: number;
+  orders_paid: number;
+  orders_direct: number;
+  orders_excluded: number;
+  revenue_excluded: number;
   spend: number;
   meta_impressions: number;
   new_customers: number;
@@ -3671,6 +3687,9 @@ export interface HourlyTotals {
   revenue_per_paid_session: number | null;
   /** Re-divided from the day's summed revenue and orders. */
   aov: number | null;
+  conversion_rate: number | null;
+  conversion_rate_paid: number | null;
+  conversion_rate_direct: number | null;
   amer: number | null;
   ga4_arpu: number | null;
 }

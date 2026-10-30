@@ -80,16 +80,21 @@ def session():
             ('before','2026-09-01 23:59:59',9999,'meta','1'),
             ('first','2026-09-02 00:00:00',100,'meta','1'),
             ('middle','2026-09-02 12:00:00',NULL,NULL,NULL),
-            ('last','2026-09-03 23:59:59.999999',200,'instagram','link_in_bio'),
+            ('swap','2026-09-03 10:00:00',200,'instagram','link_in_bio'),
+            ('last','2026-09-03 23:59:59.999999',500,'instagram','link_in_bio'),
             ('after','2026-09-04 00:00:00',9999,'meta','2');
-        -- The Overview drops returned and cancelled orders, which it
-        -- reads from here. 'keep' has neither mark; 'last' is tagged
-        -- Return AND Exchange, which is KEPT -- the value stayed.
+        -- The Overview drops cancelled, returned AND exchanged orders:
+        -- it reports what we ended up keeping, and an exchange sent the
+        -- original goods back. 'swap' is the clean instagram order that
+        -- keeps the channel split exercised; 'last' carries Return AND
+        -- Exchange and is dropped, which is what holds the totals below
+        -- at 300 rather than 800.
         CREATE TABLE shopify_orders(order_id TEXT PRIMARY KEY, tags TEXT, cancelled_at TEXT);
         INSERT INTO shopify_orders VALUES
             ('before', '[]', NULL),
             ('first',  '[]', NULL),
             ('middle', '[]', NULL),
+            ('swap',   '[]', NULL),
             ('last',   '["Return","Exchange"]', NULL),
             ('after',  '[]', NULL);
         CREATE TABLE insights_daily_by_ad(day TEXT, spend NUMERIC, impressions INTEGER);
@@ -136,9 +141,10 @@ async def test_dashboard_widgets_share_one_scan_and_include_end_day(session):
     assert (kpis.total_spend, kpis.total_impressions) == (30, 300)
     assert (kpis.total_shopify_revenue, kpis.total_shopify_orders) == (300, 3)
     # The Meta slice the session band divides by Meta sessions. 'first'
-    # (meta, 100) and 'last' (instagram, 200) qualify; 'middle' carries
+    # (meta, 100) and 'swap' (instagram, 200) qualify; 'middle' carries
     # a null utm_source and so is in the all-traffic total but not this
-    # one -- which is the whole point of keeping the two apart.
+    # one -- which is the whole point of keeping the two apart. 'last'
+    # is instagram too but is excluded, so it is in neither.
     assert (kpis.meta_shopify_revenue, kpis.meta_shopify_orders) == (300, 2)
     assert sum(row.value for row in channels) == 300
     assert any(row.label == analytics._classify_channel("instagram", "link_in_bio")
@@ -288,32 +294,40 @@ def test_creative_order_metrics_do_not_multiply_for_repeated_scope_ids():
         db.close()
 
 
-async def test_overview_excludes_returned_and_cancelled_but_keeps_exchanges(session):
-    """The Overview reports NET revenue, and the rule is not symmetric.
+async def test_overview_excludes_cancelled_returned_and_exchanged(session):
+    """The Overview reports what we ended up KEEPING.
 
-    A cancelled order never happened and a returned one came back, so
-    neither is revenue. An EXCHANGE is swapped for an item of equivalent
-    value, so the money stayed and the order counts -- including when it
-    carries both marks, which is a return that was settled with a swap
-    rather than a refund. Measured over 30 Sep - 30 Oct 2026, treating
-    exchanges as returns would have excluded 24.7 per cent of revenue
-    where the true figure is 14.8.
+    A cancelled order never happened, a returned one came back, and an
+    exchanged one had its goods come back too even though a replacement
+    went out. None of the three is revenue the Overview will claim.
+
+    The hourly tracker deliberately answers a different question --
+    what a campaign hour brought in -- and keeps exchanges, because an
+    equal-value swap cost that hour nothing. See `is_excluded_order` in
+    scripts/fetch_hourly_tracker.py and the guard in
+    tests/test_hourly_tracker_rollups.py. The two products are allowed
+    to disagree; neither is allowed to be vague about which rule it
+    used. Measured over 30 Sep - 30 Oct 2026 this rule excludes 24.7
+    per cent of revenue where keeping exchanges excluded 14.8.
     """
     kpis = await analytics.get_dashboard_kpis(
         session, date_from="2026-09-02", date_to="2026-09-03")
-    # The fixture's in-window orders are 'first' (100, no marks),
-    # 'middle' (null price, no marks) and 'last' (200, Return AND
-    # Exchange). All three are kept, so the totals are unchanged.
+    # In-window: 'first' (100), 'middle' (null price), 'swap' (200)
+    # and 'last' (500, Return AND Exchange). Only 'last' is dropped --
+    # 800 would mean the predicate stopped firing.
     assert (kpis.total_shopify_revenue, kpis.total_shopify_orders) == (300, 3)
 
 
 def test_the_exclusion_predicate_says_what_it_should():
     """The rule itself, pinned. It is a business decision, not an
-    implementation detail, and the asymmetry is the whole point: a
-    return WITH an exchange keeps its revenue."""
+    implementation detail, so a change to it should fail here and be
+    made deliberately rather than slip through."""
     assert "cancelled_at IS NOT NULL" in analytics._EXCLUDED_ORDER_SQL
     assert "jsonb_exists(o.tags, 'Return')" in analytics._EXCLUDED_ORDER_SQL
-    assert "NOT jsonb_exists(o.tags, 'Exchange')" in analytics._EXCLUDED_ORDER_SQL
+    assert "jsonb_exists(o.tags, 'Exchange')" in analytics._EXCLUDED_ORDER_SQL
+    # No longer asymmetric: the Overview drops exchanges as well. The
+    # tracker keeps them, and that divergence is asserted on its side.
+    assert "NOT jsonb_exists" not in analytics._EXCLUDED_ORDER_SQL
     # RTO must never appear: a courier returning an undelivered parcel
     # is a delivery failure, not a customer return.
     assert "RTO" not in analytics._EXCLUDED_ORDER_SQL

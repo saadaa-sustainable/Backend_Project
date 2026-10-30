@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     revenue_google          numeric,
     revenue_paid            numeric,
     orders_meta             integer,
+    -- Order counts on the same denominators as the session buckets, so
+    -- a conversion rate can be taken per channel. orders_paid is every
+    -- order carrying a utm_source that is not direct/none; the two sum
+    -- to `orders`.
+    orders_paid             integer,
+    orders_direct           integer,
+    -- Orders the hour produced that this tracker does NOT count:
+    -- cancelled, or returned without an exchange. Stored rather than
+    -- silently dropped, because "where did the gap come from" is the
+    -- first question when this row stops matching Shopify's own admin.
+    orders_excluded         integer,
+    revenue_excluded        numeric,
     new_customers           integer,
     new_customer_revenue    numeric,
 
@@ -154,6 +166,10 @@ CREATE INDEX IF NOT EXISTS ix_hourly_tracker_day ON {TABLE} (day_ist);
 #: column needs an ALTER or the next write dies on an undefined column.
 MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS sessions_by_source jsonb",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS orders_paid integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS orders_direct integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS orders_excluded integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS revenue_excluded numeric",
 ]
 
 COLUMNS = [
@@ -161,7 +177,9 @@ COLUMNS = [
     "sessions", "sessions_paid", "sessions_direct", "sessions_meta", "sessions_google",
     "sessions_by_source",
     "revenue", "orders", "revenue_shopifyql", "revenue_meta", "revenue_google",
-    "revenue_paid", "orders_meta", "new_customers", "new_customer_revenue",
+    "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
+    "orders_excluded", "revenue_excluded",
+    "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
     "ga4_sessions", "ga4_revenue", "ga4_active_users",
 ]
@@ -217,6 +235,28 @@ def is_direct(src: str | None) -> bool:
 def source_label(src: str) -> str:
     """The key a utm_source is counted under in sessions_by_source."""
     return src.strip().lower()
+
+
+def is_excluded_order(cancelled_at: str | None, tags: list[str] | None) -> bool:
+    """Orders this tracker does not count as revenue.
+
+    Cancelled, or returned. An EXCHANGE is kept: the customer swapped
+    for something of equal value, so the money stayed. An order tagged
+    both Return and Exchange is the exchange leg of a swap, not a
+    refund, and is kept for the same reason.
+
+    This deliberately differs from the daily dashboard, which drops
+    exchanges too. The tracker answers "what did this campaign hour
+    bring in"; the dashboard answers "what did we end up keeping".
+
+    Return Prime processes returns OUTSIDE Shopify's native returns
+    API, so `returnStatus` stays NO_RETURN on genuinely returned
+    orders. The tags are the only signal there is.
+    """
+    if cancelled_at:
+        return True
+    t = {str(x).strip().lower() for x in (tags or [])}
+    return "return" in t and "exchange" not in t
 
 
 def ist_hour(instant: datetime) -> datetime:
@@ -296,6 +336,8 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         id
         createdAt
         totalPriceSet { shopMoney { amount } }
+        cancelledAt
+        tags
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -340,8 +382,17 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
             first_order = str(cust.get("numberOfOrders") or "") == "1"
             b = out.setdefault(hour, dict(revenue=0.0, orders=0, revenue_meta=0.0,
                                           revenue_google=0.0, revenue_paid=0.0,
-                                          orders_meta=0, new_customers=0,
-                                          new_customer_revenue=0.0))
+                                          orders_meta=0, orders_paid=0, orders_direct=0,
+                                          orders_excluded=0, revenue_excluded=0.0,
+                                          new_customers=0, new_customer_revenue=0.0))
+
+            # Counted and set aside, not skipped silently: an hour whose
+            # orders do not match Shopify's admin should say why.
+            if is_excluded_order(n.get("cancelledAt"), n.get("tags")):
+                b["orders_excluded"] += 1
+                b["revenue_excluded"] += price
+                continue
+
             b["revenue"] += price
             b["orders"] += 1
             if is_meta(src):
@@ -349,8 +400,11 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                 b["orders_meta"] += 1
             if is_google(src):
                 b["revenue_google"] += price
-            if not is_direct(src):
+            if is_direct(src):
+                b["orders_direct"] += 1
+            else:
                 b["revenue_paid"] += price
+                b["orders_paid"] += 1
             if first_order:
                 b["new_customers"] += 1
                 b["new_customer_revenue"] += price
