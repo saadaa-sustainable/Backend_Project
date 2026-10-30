@@ -1,13 +1,21 @@
-"""Rank the day's utm_sources for the donut.
+"""The hourly tracker's day-level rollups: source ranking and AOV.
 
-The per-hour sessions_by_source maps are the only place the raw tags
-survive -- every other session column in the tracker is a bucket a
-classifier produced from them. Getting this wrong would not raise; it
-would quietly draw a ring that does not add up to the day.
+Both share one trap. A figure summed over a day is not the average of
+the hourly figures, and neither would raise if it were -- the page
+would just quietly show a number nobody could reconcile against the
+table under it.
 """
+from datetime import date
+
 import pytest
 
-from app.api.routers.analytics import _TOP_SOURCES, HourlyRow, _rank_sources
+from app.api.routers.analytics import (
+    _TOP_SOURCES,
+    HourlyRow,
+    _derive_hourly,
+    _rank_sources,
+    _totals,
+)
 
 
 def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
@@ -26,6 +34,18 @@ def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
         "sessions": sum((by_source or {}).values()) or None,
         "sessions_by_source": by_source,
     })
+
+
+def _blank() -> dict:
+    """The raw mapping _derive_hourly expects: every stored column, none
+    of the derived ones (it fills those itself)."""
+    derived = {"spend", "cost_per_session", "cost_per_paid_session", "pct_paid",
+               "pct_direct", "revenue_per_session", "revenue_per_meta_session",
+               "revenue_per_google_session", "revenue_per_paid_session", "aov",
+               "amer", "ga4_arpu"}
+    m = {k: None for k in HourlyRow.model_fields if k not in derived}
+    m.update(hour="2026-10-30T01:00:00+00:00", day_ist="2026-10-30", hour_of_day=1)
+    return m
 
 
 def test_sums_across_hours():
@@ -87,3 +107,50 @@ def test_hours_without_a_source_map_are_skipped():
 def test_a_day_with_no_sessions_yields_no_slices():
     assert _rank_sources([]) == []
     assert _rank_sources([row(1, {"meta": 0})]) == []
+
+
+# --- AOV --------------------------------------------------------------
+# Revenue over ORDERS. Kept in this file because it shares the fixture,
+# and because it is the same trap the rollup has: a ratio summed from
+# counts is not the average of the hourly ratios.
+
+def order_row(hour: int, revenue: float | None, orders: int | None) -> HourlyRow:
+    r = row(hour, None)
+    return r.model_copy(update={
+        "revenue": revenue, "orders": orders,
+        "aov": (revenue / orders) if (revenue is not None and orders) else None,
+    })
+
+
+def test_hourly_aov_is_revenue_over_orders():
+    assert _derive_hourly({**_blank(), "revenue": 5000.0, "orders": 4}).aov == 1250.0
+
+
+def test_an_hour_with_no_orders_has_no_aov():
+    """NULL, not zero: no orders is not a basket worth ₹0."""
+    assert _derive_hourly({**_blank(), "revenue": 0.0, "orders": 0}).aov is None
+
+
+def test_day_aov_is_redivided_not_averaged():
+    """The whole point of deriving totals from the summed counts.
+
+    One big-basket hour with a single order must not weigh the same as
+    a busy hour with many. Averaging these two gives 1,100; the honest
+    figure is 505.
+    """
+    rows = [order_row(1, 2000.0, 1), order_row(2, 8100.0, 40)]
+    t = _totals(date(2026, 10, 30), rows)
+    assert t is not None
+    assert t.aov == pytest.approx(10100 / 41)
+    hourly_mean = sum(r.aov for r in rows) / len(rows)
+    assert t.aov != pytest.approx(hourly_mean)
+
+
+def test_day_with_orders_but_no_revenue_still_has_an_aov():
+    t = _totals(date(2026, 10, 30), [order_row(1, 0.0, 3)])
+    assert t is not None and t.aov == 0.0
+
+
+def test_day_with_no_orders_has_no_aov():
+    t = _totals(date(2026, 10, 30), [order_row(1, 500.0, 0)])
+    assert t is not None and t.aov is None

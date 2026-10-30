@@ -137,6 +137,11 @@ const METRICS: {
   { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
   { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
   { key: "revenue", label: "Revenue", fmt: (n) => money(n, 0), dir: "up", w: 115 },
+  // Basket size, not traffic quality: the one revenue column here whose
+  // denominator is orders rather than sessions. An hour can lift
+  // Rev / session by converting more of the same traffic while AOV sits
+  // still, and the two moving apart is the useful signal.
+  { key: "aov", label: "AOV", fmt: (n) => money(n), dir: "up", w: 100 },
   { key: "revenue_per_session", label: "Rev / session", fmt: (n) => money(n), dir: "up", w: 115 },
   // Per-channel revenue columns are deliberately absent. Google Ads
   // spend comes from a BigQuery export that cannot run hourly, so a
@@ -250,7 +255,7 @@ export function HourlyTracker() {
                   against the same {c.hours} hours of {c.day}
                 </span>
               </div>
-              <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-4">
+              <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-3">
                 <Hero label="Sessions" value={compact(t.sessions)} was={compact(c.sessions)} />
                 <Hero label="Spend" value={money(t.spend, 0)} was={money(c.spend, 0)}
                       hint="Meta + Kwikchat. Google Ads has no hourly feed." />
@@ -259,6 +264,8 @@ export function HourlyTracker() {
                       was={money(c.cost_per_session)} />
                 <Hero label="Rev / session" value={money(t.revenue_per_session)}
                       was={money(c.revenue_per_session)} />
+                <Hero label="AOV" value={money(t.aov)} was={money(c.aov)}
+                      hint="Revenue ÷ orders, re-divided from the day's totals — not the average of the hourly AOVs." />
                 <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
                       hint="New-customer revenue ÷ spend." />
                 <Hero label="% paid sessions" value={pct(t.pct_paid)} was={pct(c.pct_paid)}
@@ -272,6 +279,7 @@ export function HourlyTracker() {
                 <span>Revenue <Delta now={t.revenue} was={c.revenue} /></span>
                 <span>Cost / session <Delta now={t.cost_per_session} was={c.cost_per_session} dir="down" /></span>
                 <span>Rev / session <Delta now={t.revenue_per_session} was={c.revenue_per_session} /></span>
+                <span>AOV <Delta now={t.aov} was={c.aov} /></span>
                 <span>AMER <Delta now={t.amer} was={c.amer} /></span>
                 <span>% paid <Delta now={t.pct_paid} was={c.pct_paid} dir="flat" points /></span>
                 <span>% direct <Delta now={t.pct_direct} was={c.pct_direct} dir="flat" points /></span>

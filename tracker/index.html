@@ -71,7 +71,7 @@
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
   .heroes { display: grid; gap: 18px 14px; grid-template-columns: repeat(2, minmax(0,1fr)); margin-top: 12px; }
   @media (min-width: 720px) { .heroes { grid-template-columns: repeat(3, minmax(0,1fr)); } }
-  @media (min-width: 1100px) { .heroes { grid-template-columns: repeat(4, minmax(0,1fr)); } }
+  @media (min-width: 1100px) { .heroes { grid-template-columns: repeat(3, minmax(0,1fr)); } }
   .h-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
   .h-value { font-size: 25px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums;
              letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -266,6 +266,11 @@ const METRICS = [
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["cost_per_paid_session", "Cost / paid sess", v => inr(v), "down"],
   ["revenue", "Revenue", v => inr(v, 0), "up"],
+  // Basket size, not traffic quality: the one revenue column whose
+  // denominator is ORDERS rather than sessions. An hour can lift
+  // Rev / session by converting more of the same traffic while AOV
+  // sits still -- the two moving apart is the useful signal.
+  ["aov", "AOV", v => inr(v), "up"],
   ["revenue_per_session", "Rev / session", v => inr(v), "up"],
   // Per-channel revenue columns are deliberately NOT here. Google Ads
   // spend comes from a BigQuery export that cannot run hourly, so a
@@ -284,6 +289,7 @@ const HEROES = [
   ["revenue", "Revenue", v => inr(v, 0), "up"],
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["revenue_per_session", "Rev / session", v => inr(v), "up"],
+  ["aov", "AOV", v => inr(v), "up"],
   ["amer", "AMER", xx, "up"],
   // The traffic mix, as first-class KPIs rather than a footnote: on a
   // campaign day the share you are buying is the lever, and a paid

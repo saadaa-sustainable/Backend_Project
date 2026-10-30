@@ -13825,6 +13825,10 @@ class HourlyRow(BaseModel):
     revenue_per_meta_session: float | None = None
     revenue_per_google_session: float | None = None
     revenue_per_paid_session: float | None = None
+    #: Revenue over ORDERS, not sessions -- basket size, not traffic
+    #: quality. Same revenue basis as the rest of the row: order totals
+    #: net of cancellations and Return-tagged orders.
+    aov: float | None = None
     amer: float | None = None
     ga4_arpu: float | None = None
 
@@ -13849,6 +13853,7 @@ def _derive_hourly(m: dict) -> HourlyRow:
         revenue_per_meta_session=over(m.get("revenue_meta"), m.get("sessions_meta")),
         revenue_per_google_session=over(m.get("revenue_google"), m.get("sessions_google")),
         revenue_per_paid_session=over(m.get("revenue_paid"), m.get("sessions_paid")),
+        aov=over(m.get("revenue"), m.get("orders")),
         amer=over(m.get("new_customer_revenue"), spend),
         ga4_arpu=over(m.get("ga4_revenue"), m.get("ga4_active_users")),
     )
@@ -13879,6 +13884,7 @@ class HourlyTotals(BaseModel):
     revenue_per_meta_session: float | None
     revenue_per_google_session: float | None
     revenue_per_paid_session: float | None
+    aov: float | None
     amer: float | None
     ga4_arpu: float | None
 
@@ -13915,13 +13921,13 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         return None
     s = lambda k: sum(getattr(r, k) or 0 for r in rows)  # noqa: E731
     sessions, paid = s("sessions"), s("sessions_paid")
-    spend, revenue = s("spend"), s("revenue")
+    spend, revenue, orders = s("spend"), s("revenue"), s("orders")
     ncr, users = s("new_customer_revenue"), s("ga4_active_users")
     return HourlyTotals(
         day=day, hours=len(rows),
         sessions=sessions, sessions_paid=paid, sessions_direct=s("sessions_direct"),
         sessions_meta=s("sessions_meta"), sessions_google=s("sessions_google"),
-        revenue=revenue, orders=s("orders"),
+        revenue=revenue, orders=orders,
         spend=spend, meta_impressions=s("meta_impressions"),
         new_customers=s("new_customers"), new_customer_revenue=ncr,
         cost_per_session=(spend / sessions) if sessions else None,
@@ -13934,6 +13940,10 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         revenue_per_google_session=(s("revenue_google") / s("sessions_google"))
                                    if s("sessions_google") else None,
         revenue_per_paid_session=(s("revenue_paid") / paid) if paid else None,
+        # Re-divided from the summed revenue and orders, like every
+        # other ratio here. Averaging the hourly AOVs would weight an
+        # hour with one order the same as an hour with four hundred.
+        aov=(revenue / orders) if orders else None,
         amer=(ncr / spend) if spend else None,
         ga4_arpu=(s("ga4_revenue") / users) if users else None,
     )

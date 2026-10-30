@@ -3641,6 +3641,8 @@ export interface HourlyRow {
   revenue_per_meta_session: number | null;
   revenue_per_google_session: number | null;
   revenue_per_paid_session: number | null;
+  /** Revenue ÷ orders — basket size, not traffic quality. */
+  aov: number | null;
   amer: number | null;
   ga4_arpu: number | null;
 }
@@ -3667,6 +3669,8 @@ export interface HourlyTotals {
   revenue_per_meta_session: number | null;
   revenue_per_google_session: number | null;
   revenue_per_paid_session: number | null;
+  /** Re-divided from the day's summed revenue and orders. */
+  aov: number | null;
   amer: number | null;
   ga4_arpu: number | null;
 }
