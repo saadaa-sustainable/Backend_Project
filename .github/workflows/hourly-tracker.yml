@@ -1,0 +1,164 @@
+# The Hourly Tracker's ingest.
+#
+# Writes one row per IST hour into public.hourly_campaign_tracker, which
+# is what GET /admin/analytics/hourly-tracker reads and what both
+# dashboards draw -- the admin section at #hourly-tracker and the
+# standalone deploy in Live_Tracker_Dashboard.
+#
+# This lives here rather than in the dashboard's own repo for two
+# reasons: this repo is public, so Actions minutes are free, and every
+# secret the job needs is already set here for the daily refresh.
+#
+# WHY NOT A RENDER CRON. render.yaml defines one (`hourly-tracker-fetch`,
+# `5 * * * *`) and it is the better home for this -- Render's scheduler
+# actually fires on time. Measured 2026-10-07..09, GitHub delayed this
+# repo's scheduled runs by SIX to SEVEN hours, which for a daily job is
+# survivable and for an hourly one is not: a tracker six hours behind is
+# not a tracker. Keep this as the fallback, and if the Render cron is
+# running, DISABLE the schedule below rather than letting both write.
+# They do not corrupt each other -- the upsert is idempotent -- but two
+# schedules hiding each other's failures is how a dead cron goes unnoticed.
+#
+# Re-running a day is safe and is how a past day picks up returns tagged
+# since: ON CONFLICT (hour) DO UPDATE replaces the row.
+name: Hourly Tracker ingest
+
+on:
+  schedule:
+    # Minute 5 of every hour, UTC -- the same offset the Render cron
+    # uses. The hour it writes is the hour in progress and therefore
+    # partial by construction; the dashboards label it `live` and
+    # withhold its comparison for exactly that reason.
+    - cron: "5 * * * *"
+
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "IST day to fetch (YYYY-MM-DD). Blank = today."
+        required: false
+        default: ""
+      days:
+        description: "Trailing days ending at `date`. Use >1 to backfill."
+        required: false
+        default: "1"
+
+concurrency:
+  # One writer at a time. A backfill dispatched by hand can run for
+  # minutes and would otherwise overlap the next scheduled tick.
+  #
+  # cancel-in-progress is false on purpose: killing a half-written
+  # backfill leaves a gap that nothing will notice, and the next run
+  # would not know to go back for it.
+  group: hourly-tracker-ingest
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    # A single hour takes well under a minute. The ceiling is for a
+    # hand-dispatched backfill of several weeks, which walks every order
+    # of every day through the Shopify API.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore Google service account
+        # GA4 only, and GA4 is best effort here -- it lags, and an hour
+        # without it still has sessions, spend and revenue, which is
+        # most of the dashboard. So this must not fail the job.
+        #
+        # The secret holds the RAW key file, stored with a redirect so
+        # nothing re-escapes it:  gh secret set GOOGLE_CREDS_JSON < key.json
+        # printf, not echo: a service-account key's private_key field is
+        # one long string of \n separators and echo eats them in some
+        # shells.
+        continue-on-error: true
+        env:
+          GOOGLE_CREDS_JSON: ${{ secrets.GOOGLE_CREDS_JSON }}
+        run: |
+          if [ -z "$GOOGLE_CREDS_JSON" ]; then
+            echo "::warning::GOOGLE_CREDS_JSON not set -- GA4 columns will be null."
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_CREDS_JSON" > "$RUNNER_TEMP/gcp.json"
+          python -c "import json,os,sys; json.load(open(os.environ['RUNNER_TEMP']+'/gcp.json'))" \
+            || { echo "::warning::GOOGLE_CREDS_JSON is not valid JSON -- GA4 columns will be null."; exit 0; }
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
+
+      - name: Fetch
+        env:
+          # --- database -------------------------------------------------
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          # --- Shopify: sessions, orders, the ShopifyQL cross-check ----
+          SHOP_NAME: ${{ secrets.SHOP_NAME }}
+          SHOP_DOMAIN: ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN: ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_API_VERSION: ${{ secrets.SHOPIFY_API_VERSION }}
+          # --- Meta: the only spend measured hourly --------------------
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_API_VERSION: ${{ secrets.META_API_VERSION }}
+          META_ACCOUNT_1_ID: ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME: ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID: ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME: ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID: ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME: ${{ secrets.META_ACCOUNT_3_NAME }}
+          # Google spend is NOT fetched here. It is a daily BigQuery
+          # export read out of google_ads_spend_daily, which the daily
+          # refresh fills; this job only shares that day's total across
+          # the hours.
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.date }}" ]; then ARGS="--date ${{ inputs.date }}"; fi
+          if [ -n "${{ inputs.days }}" ]; then ARGS="$ARGS --days ${{ inputs.days }}"; fi
+          echo "Running: scripts/fetch_hourly_tracker.py $ARGS"
+          python scripts/fetch_hourly_tracker.py $ARGS
+
+      - name: How far behind is it now?
+        # The ingest exiting 0 does not prove the row landed, and a
+        # tracker that silently stops is indistinguishable from a quiet
+        # night. This reads the table back.
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+        run: |
+          python - <<'PY'
+          import datetime, sys
+          from scripts.dbq import connect
+
+          ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+          now = datetime.datetime.now(ist)
+
+          with connect() as conn, conn.cursor() as cur:
+              cur.execute(
+                  "SELECT MAX(hour_of_day) FROM public.hourly_campaign_tracker "
+                  "WHERE day_ist = %s", (now.date(),))
+              latest = cur.fetchone()[0]
+
+          if latest is None:
+              sys.exit(f"::error::No rows at all for {now:%Y-%m-%d} IST.")
+
+          behind = now.hour - latest
+          print(f"IST now {now:%Y-%m-%d %H:%M} | latest hour {latest:02d}:00 | {behind}h behind")
+
+          # One hour behind is the resting state: the hour being written
+          # is itself partial. Two is a late run. Three means something
+          # has been failing quietly for a while.
+          if behind > 2:
+              sys.exit(f"::error::Tracker is {behind}h behind.")
+          PY
