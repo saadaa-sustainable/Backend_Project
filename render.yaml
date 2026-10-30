@@ -140,6 +140,40 @@ services:
   #   3. Copy the FastAPI service's URL into
   #      NEXT_PUBLIC_API_BASE_URL below (or set it in the dashboard)
   # ------------------------------------------------------------------
+  # ------------------------------------------------------------------
+  # Hourly Tracker -- its own static site, on purpose.
+  #
+  # It ships during a live campaign, when the admin app's build can be
+  # red for reasons that have nothing to do with it. One HTML file, no
+  # build step, no node_modules: there is almost nothing here that can
+  # fail to deploy.
+  #
+  # It reads the SAME /admin/analytics/hourly-tracker endpoint the admin
+  # app does, so the two cannot disagree about a number.
+  #
+  # The API base is not baked in -- a static site has no server to
+  # inject one. It comes from ?api=https://... on first load and is
+  # remembered, which also lets the same file run against localhost.
+  #
+  # Add this site's origin to EXTRA_APP_ORIGINS on backend-project or
+  # every request it makes is refused by CORS -- and a refused request
+  # renders as an empty page rather than an error.
+  # ------------------------------------------------------------------
+  - type: web
+    name: hourly-tracker
+    runtime: static
+    plan: free
+    branch: master
+    autoDeploy: true
+    staticPublishPath: ./tracker
+    headers:
+      - path: /*
+        name: Cache-Control
+        # The page is a shell; its data is fetched live. Caching the
+        # shell for an hour would hand someone a stale build during the
+        # one day it matters.
+        value: no-cache
+
   - type: web
     name: backend-project-admin
     runtime: node

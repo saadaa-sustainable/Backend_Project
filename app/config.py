@@ -262,6 +262,17 @@ class Settings(BaseSettings):
     #: than the default `next dev` port.
     admin_app_origin: str = Field(default="http://localhost:3000", alias="ADMIN_APP_ORIGIN")
 
+    #: Further origins allowed to call the API, comma separated.
+    #:
+    #: The Hourly Tracker is deployed as its own static site, on its own
+    #: origin, so without this every one of its requests is refused by
+    #: CORS -- and a refused request renders as an empty section rather
+    #: than an error, which is the hardest kind of failure to diagnose.
+    #:
+    #: Still an explicit list, never a wildcard: /admin/* can trigger
+    #: ingestion, so an origin has to be named to be trusted.
+    extra_app_origins: str = Field(default="", alias="EXTRA_APP_ORIGINS")
+
     @property
     def admin_app_origins(self) -> list[str]:
         """Every origin the admin app may be browsed on, for CORS.
@@ -284,6 +295,10 @@ class Settings(BaseSettings):
             swapped = self.admin_app_origin.replace(a, b)
             if swapped != self.admin_app_origin and swapped not in origins:
                 origins.append(swapped)
+        for extra in self.extra_app_origins.split(","):
+            extra = extra.strip().rstrip("/")
+            if extra and extra not in origins:
+                origins.append(extra)
         return origins
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
