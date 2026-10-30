@@ -16,6 +16,7 @@ import {
   filterControlClass,
 } from "./SectionChrome";
 import { HourlyTrendChart } from "./charts/HourlyTrendChart";
+import { SessionSourceDonut } from "./charts/SessionSourceDonut";
 
 /**
  * The campaign tracker, hour by hour, for a day you are still inside.
@@ -137,8 +138,12 @@ const METRICS: {
   { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
   { key: "revenue", label: "Revenue", fmt: (n) => money(n, 0), dir: "up", w: 115 },
   { key: "revenue_per_session", label: "Rev / session", fmt: (n) => money(n), dir: "up", w: 115 },
-  { key: "revenue_per_meta_session", label: "Rev / Meta sess", fmt: (n) => money(n), dir: "up", w: 125 },
-  { key: "revenue_per_google_session", label: "Rev / Google sess", fmt: (n) => money(n), dir: "up", w: 135 },
+  // Per-channel revenue columns are deliberately absent. Google Ads
+  // spend comes from a BigQuery export that cannot run hourly, so a
+  // revenue-per-Google-session next to a spend figure that excludes
+  // Google invites exactly the comparison it cannot support. Rev / paid
+  // session stays: it is revenue over the traffic we bought, on the
+  // same denominator as Cost / paid session beside it.
   { key: "revenue_per_paid_session", label: "Rev / paid sess", fmt: (n) => money(n), dir: "up", w: 125 },
   { key: "amer", label: "AMER", fmt: ratio, dir: "up", w: 85 },
   { key: "ga4_arpu", label: "ARPU (GA4)", fmt: (n) => money(n), dir: "up", w: 110 },
@@ -274,8 +279,11 @@ export function HourlyTracker() {
             </div>
           )}
 
-          <HourlyTrendChart rows={rows} baseline={data?.compare_rows ?? []}
-                            baselineDay={c?.day ?? ""} />
+          <div className="grid gap-4 lg:grid-cols-[1fr_minmax(320px,0.52fr)]">
+            <HourlyTrendChart rows={rows} baseline={data?.compare_rows ?? []}
+                              baselineDay={c?.day ?? ""} />
+            <SessionSourceDonut sources={data?.sources ?? []} />
+          </div>
 
           <TableFrame
             footer={
@@ -377,9 +385,12 @@ export function HourlyTracker() {
         weight a dead 04:00 the same as a 21:00 peak.
         Same definitions as the Overview&rsquo;s session band, bucketed by hour, so a day
         summed here agrees with the daily figures. Revenue is the sum of order totals, which
-        is what makes the per-channel columns add up to it. Spend is Meta plus Kwikchat:
-        Google Ads arrives in a daily export, and spreading a day across 24 hours would be an
-        invention rather than a measurement. Kwikchat is its flat placeholder over 24.
+        is what makes the paid column add up against it. Spend is Meta plus Kwikchat at its flat
+        &#8377;30,000 a day, over 24. Google Ads is excluded: it arrives in a BigQuery export that
+        cannot run hourly, and spreading a day across 24 hours would be an invention rather than a
+        measurement. That makes Cost / paid session a <strong>floor</strong> rather than the true
+        figure &mdash; its denominator counts every paid session, Google&rsquo;s among them, while
+        its numerator counts only what Meta and Kwikchat cost.
       </p>
     </div>
   );

@@ -3610,6 +3610,9 @@ export interface HourlyRow {
   sessions_direct: number | null;
   sessions_meta: number | null;
   sessions_google: number | null;
+  /** utm_source -> sessions. The buckets above are lossy; this is what
+   *  they were bucketed from. */
+  sessions_by_source: Record<string, number> | null;
   /** Summed from order totals — the same basis the Overview uses. */
   revenue: number | null;
   orders: number | null;
@@ -3668,8 +3671,19 @@ export interface HourlyTotals {
   ga4_arpu: number | null;
 }
 
+export interface SourceSlice {
+  source: string;
+  sessions: number;
+  /** Fraction of the day's sessions, 0..1. Summed server-side so the
+   *  admin page and the standalone tracker cannot disagree. */
+  share: number;
+}
+
 export interface HourlyTrackerResponse {
   rows: HourlyRow[];
+  /** The day's sessions by utm_source, biggest first, tail folded into
+   *  a single "other" entry. */
+  sources: SourceSlice[];
   compare_rows: HourlyRow[];
   today: HourlyTotals | null;
   /** The baseline clamped to the hours today has reached — the only

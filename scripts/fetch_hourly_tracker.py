@@ -110,6 +110,11 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     sessions_direct         integer,
     sessions_meta           integer,
     sessions_google         integer,
+    -- The raw per-source split, kept rather than thrown away after
+    -- bucketing. ShopifyQL already returns it, the buckets above are
+    -- lossy, and "which source" is the first question anyone asks when
+    -- a bucket moves. ~20-40 keys an hour.
+    sessions_by_source      jsonb,
 
     -- Revenue. `revenue` is ShopifyQL's hour total and is the
     -- authoritative one; the per-channel figures come from the orders
@@ -144,9 +149,17 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 CREATE INDEX IF NOT EXISTS ix_hourly_tracker_day ON {TABLE} (day_ist);
 """
 
+#: The table ships before every column it will ever have, and
+#: CREATE TABLE IF NOT EXISTS is a no-op once it exists -- so a new
+#: column needs an ALTER or the next write dies on an undefined column.
+MIGRATIONS = [
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS sessions_by_source jsonb",
+]
+
 COLUMNS = [
     "hour", "day_ist", "hour_of_day",
     "sessions", "sessions_paid", "sessions_direct", "sessions_meta", "sessions_google",
+    "sessions_by_source",
     "revenue", "orders", "revenue_shopifyql", "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
@@ -201,6 +214,11 @@ def is_direct(src: str | None) -> bool:
     return src.strip().lower() in {"direct", "none", "(direct)", "(none)", ""}
 
 
+def source_label(src: str) -> str:
+    """The key a utm_source is counted under in sessions_by_source."""
+    return src.strip().lower()
+
+
 def ist_hour(instant: datetime) -> datetime:
     """Normalise any aware datetime to the UTC instant starting its IST hour."""
     local = instant.astimezone(IST)
@@ -226,7 +244,15 @@ async def fetch_sessions(client, store, day: date) -> dict[datetime, dict]:
         hour = ist_hour(datetime.fromisoformat(row["hour"].replace("Z", "+00:00")))
         src, n = row.get("utm_source"), int(float(row.get("sessions") or 0))
         b = out.setdefault(hour, dict(sessions=0, sessions_paid=0, sessions_direct=0,
-                                      sessions_meta=0, sessions_google=0))
+                                      sessions_meta=0, sessions_google=0,
+                                      sessions_by_source={}))
+        # Null and the literal strings Shopify uses for "no source" all
+        # mean the same thing to a reader, so they collapse to one key
+        # rather than appearing as four near-identical slices. Case is
+        # folded for the same reason: the campaigns are tagged by hand
+        # and META/Meta/meta are one source, not three.
+        label = "(direct)" if is_direct(src) else source_label(src)
+        b["sessions_by_source"][label] = b["sessions_by_source"].get(label, 0) + n
         b["sessions"] += n
         if is_direct(src):
             b["sessions_direct"] += n
@@ -448,9 +474,15 @@ async def build_day(client, store, day: date) -> list[dict]:
 def write(rows: list[dict]) -> int:
     import psycopg2.extras  # noqa: PLC0415
 
-    tuples = [tuple(r.get(c) for c in COLUMNS) for r in rows]
+    tuples = [
+        tuple(json.dumps(r.get(c)) if c == "sessions_by_source" and r.get(c) is not None
+              else r.get(c) for c in COLUMNS)
+        for r in rows
+    ]
     with connect() as conn, conn.cursor() as cur:
         cur.execute(DDL)
+        for statement in MIGRATIONS:
+            cur.execute(statement)
         psycopg2.extras.execute_values(cur, UPSERT, tuples, page_size=200)
         conn.commit()
     return len(tuples)

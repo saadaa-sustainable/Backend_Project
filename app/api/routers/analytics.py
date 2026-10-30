@@ -13768,6 +13768,7 @@ async def create_meta_hypothesis(
 _HOURLY_TRACKER_SQL = """
 SELECT hour, day_ist, hour_of_day,
        sessions, sessions_paid, sessions_direct, sessions_meta, sessions_google,
+       sessions_by_source,
        revenue, orders, revenue_shopifyql,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
@@ -13788,6 +13789,9 @@ class HourlyRow(BaseModel):
     sessions_direct: int | None
     sessions_meta: int | None
     sessions_google: int | None
+    #: utm_source -> sessions for the hour. The buckets above are lossy;
+    #: this is what they were bucketed FROM.
+    sessions_by_source: dict[str, int] | None = None
     #: Summed from order totals -- the same basis the Overview divides
     #: by, so the channel figures below reconcile to it exactly.
     revenue: float | None
@@ -13879,8 +13883,19 @@ class HourlyTotals(BaseModel):
     ga4_arpu: float | None
 
 
+class SourceSlice(BaseModel):
+    source: str
+    sessions: int
+    share: float
+
+
 class HourlyTrackerResponse(BaseModel):
     rows: list[HourlyRow]
+    #: The day's sessions by utm_source, biggest first, for the donut.
+    #: Everything past the top slices is folded into one "other" entry:
+    #: a ring of forty labels is a decoration, not a chart, and the tail
+    #: here is dozens of sources with a handful of sessions each.
+    sources: list[SourceSlice] = []
     #: Yesterday's same hours, for the comparison lines.
     compare_rows: list[HourlyRow]
     today: HourlyTotals | None
@@ -13924,6 +13939,44 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
     )
 
 
+# Five named slices plus "other" fills the six-colour categorical
+# palette exactly, which is the house rule: a seventh series folds into
+# "other" rather than inventing a hue. The tail is dozens of sources
+# under 1% each, so nothing legible is lost.
+_TOP_SOURCES = 5
+
+
+def _rank_sources(rows: list[HourlyRow]) -> list[SourceSlice]:
+    """The day's sessions by utm_source, biggest first, tail folded.
+
+    Summed here rather than in the page so the admin section and the
+    standalone tracker cannot slice the same day two different ways.
+
+    Case is folded again even though the ingest now folds it, because
+    hours written before it did are still in the table and would
+    otherwise show up as a second slice of the same source.
+    """
+    totals: dict[str, int] = {}
+    for r in rows:
+        for src, n in (r.sessions_by_source or {}).items():
+            key = (src or "").strip().lower() or "(direct)"
+            totals[key] = totals.get(key, 0) + int(n or 0)
+
+    # Ties broken by name so the slice order -- and therefore the colour
+    # each source gets -- does not shuffle between two equal sources.
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    grand = sum(n for _, n in ranked)
+    if not grand:
+        return []
+
+    out = [SourceSlice(source=k, sessions=n, share=n / grand)
+           for k, n in ranked[:_TOP_SOURCES] if n]
+    tail = sum(n for _, n in ranked[_TOP_SOURCES:])
+    if tail:
+        out.append(SourceSlice(source="other", sessions=tail, share=tail / grand))
+    return out
+
+
 @router.get("/hourly-tracker", response_model=HourlyTrackerResponse)
 @cached_analytics(ttl=120.0)
 async def get_hourly_tracker(
@@ -13948,8 +14001,11 @@ async def get_hourly_tracker(
     clamped = ([r for r in base_rows if r.hour_of_day <= latest]
                if latest is not None else base_rows)
 
+    sources = _rank_sources(today_rows)
+
     return HourlyTrackerResponse(
         rows=today_rows,
+        sources=sources,
         compare_rows=base_rows,
         today=_totals(target, today_rows),
         compare=_totals(baseline, clamped),
