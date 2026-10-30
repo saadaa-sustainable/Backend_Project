@@ -30,6 +30,7 @@ const BlendedMerSection = dynamic(
 const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), { loading: TabLoading });
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
 const CampaignTracker = dynamic(() => import("./CampaignTracker").then((m) => m.CampaignTracker), { loading: TabLoading });
+const HourlyTracker = dynamic(() => import("./HourlyTracker").then((m) => m.HourlyTracker), { loading: TabLoading });
 const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
 const Help = dynamic(() => import("./Help").then((m) => m.Help), { loading: TabLoading });
 const AssetAnalysis = dynamic(() => import("./AssetAnalysis").then((m) => m.AssetAnalysis), { loading: TabLoading });
@@ -61,6 +62,7 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "meta-hypothesis": { label: "Meta Hypothesis", render: () => <MetaHypothesis /> },
   "untested-assets": { label: "Untested Assets", render: () => <UntestedAssets /> },
   "campaign-tracker": { label: "Campaign Tracker", render: () => <CampaignTracker /> },
+  "hourly-tracker": { label: "Hourly Tracker", render: () => <HourlyTracker /> },
   instagram: { label: "Instagram", render: () => <Instagram /> },
   "shopify-analytics": { label: "Shopify Analytics", render: () => <ShopifyAnalytics /> },
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },

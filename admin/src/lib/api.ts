@@ -1193,6 +1193,11 @@ export interface FirstClickRow {
   /** What to show: the source name, or the ad/ad set name where the id
    *  resolves, falling back to the raw id where it does not. */
   label: string;
+  /** Meta's own ad id, at ad grain, where the entity is an id Meta has told
+   *  us about. Null at source and ad set grain, and null for the kwikengage,
+   *  sagepilot-ai, affiliate and google tokens that share utm_content with
+   *  real ad ids — a dash there, never a token dressed up as an ad id. */
+  ad_id: string | null;
   /** The channel the entity belongs to — what explains an unresolved id. */
   channel: string;
   /** Meta spend for this entity over the selected window. Null at source
@@ -3590,4 +3595,96 @@ export function createMetaHypothesis(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/* ---------------------------------------------------------------- *
+ * Hourly campaign tracker                                           *
+ * ---------------------------------------------------------------- */
+
+export interface HourlyRow {
+  hour: string;
+  day_ist: string;
+  hour_of_day: number;
+  sessions: number | null;
+  sessions_paid: number | null;
+  sessions_direct: number | null;
+  sessions_meta: number | null;
+  sessions_google: number | null;
+  /** Summed from order totals — the same basis the Overview uses. */
+  revenue: number | null;
+  orders: number | null;
+  /** ShopifyQL's own total, a different measure kept as a cross-check. */
+  revenue_shopifyql: number | null;
+  revenue_meta: number | null;
+  revenue_google: number | null;
+  revenue_paid: number | null;
+  orders_meta: number | null;
+  new_customers: number | null;
+  new_customer_revenue: number | null;
+  /** Meta only. Google Ads has no hourly feed. */
+  meta_spend: number | null;
+  meta_impressions: number | null;
+  kwikchat_spend: number | null;
+  ga4_sessions: number | null;
+  ga4_revenue: number | null;
+  ga4_active_users: number | null;
+  /** Derived server-side, never stored: a stored ratio cannot be re-summed. */
+  spend: number | null;
+  cost_per_session: number | null;
+  cost_per_paid_session: number | null;
+  pct_paid: number | null;
+  pct_direct: number | null;
+  revenue_per_session: number | null;
+  revenue_per_meta_session: number | null;
+  revenue_per_google_session: number | null;
+  revenue_per_paid_session: number | null;
+  amer: number | null;
+  ga4_arpu: number | null;
+}
+
+export interface HourlyTotals {
+  day: string;
+  hours: number;
+  sessions: number;
+  sessions_paid: number;
+  sessions_direct: number;
+  sessions_meta: number;
+  revenue: number;
+  orders: number;
+  spend: number;
+  meta_impressions: number;
+  new_customers: number;
+  new_customer_revenue: number;
+  cost_per_session: number | null;
+  cost_per_paid_session: number | null;
+  pct_paid: number | null;
+  pct_direct: number | null;
+  revenue_per_session: number | null;
+  revenue_per_meta_session: number | null;
+  amer: number | null;
+  ga4_arpu: number | null;
+}
+
+export interface HourlyTrackerResponse {
+  rows: HourlyRow[];
+  compare_rows: HourlyRow[];
+  today: HourlyTotals | null;
+  /** The baseline clamped to the hours today has reached — the only
+   *  honest mid-day comparison. */
+  compare: HourlyTotals | null;
+  compare_full: HourlyTotals | null;
+  latest_hour: number | null;
+  fetched_at: string | null;
+}
+
+export function fetchHourlyTracker(
+  params: { day?: string; compare_to?: string } = {},
+): Promise<HourlyTrackerResponse> {
+  const qs = new URLSearchParams();
+  if (params.day) qs.set("day", params.day);
+  if (params.compare_to) qs.set("compare_to", params.compare_to);
+  const q = qs.toString();
+  return request<HourlyTrackerResponse>(
+    `/admin/analytics/hourly-tracker${q ? `?${q}` : ""}`,
+  );
 }

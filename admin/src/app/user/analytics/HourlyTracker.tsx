@@ -1,0 +1,339 @@
+"use client";
+
+import { Fragment, useEffect, useMemo, useState } from "react";
+
+import {
+  ApiError,
+  HourlyRow,
+  HourlyTotals,
+  HourlyTrackerResponse,
+  fetchHourlyTracker,
+} from "@/lib/api";
+import {
+  FilterCell,
+  SectionHeader,
+  TableFrame,
+  filterControlClass,
+} from "./SectionChrome";
+import { HourlyTrendChart } from "./charts/HourlyTrendChart";
+
+/**
+ * The campaign tracker, hour by hour, for a day you are still inside.
+ *
+ * Everything here answers one question: is this hour better or worse
+ * than the same hour yesterday. That is why nothing is shown without a
+ * comparison beside it -- a cost per session of Rs 6.14 means nothing
+ * alone, and means a great deal against Rs 6.72 at the same hour
+ * yesterday.
+ *
+ * The baseline is CLAMPED to the hours today has reached. Comparing a
+ * part-finished day against a full one flatters the full one every
+ * time, and at 10am it would say the day is going catastrophically.
+ */
+
+const IST_OFFSET_MIN = 330;
+
+/** Today in Asia/Kolkata, whatever the viewer's own clock says. The
+ *  store reports in IST, so the dashboard has to think in IST. */
+function istToday(): string {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (IST_OFFSET_MIN + now.getTimezoneOffset()) * 60000);
+  return ist.toISOString().slice(0, 10);
+}
+
+const money = (n: number | null | undefined, dp = 2) =>
+  n === null || n === undefined
+    ? "—"
+    : n.toLocaleString("en-IN", { style: "currency", currency: "INR",
+        minimumFractionDigits: dp, maximumFractionDigits: dp });
+const compact = (n: number | null | undefined) =>
+  n === null || n === undefined ? "—" : n.toLocaleString("en-IN");
+const pct = (n: number | null | undefined, dp = 1) =>
+  n === null || n === undefined ? "—" : `${(n * 100).toFixed(dp)}%`;
+const ratio = (n: number | null | undefined) =>
+  n === null || n === undefined ? "—" : `${n.toFixed(2)}x`;
+
+/** Where a bigger number is the GOOD outcome. Cost per session is the
+ *  obvious exception, and getting it backwards would colour a saving
+ *  red. */
+type Dir = "up" | "down";
+
+function Delta({ now, was, dir = "up", suffix = "" }:
+  { now: number | null; was: number | null; dir?: Dir; suffix?: string }) {
+  if (now === null || was === null || !was) {
+    return <span className="text-text-tertiary">—</span>;
+  }
+  const change = (now - was) / Math.abs(was);
+  // Within half a per cent is noise at hour grain, not a move.
+  const flat = Math.abs(change) < 0.005;
+  const good = dir === "up" ? change > 0 : change < 0;
+  const tone = flat ? "text-text-tertiary"
+    : good ? "text-success-text" : "text-warning-text";
+  return (
+    <span className={`tabular-nums ${tone}`}>
+      {change > 0 ? "+" : ""}{(change * 100).toFixed(1)}%{suffix}
+    </span>
+  );
+}
+
+/** One headline figure with yesterday beneath it.
+ *
+ *  Deliberately takes no direction: the hero shows the two numbers and
+ *  lets the reader compare them. The coloured judgement lives in the
+ *  Delta row below, in one place, where the up-is-good rule is applied
+ *  per metric and cost per session is the exception. */
+function Hero({ label, value, was, hint }: {
+  label: string; value: string; was: string; hint?: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[11px] uppercase tracking-wide text-text-tertiary" title={hint}>
+        {label}
+      </dt>
+      <dd className="mt-1 truncate tabular-nums text-2xl font-semibold text-text-primary">
+        {value}
+      </dd>
+      <dd className="mt-0.5 text-[11.5px] text-text-secondary">
+        <span className="tabular-nums">{was}</span> same time yesterday
+      </dd>
+    </div>
+  );
+}
+
+const METRICS: {
+  key: keyof HourlyRow;
+  label: string;
+  fmt: (n: number | null) => string;
+  dir: Dir;
+  w: number;
+}[] = [
+  { key: "sessions", label: "Sessions", fmt: compact, dir: "up", w: 90 },
+  { key: "pct_paid", label: "% paid", fmt: (n) => pct(n), dir: "up", w: 80 },
+  { key: "pct_direct", label: "% direct", fmt: (n) => pct(n), dir: "down", w: 85 },
+  { key: "meta_impressions", label: "Impressions", fmt: compact, dir: "up", w: 110 },
+  { key: "spend", label: "Spend", fmt: (n) => money(n, 0), dir: "up", w: 105 },
+  { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
+  { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
+  { key: "revenue", label: "Revenue", fmt: (n) => money(n, 0), dir: "up", w: 115 },
+  { key: "revenue_per_session", label: "Rev / session", fmt: (n) => money(n), dir: "up", w: 115 },
+  { key: "revenue_per_meta_session", label: "Rev / Meta sess", fmt: (n) => money(n), dir: "up", w: 125 },
+  { key: "revenue_per_google_session", label: "Rev / Google sess", fmt: (n) => money(n), dir: "up", w: 135 },
+  { key: "revenue_per_paid_session", label: "Rev / paid sess", fmt: (n) => money(n), dir: "up", w: 125 },
+  { key: "amer", label: "AMER", fmt: ratio, dir: "up", w: 85 },
+  { key: "ga4_arpu", label: "ARPU (GA4)", fmt: (n) => money(n), dir: "up", w: 110 },
+];
+
+export function HourlyTracker() {
+  const [day, setDay] = useState(istToday);
+  const [compareTo, setCompareTo] = useState("");
+  const [showDeltas, setShowDeltas] = useState(true);
+  const [data, setData] = useState<HourlyTrackerResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+
+  const params = useMemo(
+    () => ({ day, compare_to: compareTo || undefined }), [day, compareTo]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // No setState in the effect body: every state change happens in a
+    // callback. That satisfies the cascading-render rule, and on a view
+    // that refetches itself every five minutes it is also the better
+    // behaviour -- the table keeps showing the last good figures
+    // instead of blanking to a spinner on every tick.
+    fetchHourlyTracker(params)
+      .then((r) => { if (!cancelled) { setData(r); setError(null); } })
+      .catch((e) => { if (!cancelled) setError(e instanceof ApiError ? e.message : String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [params, tick]);
+
+  // The point of an hourly tracker is that it does not need reloading.
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 5 * 60000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const rows = data?.rows ?? [];
+  const baseline = useMemo(() => {
+    const m = new Map<number, HourlyRow>();
+    for (const r of data?.compare_rows ?? []) m.set(r.hour_of_day, r);
+    return m;
+  }, [data?.compare_rows]);
+
+  const t: HourlyTotals | null = data?.today ?? null;
+  const c: HourlyTotals | null = data?.compare ?? null;
+  const isToday = day === istToday();
+
+  return (
+    <div className="flex flex-col gap-5">
+      <SectionHeader title="Hourly Tracker">
+        <span className="text-[11.5px] text-text-tertiary">
+          {data?.latest_hour !== null && data?.latest_hour !== undefined
+            ? `${String(data.latest_hour).padStart(2, "0")}:00 IST · ${rows.length} hours`
+            : "no data for this day"}
+          {isToday ? " · refreshes every 5 min" : ""}
+        </span>
+      </SectionHeader>
+
+      <div className="flex flex-wrap items-end gap-3">
+        <FilterCell label="Day" className="w-44" htmlFor="ht-day">
+          <input id="ht-day" type="date" value={day} max={istToday()}
+                 onChange={(e) => setDay(e.target.value)} className={filterControlClass} />
+        </FilterCell>
+        <FilterCell label="Compare to" className="w-48" htmlFor="ht-cmp">
+          <input id="ht-cmp" type="date" value={compareTo} max={istToday()}
+                 placeholder="previous day"
+                 onChange={(e) => setCompareTo(e.target.value)} className={filterControlClass} />
+        </FilterCell>
+        <label className="flex items-center gap-2 pb-1.5 text-[13px] text-text-secondary">
+          <input type="checkbox" checked={showDeltas}
+                 onChange={(e) => setShowDeltas(e.target.checked)} />
+          Show hour-on-hour change
+        </label>
+        <button type="button" onClick={() => setTick((n) => n + 1)}
+                className="ml-auto rounded-md border border-border-primary bg-bg-white px-3 py-1.5 text-[13px] text-text-primary hover:bg-bg-muted/60">
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <p role="alert" className="rounded-md border border-warning-border bg-warning-bg px-4 py-3 text-sm text-warning-text">
+          {error}
+        </p>
+      )}
+
+      {loading && !rows.length ? (
+        <p className="py-8 text-sm text-text-secondary">Loading the hour&rsquo;s figures…</p>
+      ) : !rows.length ? (
+        <p className="py-8 text-sm text-text-secondary">
+          Nothing recorded for {day}. Run{" "}
+          <code className="text-[12px]">scripts/fetch_hourly_tracker.py --date {day}</code>.
+        </p>
+      ) : (
+        <>
+          {/* Day to date, each against the SAME hours yesterday. */}
+          {t && c && (
+            <div className="rounded-md border border-border-primary bg-bg-white p-4">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-[13px] font-medium text-text-primary">
+                  Day to date · {t.hours} hours
+                </h3>
+                <span className="text-[11.5px] text-text-tertiary">
+                  against the same {c.hours} hours of {c.day}
+                </span>
+              </div>
+              <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-6">
+                <Hero label="Sessions" value={compact(t.sessions)} was={compact(c.sessions)} />
+                <Hero label="Spend" value={money(t.spend, 0)} was={money(c.spend, 0)}
+                      hint="Meta + Kwikchat. Google Ads has no hourly feed." />
+                <Hero label="Revenue" value={money(t.revenue, 0)} was={money(c.revenue, 0)} />
+                <Hero label="Cost / session" value={money(t.cost_per_session)}
+                      was={money(c.cost_per_session)} />
+                <Hero label="Rev / session" value={money(t.revenue_per_session)}
+                      was={money(c.revenue_per_session)} />
+                <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
+                      hint="New-customer revenue ÷ spend." />
+              </dl>
+              <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-border-soft pt-3 text-[12px] text-text-secondary">
+                <span>Sessions <Delta now={t.sessions} was={c.sessions} /></span>
+                <span>Spend <Delta now={t.spend} was={c.spend} /></span>
+                <span>Revenue <Delta now={t.revenue} was={c.revenue} /></span>
+                <span>Cost / session <Delta now={t.cost_per_session} was={c.cost_per_session} dir="down" /></span>
+                <span>Rev / session <Delta now={t.revenue_per_session} was={c.revenue_per_session} /></span>
+                <span>AMER <Delta now={t.amer} was={c.amer} /></span>
+                <span className="text-text-tertiary">
+                  {pct(t.pct_paid)} paid · {pct(t.pct_direct)} direct
+                </span>
+              </div>
+            </div>
+          )}
+
+          <HourlyTrendChart rows={rows} baseline={data?.compare_rows ?? []}
+                            baselineDay={c?.day ?? ""} />
+
+          <TableFrame
+            footer={
+              <>
+                <span className="text-[11.5px] text-text-tertiary">
+                  Every hour against the same hour of {c?.day ?? "the previous day"}
+                  {isToday ? " · the live hour shows no change, it is still filling" : ""}
+                </span>
+                <span className="text-[11.5px] text-text-tertiary">
+                  Spend is Meta + Kwikchat · Google Ads has no hourly feed
+                </span>
+              </>
+            }
+          >
+            <div className="overflow-x-auto border border-border-primary bg-bg-white">
+              <table className="border-collapse bg-bg-white text-[12.5px]">
+                <thead>
+                  <tr className="bg-bg-white text-left text-[11px] uppercase tracking-wide text-text-tertiary">
+                    <th className="sticky left-0 z-10 border-b border-r border-border-soft bg-bg-white px-3 py-2 font-medium">
+                      Hour
+                    </th>
+                    {METRICS.map((m) => (
+                      <th key={m.key} style={{ minWidth: m.w }}
+                          className="whitespace-normal border-b border-r border-border-soft px-3 py-2 text-right align-bottom font-medium last:border-r-0">
+                        {m.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...rows].reverse().map((r) => {
+                    const prev = baseline.get(r.hour_of_day);
+                    // The newest hour of TODAY is still filling. Showing
+                    // its change against a complete hour yesterday reads
+                    // as a collapse -- at 18:10 it said sessions -59.9%
+                    // and spend -79.8% when nothing had gone wrong at
+                    // all. The figures stay, the comparison does not.
+                    const partial = isToday && r.hour_of_day === data?.latest_hour;
+                    return (
+                      <tr key={r.hour}
+                          className={`align-top hover:bg-bg-muted/40 ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
+                        <td className={`sticky left-0 z-10 border-b border-r border-border-soft px-3 py-1.5 font-mono text-[11.5px] text-text-primary ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
+                          {String(r.hour_of_day).padStart(2, "0")}:00
+                          {partial && (
+                            <span className="ml-1.5 font-sans text-[9.5px] uppercase tracking-wide text-text-tertiary"
+                                  title="This hour is still filling. Comparing it with a complete hour yesterday would read as a fall that has not happened.">
+                              live
+                            </span>
+                          )}
+                        </td>
+                        {METRICS.map((m) => {
+                          const v = r[m.key] as number | null;
+                          const was = (prev?.[m.key] ?? null) as number | null;
+                          return (
+                            <td key={m.key} style={{ minWidth: m.w }}
+                                className="border-b border-r border-border-soft px-3 py-1.5 text-right tabular-nums text-text-primary last:border-r-0">
+                              {m.fmt(v)}
+                              {showDeltas && !partial && (
+                                <span className="ml-2 text-[10.5px]">
+                                  <Delta now={v} was={was} dir={m.dir} />
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </TableFrame>
+        </>
+      )}
+
+      <p className="text-[11.5px] text-text-tertiary">
+        Same definitions as the Overview&rsquo;s session band, bucketed by hour, so a day
+        summed here agrees with the daily figures. Revenue is the sum of order totals, which
+        is what makes the per-channel columns add up to it. Spend is Meta plus Kwikchat:
+        Google Ads arrives in a daily export, and spreading a day across 24 hours would be an
+        invention rather than a measurement. Kwikchat is its flat placeholder over 24.
+      </p>
+    </div>
+  );
+}

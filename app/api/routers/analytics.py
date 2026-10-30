@@ -2466,6 +2466,12 @@ class SourceBreakdown(BaseModel):
 #: carrying an ad at both ends). Most hand-offs happen inside one
 #: channel, between its own creatives, and the source view hides every
 #: one of them.
+# Both ends of a journey, keyed at one grain. The FIRST comes from GA4,
+# reached by transaction_id -- which IS the Shopify order number -- and
+# GA4 is consulted for nothing else. The LAST is ours: the UTM the order
+# itself carries, mapped to an ad by shopify_order_attribution. GA4's
+# own last click was a second, conflicting answer and has been dropped
+# from the database entirely.
 _FIRST_CLICK_GRAINS = {
     "source": ("COALESCE(NULLIF(btrim(first_source), ''), '(none)')",
                "COALESCE(NULLIF(btrim(last_source), ''), '(none)')"),
@@ -2633,6 +2639,18 @@ def _first_click_sql(grain: str, basis: str = "order",
         tbl, key, col = names[grain]
         label = f"COALESCE(NULLIF(btrim(n.{col}), ''), e.entity)"
         join = f"  LEFT JOIN {tbl} n ON n.{key} = e.entity\n"
+    # The id behind the name, and only where it is really Meta's.
+    #
+    # `entity` is whatever utm_content held, which is ad ids, ad names,
+    # kwikengage and sagepilot tokens, google ad ids and the occasional
+    # unexpanded {{ad.id}}. Taking it as an ad id would print a token
+    # under a column headed "ad id" and invite somebody to paste it
+    # into Ads Manager. The join to ad_lifecycle already decides this:
+    # it matches only ids Meta has told us about, so NULL there is the
+    # honest answer for everything else.
+    # CAST(...), not NULL::text: the spend tests run this same SQL
+    # through sqlite, which does not know the Postgres cast operator.
+    entity_id = "n.ad_id" if grain == "ad" else "CAST(NULL AS text)"
     side_spend = {
         side: ("NULL::numeric" if grain == "source" else
                f"CASE WHEN {spend_col} IS NULL THEN NULL "
@@ -2674,7 +2692,7 @@ def _first_click_sql(grain: str, basis: str = "order",
             f"    FROM {sp_tbl} GROUP BY {sp_key}\n"
             f"), life_first AS (\n"
             f"  SELECT {fc_key} AS k, SUM(revenue) AS revenue, COUNT(*) AS orders\n"
-            f"    FROM public.ga4_order_attribution\n"
+            f"    FROM public.shopify_order_clicks\n"
             f"   WHERE {fc_key} IS NOT NULL GROUP BY {fc_key}\n"
             f"), ")
         # Slightly conservative by construction: spend history starts
@@ -2694,14 +2712,14 @@ WITH {life_cte}ends AS (
   SELECT {first_k} AS entity,
          COALESCE(NULLIF(btrim(first_source), ''), '(none)') AS channel,
          'first'::text AS side, revenue, days_to_convert, total_sessions
-    FROM public.ga4_order_attribution
+    FROM public.shopify_order_clicks
 {first_join}{first_window}     AND {first_k} IS NOT NULL
 {pair}
   UNION ALL
   SELECT {last_k},
          COALESCE(NULLIF(btrim(last_source), ''), '(none)'),
          'last'::text, revenue, days_to_convert, total_sessions
-    FROM public.ga4_order_attribution
+    FROM public.shopify_order_clicks
 {last_join}{order_window}     AND {last_k} IS NOT NULL
 {pair}
 ), agg AS (
@@ -2728,7 +2746,8 @@ WITH {life_cte}ends AS (
     FROM ends
    GROUP BY entity
 )
-SELECT e.entity AS source, {label} AS label, e.channel AS channel,
+SELECT e.entity AS source, {label} AS label, {entity_id} AS ad_id,
+       e.channel AS channel,
        {spend_col} AS spend,
        {side_spend['first']} AS first_click_spend,
        {side_spend['last']} AS last_click_spend,
@@ -2780,6 +2799,13 @@ class FirstClickRow(BaseModel):
     #: What to show. At source grain the key itself; at ad grain the
     #: ad's name, falling back to the raw id when it does not resolve.
     label: str
+    #: Meta's own ad id, at ad grain, where `source` is an id Meta has
+    #: told us about. None everywhere else -- at source and adset
+    #: grain, and for the kwikengage, sagepilot, affiliate and google
+    #: tokens that share the utm_content field with real ad ids. A
+    #: token printed under this name would look like something you
+    #: could search for in Ads Manager, and it is not.
+    ad_id: str | None = None
     #: The channel this entity belongs to. At source grain it repeats
     #: `source`; at ad grain it is what explains an unresolved id.
     channel: str
@@ -3065,7 +3091,7 @@ async def get_first_click(
                COALESCE(SUM(revenue) FILTER (
                    WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
                  AS last_click_revenue_total
-          FROM public.ga4_order_attribution
+          FROM public.shopify_order_clicks
           {"LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id" if grain == "ad" else ""}
           {"LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id" if grain == "ad" else ""}
          WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
@@ -3212,7 +3238,9 @@ async def get_first_click_daily(
                g.revenue,
                {first_k} AS fk,
                {last_k}  AS lk
-          FROM public.ga4_order_attribution g, b
+          FROM public.shopify_order_clicks g, b
+          {"LEFT JOIN public.ad_token_resolution rf ON rf.token = g.first_ad_id" if grain == "ad" else ""}
+          {"LEFT JOIN public.ad_token_resolution rl ON rl.token = g.last_ad_id" if grain == "ad" else ""}
          WHERE g.order_at >= (b.a::timestamp AT TIME ZONE 'Asia/Kolkata')
            AND g.order_at <  ((b.z + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
     ),
@@ -4246,7 +4274,12 @@ _LP_LAST_CLICK_SQL = f"""
     FROM (
       SELECT {_LP_LAST_CLICK_PATH_SQL} AS path,
              COALESCE(s.total_price, g.revenue)   AS revenue,
-             COALESCE(s.utm_source, g.last_source) AS utm_source,
+             -- Shopify's UTM alone now. GA4's last_source was the
+             -- fallback for the 4.3% that do not join; it has been
+             -- dropped from the database, because the last click is
+             -- ours and GA4 is never a second opinion on it. Those
+             -- rows classify as unsourced rather than by GA4's answer.
+             s.utm_source                          AS utm_source,
              -- The Organic (IG) rule reads utm_content as well as
              -- utm_source, so the subquery has to expose it or the
              -- predicate fails to compile -- which it did, with
@@ -13714,3 +13747,206 @@ async def create_meta_hypothesis(
     # team, seeing nothing, would simply save it again.
     get_meta_hypotheses.analytics_cache.invalidate()
     return HypothesisCreated(id=row.id, matched_level=level, matched_name=name)
+
+
+# ----------------------------------------------------------------------
+# Hourly campaign tracker
+#
+# Same definitions as the Overview's session band, bucketed by hour, so
+# a day summed here agrees with the daily figures. Built for live
+# campaign days where waiting for tomorrow's dashboard is too late.
+#
+# Every ratio is computed HERE rather than stored, because a stored
+# ratio cannot be re-aggregated: summing 24 hourly cost-per-session
+# figures does not give the day's cost per session, and someone would
+# eventually do it. The table holds counts and money; the division
+# happens once, at the edge.
+# ----------------------------------------------------------------------
+#: Asia/Kolkata. The tracker stores the UTC instant that starts an IST
+#: hour, so the day a row belongs to is already decided -- `day_ist` --
+#: and no endpoint has to re-derive it.
+_HOURLY_TRACKER_SQL = """
+SELECT hour, day_ist, hour_of_day,
+       sessions, sessions_paid, sessions_direct, sessions_meta, sessions_google,
+       revenue, orders, revenue_shopifyql,
+       revenue_meta, revenue_google, revenue_paid,
+       orders_meta, new_customers, new_customer_revenue,
+       meta_spend, meta_impressions, kwikchat_spend,
+       ga4_sessions, ga4_revenue, ga4_active_users
+  FROM public.hourly_campaign_tracker
+ WHERE day_ist = ANY(:days)
+ ORDER BY hour
+"""
+
+
+class HourlyRow(BaseModel):
+    hour: datetime
+    day_ist: date
+    hour_of_day: int
+    sessions: int | None
+    sessions_paid: int | None
+    sessions_direct: int | None
+    sessions_meta: int | None
+    sessions_google: int | None
+    #: Summed from order totals -- the same basis the Overview divides
+    #: by, so the channel figures below reconcile to it exactly.
+    revenue: float | None
+    orders: int | None
+    #: ShopifyQL's own total for the hour, a deliberately different
+    #: measure kept as a cross-check. Typically within half a per cent.
+    revenue_shopifyql: float | None
+    revenue_meta: float | None
+    revenue_google: float | None
+    revenue_paid: float | None
+    orders_meta: int | None
+    new_customers: int | None
+    new_customer_revenue: float | None
+    #: Meta + Kwikchat. Google Ads is absent on purpose: it arrives in a
+    #: daily export, and spreading a day across 24 hours would be an
+    #: invention rather than a measurement.
+    meta_spend: float | None
+    meta_impressions: int | None
+    kwikchat_spend: float | None
+    ga4_sessions: int | None
+    ga4_revenue: float | None
+    ga4_active_users: int | None
+
+    # --- derived, never stored ------------------------------------
+    spend: float | None = None
+    cost_per_session: float | None = None
+    cost_per_paid_session: float | None = None
+    pct_paid: float | None = None
+    pct_direct: float | None = None
+    revenue_per_session: float | None = None
+    revenue_per_meta_session: float | None = None
+    revenue_per_google_session: float | None = None
+    revenue_per_paid_session: float | None = None
+    amer: float | None = None
+    ga4_arpu: float | None = None
+
+
+def _derive_hourly(m: dict) -> HourlyRow:
+    """Fill the ratios. A zero denominator yields NULL, not 0 -- an hour
+    with no paid sessions has no cost per paid session, and 0 would sort
+    it below an hour that genuinely performed badly."""
+    def over(num, den):
+        return (float(num) / float(den)) if (num is not None and den) else None
+
+    spend = (m.get("meta_spend") or 0) + (m.get("kwikchat_spend") or 0)
+    sessions = m.get("sessions") or 0
+    return HourlyRow(
+        **m,
+        spend=spend or None,
+        cost_per_session=over(spend, sessions),
+        cost_per_paid_session=over(spend, m.get("sessions_paid")),
+        pct_paid=over(m.get("sessions_paid"), sessions),
+        pct_direct=over(m.get("sessions_direct"), sessions),
+        revenue_per_session=over(m.get("revenue"), sessions),
+        revenue_per_meta_session=over(m.get("revenue_meta"), m.get("sessions_meta")),
+        revenue_per_google_session=over(m.get("revenue_google"), m.get("sessions_google")),
+        revenue_per_paid_session=over(m.get("revenue_paid"), m.get("sessions_paid")),
+        amer=over(m.get("new_customer_revenue"), spend),
+        ga4_arpu=over(m.get("ga4_revenue"), m.get("ga4_active_users")),
+    )
+
+
+class HourlyTotals(BaseModel):
+    """A day, or a day up to an hour. Ratios are recomputed from the
+    summed counts -- never averaged from the hourly ratios, which would
+    weight a quiet 4am hour the same as a 9pm peak."""
+    day: date
+    hours: int
+    sessions: int
+    sessions_paid: int
+    sessions_direct: int
+    sessions_meta: int
+    revenue: float
+    orders: int
+    spend: float
+    meta_impressions: int
+    new_customers: int
+    new_customer_revenue: float
+    cost_per_session: float | None
+    cost_per_paid_session: float | None
+    pct_paid: float | None
+    pct_direct: float | None
+    revenue_per_session: float | None
+    revenue_per_meta_session: float | None
+    amer: float | None
+    ga4_arpu: float | None
+
+
+class HourlyTrackerResponse(BaseModel):
+    rows: list[HourlyRow]
+    #: Yesterday's same hours, for the comparison lines.
+    compare_rows: list[HourlyRow]
+    today: HourlyTotals | None
+    #: Yesterday CLAMPED to the same hours today has reached, which is
+    #: the only honest comparison mid-day: a full yesterday against a
+    #: part-finished today always flatters yesterday.
+    compare: HourlyTotals | None
+    #: Yesterday in full, for when the day is over and the clamp stops
+    #: mattering.
+    compare_full: HourlyTotals | None
+    latest_hour: int | None
+    fetched_at: datetime | None
+
+
+def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
+    if not rows:
+        return None
+    s = lambda k: sum(getattr(r, k) or 0 for r in rows)  # noqa: E731
+    sessions, paid = s("sessions"), s("sessions_paid")
+    spend, revenue = s("spend"), s("revenue")
+    ncr, users = s("new_customer_revenue"), s("ga4_active_users")
+    return HourlyTotals(
+        day=day, hours=len(rows),
+        sessions=sessions, sessions_paid=paid, sessions_direct=s("sessions_direct"),
+        sessions_meta=s("sessions_meta"), revenue=revenue, orders=s("orders"),
+        spend=spend, meta_impressions=s("meta_impressions"),
+        new_customers=s("new_customers"), new_customer_revenue=ncr,
+        cost_per_session=(spend / sessions) if sessions else None,
+        cost_per_paid_session=(spend / paid) if paid else None,
+        pct_paid=(paid / sessions) if sessions else None,
+        pct_direct=(s("sessions_direct") / sessions) if sessions else None,
+        revenue_per_session=(revenue / sessions) if sessions else None,
+        revenue_per_meta_session=(s("revenue_meta") / s("sessions_meta"))
+                                 if s("sessions_meta") else None,
+        amer=(ncr / spend) if spend else None,
+        ga4_arpu=(s("ga4_revenue") / users) if users else None,
+    )
+
+
+@router.get("/hourly-tracker", response_model=HourlyTrackerResponse)
+@cached_analytics(ttl=120.0)
+async def get_hourly_tracker(
+    session: SessionDep,
+    day: date | None = Query(default=None, description="IST day. Default: today."),
+    compare_to: date | None = Query(
+        default=None, description="Day to compare against. Default: the day before."),
+) -> HourlyTrackerResponse:
+    """The campaign tracker, hour by hour, against another day."""
+    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    target = day or ist_now.date()
+    baseline = compare_to or (target - timedelta(days=1))
+
+    result = (await session.execute(text(_HOURLY_TRACKER_SQL),
+                                    {"days": [target, baseline]})).mappings().all()
+    rows = [_derive_hourly(dict(r)) for r in result]
+    today_rows = [r for r in rows if r.day_ist == target]
+    base_rows = [r for r in rows if r.day_ist == baseline]
+
+    latest = max((r.hour_of_day for r in today_rows), default=None)
+    # Clamp the baseline to the hours today has actually reached.
+    clamped = ([r for r in base_rows if r.hour_of_day <= latest]
+               if latest is not None else base_rows)
+
+    return HourlyTrackerResponse(
+        rows=today_rows,
+        compare_rows=base_rows,
+        today=_totals(target, today_rows),
+        compare=_totals(baseline, clamped),
+        compare_full=_totals(baseline, base_rows),
+        latest_hour=latest,
+        fetched_at=ist_now,
+    )
