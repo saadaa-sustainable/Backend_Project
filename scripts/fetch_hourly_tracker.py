@@ -588,6 +588,49 @@ def distribute_daily(total: float, weights: dict[datetime, float]) -> dict[datet
     return {h: total * (w / denom) for h, w in weights.items()}
 
 
+def is_unsettled(day: date, last_write: datetime | None,
+                 latest_hour: int | None) -> bool:
+    """The decision, separated from the query so it can be tested.
+
+    None for `last_write` means the day was never ingested at all --
+    that is a backfill, not a settle, and this returns False so a gap
+    in history is never silently filled by a job meant to tidy the
+    edge of yesterday.
+    """
+    if last_write is None:
+        return False
+    day_end = datetime.combine(day, datetime.min.time(), IST) + timedelta(days=1)
+    return last_write < day_end or (latest_hour if latest_hour is not None else -1) < 23
+
+
+def needs_settling(day: date) -> bool:
+    """Was this day last written BEFORE it had actually finished?
+
+    The hour a run writes is the hour in progress, so it is partial by
+    construction. That is fine while the day is live -- the next run
+    replaces it. It stops being fine at midnight: the last run of a day
+    stores an incomplete final hour, the date rolls over, and nothing
+    ever goes back for the rest of it.
+
+    Measured 2026-10-30: the day was last written 23:16 IST and kept
+    1,293 orders / Rs 18.94L against Shopify's own 1,399 / Rs 19.57L.
+    Re-pulling the closed day recovered 43 orders and Rs 72,943 -- the
+    last forty-four minutes, missing permanently.
+
+    Checked rather than scheduled on purpose. A "re-pull yesterday if
+    the hour is 0 or 1" rule only works if a run actually happens in
+    that window, and the whole reason this job exists is that the
+    scheduler cannot be relied on to fire.
+    """
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT MAX(fetched_at), MAX(hour_of_day)
+            FROM public.hourly_campaign_tracker WHERE day_ist = %s
+        """, (day,))
+        last_write, latest_hour = cur.fetchone() or (None, None)
+    return is_unsettled(day, last_write, latest_hour)
+
+
 async def build_day(client, store, day: date) -> list[dict]:
     sessions, sales, orders, meta = await asyncio.gather(
         fetch_sessions(client, store, day),
@@ -665,12 +708,25 @@ async def main() -> int:
     ap.add_argument("--days", type=int, default=1,
                     help="Trailing days ending at --date (default today).")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-settle", action="store_true",
+                    help="Skip the automatic re-pull of a day that was last "
+                         "written before it ended. Only affects the default "
+                         "run; an explicit --date is never extended.")
     args = ap.parse_args()
 
     from shopify_client import discover_stores  # noqa: PLC0415
 
     end = args.date or datetime.now(IST).date()
     days = [end - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
+
+    # Settle the previous day if its stored copy predates its own
+    # midnight. Only on the default run: an explicit --date is a
+    # deliberate request for those days and nothing else.
+    if args.date is None and not args.no_settle:
+        prev = end - timedelta(days=1)
+        if prev not in days and needs_settling(prev):
+            print(f"Settling {prev}: last written before the day ended.")
+            days.insert(0, prev)
     store = list(discover_stores().values())[0]
 
     total = 0
