@@ -248,9 +248,11 @@ export function HourlyTracker() {
     return () => { cancelled = true; };
   }, [params, tick]);
 
-  // The point of an hourly tracker is that it does not need reloading.
+  // Once an hour, because the data arrives once an hour: the ingest
+  // cron fires at minute 5, and polling twelve times an hour fetched
+  // the same rows eleven times over.
   useEffect(() => {
-    const id = window.setInterval(() => setTick((n) => n + 1), 5 * 60000);
+    const id = window.setInterval(() => setTick((n) => n + 1), 60 * 60000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -282,7 +284,7 @@ export function HourlyTracker() {
           {data?.latest_hour !== null && data?.latest_hour !== undefined
             ? `${String(data.latest_hour).padStart(2, "0")}:00 IST · ${rows.length} hours`
             : "no data for this day"}
-          {isToday ? " · refreshes every 5 min" : ""}
+          {isToday ? " · refreshes hourly" : ""}
         </span>
       </SectionHeader>
 

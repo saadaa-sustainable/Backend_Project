@@ -221,7 +221,12 @@ function apiBase() {
   const fromUrl = qs.get("api");
   if (fromUrl) { try { localStorage.setItem("tracker_api", fromUrl); } catch {} return fromUrl.replace(/\/+$/, ""); }
   try { const v = localStorage.getItem("tracker_api"); if (v) return v.replace(/\/+$/, ""); } catch {}
-  return "http://localhost:8002";
+  // Only a sensible guess while developing. On a deployed origin it is
+  // not: a first-time visitor would get a connection error pointing at
+  // their OWN machine, which reads as "the dashboard is broken" rather
+  // than "nobody has told it where the API lives".
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  return local ? "http://localhost:8002" : "";
 }
 
 const IST_MIN = 330;
@@ -363,6 +368,18 @@ async function load() {
   const cmp = $("cmp").value;
   const base = apiBase();
   $("api").value = base;
+  // Nothing configured yet. Say so plainly instead of firing a request
+  // at a relative path and reporting whatever 404 the static host gives
+  // back, which tells the reader nothing about what to do next.
+  if (!base) {
+    $("status").textContent = "no API set";
+    $("error").innerHTML = '<div class="err"><strong>No backend configured.</strong> ' +
+      'Put the backend URL in the API box above, or open this page with ' +
+      '<code>?api=https://your-backend.example.com</code>. It is remembered ' +
+      'per browser. The backend must also list this origin in ' +
+      '<code>EXTRA_APP_ORIGINS</code>.</div>';
+    return;
+  }
   const url = base + "/admin/analytics/hourly-tracker?day=" + day +
               (cmp ? "&compare_to=" + cmp : "");
   $("status").textContent = "loading…";
@@ -393,7 +410,7 @@ function render(d, day) {
     ? String(d.latest_hour).padStart(2, "0") + ":00 IST"
     : "no data";
   $("sub").textContent = rows.length
-    ? rows.length + " hours" + (isToday ? " · auto-refreshes every 5 min" : "")
+    ? rows.length + " hours" + (isToday ? " · auto-refreshes hourly" : "")
     : "nothing recorded for " + day;
 
   if (!rows.length) {
@@ -782,8 +799,11 @@ try {
 } catch {}
 
 load();
-// The whole point of an hourly view is that it does not need reloading.
-timer = setInterval(load, 5 * 60000);
+// Once an hour, because the data arrives once an hour: the ingest cron
+// fires at minute 5, and polling twelve times an hour simply fetched
+// the same rows eleven times over. The offset puts the refresh a few
+// minutes after the write rather than racing it.
+timer = setInterval(load, 60 * 60000);
 </script>
 </body>
 </html>
