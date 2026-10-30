@@ -302,10 +302,16 @@ const HEROES = [
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["revenue_per_session", "Rev / session", v => inr(v), "up"],
   ["aov", "AOV", v => inr(v), "up"],
+  // The same two rates over bought traffic only -- paid sessions being
+  // every session with a utm_source that is not direct or none. They
+  // sit together, and next to AMER, because that is the row anyone
+  // judging a campaign day actually reads.
+  ["cost_per_paid_session", "Cost / paid session", v => inr(v), "down"],
+  ["revenue_per_paid_session", "Rev / paid session", v => inr(v), "up"],
+  ["amer", "AMER", xx, "up"],
   ["conversion_rate", "Conversion rate", v => pc(v, 2), "up", true],
   ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "up", true],
   ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
-  ["amer", "AMER", xx, "up"],
   // The traffic mix, as first-class KPIs rather than a footnote: on a
   // campaign day the share you are buying is the lever, and a paid
   // share sliding while spend holds is the thing worth catching early.

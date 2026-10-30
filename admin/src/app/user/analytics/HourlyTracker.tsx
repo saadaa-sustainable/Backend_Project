@@ -102,6 +102,12 @@ function Delta({ now, was, dir = "up", points = false }:
  *  lets the reader compare them. The coloured judgement lives in the
  *  Delta row below, in one place, where the up-is-good rule is applied
  *  per metric and cost per session is the exception. */
+/** What "paid" means everywhere on this page. Written once so the two
+ *  cost/revenue heroes and the conversion ones cannot drift apart. */
+const PAID_SESSION_HINT =
+  "Paid sessions are every session carrying a utm_source that is not direct or none"
+  + " — which includes organic-looking tags, so read it as 'attributed', not 'bought'.";
+
 function Hero({ label, value, was, hint, parts }: {
   label: string; value: string; was: string; hint?: string;
   /** Components of `value`, listed under it. For a figure that adds
@@ -295,6 +301,18 @@ export function HourlyTracker() {
                       was={money(c.revenue_per_session)} />
                 <Hero label="AOV" value={money(t.aov)} was={money(c.aov)}
                       hint="Revenue ÷ orders, re-divided from the day's totals — not the average of the hourly AOVs." />
+                {/* The same two rates over bought traffic only. They sit
+                    together, and next to AMER, because that is the row
+                    anyone judging a campaign day actually reads. */}
+                <Hero label="Cost / paid session" value={money(t.cost_per_paid_session)}
+                      was={money(c.cost_per_paid_session)}
+                      hint={"Spend ÷ paid sessions. " + PAID_SESSION_HINT} />
+                <Hero label="Rev / paid session" value={money(t.revenue_per_paid_session)}
+                      was={money(c.revenue_per_paid_session)}
+                      hint={"Revenue from orders with a utm_source, ÷ paid sessions. "
+                            + PAID_SESSION_HINT} />
+                <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
+                      hint="New-customer revenue ÷ spend." />
                 <Hero label="Conversion rate" value={pct(t.conversion_rate, 2)}
                       was={pct(c.conversion_rate, 2)}
                       hint="Orders ÷ sessions. Cancelled and returned orders are not counted; exchanges are." />
@@ -304,8 +322,6 @@ export function HourlyTracker() {
                 <Hero label="CR / direct" value={pct(t.conversion_rate_direct, 2)}
                       was={pct(c.conversion_rate_direct, 2)}
                       hint="Orders with no utm_source, over direct sessions." />
-                <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
-                      hint="New-customer revenue ÷ spend." />
                 <Hero label="% paid sessions" value={pct(t.pct_paid)} was={pct(c.pct_paid)}
                       hint="Sessions carrying a utm_source that is not direct or none." />
                 <Hero label="% direct sessions" value={pct(t.pct_direct)} was={pct(c.pct_direct)}
@@ -318,6 +334,10 @@ export function HourlyTracker() {
                 <span>Cost / session <Delta now={t.cost_per_session} was={c.cost_per_session} dir="down" /></span>
                 <span>Rev / session <Delta now={t.revenue_per_session} was={c.revenue_per_session} /></span>
                 <span>AOV <Delta now={t.aov} was={c.aov} /></span>
+                <span>Cost / paid sess <Delta now={t.cost_per_paid_session}
+                                              was={c.cost_per_paid_session} dir="down" /></span>
+                <span>Rev / paid sess <Delta now={t.revenue_per_paid_session}
+                                             was={c.revenue_per_paid_session} /></span>
                 <span>CR <Delta now={t.conversion_rate} was={c.conversion_rate} points /></span>
                 <span>AMER <Delta now={t.amer} was={c.amer} /></span>
                 <span>% paid <Delta now={t.pct_paid} was={c.pct_paid} dir="flat" points /></span>
