@@ -77,6 +77,8 @@
              letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .h-prev { font-size: 11.5px; color: var(--text-2); margin-top: 2px; font-variant-numeric: tabular-nums; }
   .h-delta { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .h-parts { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 4px;
+             font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
   .good { color: var(--good); } .bad { color: var(--bad); } .flat { color: var(--flat); }
   .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
   table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
@@ -188,6 +190,7 @@
     <div class="donutbody" id="donutbody"></div>
     <p class="note" id="donut-note"></p>
   </div>
+
   </div>
 
   <div style="margin-top:16px" class="tablewrap" id="tablewrap" hidden>
@@ -270,11 +273,6 @@ const METRICS = [
   ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "up", true],
   ["meta_impressions", "Impressions", num, "up"],
   ["spend", "Spend", v => inr(v, 0), "up"],
-  // Broken out because the three have different standing: Meta is
-  // measured by the hour, Google is a daily total shared across the
-  // hours, Kwikchat is a flat placeholder. A dash means the hour is
-  // past the moment Google's daily figure was captured.
-  ["google_spend", "Google", v => inr(v, 0), "up"],
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["cost_per_paid_session", "Cost / paid sess", v => inr(v), "down"],
   // The numerator of both CR and AOV, which had no column of its own.
@@ -364,11 +362,23 @@ function render(d, day) {
     $("totals").hidden = false;
     $("ttl-title").textContent = "Day to date · " + t.hours + " hours";
     $("ttl-vs").textContent = "against the same " + c.hours + " hours of " + c.day;
+    // Spend adds three numbers that are not the same KIND of number --
+    // Meta is measured hourly, Google is a daily total shared across
+    // the hours, Kwikchat is a flat placeholder -- so the total alone
+    // hides what it is made of. It is the only KPI with components
+    // worth naming, hence the special case rather than a general one.
+    const partsFor = k => k !== "spend" ? "" :
+      '<div class="h-parts">' +
+      [["Meta", t.meta_spend], ["Google", t.google_spend], ["Kwikchat", t.kwikchat_spend]]
+        .map(([n, v]) => '<span>' + esc(n) + ' ' + inr(v, 0) + '</span>').join("") +
+      '</div>';
+
     $("heroes").innerHTML = HEROES.map(([k, label, fmt, dir, points]) =>
       '<div><div class="h-label">' + label + '</div>' +
       '<div class="h-value">' + fmt(t[k]) + '</div>' +
       '<div class="h-prev">' + fmt(c[k]) + ' <span class="h-delta">' +
-      deltaHTML(t[k], c[k], dir, points) + '</span></div></div>').join("");
+      deltaHTML(t[k], c[k], dir, points) + '</span></div>' +
+      partsFor(k) + '</div>').join("");
   }
 
   drawChart(rows, d.compare_rows || [], c ? c.day : "");

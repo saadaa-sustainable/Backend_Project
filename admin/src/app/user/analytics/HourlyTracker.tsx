@@ -102,8 +102,13 @@ function Delta({ now, was, dir = "up", points = false }:
  *  lets the reader compare them. The coloured judgement lives in the
  *  Delta row below, in one place, where the up-is-good rule is applied
  *  per metric and cost per session is the exception. */
-function Hero({ label, value, was, hint }: {
+function Hero({ label, value, was, hint, parts }: {
   label: string; value: string; was: string; hint?: string;
+  /** Components of `value`, listed under it. For a figure that adds
+   *  together things of different kinds -- Spend is one measured
+   *  channel and two day-level allocations -- the total alone hides
+   *  what it is made of. */
+  parts?: { label: string; value: string }[];
 }) {
   return (
     <div className="min-w-0">
@@ -116,6 +121,15 @@ function Hero({ label, value, was, hint }: {
       <dd className="mt-0.5 text-[11.5px] text-text-secondary">
         <span className="tabular-nums">{was}</span> same time yesterday
       </dd>
+      {parts?.length ? (
+        <dd className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-text-tertiary">
+          {parts.map((p) => (
+            <span key={p.label}>
+              {p.label} <span className="tabular-nums">{p.value}</span>
+            </span>
+          ))}
+        </dd>
+      ) : null}
     </div>
   );
 }
@@ -141,11 +155,6 @@ const METRICS: {
   { key: "conversion_rate_direct", label: "CR / direct", fmt: (n) => pct(n, 2), dir: "up", w: 105, points: true },
   { key: "meta_impressions", label: "Impressions", fmt: compact, dir: "up", w: 110 },
   { key: "spend", label: "Spend", fmt: (n) => money(n, 0), dir: "up", w: 105 },
-  // Broken out because the three have different standing: Meta is
-  // measured by the hour, Google is a daily total shared across the
-  // hours, Kwikchat is a flat placeholder. A dash means that hour is
-  // past the moment Google's daily figure was captured.
-  { key: "google_spend", label: "Google", fmt: (n) => money(n, 0), dir: "up", w: 95 },
   { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
   { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
   { key: "orders", label: "Orders", fmt: compact, dir: "up", w: 85 },
@@ -271,9 +280,14 @@ export function HourlyTracker() {
               <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-3">
                 <Hero label="Sessions" value={compact(t.sessions)} was={compact(c.sessions)} />
                 <Hero label="Spend" value={money(t.spend, 0)} was={money(c.spend, 0)}
-                      hint={`Meta ${money(t.meta_spend, 0)} + Google ${money(t.google_spend, 0)}`
-                            + ` + Kwikchat ${money(t.kwikchat_spend, 0)}.`
-                            + " Meta is hourly; the other two are daily totals shared across the hours."} />
+                      hint={"Meta is measured hourly. Google is a daily total shared across the"
+                            + " hours by each hour's share of Google-driven sessions, and"
+                            + " Kwikchat is a flat \u20B930,000 a day over 24."}
+                      parts={[
+                        { label: "Meta", value: money(t.meta_spend, 0) },
+                        { label: "Google", value: money(t.google_spend, 0) },
+                        { label: "Kwikchat", value: money(t.kwikchat_spend, 0) },
+                      ]} />
                 <Hero label="Revenue" value={money(t.revenue, 0)} was={money(c.revenue, 0)} />
                 <Hero label="Cost / session" value={money(t.cost_per_session)}
                       was={money(c.cost_per_session)} />
