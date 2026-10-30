@@ -5,7 +5,7 @@ the hourly figures, and neither would raise if it were -- the page
 would just quietly show a number nobody could reconcile against the
 table under it.
 """
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -17,7 +17,11 @@ from app.api.routers.analytics import (
     _rank_sources,
     _totals,
 )
-from scripts.fetch_hourly_tracker import distribute_daily, is_excluded_order
+from scripts.fetch_hourly_tracker import (
+    distribute_daily,
+    is_excluded_order,
+    is_unsettled,
+)
 
 
 def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
@@ -297,3 +301,40 @@ def test_an_hour_past_the_google_capture_still_has_a_spend():
     r = _derive_hourly({**_blank(), "sessions": 100, "meta_spend": 1000.0,
                         "kwikchat_spend": 1250.0, "google_spend": None})
     assert r.spend == pytest.approx(2250.0)
+
+
+# --- settling a closed day --------------------------------------------
+# The hour a run writes is the hour in progress, so it is partial by
+# construction. Fine while the day is live; not fine at midnight, when
+# the date rolls over and nothing goes back for the rest of it.
+
+def _ist(y, m, d, hh=0, mm=0):
+    return datetime(y, m, d, hh, mm, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+
+
+def test_a_day_last_written_before_its_midnight_is_unsettled():
+    """The bug this exists for: 30 Oct frozen at 23:16 IST, missing the
+    last forty-four minutes of orders permanently."""
+    assert is_unsettled(date(2026, 10, 30), _ist(2026, 10, 30, 23, 16), 23) is True
+
+
+def test_a_day_rewritten_after_its_midnight_is_settled():
+    assert is_unsettled(date(2026, 10, 30), _ist(2026, 10, 31, 0, 20), 23) is False
+
+
+def test_a_day_missing_its_final_hours_is_unsettled():
+    """Written after midnight but short of hour 23 -- a run that died
+    partway, or a day whose late hours never arrived."""
+    assert is_unsettled(date(2026, 10, 30), _ist(2026, 10, 31, 3, 0), 19) is True
+
+
+def test_a_day_never_ingested_is_not_settled_but_left_alone():
+    """Absent is a backfill, not a settle. Tidying the edge of yesterday
+    must never silently fill a hole in history."""
+    assert is_unsettled(date(2026, 1, 1), None, None) is False
+
+
+def test_the_boundary_is_the_day_s_own_midnight():
+    midnight = _ist(2026, 10, 31, 0, 0)
+    assert is_unsettled(date(2026, 10, 30), midnight - timedelta(seconds=1), 23) is True
+    assert is_unsettled(date(2026, 10, 30), midnight, 23) is False
