@@ -359,15 +359,25 @@ function render(d, day) {
   if (!rows.length) {
     $("totals").hidden = $("chartcard").hidden = $("tablewrap").hidden = true;
     $("donutcard").hidden = true;
-    $("footnote").textContent = "Run scripts/fetch_hourly_tracker.py --date " + day + " to populate this day.";
+    $("footnote").textContent =
+      (d.first_day && d.last_day
+        ? "This tracker holds " + d.first_day + " to " + d.last_day + ". "
+        : "") +
+      "Run scripts/fetch_hourly_tracker.py --date " + day + " to populate this day.";
     return;
   }
 
   // --- totals ---
-  if (t && c) {
+  if (t) {
+    const base = c || {};                  // no baseline: every read is undefined
+    const baselineDay = $("cmp").value ||
+      new Date(new Date(day + "T00:00:00Z").getTime() - 86400000).toISOString().slice(0, 10);
+
     $("totals").hidden = false;
     $("ttl-title").textContent = "Day to date · " + t.hours + " hours";
-    $("ttl-vs").textContent = "against the same " + c.hours + " hours of " + c.day;
+    $("ttl-vs").textContent = c
+      ? "against the same " + c.hours + " hours of " + c.day
+      : baselineDay + " is not in the tracker, so there is nothing to compare against";
     // Spend adds three numbers that are not the same KIND of number --
     // Meta is measured hourly, Google is a daily total shared across
     // the hours, Kwikchat is a flat placeholder -- so the total alone
@@ -382,8 +392,8 @@ function render(d, day) {
     $("heroes").innerHTML = HEROES.map(([k, label, fmt, dir, points]) =>
       '<div><div class="h-label">' + label + '</div>' +
       '<div class="h-value">' + fmt(t[k]) + '</div>' +
-      '<div class="h-prev">' + fmt(c[k]) + ' <span class="h-delta">' +
-      deltaHTML(t[k], c[k], dir, points) + '</span></div>' +
+      '<div class="h-prev">' + (c ? fmt(base[k]) + ' ' : '') + '<span class="h-delta">' +
+      deltaHTML(t[k], base[k], dir, points) + '</span></div>' +
       partsFor(k) + '</div>').join("");
   }
 

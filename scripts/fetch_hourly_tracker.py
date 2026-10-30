@@ -650,7 +650,8 @@ async def main() -> int:
         for day in days:
             rows = await build_day(client, store, day)
             sess = sum(r.get("sessions") or 0 for r in rows)
-            spend = sum((r.get("meta_spend") or 0) + (r.get("kwikchat_spend") or 0) for r in rows)
+            spend = sum((r.get("meta_spend") or 0) + (r.get("kwikchat_spend") or 0)
+                        + (r.get("google_spend") or 0) for r in rows)
             rev = sum(r.get("revenue") or 0 for r in rows)
             crosscheck = sum(r.get("revenue_shopifyql") or 0 for r in rows)
             print(f"{day}  {len(rows):>2} hours   {sess:>7,} sessions   "

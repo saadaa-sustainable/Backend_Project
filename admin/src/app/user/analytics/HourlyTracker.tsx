@@ -66,8 +66,11 @@ const ratio = (n: number | null | undefined) =>
 type Dir = "up" | "down" | "flat";
 
 function Delta({ now, was, dir = "up", points = false }:
-  { now: number | null; was: number | null; dir?: Dir; points?: boolean }) {
-  if (now === null || was === null || !was) {
+  { now: number | null | undefined; was: number | null | undefined;
+    dir?: Dir; points?: boolean }) {
+  // `undefined` as well as null: the baseline day may not be in the
+  // tracker at all, and a missing comparison is a dash, not a zero.
+  if (now === null || now === undefined || !was) {
     return <span className="text-text-tertiary">—</span>;
   }
   // A share moves in POINTS. "90.2% is 2% up on 88.4%" is a different
@@ -223,6 +226,10 @@ export function HourlyTracker() {
 
   const t: HourlyTotals | null = data?.today ?? null;
   const c: HourlyTotals | null = data?.compare ?? null;
+  /** The day the baseline WOULD have been, for when it is not there. */
+  const baselineDay = compareTo
+    || new Date(new Date(`${day}T00:00:00Z`).getTime() - 86400000)
+         .toISOString().slice(0, 10);
   const isToday = day === istToday();
 
   return (
@@ -267,25 +274,31 @@ export function HourlyTracker() {
         <p className="py-8 text-sm text-text-secondary">Loading the hour&rsquo;s figures…</p>
       ) : !rows.length ? (
         <p className="py-8 text-sm text-text-secondary">
-          Nothing recorded for {day}. Run{" "}
+          Nothing recorded for {day}.{" "}
+          {data?.first_day && data?.last_day
+            ? <>This tracker holds {data.first_day} to {data.last_day}.{" "}</>
+            : null}
+          Run{" "}
           <code className="text-[12px]">scripts/fetch_hourly_tracker.py --date {day}</code>.
         </p>
       ) : (
         <>
-          {/* Day to date, each against the SAME hours yesterday. */}
-          {t && c && (
+          {/* Day to date, each against the SAME hours yesterday --
+              or on its own, when the day before was never ingested. */}
+          {t && (
             <div className="rounded-md border border-border-primary bg-bg-white p-4">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="text-[13px] font-medium text-text-primary">
                   Day to date · {t.hours} hours
                 </h3>
                 <span className="text-[11.5px] text-text-tertiary">
-                  against the same {c.hours} hours of {c.day}
+                  {c ? `against the same ${c.hours} hours of ${c.day}`
+                     : `${baselineDay} is not in the tracker, so there is nothing to compare against`}
                 </span>
               </div>
               <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-3">
-                <Hero label="Sessions" value={compact(t.sessions)} was={compact(c.sessions)} />
-                <Hero label="Spend" value={money(t.spend, 0)} was={money(c.spend, 0)}
+                <Hero label="Sessions" value={compact(t.sessions)} was={compact(c?.sessions)} />
+                <Hero label="Spend" value={money(t.spend, 0)} was={money(c?.spend, 0)}
                       hint={"Meta is measured hourly. Google is a daily total shared across the"
                             + " hours by each hour's share of Google-driven sessions, and"
                             + " Kwikchat is a flat \u20B930,000 a day over 24."}
@@ -294,54 +307,54 @@ export function HourlyTracker() {
                         { label: "Google", value: money(t.google_spend, 0) },
                         { label: "Kwikchat", value: money(t.kwikchat_spend, 0) },
                       ]} />
-                <Hero label="Revenue" value={money(t.revenue, 0)} was={money(c.revenue, 0)} />
+                <Hero label="Revenue" value={money(t.revenue, 0)} was={money(c?.revenue, 0)} />
                 <Hero label="Cost / session" value={money(t.cost_per_session)}
-                      was={money(c.cost_per_session)} />
+                      was={money(c?.cost_per_session)} />
                 <Hero label="Rev / session" value={money(t.revenue_per_session)}
-                      was={money(c.revenue_per_session)} />
-                <Hero label="AOV" value={money(t.aov)} was={money(c.aov)}
+                      was={money(c?.revenue_per_session)} />
+                <Hero label="AOV" value={money(t.aov)} was={money(c?.aov)}
                       hint="Revenue ÷ orders, re-divided from the day's totals — not the average of the hourly AOVs." />
                 {/* The same two rates over bought traffic only. They sit
                     together, and next to AMER, because that is the row
                     anyone judging a campaign day actually reads. */}
                 <Hero label="Cost / paid session" value={money(t.cost_per_paid_session)}
-                      was={money(c.cost_per_paid_session)}
+                      was={money(c?.cost_per_paid_session)}
                       hint={"Spend ÷ paid sessions. " + PAID_SESSION_HINT} />
                 <Hero label="Rev / paid session" value={money(t.revenue_per_paid_session)}
-                      was={money(c.revenue_per_paid_session)}
+                      was={money(c?.revenue_per_paid_session)}
                       hint={"Revenue from orders with a utm_source, ÷ paid sessions. "
                             + PAID_SESSION_HINT} />
-                <Hero label="AMER" value={ratio(t.amer)} was={ratio(c.amer)}
+                <Hero label="AMER" value={ratio(t.amer)} was={ratio(c?.amer)}
                       hint="New-customer revenue ÷ spend." />
                 <Hero label="Conversion rate" value={pct(t.conversion_rate, 2)}
-                      was={pct(c.conversion_rate, 2)}
+                      was={pct(c?.conversion_rate, 2)}
                       hint="Orders ÷ sessions. Cancelled and returned orders are not counted; exchanges are." />
                 <Hero label="CR / paid" value={pct(t.conversion_rate_paid, 2)}
-                      was={pct(c.conversion_rate_paid, 2)}
+                      was={pct(c?.conversion_rate_paid, 2)}
                       hint="Orders from a utm_source that is not direct, over paid sessions." />
                 <Hero label="CR / direct" value={pct(t.conversion_rate_direct, 2)}
-                      was={pct(c.conversion_rate_direct, 2)}
+                      was={pct(c?.conversion_rate_direct, 2)}
                       hint="Orders with no utm_source, over direct sessions." />
-                <Hero label="% paid sessions" value={pct(t.pct_paid)} was={pct(c.pct_paid)}
+                <Hero label="% paid sessions" value={pct(t.pct_paid)} was={pct(c?.pct_paid)}
                       hint="Sessions carrying a utm_source that is not direct or none." />
-                <Hero label="% direct sessions" value={pct(t.pct_direct)} was={pct(c.pct_direct)}
+                <Hero label="% direct sessions" value={pct(t.pct_direct)} was={pct(c?.pct_direct)}
                       hint="Sessions with no utm_source, or one that says direct/none. The complement of % paid." />
               </dl>
               <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-border-soft pt-3 text-[12px] text-text-secondary">
-                <span>Sessions <Delta now={t.sessions} was={c.sessions} /></span>
-                <span>Spend <Delta now={t.spend} was={c.spend} /></span>
-                <span>Revenue <Delta now={t.revenue} was={c.revenue} /></span>
-                <span>Cost / session <Delta now={t.cost_per_session} was={c.cost_per_session} dir="down" /></span>
-                <span>Rev / session <Delta now={t.revenue_per_session} was={c.revenue_per_session} /></span>
-                <span>AOV <Delta now={t.aov} was={c.aov} /></span>
+                <span>Sessions <Delta now={t.sessions} was={c?.sessions} /></span>
+                <span>Spend <Delta now={t.spend} was={c?.spend} /></span>
+                <span>Revenue <Delta now={t.revenue} was={c?.revenue} /></span>
+                <span>Cost / session <Delta now={t.cost_per_session} was={c?.cost_per_session} dir="down" /></span>
+                <span>Rev / session <Delta now={t.revenue_per_session} was={c?.revenue_per_session} /></span>
+                <span>AOV <Delta now={t.aov} was={c?.aov} /></span>
                 <span>Cost / paid sess <Delta now={t.cost_per_paid_session}
-                                              was={c.cost_per_paid_session} dir="down" /></span>
+                                              was={c?.cost_per_paid_session} dir="down" /></span>
                 <span>Rev / paid sess <Delta now={t.revenue_per_paid_session}
-                                             was={c.revenue_per_paid_session} /></span>
-                <span>CR <Delta now={t.conversion_rate} was={c.conversion_rate} points /></span>
-                <span>AMER <Delta now={t.amer} was={c.amer} /></span>
-                <span>% paid <Delta now={t.pct_paid} was={c.pct_paid} dir="flat" points /></span>
-                <span>% direct <Delta now={t.pct_direct} was={c.pct_direct} dir="flat" points /></span>
+                                             was={c?.revenue_per_paid_session} /></span>
+                <span>CR <Delta now={t.conversion_rate} was={c?.conversion_rate} points /></span>
+                <span>AMER <Delta now={t.amer} was={c?.amer} /></span>
+                <span>% paid <Delta now={t.pct_paid} was={c?.pct_paid} dir="flat" points /></span>
+                <span>% direct <Delta now={t.pct_direct} was={c?.pct_direct} dir="flat" points /></span>
               </div>
             </div>
           )}

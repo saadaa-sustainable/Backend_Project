@@ -13971,6 +13971,12 @@ class HourlyTrackerResponse(BaseModel):
     compare_full: HourlyTotals | None
     latest_hour: int | None
     fetched_at: datetime | None
+    #: The span the table actually holds. A day outside it is not a
+    #: failure, it is a day nobody has ingested -- and without this the
+    #: page cannot tell the two apart, so it says "no data" and leaves
+    #: the reader guessing which dates are worth trying.
+    first_day: date | None = None
+    last_day: date | None = None
 
 
 def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
@@ -14081,6 +14087,19 @@ async def get_hourly_tracker(
 
     result = (await session.execute(text(_HOURLY_TRACKER_SQL),
                                     {"days": [target, baseline]})).mappings().all()
+
+    # Two statements rather than one: the span covers the whole table
+    # while the rows are two days of it, and folding them together
+    # would mean re-deriving the span per row.
+    #
+    # Sequential, NOT asyncio.gather. One AsyncSession cannot run two
+    # statements at once -- see the note on get_dashboard_all, where
+    # gathering on a single session raised InterfaceError ("another
+    # operation is in progress") and 500'd every call. Both queries
+    # ride the day_ist index: 9 blocks for this one.
+    span_row = (await session.execute(text(
+        "SELECT MIN(day_ist) AS first_day, MAX(day_ist) AS last_day "
+        "FROM public.hourly_campaign_tracker"))).mappings().first() or {}
     rows = [_derive_hourly(dict(r)) for r in result]
     today_rows = [r for r in rows if r.day_ist == target]
     base_rows = [r for r in rows if r.day_ist == baseline]
@@ -14101,4 +14120,6 @@ async def get_hourly_tracker(
         compare_full=_totals(baseline, base_rows),
         latest_hour=latest,
         fetched_at=ist_now,
+        first_day=span_row.get("first_day"),
+        last_day=span_row.get("last_day"),
     )

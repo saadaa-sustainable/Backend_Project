@@ -3725,6 +3725,11 @@ export interface HourlyTrackerResponse {
   compare_full: HourlyTotals | null;
   latest_hour: number | null;
   fetched_at: string | null;
+  /** The span the table actually holds. A day outside it has not been
+   *  ingested, which is a different thing from a day that had no
+   *  traffic — the page needs to be able to say which. */
+  first_day: string | null;
+  last_day: string | null;
 }
 
 export function fetchHourlyTracker(
