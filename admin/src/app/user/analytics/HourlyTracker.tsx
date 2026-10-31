@@ -15,6 +15,7 @@ import {
   TableFrame,
   filterControlClass,
 } from "./SectionChrome";
+import { HourlyCompareChart } from "./charts/HourlyCompareChart";
 import { HourlyTrendChart } from "./charts/HourlyTrendChart";
 import { SessionSourceDonut } from "./charts/SessionSourceDonut";
 
@@ -409,6 +410,14 @@ export function HourlyTracker() {
                               baselineDay={c?.day ?? ""} />
             <SessionSourceDonut sources={data?.sources ?? []} />
           </div>
+
+          {/* The trend chart above draws both days as lines, which reads
+              SHAPE well and gaps badly. This reads the gap: one metric,
+              paired bars, so the difference is a length rather than a
+              distance between two moving curves. */}
+          <HourlyCompareChart rows={rows} baseline={data?.compare_rows ?? []}
+                              baselineDay={c?.day ?? ""}
+                              liveHour={isToday ? data?.latest_hour : null} />
 
           <TableFrame
             footer={

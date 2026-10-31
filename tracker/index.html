@@ -203,6 +203,24 @@
 
   </div>
 
+  <!-- The trend chart draws both days as lines, which reads SHAPE well
+       and gaps badly: two curves a few pixels apart at 04:00 and far
+       apart at 20:00 do not say which hours carried the difference.
+       Paired bars make the gap a length instead of a distance. -->
+  <div class="card" id="cmpcard" style="margin-top:16px" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px" id="cmp-title"></strong>
+      <label class="f" style="padding:4px 8px">Metric
+        <select id="cmp-metric" style="background:transparent;border:0;color:var(--text);font:inherit;font-size:12px;outline:none"></select>
+      </label>
+    </div>
+    <div class="legend" id="cmp-legend" style="margin-top:6px"></div>
+    <div style="overflow-x:auto;margin-top:6px">
+      <svg id="cmpchart" viewBox="0 0 1000 300" style="width:100%;min-width:620px"></svg>
+    </div>
+    <div class="sub" id="cmp-tip" style="margin-top:4px;min-height:16px"></div>
+  </div>
+
   <div style="margin-top:16px" class="tablewrap" id="tablewrap" hidden>
     <table><thead id="thead"></thead><tbody id="tbody"></tbody></table>
   </div>
@@ -415,7 +433,7 @@ function render(d, day) {
 
   if (!rows.length) {
     $("totals").hidden = $("chartcard").hidden = $("tablewrap").hidden = true;
-    $("donutcard").hidden = true;
+    $("donutcard").hidden = $("cmpcard").hidden = true;
     $("footnote").textContent =
       (d.first_day && d.last_day
         ? "This tracker holds " + d.first_day + " to " + d.last_day + ". "
@@ -424,11 +442,16 @@ function render(d, day) {
     return;
   }
 
+  // The label for line two everywhere -- the stacked table cells, the
+  // comparison chart, and the "nothing to compare against" notice.
+  // Falls back to the day the baseline WOULD have been, so a missing
+  // day still says WHICH day is missing.
+  const baselineDay = $("cmp").value ||
+    new Date(new Date(day + "T00:00:00Z").getTime() - 86400000).toISOString().slice(0, 10);
+
   // --- totals ---
   if (t) {
     const base = c || {};                  // no baseline: every read is undefined
-    const baselineDay = $("cmp").value ||
-      new Date(new Date(day + "T00:00:00Z").getTime() - 86400000).toISOString().slice(0, 10);
 
     $("totals").hidden = false;
     $("ttl-title").textContent = "Day to date · " + t.hours + " hours";
@@ -456,6 +479,8 @@ function render(d, day) {
 
   drawChart(rows, d.compare_rows || [], c ? c.day : "");
   drawDonut(d.sources || []);
+  drawCompare(rows, d.compare_rows || [], c ? c.day : baselineDay,
+              isToday ? d.latest_hour : null);
 
   // --- table ---
   $("tablewrap").hidden = false;
@@ -623,6 +648,137 @@ $("donutbody").addEventListener("pointerover", e => {
 $("donutbody").addEventListener("pointerleave", () => {
   if (DONUT.length) paintDonut(null);
 });
+
+// --- hour-by-hour comparison -----------------------------------------
+// One metric, this day beside the comparison day, paired bars sharing
+// one axis. The trend chart overlays both days as lines, which reads
+// SHAPE well and gaps badly -- two curves a few pixels apart at 04:00
+// and far apart at 20:00 do not say which hours carried the difference,
+// because the eye measures vertical distance against a moving baseline.
+//
+// A metric picker rather than a fixed series: "which hour beat
+// yesterday" gets asked of sessions one day and cost per session the
+// next, and three near-identical charts would be worse than one that
+// changes.
+const CMP_METRICS = [
+  ["sessions", "Sessions", num],
+  ["orders", "Orders", num],
+  ["revenue", "Revenue", v => inr(v, 0)],
+  ["spend", "Spend", v => inr(v, 0)],
+  ["cost_per_session", "Cost / session", v => inr(v, 0), true],
+  ["revenue_per_session", "Rev / session", v => inr(v, 0)],
+  ["aov", "AOV", v => inr(v, 0)],
+  ["conversion_rate", "Conversion rate", v => pc(v, 2)],
+  ["pct_paid", "% paid sessions", v => pc(v, 1)],
+  ["amer", "AMER", xx],
+];
+let CMP = null;   // {now, was, baseDay, live} from the last draw
+
+function drawCompare(rows, base, baseDay, liveHour) {
+  if (!rows.length) { $("cmpcard").hidden = true; return; }
+
+  if (!$("cmp-metric").options.length) {
+    $("cmp-metric").innerHTML = CMP_METRICS
+      .map(([k, label]) => '<option value="' + esc(k) + '">' + esc(label) + "</option>").join("");
+    $("cmp-metric").onchange = () => { if (CMP) paintCompare(); };
+  }
+
+  const byHour = rs => new Map(rs.map(r => [r.hour_of_day, r]));
+  CMP = { now: byHour(rows), was: byHour(base), baseDay: baseDay, live: liveHour };
+
+  $("cmpcard").hidden = false;
+  $("cmp-title").textContent = "Hour by hour against " + (baseDay || "the previous day");
+  $("cmp-legend").innerHTML =
+    '<span><i style="background:var(--cost);height:9px;width:9px;border-radius:2px"></i>this day</span>' +
+    '<span><i style="background:var(--border);height:9px;width:9px;border-radius:2px"></i>' +
+    esc(baseDay || "previous day") + "</span>";
+  paintCompare();
+}
+
+function paintCompare(hover) {
+  const W = 1000, H = 300, L = 64, R = 16, T = 16, B = 46;
+  const PW = W - L - R, PH = H - T - B;
+  const [key, , fmt, lowerBetter] = CMP_METRICS.find(m => m[0] === $("cmp-metric").value)
+                                   || CMP_METRICS[0];
+
+  const val = (m, h) => { const r = m.get(h); const v = r ? r[key] : null;
+                          return (v === null || v === undefined || !isFinite(v)) ? null : v; };
+  let max = 0;
+  for (let h = 0; h < 24; h++) {
+    const a = val(CMP.now, h), b = val(CMP.was, h);
+    if (a !== null) max = Math.max(max, a);
+    if (b !== null) max = Math.max(max, b);
+  }
+  max = (max || 1) * 1.08;
+
+  const slot = PW / 24, barW = Math.max(2, (slot - 4) / 2);
+  const y = v => T + PH * (1 - v / max);
+
+  let svg = "";
+  [0, 0.5, 1].forEach(f => {
+    const v = max * f;
+    svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) +
+           '" stroke="var(--border-soft)"></line>' +
+           '<text x="' + (L - 8) + '" y="' + y(v) + '" dominant-baseline="middle" ' +
+           'text-anchor="end" font-size="10.5" fill="var(--text-2)">' + esc(fmt(v)) + "</text>";
+  });
+
+  for (let h = 0; h < 24; h++) {
+    const x0 = L + h * slot, a = val(CMP.now, h), b = val(CMP.was, h);
+    const live = CMP.live != null && h === CMP.live;
+    // A full-height hover target: aiming at a 2px bar at 4am is not
+    // something anyone should have to do.
+    if (hover === h) {
+      svg += '<rect x="' + x0 + '" y="' + T + '" width="' + slot + '" height="' + PH +
+             '" fill="var(--border-soft)" opacity="0.55"></rect>';
+    }
+    svg += '<rect class="cmphit" data-h="' + h + '" x="' + x0 + '" y="' + T +
+           '" width="' + slot + '" height="' + PH + '" fill="transparent"></rect>';
+    if (b !== null) {
+      svg += '<rect x="' + (x0 + 2) + '" y="' + y(b) + '" width="' + barW +
+             '" height="' + (PH - (y(b) - T)) + '" fill="var(--border)"></rect>';
+    }
+    if (a !== null) {
+      svg += '<rect x="' + (x0 + 2 + barW) + '" y="' + y(a) + '" width="' + barW +
+             '" height="' + (PH - (y(a) - T)) + '" fill="var(--cost)"' +
+             (live ? ' opacity="0.45"' : "") + "></rect>";
+    }
+  }
+  [0, 3, 6, 9, 12, 15, 18, 21].forEach(h => {
+    svg += '<text x="' + (L + h * slot + slot / 2) + '" y="' + (H - 26) +
+           '" text-anchor="middle" font-size="10.5" fill="var(--text-2)">' +
+           ((h % 12) || 12) + (h < 12 ? "am" : "pm") + "</text>";
+  });
+  $("cmpchart").innerHTML = svg;
+
+  if (hover == null) {
+    $("cmp-tip").textContent = "Hover an hour to compare it.";
+    return;
+  }
+  const a = val(CMP.now, hover), b = val(CMP.was, hover);
+  const live = CMP.live != null && hover === CMP.live;
+  let tail;
+  if (live) tail = '<span class="flat">still filling \u2014 no comparison</span>';
+  else if (a === null || b === null || !b) tail = '<span class="flat">\u2014</span>';
+  else {
+    const ch = (a - b) / Math.abs(b);
+    const good = lowerBetter ? ch < 0 : ch > 0;
+    tail = '<span class="' + (good ? "good" : "bad") + '">' +
+           (ch > 0 ? "\u2197 " : ch < 0 ? "\u2198 " : "") +
+           Math.abs(ch * 100).toFixed(0) + "%</span>";
+  }
+  $("cmp-tip").innerHTML =
+    "<strong>" + String(hover).padStart(2, "0") + ":00</strong> &nbsp; " +
+    esc(fmt(a)) + " &nbsp; <span class=\"flat\">" + esc(CMP.baseDay || "prev") + " " +
+    esc(fmt(b)) + "</span> &nbsp; " + tail;
+}
+
+// Delegated: paintCompare replaces the whole SVG on every hover.
+$("cmpchart").addEventListener("pointerover", e => {
+  const el = e.target.closest(".cmphit");
+  if (el && CMP) paintCompare(Number(el.getAttribute("data-h")));
+});
+$("cmpchart").addEventListener("pointerleave", () => { if (CMP) paintCompare(null); });
 
 // --- chart ------------------------------------------------------------
 // Three bands, because sessions run in thousands, the two ratios in tens
