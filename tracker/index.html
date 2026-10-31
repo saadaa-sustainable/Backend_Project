@@ -279,8 +279,15 @@ function apiBase() {
 const IST_MIN = 330;
 function istToday() {
   const n = new Date();
-  return new Date(n.getTime() + (IST_MIN + n.getTimezoneOffset()) * 60000)
-    .toISOString().slice(0, 10);
+  // No getTimezoneOffset here. getTime() is already epoch -- an
+  // instant, with no timezone in it -- so adding the browser's offset
+  // corrects a second time for something already correct.
+  //
+  // It only showed up for browsers already in IST, which is every user
+  // of this dashboard: between 00:00 and 05:30 IST the UTC date is
+  // still yesterday, so the page opened on yesterday and the hourly
+  // refresh kept it there. Reported 2026-11-01 at 01:29 IST.
+  return new Date(n.getTime() + IST_MIN * 60000).toISOString().slice(0, 10);
 }
 
 const inr = (n, dp = 2) => n === null || n === undefined ? "—"
@@ -415,7 +422,14 @@ const HEROES = [
 const $ = id => document.getElementById(id);
 let timer = null;
 
+//: Did someone CHOOSE this day, or did it default to today? Only the
+//: default may roll forward. Without the distinction a tab left open
+//: overnight keeps refreshing yesterday for ever -- the day was read
+//: once at load and never looked at again.
+let DAY_PINNED = false;
+
 async function load() {
+  if (!DAY_PINNED) $("day").value = istToday();
   const day = $("day").value || istToday();
   const cmp = $("cmp").value;
   const base = apiBase();
@@ -1087,6 +1101,8 @@ function hideTip() {
 }
 
 // --- wiring -----------------------------------------------------------
+// ?day= is a deliberate choice and must survive midnight.
+DAY_PINNED = !!qs.get("day");
 $("day").value = qs.get("day") || istToday();
 $("cmp").value = qs.get("compare_to") || "";
 $("api").value = apiBase();
@@ -1096,7 +1112,7 @@ $("chart").addEventListener("pointermove", hoverAt);
 $("chart").addEventListener("pointerleave", hideTip);
 
 $("refresh").onclick = load;
-$("day").onchange = load;
+$("day").onchange = () => { DAY_PINNED = true; load(); };
 $("cmp").onchange = load;
 // A re-render, not a re-fetch: the figures are already in hand and the
 // toggle only decides whether the third line is drawn.

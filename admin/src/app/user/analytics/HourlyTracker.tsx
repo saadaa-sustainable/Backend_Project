@@ -40,7 +40,11 @@ const IST_OFFSET_MIN = 330;
  *  store reports in IST, so the dashboard has to think in IST. */
 function istToday(): string {
   const now = new Date();
-  const ist = new Date(now.getTime() + (IST_OFFSET_MIN + now.getTimezoneOffset()) * 60000);
+  // No getTimezoneOffset: getTime() is already epoch, so adding the
+  // browser's offset corrects a second time for something already
+  // correct. It only broke for browsers in IST -- between 00:00 and
+  // 05:30 the UTC date is still yesterday, so the page showed yesterday.
+  const ist = new Date(now.getTime() + IST_OFFSET_MIN * 60000);
   return ist.toISOString().slice(0, 10);
 }
 
@@ -226,6 +230,10 @@ const METRICS: {
 
 export function HourlyTracker() {
   const [day, setDay] = useState(istToday);
+  /** Did someone CHOOSE this day, or did it default to today? Only the
+   *  default may roll forward. Without the distinction a tab left open
+   *  overnight keeps refreshing yesterday for ever. */
+  const [dayPinned, setDayPinned] = useState(false);
   const [compareTo, setCompareTo] = useState("");
   const [showDeltas, setShowDeltas] = useState(true);
   /** Hours opened out. A Set, not one hour: comparing 09:00 with
@@ -275,10 +283,17 @@ export function HourlyTracker() {
   // Once an hour, because the data arrives once an hour: the ingest
   // cron fires at minute 5, and polling twelve times an hour fetched
   // the same rows eleven times over.
+  //
+  // The same tick rolls the date forward at midnight, unless someone
+  // has chosen a day. A tab open across midnight was otherwise still
+  // asking for yesterday at noon.
   useEffect(() => {
-    const id = window.setInterval(() => setTick((n) => n + 1), 60 * 60000);
+    const id = window.setInterval(() => {
+      setDay((d) => (dayPinned ? d : istToday()));
+      setTick((n) => n + 1);
+    }, 60 * 60000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [dayPinned]);
 
   const rows = data?.rows ?? [];
   const baseline = useMemo(() => {
@@ -315,7 +330,7 @@ export function HourlyTracker() {
       <div className="flex flex-wrap items-end gap-3">
         <FilterCell label="Day" className="w-44" htmlFor="ht-day">
           <input id="ht-day" type="date" value={day} max={istToday()}
-                 onChange={(e) => setDay(e.target.value)} className={filterControlClass} />
+                 onChange={(e) => { setDayPinned(true); setDay(e.target.value); }} className={filterControlClass} />
         </FilterCell>
         <FilterCell label="Compare to" className="w-48" htmlFor="ht-cmp">
           <input id="ht-cmp" type="date" value={compareTo} max={istToday()}
