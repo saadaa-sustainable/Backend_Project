@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApiError,
@@ -15,6 +15,7 @@ import {
   TableFrame,
   filterControlClass,
 } from "./SectionChrome";
+import { HourDetail } from "./charts/HourDetail";
 import { HourlyCompareChart } from "./charts/HourlyCompareChart";
 import { HourlyTrendChart } from "./charts/HourlyTrendChart";
 import { SessionSourceDonut } from "./charts/SessionSourceDonut";
@@ -227,6 +228,28 @@ export function HourlyTracker() {
   const [day, setDay] = useState(istToday);
   const [compareTo, setCompareTo] = useState("");
   const [showDeltas, setShowDeltas] = useState(true);
+  /** Hours opened out. A Set, not one hour: comparing 09:00 with
+   *  14:00 means having both on screen at once. */
+  const [openHours, setOpenHours] = useState<ReadonlySet<number>>(new Set());
+  /** The scrolling table's VISIBLE width, for the drill-down panel.
+   *  Measured rather than assumed: 100vw includes the sidebar, and the
+   *  cell the panel sits in is as wide as the whole table. */
+  const scrollBox = useRef<HTMLDivElement | null>(null);
+  const [boxWidth, setBoxWidth] = useState<number | undefined>(undefined);
+  const measure = useCallback((el: HTMLDivElement | null) => {
+    scrollBox.current = el;
+    if (el) setBoxWidth(el.clientWidth);
+  }, []);
+  // Re-runs once the ref callback has supplied a node; after that the
+  // observer keeps the width current on resize.
+  const measured = boxWidth !== undefined;
+  useEffect(() => {
+    const el = scrollBox.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setBoxWidth(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measured]);
   const [data, setData] = useState<HourlyTrackerResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -451,7 +474,8 @@ export function HourlyTracker() {
               </>
             }
           >
-            <div className="overflow-x-auto border border-border-primary bg-bg-white">
+            <div ref={measure}
+                 className="overflow-x-auto border border-border-primary bg-bg-white">
               <table className="border-collapse bg-bg-white text-[12.5px]">
                 <thead>
                   <tr className="bg-bg-white text-left text-[11px] uppercase tracking-wide text-text-tertiary">
@@ -518,8 +542,29 @@ export function HourlyTracker() {
                     // all. The figures stay, the comparison does not.
                     const partial = isToday && r.hour_of_day === data?.latest_hour;
                     return (
-                      <tr key={r.hour}
-                          className={`align-top hover:bg-bg-muted/40 ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
+                      <Fragment key={r.hour}>
+                      <tr
+                        onClick={() => setOpenHours((prev) => {
+                          const next = new Set(prev);
+                          if (!next.delete(r.hour_of_day)) next.add(r.hour_of_day);
+                          return next;
+                        })}
+                        // Rows are interactive, so they have to be
+                        // reachable without a mouse. A tr cannot be a
+                        // button, hence the explicit role and key.
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={openHours.has(r.hour_of_day)}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Enter" && e.key !== " ") return;
+                          e.preventDefault();
+                          setOpenHours((prev) => {
+                            const next = new Set(prev);
+                            if (!next.delete(r.hour_of_day)) next.add(r.hour_of_day);
+                            return next;
+                          });
+                        }}
+                        className={`cursor-pointer align-top hover:bg-bg-muted/40 ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
                         <td style={{ minWidth: 172 }}
                             className={`sticky left-0 z-10 whitespace-nowrap border-b border-r border-border-soft px-3 py-1.5 font-mono text-[11.5px] text-text-primary ${partial ? "bg-bg-muted/30" : "bg-bg-white"}`}>
                           <span className="block">
@@ -530,6 +575,10 @@ export function HourlyTracker() {
                                 live
                               </span>
                             )}
+                            <span aria-hidden="true"
+                                  className="ml-1.5 font-sans text-[9px] text-text-tertiary">
+                              {openHours.has(r.hour_of_day) ? "\u25BC" : "\u25B6"}
+                            </span>
                           </span>
                           <span className="mt-0.5 block text-text-tertiary">
                             {hourLabel(baseDay, r.hour_of_day)}
@@ -555,6 +604,22 @@ export function HourlyTracker() {
                           );
                         })}
                       </tr>
+                      {openHours.has(r.hour_of_day) && (
+                        <tr>
+                          <td colSpan={METRICS.length + 1}
+                              className="border-b border-border-primary p-0">
+                            <HourDetail
+                              row={r}
+                              prev={prev}
+                              dayLabel={dayLabel(r.day_ist)}
+                              prevLabel={`${dayLabel(baseDay)}, ${String(r.hour_of_day).padStart(2, "0")}:00`}
+                              partial={partial}
+                              width={boxWidth}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>

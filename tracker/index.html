@@ -108,6 +108,31 @@
   tr.total td .l1 { font-weight: 650; }
   tr.total td .l2 { font-weight: 400; }
   td .l1, td .l2 { font-variant-numeric: tabular-nums; }
+  tbody tr.hrow { cursor: pointer; }
+  .caret { font-size: 9px; color: var(--text-3); margin-left: 6px; }
+  /* Sticky, and sized by script to the VISIBLE table width: the cell it
+     sits in spans a table far wider than the screen, so without both
+     the right-hand groups land off-screen and scroll away from the row
+     they describe. */
+  tr.detail > td { padding: 0; background: var(--muted); border-bottom: 1px solid var(--border); }
+  .hd { position: sticky; left: 0; padding: 12px 16px; }
+  .hd-head { font-size: 12.5px; font-weight: 600; }
+  .hd-grid { display: grid; gap: 14px 40px; margin-top: 10px; }
+  @media (min-width: 760px) { .hd-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  .hd-g > div:first-child { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+                            color: var(--text-3); }
+  .hd-g table { width: 100%; margin-top: 4px; }
+  .hd-g td { border: 0; padding: 1px 8px 1px 0; font-size: 11.5px; white-space: nowrap;
+             font-variant-numeric: tabular-nums; }
+  /* The main table pins its first column with position:sticky and an
+     opaque background. That rule matches by selector, so it also hit
+     every nested table in here and painted a bar down the labels. */
+  .hd-g td:first-child { text-align: left; color: var(--text-2);
+                         position: static; background: transparent; }
+  .hd-g td.v { text-align: right; color: var(--text); }
+  .hd-g td.w { text-align: right; color: var(--text-3); }
+  .hd-g td.c { text-align: right; font-size: 11px; }
+  .hd-note { margin-top: 4px; font-size: 10.5px; line-height: 1.4; color: var(--text-3); }
   .note { color: var(--text-3); font-size: 11.5px; margin-top: 10px; line-height: 1.6; }
   .err { border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 13px; }
   /* The chart and the donut sit side by side on a desktop and stack on
@@ -517,6 +542,11 @@ function render(d, day) {
     METRICS.map(([k, , fmt, dir, points]) =>
       cell(t[k], c ? c[k] : null, fmt, dir, points, false)).join("") + '</tr>';
 
+  // The visible width of the scrolling table, for the drill-down.
+  // Measured, not assumed: the cell it sits in is as wide as the whole
+  // table, and that is far wider than the screen.
+  const boxW = $("tablewrap").clientWidth;
+
   $("tbody").innerHTML = totalRow + rows.slice().reverse().map(r => {
     // The newest hour of today is still filling. Its figures are real;
     // its change against a COMPLETE hour yesterday is not, and reads as
@@ -524,13 +554,16 @@ function render(d, day) {
     // percentage withheld.
     const live = isToday && r.hour_of_day === d.latest_hour;
     const p = prev.get(r.hour_of_day);
-    return '<tr class="' + (live ? "live" : "") + '">' +
+    const open = OPEN_HOURS.has(r.hour_of_day);
+    return '<tr class="hrow ' + (live ? "live" : "") + '" data-hr="' + r.hour_of_day + '">' +
       '<td><span class="l1">' + hourLabel(r.day_ist, r.hour_of_day) +
-      (live ? '<span class="tag">live</span>' : "") + '</span>' +
+      (live ? '<span class="tag">live</span>' : "") +
+      '<span class="caret">' + (open ? "\u25BC" : "\u25B6") + '</span></span>' +
       '<span class="l2">' + hourLabel(baseDay, r.hour_of_day) + '</span>' +
       (showPct && !live ? '<span class="l3">&nbsp;</span>' : '') + '</td>' +
       METRICS.map(([k, , fmt, dir, points]) =>
-        cell(r[k], p ? p[k] : null, fmt, dir, points, live)).join("") + '</tr>';
+        cell(r[k], p ? p[k] : null, fmt, dir, points, live)).join("") + '</tr>' +
+      (open ? hourDetailHTML(r, p, baseDay, live, boxW) : "");
   }).join("");
 
   $("footnote").textContent =
@@ -653,6 +686,98 @@ $("donutbody").addEventListener("pointerover", e => {
 $("donutbody").addEventListener("pointerleave", () => {
   if (DONUT.length) paintDonut(null);
 });
+
+// --- one hour, opened out --------------------------------------------
+// The table carries only as many metrics as fit across a screen, and
+// several that matter are not among them -- the session and order
+// splits, what was excluded, what GA4 saw. Those are the figures you
+// want precisely when an hour looks wrong, which is the moment you
+// click it.
+//
+// Grouped rather than listed: "sessions up, orders flat" is a different
+// story from "sessions flat, orders down", and the grouping is what
+// makes the two readable at a glance.
+//
+// Each item is [key, label, fmt, kind] where kind is "" (up is good),
+// "down" (a fall is the win -- only cost), "pt" (a share, so the change
+// is points) or "flat" (no judgement: a mix is a choice, not a score).
+const HD_GROUPS = [
+  ["Traffic", "Paid means attributed, not bought \u2014 any utm_source that is not direct.", [
+    ["sessions", "Sessions", num, ""],
+    ["sessions_paid", "Paid sessions", num, ""],
+    ["sessions_direct", "Direct sessions", num, ""],
+    ["sessions_meta", "Meta sessions", num, ""],
+    ["sessions_google", "Google sessions", num, ""],
+    ["pct_paid", "% paid", v => pc(v, 1), "pt-flat"],
+    ["pct_direct", "% direct", v => pc(v, 1), "pt-flat"],
+  ]],
+  ["Conversion", "", [
+    ["orders", "Orders", num, ""],
+    ["orders_paid", "Paid orders", num, ""],
+    ["orders_direct", "Direct orders", num, ""],
+    ["conversion_rate", "CR", v => pc(v, 2), "pt"],
+    ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "pt"],
+    ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "pt"],
+  ]],
+  ["Revenue", "", [
+    ["revenue", "Revenue", v => inr(v, 0), ""],
+    ["revenue_paid", "Paid revenue", v => inr(v, 0), ""],
+    ["aov", "AOV", v => inr(v), ""],
+    ["revenue_per_session", "Rev / session", v => inr(v), ""],
+    ["revenue_per_paid_session", "Rev / paid session", v => inr(v), ""],
+    ["revenue_shopifyql", "ShopifyQL cross-check", v => inr(v, 0), ""],
+  ]],
+  ["Spend", "Only Meta is measured hourly; Google and Kwikchat are daily totals shared across the hours.", [
+    ["spend", "Spend", v => inr(v, 0), ""],
+    ["meta_spend", "Meta", v => inr(v, 0), ""],
+    ["google_spend", "Google", v => inr(v, 0), ""],
+    ["kwikchat_spend", "Kwikchat", v => inr(v, 0), ""],
+    ["meta_impressions", "Impressions (Meta)", num, ""],
+    ["cost_per_session", "Cost / session", v => inr(v), "down"],
+    ["cost_per_paid_session", "Cost / paid session", v => inr(v), "down"],
+  ]],
+  ["Acquisition", "", [
+    ["new_customers", "New customers", num, ""],
+    ["new_customer_revenue", "New-customer revenue", v => inr(v, 0), ""],
+    ["amer", "AMER", xx, ""],
+  ]],
+  ["GA4", "A different tool and a different denominator \u2014 ARPU divides by active users, not sessions. GA4 lags, so the newest hours are often absent.", [
+    ["ga4_active_users", "Active users", num, ""],
+    ["ga4_sessions", "Sessions (GA4)", num, ""],
+    ["ga4_revenue", "Revenue (GA4)", v => inr(v, 0), ""],
+    ["ga4_arpu", "ARPU", v => inr(v), ""],
+  ]],
+  ["Not counted", "Cancelled, or returned without an exchange. Set aside rather than dropped silently, so a gap against Shopify's admin has an explanation.", [
+    ["orders_excluded", "Orders excluded", num, "flat"],
+    ["revenue_excluded", "Revenue excluded", v => inr(v, 0), "flat"],
+  ]],
+];
+
+//: Hours opened out. A Set, not one hour: comparing 09:00 with 14:00
+//: means having both on screen at once.
+const OPEN_HOURS = new Set();
+
+function hourDetailHTML(r, p, baseDay, live, width) {
+  const body = HD_GROUPS.map(([title, note, items]) =>
+    '<div class="hd-g"><div>' + esc(title) + "</div><table><tbody>" +
+    items.map(([k, label, fmt, kind]) => {
+      const now = r[k], was = p ? p[k] : null;
+      const pts = kind.indexOf("pt") === 0;
+      const dir = kind === "down" ? "down" : kind.indexOf("flat") >= 0 ? "flat" : "up";
+      return "<tr><td>" + esc(label) + '</td><td class="v">' + fmt(now) +
+             '</td><td class="w">' + fmt(was) + '</td><td class="c">' +
+             (live ? '<span class="flat">\u2014</span>' : changeHTML(now, was, dir, pts)) +
+             "</td></tr>";
+    }).join("") + "</tbody></table>" +
+    (note ? '<p class="hd-note">' + esc(note) + "</p>" : "") + "</div>").join("");
+
+  return '<tr class="detail"><td colspan="' + (METRICS.length + 1) + '">' +
+    '<div class="hd"' + (width ? ' style="width:' + width + 'px"' : "") + '>' +
+    '<span class="hd-head">' + esc(hourLabel(r.day_ist, r.hour_of_day)) + "</span> " +
+    '<span class="sub">against ' + esc(hourLabel(baseDay, r.hour_of_day)) + "</span>" +
+    (live ? ' <span class="sub">still filling \u2014 changes withheld</span>' : "") +
+    '<div class="hd-grid">' + body + "</div></div></td></tr>";
+}
 
 // --- hour-by-hour comparison -----------------------------------------
 // One metric, this day beside the comparison day, paired bars sharing
@@ -944,6 +1069,17 @@ $("cmp").onchange = load;
 // A re-render, not a re-fetch: the figures are already in hand and the
 // toggle only decides whether the third line is drawn.
 $("deltas").onchange = () => { if (LAST) render(LAST.d, LAST.day); };
+
+// Delegated: the table body is rebuilt on every toggle, so per-row
+// handlers would not survive it. A re-render, not a refetch -- the
+// figures are already in hand.
+$("tbody").addEventListener("click", e => {
+  const tr = e.target.closest("tr.hrow");
+  if (!tr || !LAST) return;
+  const hr = Number(tr.getAttribute("data-hr"));
+  if (!OPEN_HOURS.delete(hr)) OPEN_HOURS.add(hr);
+  render(LAST.d, LAST.day);
+});
 $("api").onchange = () => {
   try { localStorage.setItem("tracker_api", $("api").value.trim()); } catch {}
   load();
