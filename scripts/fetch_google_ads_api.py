@@ -94,7 +94,8 @@ WHERE segments.date BETWEEN '{since}' AND '{until}'
 UPSERT = """
 INSERT INTO public.google_ads_spend_daily
   (day, campaign_id, campaign_name, campaign_status, channel_type,
-   spend, clicks, impressions, conversions, conv_value, fetched_at, source)
+   spend, clicks, impressions, conversions, conv_value, fetched_at, source,
+   data_as_of)
 VALUES %s
 ON CONFLICT (day, campaign_id) DO UPDATE SET
   campaign_name   = EXCLUDED.campaign_name,
@@ -106,7 +107,17 @@ ON CONFLICT (day, campaign_id) DO UPDATE SET
   conversions     = EXCLUDED.conversions,
   conv_value      = EXCLUDED.conv_value,
   fetched_at      = EXCLUDED.fetched_at,
-  source          = EXCLUDED.source
+  source          = EXCLUDED.source,
+  -- The API answers LIVE, so the data is current as of the moment we
+  -- asked. MapleMonk's copy is current as of its morning sync, which
+  -- is what data_as_of carries for its rows.
+  --
+  -- Without this the stale MapleMonk value survived on rows the API had
+  -- already overwritten with fresher numbers: measured 2026-10-31, a
+  -- row fetched 11:42 still claimed 11:03, and the hourly tracker reads
+  -- that column to decide how many hours a day's spend covers. It was
+  -- holding back forty minutes of Google spend for no reason.
+  data_as_of      = EXCLUDED.data_as_of
 """
 
 
@@ -124,7 +135,9 @@ def _rows(results: list[dict]) -> list[tuple]:
             int(m.get("impressions", 0)),
             float(m.get("conversions", 0)),
             float(m.get("conversionsValue", 0)),
-            now, "google_ads_api",
+            # fetched_at and data_as_of are the same instant here, and
+            # that is the claim: the API answered live.
+            now, "google_ads_api", now,
         ))
     return out
 
