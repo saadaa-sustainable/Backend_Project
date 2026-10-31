@@ -125,36 +125,72 @@ const GROUPS: { title: string; note?: string; items: Item[] }[] = [
   },
 ];
 
-function Delta({ now, was, item }: {
+/** Relative change, the quantity every bar is drawn from.
+ *
+ *  Relative for EVERY metric, shares included, so one axis can carry
+ *  all of them and the bars mean the same thing next to each other. A
+ *  share's honest unit is points, so the LABEL still says points -- the
+ *  bar answers "how far did this move", the label answers "by how
+ *  much", and those are different questions.
+ */
+function relative(now: number | null, was: number | null): number | null {
+  if (now === null || now === undefined || !was) return null;
+  return (now - was) / Math.abs(was);
+}
+
+function Bar({ now, was, item, scale }: {
+  now: number | null; was: number | null; item: Item; scale: number;
+}) {
+  const ch = relative(now, was);
+  if (ch === null) {
+    return <div className="h-3 rounded-sm bg-border-soft" style={{ opacity: 0.4 }} />;
+  }
+  // Clamped, not scaled to the largest: one metric moving 900% would
+  // otherwise flatten every other bar to a sliver and the chart would
+  // say nothing. The clamp is marked so an outlier is still visible AS
+  // an outlier.
+  const frac = Math.min(Math.abs(ch) / scale, 1);
+  const clipped = Math.abs(ch) > scale;
+  const good = item.lowerIsBetter ? ch < 0 : ch > 0;
+  const ink = item.neutral ? "bg-border-primary"
+    : good ? "bg-success-mid" : "bg-warning-text";
+
+  return (
+    <div className="relative h-3" aria-hidden="true">
+      {/* The zero line. Bars grow right when the figure rose and left
+          when it fell, so direction is readable before any colour. */}
+      <div className="absolute inset-y-0 left-1/2 w-px bg-border-primary" />
+      <div
+        className={`absolute inset-y-0 ${ink} ${ch > 0 ? "rounded-r-sm" : "rounded-l-sm"}`}
+        style={ch > 0
+          ? { left: "50%", width: `${frac * 50}%` }
+          : { right: "50%", width: `${frac * 50}%` }}
+      />
+      {clipped && (
+        <div className={`absolute inset-y-0 w-0.5 bg-text-primary ${ch > 0 ? "right-0" : "left-0"}`} />
+      )}
+    </div>
+  );
+}
+
+function Label({ now, was, item }: {
   now: number | null; was: number | null; item: Item;
 }) {
   if (now === null || now === undefined || !was) {
     return <span className="text-text-tertiary">—</span>;
   }
-  // Colour and arrow answer different questions, so they are decided
-  // separately. Grey says "no judgement" -- a traffic mix is a choice,
-  // not a score. The arrow still says WHICH WAY, which is a fact and
-  // worth keeping even where the direction is not good or bad.
   const tiny = (v: number) => Math.abs(v) < (item.points ? 0.05 : 0.005);
   if (item.points) {
     const pts = (now - was) * 100;
     const ink = tiny(pts) || item.neutral ? "text-text-tertiary"
       : pts > 0 ? "text-success-text" : "text-warning-text";
-    return (
-      <span className={ink}>
-        {tiny(pts) ? "" : pts > 0 ? "↗ +" : "↘ "}{pts.toFixed(1)} pt
-      </span>
-    );
+    return <span className={ink}>{pts > 0 ? "+" : ""}{pts.toFixed(1)} pt</span>;
   }
   const ch = (now - was) / Math.abs(was);
   const good = item.lowerIsBetter ? ch < 0 : ch > 0;
   const ink = tiny(ch) || item.neutral ? "text-text-tertiary"
     : good ? "text-success-text" : "text-warning-text";
-  return (
-    <span className={ink}>
-      {tiny(ch) ? "" : ch > 0 ? "↗ " : "↘ "}{Math.abs(ch * 100).toFixed(0)}%
-    </span>
-  );
+  return <span className={ink}>{ch > 0 ? "+" : ""}{(ch * 100).toFixed(0)}%</span>;
 }
 
 export function HourDetail({ row, prev, dayLabel, prevLabel, partial, width }: {
@@ -194,37 +230,48 @@ export function HourDetail({ row, prev, dayLabel, prevLabel, partial, width }: {
       {/* Two columns, not three. A third fits the width but not the
           CONTENT: rupee figures in the lakhs plus a label and two
           comparison columns clipped the rightmost group. */}
+      {/* One shared scale, so a bar in Spend means the same as a bar
+          in Traffic. Clamped at 100% rather than fitted to the largest:
+          a single metric up 900% would flatten every other bar to a
+          sliver and the chart would say nothing. */}
+      <div className="mt-1 text-[10.5px] text-text-tertiary">
+        Bars show movement against the comparison hour, left for a fall
+        and right for a rise, on one shared scale clamped at ±100%. A
+        solid end-cap means the move ran past the scale. Shares are drawn
+        relative so they sit on the same axis, but labelled in points.
+      </div>
+
       <div className="mt-3 grid gap-x-10 gap-y-4 md:grid-cols-2">
         {GROUPS.map((g) => (
           <div key={g.title} className="min-w-0">
             <div className="text-[11px] uppercase tracking-wide text-text-tertiary">
               {g.title}
             </div>
-            <table className="mt-1 w-full">
-              <tbody>
-                {g.items.map((it) => {
-                  const now = read(row, it.key);
-                  const was = read(prev, it.key);
-                  return (
-                    <tr key={String(it.key)} className="align-baseline">
-                      <td className="py-[1px] pr-2 text-[11.5px] text-text-secondary">
-                        {it.label}
-                      </td>
-                      <td className="py-[1px] pr-2 text-right text-[11.5px] tabular-nums text-text-primary">
-                        {it.fmt(now)}
-                      </td>
-                      <td className="py-[1px] pr-2 text-right text-[11.5px] tabular-nums text-text-tertiary">
-                        {it.fmt(was)}
-                      </td>
-                      <td className="py-[1px] text-right text-[11px] tabular-nums">
-                        {partial ? <span className="text-text-tertiary">—</span>
-                                 : <Delta now={now} was={was} item={it} />}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <div className="mt-1 space-y-[3px]">
+              {g.items.map((it) => {
+                const now = read(row, it.key);
+                const was = read(prev, it.key);
+                return (
+                  <div key={String(it.key)}
+                       className="grid items-center gap-x-2"
+                       style={{ gridTemplateColumns: "minmax(0,1fr) 72px 110px 52px" }}>
+                    <span className="truncate text-[11.5px] text-text-secondary">
+                      {it.label}
+                    </span>
+                    <span className="text-right text-[11.5px] tabular-nums text-text-primary">
+                      {it.fmt(now)}
+                    </span>
+                    {partial
+                      ? <div className="h-3 rounded-sm bg-border-soft opacity-40" />
+                      : <Bar now={now} was={was} item={it} scale={1} />}
+                    <span className="text-right text-[11px] tabular-nums">
+                      {partial ? <span className="text-text-tertiary">—</span>
+                               : <Label now={now} was={was} item={it} />}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
             {g.note && (
               <p className="mt-1 text-[10.5px] leading-snug text-text-tertiary">{g.note}</p>
             )}

@@ -121,17 +121,21 @@
   @media (min-width: 760px) { .hd-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
   .hd-g > div:first-child { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
                             color: var(--text-3); }
-  .hd-g table { width: 100%; margin-top: 4px; }
-  .hd-g td { border: 0; padding: 1px 8px 1px 0; font-size: 11.5px; white-space: nowrap;
-             font-variant-numeric: tabular-nums; }
-  /* The main table pins its first column with position:sticky and an
-     opaque background. That rule matches by selector, so it also hit
-     every nested table in here and painted a bar down the labels. */
-  .hd-g td:first-child { text-align: left; color: var(--text-2);
-                         position: static; background: transparent; }
-  .hd-g td.v { text-align: right; color: var(--text); }
-  .hd-g td.w { text-align: right; color: var(--text-3); }
-  .hd-g td.c { text-align: right; font-size: 11px; }
+  .hd-rows { margin-top: 4px; }
+  .hd-r { display: grid; align-items: center; gap: 0 8px; padding: 1.5px 0;
+          grid-template-columns: minmax(0,1fr) 72px 110px 52px; font-size: 11.5px;
+          font-variant-numeric: tabular-nums; }
+  .hd-r .nm { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hd-r .v { text-align: right; color: var(--text); }
+  .hd-r .c { text-align: right; font-size: 11px; }
+  /* The bar. Grows right from a centre line when the figure rose and
+     left when it fell, so direction is readable before any colour. */
+  .hd-bar { position: relative; height: 12px; }
+  .hd-bar .zero { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px;
+                  background: var(--border); }
+  .hd-bar .fill { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+  .hd-bar .cap { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
+  .hd-bar.none { background: var(--border-soft); border-radius: 2px; opacity: .4; }
   .hd-note { margin-top: 4px; font-size: 10.5px; line-height: 1.4; color: var(--text-3); }
   .note { color: var(--text-3); font-size: 11.5px; margin-top: 10px; line-height: 1.6; }
   .err { border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 13px; }
@@ -757,18 +761,42 @@ const HD_GROUPS = [
 //: means having both on screen at once.
 const OPEN_HOURS = new Set();
 
+// One shared scale for every bar, so a bar under Spend means the same
+// as one under Traffic. Clamped rather than fitted to the largest: a
+// single metric up 900% would flatten every other bar to a sliver and
+// the chart would say nothing. A clamped bar gets an end-cap so an
+// outlier is still visible AS an outlier.
+const HD_SCALE = 1.0;
+
+function hdBar(now, was, kind, live) {
+  if (live || now == null || was == null || !was) return '<div class="hd-bar none"></div>';
+  const ch = (now - was) / Math.abs(was);
+  const frac = Math.min(Math.abs(ch) / HD_SCALE, 1) * 50;
+  const neutral = kind.indexOf("flat") >= 0;
+  const good = kind === "down" ? ch < 0 : ch > 0;
+  const colour = neutral ? "var(--border)" : good ? "var(--good)" : "var(--bad)";
+  const side = ch > 0 ? "left:50%" : "right:50%";
+  const cap = Math.abs(ch) > HD_SCALE
+    ? '<div class="cap" style="' + (ch > 0 ? "right:0" : "left:0") + '"></div>' : "";
+  return '<div class="hd-bar"><div class="zero"></div>' +
+         '<div class="fill" style="' + side + ';width:' + frac + '%;background:' + colour + '"></div>' +
+         cap + "</div>";
+}
+
 function hourDetailHTML(r, p, baseDay, live, width) {
   const body = HD_GROUPS.map(([title, note, items]) =>
-    '<div class="hd-g"><div>' + esc(title) + "</div><table><tbody>" +
+    '<div class="hd-g"><div>' + esc(title) + '</div><div class="hd-rows">' +
     items.map(([k, label, fmt, kind]) => {
       const now = r[k], was = p ? p[k] : null;
       const pts = kind.indexOf("pt") === 0;
       const dir = kind === "down" ? "down" : kind.indexOf("flat") >= 0 ? "flat" : "up";
-      return "<tr><td>" + esc(label) + '</td><td class="v">' + fmt(now) +
-             '</td><td class="w">' + fmt(was) + '</td><td class="c">' +
+      return '<div class="hd-r"><span class="nm">' + esc(label) + "</span>" +
+             '<span class="v">' + fmt(now) + "</span>" +
+             hdBar(now, was, kind, live) +
+             '<span class="c">' +
              (live ? '<span class="flat">\u2014</span>' : changeHTML(now, was, dir, pts)) +
-             "</td></tr>";
-    }).join("") + "</tbody></table>" +
+             "</span></div>";
+    }).join("") + "</div>" +
     (note ? '<p class="hd-note">' + esc(note) + "</p>" : "") + "</div>").join("");
 
   return '<tr class="detail"><td colspan="' + (METRICS.length + 1) + '">' +
@@ -776,6 +804,10 @@ function hourDetailHTML(r, p, baseDay, live, width) {
     '<span class="hd-head">' + esc(hourLabel(r.day_ist, r.hour_of_day)) + "</span> " +
     '<span class="sub">against ' + esc(hourLabel(baseDay, r.hour_of_day)) + "</span>" +
     (live ? ' <span class="sub">still filling \u2014 changes withheld</span>' : "") +
+    '<p class="hd-note" style="margin-top:6px">Bars show movement against the comparison ' +
+    'hour, left for a fall and right for a rise, on one shared scale clamped at \u00b1100%. ' +
+    'A solid end-cap means the move ran past the scale. Shares are drawn relative so they ' +
+    'sit on the same axis, but labelled in points.</p>' +
     '<div class="hd-grid">' + body + "</div></div></td></tr>";
 }
 
