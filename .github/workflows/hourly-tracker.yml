@@ -102,29 +102,17 @@ jobs:
       # the tracker READS them: it shares Google's daily total across the
       # hours and divides Kwikchat's by 24. Running them afterwards would
       # publish an hour costed against yesterday's spend.
-      - name: Refresh Google Ads spend
-        # Cheap: a few days of one BigQuery table, ~0.001 GiB a run.
-        #
-        # MapleMonk syncs once each morning, so most hourly runs re-read
-        # the same numbers. That is the point -- when the sync does land,
-        # the tracker picks it up within the hour instead of waiting for
-        # tomorrow's daily refresh. The three-day window also lets a
-        # partial same-day capture be corrected once the full day exports.
-        #
-        # Not allowed to fail the job. Google is a minority of spend and
-        # the tracker stores NULL for an uncovered hour rather than
-        # inventing one, so a stale Google figure costs less than a run
-        # that fetches nothing at all.
-        continue-on-error: true
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
-        run: |
-          if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
-            echo "::warning::No Google credentials -- keeping the existing Google spend."
-            exit 0
-          fi
-          python scripts/fetch_google_ads_spend.py --days 3
+      # No Google step here, deliberately. Google spend is refreshed by
+      # hand with scripts/fetch_google_ads_api.py, which answers live
+      # and needs an adwords-scoped OAuth token this runner does not
+      # have. The BigQuery export that used to be wired in here failed
+      # in two seconds on every run -- GOOGLE_CREDS_JSON is an OAuth
+      # client, not a service-account key -- and continue-on-error hid
+      # it, which is worse than not running it at all.
+      #
+      # The tracker copes: an hour with no Google figure stores NULL and
+      # renders a dash, never a zero, so a stale Google number is
+      # visible rather than silently folded into Cost / session.
 
       - name: Refresh Kwikchat spend
         # Still a flat placeholder until a real feed exists, but it now
