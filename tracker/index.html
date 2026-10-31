@@ -376,6 +376,11 @@ const HEROES = [
   // share sliding while spend holds is the thing worth catching early.
   ["pct_paid", "% paid sessions", pc, "flat", true],
   ["pct_direct", "% direct sessions", pc, "flat", true],
+  // Last, and from a different tool on purpose. GA4 divides by ACTIVE
+  // USERS, not sessions, so this is not comparable with Rev / session
+  // however much the two look alike. Best effort: GA4 lags, so the
+  // newest hours may be missing and the day figure moves as they land.
+  ["ga4_arpu", "ARPU (GA4)", v => inr(v), "up"],
 ];
 
 const $ = id => document.getElementById(id);

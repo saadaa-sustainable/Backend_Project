@@ -385,6 +385,14 @@ export function HourlyTracker() {
                       hint="Sessions carrying a utm_source that is not direct or none." />
                 <Hero label="% direct sessions" value={pct(t.pct_direct)} was={pct(c?.pct_direct)}
                       hint="Sessions with no utm_source, or one that says direct/none. The complement of % paid." />
+                {/* Last, and from a different tool on purpose. GA4
+                    divides by ACTIVE USERS, not sessions, so this is
+                    not comparable with Rev / session however much the
+                    two look alike. */}
+                <Hero label="ARPU (GA4)" value={money(t.ga4_arpu)} was={money(c?.ga4_arpu)}
+                      hint={"GA4 revenue \u00f7 GA4 active users \u2014 a different tool and a"
+                            + " different denominator, so NOT comparable with Rev / session."
+                            + " Best effort: GA4 lags, so the newest hours may be missing."} />
               </dl>
               <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-border-soft pt-3 text-[12px] text-text-secondary">
                 <span>Sessions <Delta now={t.sessions} was={c?.sessions} /></span>
@@ -398,6 +406,7 @@ export function HourlyTracker() {
                 <span>Rev / paid sess <Delta now={t.revenue_per_paid_session}
                                              was={c?.revenue_per_paid_session} /></span>
                 <span>CR <Delta now={t.conversion_rate} was={c?.conversion_rate} points /></span>
+                <span>ARPU <Delta now={t.ga4_arpu} was={c?.ga4_arpu} /></span>
                 <span>AMER <Delta now={t.amer} was={c?.amer} /></span>
                 <span>% paid <Delta now={t.pct_paid} was={c?.pct_paid} dir="flat" points /></span>
                 <span>% direct <Delta now={t.pct_direct} was={c?.pct_direct} dir="flat" points /></span>
