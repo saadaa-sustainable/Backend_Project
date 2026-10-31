@@ -103,28 +103,44 @@ jobs:
       # hours and divides Kwikchat's by 24. Running them afterwards would
       # publish an hour costed against yesterday's spend.
       - name: Refresh Google Ads spend
-        # Cheap: a few days of one BigQuery table, ~0.001 GiB a run.
+        # The Google Ads API, not the BigQuery export. Three reasons:
         #
-        # MapleMonk syncs once each morning, so most hourly runs re-read
-        # the same numbers. That is the point -- when the sync does land,
-        # the tracker picks it up within the hour instead of waiting for
-        # tomorrow's daily refresh. The three-day window also lets a
-        # partial same-day capture be corrected once the full day exports.
+        #   1. It answers LIVE. MapleMonk syncs once each morning, so an
+        #      hourly tracker fed from it carries a Google figure frozen
+        #      at ~11:00 IST for the rest of the day. Measured
+        #      2026-10-31 11:43 the API already had Rs 1,847 of spend
+        #      the export had not seen.
+        #   2. The export's credential does not work here anyway.
+        #      GOOGLE_CREDS_JSON holds an OAuth client rather than a
+        #      service-account key, so the BigQuery path failed in two
+        #      seconds on every run and continue-on-error hid it.
+        #   3. Google restates recent days as conversions land, and a
+        #      three-day window lets them settle.
+        #
+        # MapleMonk is still the backup: the daily refresh keeps filling
+        # the same table, and the upsert prefers a fresh API row while
+        # letting the export take one back once it is three days stale.
         #
         # Not allowed to fail the job. Google is a minority of spend and
-        # the tracker stores NULL for an uncovered hour rather than
-        # inventing one, so a stale Google figure costs less than a run
-        # that fetches nothing at all.
+        # an uncovered hour stores NULL rather than an invented figure,
+        # so a stale Google number costs far less than a run that
+        # fetches nothing at all.
         continue-on-error: true
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          GOOGLE_ADS_API: ${{ secrets.GOOGLE_ADS_API }}
+          # The authorised-user token JSON. There is no secrets/
+          # directory on a runner, so the auth reads it from here.
+          # Store it with a redirect, never a paste:
+          #   gh secret set GOOGLE_ADS_OAUTH_JSON < secrets/google_oauth_token_ads.json
+          GOOGLE_ADS_OAUTH_JSON: ${{ secrets.GOOGLE_ADS_OAUTH_JSON }}
         run: |
-          if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
-            echo "::warning::No Google credentials -- keeping the existing Google spend."
+          if [ -z "${GOOGLE_ADS_API}" ] || [ -z "${GOOGLE_ADS_OAUTH_JSON}" ]; then
+            echo "::warning::GOOGLE_ADS_API or GOOGLE_ADS_OAUTH_JSON is not set -- keeping the existing Google spend."
             exit 0
           fi
-          python scripts/fetch_google_ads_spend.py --days 3
+          python scripts/fetch_google_ads_api.py --days 3
 
       - name: Refresh Kwikchat spend
         # Still a flat placeholder until a real feed exists, but it now

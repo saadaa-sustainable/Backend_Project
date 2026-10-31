@@ -75,7 +75,53 @@ class AdsSession:
         return out
 
 
+#: An authorised-user token as JSON, for runners that have no secrets/
+#: directory. CI is the whole reason: the hourly ingest cannot read a
+#: developer's laptop, and without this the Google half of every run is
+#: skipped. Store it with a REDIRECT so nothing re-escapes the
+#: refresh_token:
+#:     gh secret set GOOGLE_ADS_OAUTH_JSON < secrets/google_oauth_token_ads.json
+ENV_TOKEN_JSON = "GOOGLE_ADS_OAUTH_JSON"
+
+
+def _token_from_env() -> Path | None:
+    """Materialise the env-held token into a file, or None if unset.
+
+    `Credentials.from_authorized_user_file` wants a path, and the
+    library rewrites that file after a refresh, so it has to be
+    writable -- hence a temp file rather than the repo.
+    """
+    raw = os.getenv(ENV_TOKEN_JSON)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise GoogleAdsAuthError(
+            f"{ENV_TOKEN_JSON} is not valid JSON ({exc}). Store it with a "
+            f"redirect, not a paste: gh secret set {ENV_TOKEN_JSON} < token.json"
+        ) from exc
+    if ADWORDS_SCOPE not in (payload.get("scopes") or []):
+        raise GoogleAdsAuthError(
+            f"{ENV_TOKEN_JSON} carries no `adwords` scope. A sheets/drive "
+            "token is not enough; mint one with "
+            "scripts/google_oauth_login.py --scopes ads")
+
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="gads_token_", suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(payload, fh)
+    return Path(path)
+
+
 def _token_file() -> Path:
+    # The env copy wins. A runner that has both is a developer machine
+    # exporting the secret to test the CI path, and the point of that
+    # test is to exercise what CI will actually use.
+    from_env = _token_from_env()
+    if from_env is not None:
+        return from_env
+
     for p in sorted(glob.glob(str(SECRETS / "google_oauth_token_*.json")),
                     key=os.path.getmtime, reverse=True):
         try:
@@ -85,7 +131,8 @@ def _token_file() -> Path:
             continue
     raise GoogleAdsAuthError(
         "No OAuth token carries the `adwords` scope. Mint one with:\n"
-        "   ./.venv/bin/python scripts/google_oauth_login.py --scopes ads")
+        "   ./.venv/bin/python scripts/google_oauth_login.py --scopes ads\n"
+        f"On a runner with no secrets/ directory, set {ENV_TOKEN_JSON} instead.")
 
 
 def _bearer(path: Path) -> str:
