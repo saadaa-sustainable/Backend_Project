@@ -147,15 +147,32 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- The P&L basis, which is NOT the revenue basis above.
     --
     -- It drops orders tagged `inf` (the daily-report / influencer
-    -- orders) and `Return_Prime`, and it KEEPS cancelled orders --
-    -- cancellation is modelled as a rate in the P&L rather than
-    -- excluded order by order, so excluding them here would deduct it
-    -- twice.
+    -- orders) and `Return_Prime`, and it KEEPS cancelled orders, which
+    -- are then counted separately below and deducted on their own line.
+    -- Keeping them is what lets the statement show the deduction
+    -- instead of a number that has already quietly had it taken out.
     pnl_sales               numeric,
     pnl_orders              integer,
     -- Units sold, with the Saadaa Silver Coin taken out: it is a gift
     -- line, not an item sold, and counting it would deflate ASP.
     pnl_qty                 integer,
+    -- Cancellations WITHIN the P&L population, measured rather than
+    -- assumed. These are a subset of pnl_sales/pnl_orders above, not a
+    -- separate population: the statement shows total sales and then
+    -- deducts these to reach net sales, so counting them in both
+    -- places is the point.
+    --
+    -- A cancellation is dated by the order's own hour, not by the hour
+    -- it was cancelled in -- an order placed at 10:00 and cancelled at
+    -- 16:00 belongs to 10:00 in every other figure on the row, and
+    -- splitting it would stop the hours summing to the day.
+    pnl_cancelled_orders    integer,
+    pnl_cancelled_sales     numeric,
+    -- Units on those orders, so ASP can divide a net numerator by a net
+    -- denominator. Without this the sales figure would have the
+    -- cancellations taken out while the unit count still carried them,
+    -- which understates ASP by exactly the cancelled share.
+    pnl_cancelled_qty       integer,
     -- Orders CONTAINING a coin, not coins sold -- the cost is per
     -- order that shipped one.
     silver_coin_orders      integer,
@@ -197,6 +214,9 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_sales numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_qty integer",
 ]
 
 COLUMNS = [
@@ -207,6 +227,7 @@ COLUMNS = [
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
     "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders",
+    "pnl_cancelled_orders", "pnl_cancelled_sales", "pnl_cancelled_qty",
     "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
     "google_spend", "google_spend_as_of",
@@ -462,7 +483,10 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                                           orders_excluded=0, revenue_excluded=0.0,
                                           new_customers=0, new_customer_revenue=0.0,
                                           pnl_sales=0.0, pnl_orders=0, pnl_qty=0,
-                                          silver_coin_orders=0))
+                                          silver_coin_orders=0,
+                                          pnl_cancelled_orders=0,
+                                          pnl_cancelled_sales=0.0,
+                                          pnl_cancelled_qty=0))
 
             # The P&L basis is accumulated BEFORE the revenue
             # exclusions, because the two answer different questions
@@ -474,6 +498,10 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                 b["pnl_qty"] += units
                 if has_coin:
                     b["silver_coin_orders"] += 1
+                if n.get("cancelledAt"):
+                    b["pnl_cancelled_orders"] += 1
+                    b["pnl_cancelled_sales"] += price
+                    b["pnl_cancelled_qty"] += units
 
             # Counted and set aside, not skipped silently: an hour whose
             # orders do not match Shopify's admin should say why.
@@ -597,10 +625,17 @@ def fetch_kwikchat_spend(day: date) -> float:
     scripts/seed_kwikchat_spend.py) had no effect on the tracker at all.
     Updating the placeholder in one place left the two disagreeing.
 
-    Still a placeholder until a real feed exists; this only makes it a
-    placeholder with ONE home. Falls back to the constant when the day
-    has no row, because a tracker that silently drops a spend component
-    reads flatteringly on every ratio that divides by spend.
+    Measured for the months whose console export has been loaded by
+    scripts/import_kwikchat_spend.py; the flat constant is only the
+    fallback for a day with no row, and `is_estimate` on the row is what
+    tells the two apart.
+
+    The fallback stays rather than returning None, because a tracker
+    that silently drops a spend component reads flatteringly on every
+    ratio that divides by spend. But it is a BAD guess and knowingly so:
+    real Kwikchat spend is spiky -- a few campaign blasts a month
+    against a near-zero trickle between them -- so the flat rate is
+    wrong on essentially every day, in one direction or the other.
     """
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT spend FROM public.kwikchat_spend_daily WHERE day = %s", (day,))

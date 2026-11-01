@@ -21,16 +21,14 @@ import type { HourlyRow, HourlyTotals } from "@/lib/api";
 const KEY = "tracker_pnl_assumptions";
 
 type Assumptions = {
-  cancelRate: number;   // share of sales lost to cancellation / RTO
   gstRate: number;      // GST charged on ad spend
   logistics: number;    // rupees per order
-  pgRate: number;       // payment-gateway fee, share of net sales
+  pgRate: number;       // payment-gateway fee, share of total sales
   coinCost: number;     // rupees per order that shipped a coin
-  cogsRate: number;     // share of net sales
+  cogsRate: number;     // share of total sales
 };
 
 const DEFAULTS: Assumptions = {
-  cancelRate: 0.05,
   // 18% is the Indian GST on advertising services. Not given in the
   // brief, so it is a default to correct rather than a claim.
   gstRate: 0.18,
@@ -41,12 +39,10 @@ const DEFAULTS: Assumptions = {
 };
 
 const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: string }[] = [
-  { key: "cancelRate", label: "Cancellation / RTO", pct: true,
-    hint: "Share of sales that never completes. Applied to total sales to give Net Sales." },
-  { key: "cogsRate", label: "COGS", pct: true, hint: "Share of NET sales." },
+  { key: "cogsRate", label: "COGS", pct: true, hint: "Share of total sales." },
   { key: "gstRate", label: "GST on ad spend", pct: true,
     hint: "18% is the Indian GST on advertising services — a default, not a measured figure." },
-  { key: "pgRate", label: "PG fees", pct: true, hint: "Share of NET sales." },
+  { key: "pgRate", label: "PG fees", pct: true, hint: "Share of total sales." },
   { key: "logistics", label: "Logistics / order", pct: false, hint: "Rupees per P&L order." },
   { key: "coinCost", label: "Silver coin / order", pct: false,
     hint: "Rupees per order that shipped a coin — per order, not per coin." },
@@ -55,9 +51,27 @@ const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: strin
 /** One period's P&L. The day and each hour run through this, so the
  *  footer cannot drift from the rows beneath it. */
 export type Pnl = {
-  sales: number; orders: number; units: number; coinOrders: number;
+  /** Shopify's own net sales for the P&L population — cancelled orders
+   *  still in it, because the statement deducts them visibly below. */
+  sales: number;
+  /** The whole P&L population, cancelled orders included. */
+  orders: number; units: number; coinOrders: number;
+  /** The same, with the cancelled ones taken out — what actually sold,
+   *  and the denominator for every figure under the cancellation
+   *  line. */
+  liveOrders: number; liveUnits: number;
   asp: number | null; aov: number | null;
-  cancellation: number; netSales: number;
+  /** Measured, not modelled: the value of the orders actually
+   *  cancelled. */
+  cancellation: number;
+  cancelledOrders: number;
+  /** Share of orders cancelled. Taken on ORDERS rather than on value,
+   *  which is the figure that gets quoted — and the one that does not
+   *  move just because a big order happened to be among them. */
+  cancelPct: number | null;
+  /** Net sales less cancelled orders. Everything below is taken on
+   *  this, because this is the money that can still arrive. */
+  totalSales: number;
   adSpend: number; adGst: number; logistics: number;
   pgFees: number; coins: number; cogs: number;
   totalDeductions: number; cm: number; cmPct: number | null;
@@ -66,6 +80,8 @@ export type Pnl = {
 function computePnl(r: {
   pnl_sales: number | null; pnl_orders: number | null; pnl_qty: number | null;
   silver_coin_orders: number | null; spend: number | null;
+  pnl_cancelled_orders?: number | null; pnl_cancelled_sales?: number | null;
+  pnl_cancelled_qty?: number | null;
 }, a: Assumptions): Pnl {
   const sales = r.pnl_sales ?? 0;
   const orders = r.pnl_orders ?? 0;
@@ -73,22 +89,49 @@ function computePnl(r: {
   const coinOrders = r.silver_coin_orders ?? 0;
   const adSpend = r.spend ?? 0;
 
-  const cancellation = sales * a.cancelRate;
-  const netSales = sales - cancellation;
+  // Cancellation used to be a flat 5% of sales. It is now counted from
+  // the orders themselves, so the deduction is the real one and the
+  // rate is an output rather than an input.
+  //
+  // Rows written before the columns existed report null, not 0. Those
+  // read as no cancellation, which understates the deduction -- but
+  // inventing a rate for them would be worse, and re-ingesting the day
+  // fixes it.
+  const cancellation = r.pnl_cancelled_sales ?? 0;
+  const cancelledOrders = r.pnl_cancelled_orders ?? 0;
+  const totalSales = sales - cancellation;
+  // Net of cancellation on both sides of every ratio. Mixing a net
+  // numerator with a gross denominator would understate ASP and AOV by
+  // exactly the cancelled share, which is the bug this is written to
+  // avoid rather than a nicety.
+  const liveOrders = Math.max(0, orders - cancelledOrders);
+  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty ?? 0));
+
   const adGst = adSpend * a.gstRate;
-  const logistics = orders * a.logistics;
-  const pgFees = netSales * a.pgRate;
+  // Per order DISPATCHED. A cancelled order is cancelled before it
+  // ships in all but the rare post-dispatch case, which Shopify tags as
+  // a return rather than a cancellation -- so charging it logistics
+  // would be inventing a cost.
+  const logistics = liveOrders * a.logistics;
+  const pgFees = totalSales * a.pgRate;
+  // Still on the whole population, deliberately: the gift ships with
+  // the order and there is no per-order coin flag to net it down by.
+  // Errs towards charging a cost rather than hiding one.
   const coins = coinOrders * a.coinCost;
-  const cogs = netSales * a.cogsRate;
+  const cogs = totalSales * a.cogsRate;
   const totalDeductions = adSpend + adGst + logistics + pgFees + coins + cogs;
-  const cm = netSales - totalDeductions;
+  const cm = totalSales - totalDeductions;
 
   return {
-    sales, orders, units, coinOrders,
-    asp: units ? sales / units : null,
-    aov: orders ? sales / orders : null,
-    cancellation, netSales, adSpend, adGst, logistics, pgFees, coins, cogs,
-    totalDeductions, cm, cmPct: netSales ? cm / netSales : null,
+    sales, orders, units, coinOrders, liveOrders, liveUnits,
+    // On total sales, consistent with every figure below it -- a
+    // cancelled order sold nothing.
+    asp: liveUnits ? totalSales / liveUnits : null,
+    aov: liveOrders ? totalSales / liveOrders : null,
+    cancellation, cancelledOrders,
+    cancelPct: orders ? cancelledOrders / orders : null,
+    totalSales, adSpend, adGst, logistics, pgFees, coins, cogs,
+    totalDeductions, cm, cmPct: totalSales ? cm / totalSales : null,
   };
 }
 
@@ -179,14 +222,14 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
   // the day's, never the arithmetic's.
   const c = compare ? computePnl(compare, a) : null;
   const byHour = new Map((compareRows ?? []).map((r) => [r.hour_of_day, r]));
-  const { sales, orders, units, asp, aov, cancellation, netSales, cm, cmPct,
-          totalDeductions } = d;
+  const { sales, orders, asp, aov, cancellation, cancelledOrders, cancelPct,
+          totalSales, liveOrders, liveUnits, cm, cmPct, totalDeductions } = d;
 
   const deductions: { label: string; value: number; was?: number; note?: string }[] = [
     { label: "Ad spend", value: d.adSpend, was: c?.adSpend, note: "Meta + Google + Kwikchat" },
     { label: "GST on ad spend", value: d.adGst, was: c?.adGst },
     { label: "Logistics", value: d.logistics, was: c?.logistics,
-      note: `${orders.toLocaleString("en-IN")} orders` },
+      note: `${liveOrders.toLocaleString("en-IN")} dispatched` },
     { label: "PG fees", value: d.pgFees, was: c?.pgFees },
     { label: "Silver coin", value: d.coins, was: c?.coins,
       note: `${totals.silver_coin_orders.toLocaleString("en-IN")} orders` },
@@ -221,21 +264,31 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
         </button>
       </div>
 
-      <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-5">
+      <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-7">
         <Kpi label="ASP" value={money(asp, 2)} was={c ? money(c.asp, 2) : undefined}
              now={asp} prev={c?.asp} day={compareDay}
-             hint="Total sales ÷ units sold, with the gift coin excluded from units — it is not an item sold." />
+             hint="Total sales ÷ units sold. The gift coin is not a unit sold, and cancelled orders are out of both sides." />
         <Kpi label="AOV" value={money(aov, 2)} was={c ? money(c.aov, 2) : undefined}
-             now={aov} prev={c?.aov} day={compareDay} hint="Total sales ÷ orders." />
-        <Kpi label="Net sales" value={money(netSales)} was={c ? money(c.netSales) : undefined}
-             now={netSales} prev={c?.netSales} day={compareDay}
-             hint={`Total sales ${money(sales)} less ${pct(a.cancelRate)} cancellation.`} />
+             now={aov} prev={c?.aov} day={compareDay}
+             hint="Total sales ÷ orders, cancelled orders out of both sides." />
+        <Kpi label="Units sold" value={liveUnits.toLocaleString("en-IN")}
+             was={c ? c.liveUnits.toLocaleString("en-IN") : undefined}
+             now={liveUnits} prev={c?.liveUnits} day={compareDay}
+             hint="Units on the orders that stand, with the gift coin excluded — it is a gift, not an item sold." />
+        <Kpi label="Total sales" value={money(totalSales)}
+             was={c ? money(c.totalSales) : undefined}
+             now={totalSales} prev={c?.totalSales} day={compareDay}
+             hint={`Net sales ${money(sales)} less ${money(cancellation)} of cancelled orders.`} />
+        <Kpi label="Cancellation %" value={pct(cancelPct)}
+             was={c ? pct(c.cancelPct) : undefined}
+             now={cancelPct} prev={c?.cancelPct} day={compareDay} lowerIsBetter
+             hint={`${cancelledOrders.toLocaleString("en-IN")} of ${orders.toLocaleString("en-IN")} orders cancelled, worth ${money(cancellation)}. Measured, not assumed.`} />
         <Kpi label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
              now={cm} prev={c?.cm} day={compareDay}
-             hint="Net sales less every deduction below." />
+             hint="Total sales less every deduction below." />
         <Kpi label="CM %" value={pct(cmPct)} was={c ? pct(c.cmPct) : undefined}
              now={cmPct} prev={c?.cmPct} day={compareDay}
-             hint="Contribution margin ÷ net sales." />
+             hint="Contribution margin ÷ total sales." />
       </dl>
 
       {open && (
@@ -265,18 +318,22 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
           </div>
           <p className="mt-2 text-[10.5px] text-text-tertiary">
             Saved in this browser. Percentages on COGS and PG fees apply to
-            <strong> net</strong> sales; cancellation applies to total sales.
+            <strong> total</strong> sales — net sales after cancelled orders.
+            Cancellation is no longer an assumption: it is counted from the
+            orders themselves.
           </p>
         </div>
       )}
 
       <div className="mt-4 grid gap-x-10 gap-y-1 md:grid-cols-2">
-        <Line label="Total sales" value={money(sales)} was={c ? money(c.sales) : undefined} strong
-              note={`${orders.toLocaleString("en-IN")} orders · ${units.toLocaleString("en-IN")} units`} />
-        <Line label={`Cancellation / RTO (${pct(a.cancelRate)})`} value={`− ${money(cancellation)}`}
-              was={c ? `− ${money(c.cancellation)}` : undefined} />
-        <Line label="Net sales" value={money(netSales)} was={c ? money(c.netSales) : undefined}
-              strong rule />
+        <Line label="Net sales" value={money(sales)} was={c ? money(c.sales) : undefined} strong
+              note={`${orders.toLocaleString("en-IN")} orders placed`} />
+        <Line label="Cancelled orders" value={`− ${money(cancellation)}`}
+              was={c ? `− ${money(c.cancellation)}` : undefined}
+              note={`${cancelledOrders.toLocaleString("en-IN")} orders · ${pct(cancelPct)}`} />
+        <Line label="Total sales" value={money(totalSales)}
+              was={c ? money(c.totalSales) : undefined} strong rule
+              note={`${liveOrders.toLocaleString("en-IN")} orders · ${liveUnits.toLocaleString("en-IN")} units`} />
         <div />
         {deductions.map((row) => (
           <Line key={row.label} label={row.label} value={`− ${money(row.value)}`}
@@ -286,7 +343,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
               was={c ? `− ${money(c.totalDeductions)}` : undefined} rule />
         <Line label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
               strong rule
-              note={cmPct !== null ? `${pct(cmPct)} of net sales` : undefined} />
+              note={cmPct !== null ? `${pct(cmPct)} of total sales` : undefined} />
       </div>
 
       {hourly.length > 0 && (
@@ -307,7 +364,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
                   <th className="py-1 pr-3 font-medium">Orders</th>
                   <th className="py-1 pr-3 font-medium">ASP</th>
                   <th className="py-1 pr-3 font-medium">AOV</th>
-                  <th className="py-1 pr-3 font-medium">Net sales</th>
+                  <th className="py-1 pr-3 font-medium">Total sales</th>
                   <th className="py-1 pr-3 font-medium">Spend</th>
                   <th className="py-1 pr-3 font-medium">CM</th>
                   <th className="py-1 pr-3 font-medium">CM %</th>
@@ -335,7 +392,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
                       </td>
                       <td className="py-[3px] pr-3 text-text-secondary">{money(p.asp, 0)}</td>
                       <td className="py-[3px] pr-3 text-text-secondary">{money(p.aov, 0)}</td>
-                      <td className="py-[3px] pr-3 text-text-secondary">{money(p.netSales)}</td>
+                      <td className="py-[3px] pr-3 text-text-secondary">{money(p.totalSales)}</td>
                       <td className="py-[3px] pr-3 text-text-secondary">{money(p.adSpend)}</td>
                       <td className={`py-[3px] pr-3 font-medium ${
                         p.cm >= 0 ? "text-success-text" : "text-warning-text"}`}>
@@ -376,20 +433,23 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
       )}
 
       <p className="mt-3 border-t border-border-soft pt-2 text-[11px] leading-snug text-text-tertiary">
-        Only total sales, orders and units are measured. Everything below the
-        Net sales line is a model built from the rates above, and the day is
-        still running — a margin here is an estimate, not a result. Orders
+        Sales, orders, units and cancellations are measured. Everything below
+        the Total sales line is a model built from the rates above, and the day
+        is still running — a margin here is an estimate, not a result. Orders
         tagged <code>inf</code> (daily report) and <code>Return_Prime</code> are
-        excluded; cancelled orders are kept, because cancellation is applied as
-        a rate rather than order by order.
+        excluded; cancelled orders are kept in the population and deducted on
+        their own line, so the deduction can be seen rather than assumed.
       </p>
     </div>
   );
 }
 
-function Kpi({ label, value, was, now, prev, day, hint }: {
+function Kpi({ label, value, was, now, prev, day, hint, lowerIsBetter }: {
   label: string; value: string; was?: string;
   now?: number | null; prev?: number | null; day?: string; hint?: string;
+  /** Cancellation % going up is bad news. Colour follows the judgement;
+   *  the arrow still follows the direction. */
+  lowerIsBetter?: boolean;
 }) {
   return (
     <div className="min-w-0">
@@ -402,7 +462,9 @@ function Kpi({ label, value, was, now, prev, day, hint }: {
       {was !== undefined && (
         <dd className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[11.5px]">
           <span className="tabular-nums text-text-tertiary">{was}</span>
-          <span className="text-[11px]"><Change now={now} was={prev} /></span>
+          <span className="text-[11px]">
+            <Change now={now} was={prev} lowerIsBetter={lowerIsBetter} />
+          </span>
           {day && <span className="text-[10px] text-text-tertiary">{day}</span>}
         </dd>
       )}

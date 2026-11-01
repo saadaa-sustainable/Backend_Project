@@ -103,7 +103,7 @@ kind of number:
 |---|---|---|
 | **Meta** | hourly | measured — `breakdowns=hourly_stats_aggregated_by_advertiser_time_zone` (advertiser TZ is IST) |
 | **Google** | daily | the day's total, shared out by each hour's share of *Google-driven sessions* |
-| **Kwikchat** | flat ₹30,000/day | ₹1,250 an hour |
+| **Kwikchat** | daily | the day's total, shared out evenly across the hours |
 
 The Google allocator is not arbitrary: on 29 Oct the Google session
 share and the Meta spend share tracked each other within ~1.5 points at
@@ -119,8 +119,22 @@ past it store NULL and show a dash — "not told yet" and "Google spent
 nothing" are different claims. Those hours still carry their Meta and
 Kwikchat spend, so the cost curve keeps no hole.
 
-Kwikchat is a **placeholder**, not a measurement. Any ratio with spend
-in it inherits that.
+Kwikchat is **measured for October onward**, loaded from the console's
+daily-spend export by `scripts/import_kwikchat_spend.py`. It was a flat
+₹30,000/day placeholder before that, and the placeholder was not a
+rounding error: the real figure is spiky, a few campaign blasts a month
+against a near-zero trickle in between, so the flat rate overstated most
+days by orders of magnitude and understated the blast days. Any ratio
+with spend in it inherited that.
+
+A day with no export loaded still falls back to the placeholder, and
+`kwikchat_spend_daily.is_estimate` is what tells the two apart. The
+export is a manual download, so a new month needs the import run.
+
+Kwikchat's hourly shape is a flat 24th, unlike Google's. There is no
+Kwikchat-driven session column to allocate by, and inventing a shape
+would be worse than admitting there isn't one — the daily total is
+right, the within-day curve is not a claim.
 
 ---
 
@@ -212,7 +226,67 @@ shows a dash. A day outside the table says which span the tracker holds.
 
 ---
 
-## 5. Freshness
+## 5. The Live P&L
+
+Its own section, and a **different population** again: it drops orders
+tagged `inf` (daily report / influencer) and `Return_Prime`, and it
+**keeps cancelled orders**, which are then deducted on their own line.
+Keeping them is what lets the statement show the deduction instead of
+handing you a number that has quietly already had it taken out.
+
+```
+Net sales          pnl_sales            Shopify's own total for the population
+  less  Cancelled orders                pnl_cancelled_sales, MEASURED
+= Total sales                           everything below is taken on this
+  less  Ad spend, GST on it, logistics, PG fees, silver coin, COGS
+= Contribution margin
+```
+
+| KPI | Definition |
+|---|---|
+| **ASP** | total sales ÷ units sold |
+| **AOV** | total sales ÷ orders |
+| **Units sold** | units on the orders that stand, gift coin excluded |
+| **Total sales** | net sales less cancelled orders |
+| **Cancellation %** | cancelled orders ÷ orders placed |
+| **Contribution margin** | total sales less every deduction |
+| **CM %** | contribution margin ÷ total sales |
+
+**Cancellation is measured, not assumed.** It used to be a flat 5% rate
+you could type over. It is now counted from `cancelledAt` on the orders
+themselves, which is what makes Cancellation % a reading rather than an
+echo of the input.
+
+**Every ratio is net of cancellation on both sides.** A net numerator
+over a gross denominator would understate ASP and AOV by exactly the
+cancelled share — so `liveOrders` and `liveUnits` take the cancelled
+orders out of the denominators too. Logistics follows the same rule and
+is charged per order *dispatched*: a cancellation is cancelled before it
+ships in all but the rare post-dispatch case, which Shopify tags as a
+return rather than a cancellation.
+
+The silver coin is the one deduction still taken on the whole
+population. The gift ships with the order and there is no per-order coin
+flag to net it down by, so it errs towards charging a cost rather than
+hiding one.
+
+**A cancellation is dated by the order's own hour**, not the hour it was
+cancelled in. An order placed at 10:00 and cancelled at 16:00 belongs to
+10:00 in every other figure on the row, and splitting it would stop the
+hours summing to the day.
+
+Rows written before these columns existed report NULL, which reads as no
+cancellation. That understates the deduction; re-ingesting the day fixes
+it.
+
+Everything under the Total sales line is a **model**, built from six
+editable rates that persist per browser and drive the hourly rows as
+well as the summary. GST on ad spend defaults to 18%, the Indian rate on
+advertising services — a default to correct, not a claim.
+
+---
+
+## 6. Freshness
 
 | source | cadence | note |
 |---|---|---|
