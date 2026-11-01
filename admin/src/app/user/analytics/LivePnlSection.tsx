@@ -96,7 +96,8 @@ export function LivePnlSection() {
             : ""}
         </p>
       ) : (
-        <LivePnl totals={t} />
+        <LivePnl totals={t} rows={data?.rows ?? []}
+                 liveHour={isToday ? data?.latest_hour : null} />
       )}
     </div>
   );

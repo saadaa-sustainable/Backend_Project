@@ -157,6 +157,18 @@
   .pnl-assump input { width: 72px; text-align: right; font: inherit; font-size: 11.5px;
                       background: transparent; color: var(--text); border: 1px solid var(--border);
                       border-radius: 4px; padding: 2px 5px; font-variant-numeric: tabular-nums; }
+  .pnl-hrs { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 8px;
+             font-variant-numeric: tabular-nums; }
+  .pnl-hrs th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
+                color: var(--text-3); font-weight: 600; text-align: right; padding: 3px 12px 3px 0;
+                position: static; background: transparent; border: 0; }
+  .pnl-hrs th:first-child, .pnl-hrs td:first-child { text-align: left;
+                position: static; background: transparent; }
+  .pnl-hrs td { text-align: right; padding: 3px 12px 3px 0; border: 0;
+                border-top: 1px solid var(--border-soft); white-space: nowrap; }
+  .pnl-bar { position: relative; height: 10px; width: 120px; }
+  .pnl-bar .z { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: var(--border); }
+  .pnl-bar .f { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
   .pnl-lines { display: grid; gap: 0 40px; margin-top: 14px; }
   @media (min-width: 760px) { .pnl-lines { grid-template-columns: repeat(2, minmax(0,1fr)); } }
   .pnl-l { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
@@ -246,6 +258,7 @@
     <div class="pnl-kpis" id="pnl-kpis"></div>
     <div class="pnl-assump" id="pnl-assump" hidden></div>
     <div class="pnl-lines" id="pnl-lines"></div>
+    <div id="pnl-hourly"></div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
       Only total sales, orders and units are measured. Everything below the Net sales line is a
       model built from the rates above, and the day is still running — a margin here is an
@@ -548,7 +561,7 @@ function render(d, day) {
   // --- the P&L view owns the whole page when it is on -----------------
   if (VIEW === "pnl") {
     TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
-    drawPnl(t);
+    drawPnl(t, rows, isToday ? d.latest_hour : null);
     $("footnote").textContent = "";
     return;
   }
@@ -823,7 +836,72 @@ function applyView() {
 $("view-tracker").onclick = () => { if (VIEW !== "tracker") { VIEW = "tracker"; applyView(); } };
 $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView(); } };
 
-function drawPnl(t) {
+function computePnl(r, a) {
+  const sales = r.pnl_sales || 0, orders = r.pnl_orders || 0;
+  const units = r.pnl_qty || 0, coinOrders = r.silver_coin_orders || 0;
+  const adSpend = r.spend || 0;
+  const cancellation = sales * a.cancelRate;
+  const net = sales - cancellation;
+  const adGst = adSpend * a.gstRate;
+  const logistics = orders * a.logistics;
+  const pgFees = net * a.pgRate;
+  const coins = coinOrders * a.coinCost;
+  const cogs = net * a.cogsRate;
+  const totalDed = adSpend + adGst + logistics + pgFees + coins + cogs;
+  const cm = net - totalDed;
+  return { sales, orders, units, coinOrders, adSpend, cancellation, net,
+           adGst, logistics, pgFees, coins, cogs, totalDed, cm,
+           asp: units ? sales / units : null,
+           aov: orders ? sales / orders : null,
+           cmPct: net ? cm / net : null };
+}
+
+function drawPnlHourly(rows, a, liveHour) {
+  // Only hours that actually sold. An hour with no orders has no ASP,
+  // no AOV and a margin that is just negative ad spend -- it says
+  // nothing and crowds out the hours that do.
+  const hrs = (rows || []).filter(r => (r.pnl_orders || 0) > 0)
+    .map(r => ({ h: r.hour_of_day, p: computePnl(r, a) }))
+    .sort((x, y) => y.h - x.h);
+  if (!hrs.length) { $("pnl-hourly").innerHTML = ""; return; }
+
+  // One scale across the day, so a bar means the same at 04:00 as at
+  // 20:00.
+  const worst = Math.max(1, ...hrs.map(x => Math.abs(x.p.cm)));
+
+  $("pnl-hourly").innerHTML =
+    '<div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;' +
+    'align-items:baseline;margin-top:16px;padding-top:12px;border-top:1px solid var(--border-soft)">' +
+    '<strong style="font-size:12px">Hour by hour</strong>' +
+    '<span class="sub">Same assumptions. Bars are contribution margin, right for a profit ' +
+    'and left for a loss, on one scale.</span></div>' +
+    '<table class="pnl-hrs"><thead><tr>' +
+    ["Hour","Sales","Orders","ASP","AOV","Net sales","Spend","CM","CM %",""]
+      .map(h => "<th>" + esc(h) + "</th>").join("") +
+    "</tr></thead><tbody>" +
+    hrs.map(({ h, p }) => {
+      const live = liveHour != null && h === liveHour;
+      const frac = Math.min(Math.abs(p.cm) / worst, 1) * 50;
+      const good = p.cm >= 0;
+      const cls = good ? "good" : "bad";
+      return "<tr><td>" + String(h).padStart(2, "0") + ":00" +
+        (live ? '<span class="tag">live</span>' : "") + "</td>" +
+        "<td>" + inr(p.sales, 0) + "</td>" +
+        '<td class="flat">' + num(p.orders) + "</td>" +
+        '<td class="flat">' + inr(p.asp, 0) + "</td>" +
+        '<td class="flat">' + inr(p.aov, 0) + "</td>" +
+        '<td class="flat">' + inr(p.net, 0) + "</td>" +
+        '<td class="flat">' + inr(p.adSpend, 0) + "</td>" +
+        '<td class="' + cls + '">' + inr(p.cm, 0) + "</td>" +
+        '<td class="' + cls + '">' + pc(p.cmPct, 1) + "</td>" +
+        '<td><div class="pnl-bar"><div class="z"></div>' +
+        '<div class="f" style="' + (good ? "left:50%" : "right:50%") +
+        ";width:" + frac + "%;background:var(--" + (good ? "good" : "bad") + ')"></div>' +
+        "</div></td></tr>";
+    }).join("") + "</tbody></table>";
+}
+
+function drawPnl(t, rows, liveHour) {
   if (VIEW !== "pnl" || !t || !t.pnl_orders) { $("pnlcard").hidden = true; return; }
   $("pnlcard").hidden = false;
 
@@ -877,6 +955,8 @@ function drawPnl(t) {
     line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule") +
     line("Contribution margin", inr(cm, 0),
          cmPct === null ? "" : pc(cmPct, 1) + " of net sales", "strong rule");
+
+  drawPnlHourly(rows, a, liveHour);
 }
 
 // Delegated, because drawPnl replaces the inputs on every change.
@@ -889,7 +969,8 @@ $("pnl-assump").addEventListener("input", e => {
   a[el.getAttribute("data-k")] = el.getAttribute("data-pct") ? v / 100 : v;
   try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
   const hidden = $("pnl-assump").hidden;
-  drawPnl(LAST.d.today);
+  drawPnl(LAST.d.today, LAST.d.rows || [],
+          LAST.day === istToday() ? LAST.d.latest_hour : null);
   $("pnl-assump").hidden = hidden;
   // Redrawing blew away focus mid-keystroke; put it back.
   const again = $("pnl-assump").querySelector('input[data-k="' + el.getAttribute("data-k") + '"]');

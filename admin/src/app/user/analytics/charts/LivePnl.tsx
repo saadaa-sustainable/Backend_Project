@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
-import type { HourlyTotals } from "@/lib/api";
+import type { HourlyRow, HourlyTotals } from "@/lib/api";
 
 /**
  * Contribution margin for the day so far, from the day's own numbers
@@ -52,6 +52,46 @@ const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: strin
     hint: "Rupees per order that shipped a coin — per order, not per coin." },
 ];
 
+/** One period's P&L. The day and each hour run through this, so the
+ *  footer cannot drift from the rows beneath it. */
+export type Pnl = {
+  sales: number; orders: number; units: number; coinOrders: number;
+  asp: number | null; aov: number | null;
+  cancellation: number; netSales: number;
+  adSpend: number; adGst: number; logistics: number;
+  pgFees: number; coins: number; cogs: number;
+  totalDeductions: number; cm: number; cmPct: number | null;
+};
+
+function computePnl(r: {
+  pnl_sales: number | null; pnl_orders: number | null; pnl_qty: number | null;
+  silver_coin_orders: number | null; spend: number | null;
+}, a: Assumptions): Pnl {
+  const sales = r.pnl_sales ?? 0;
+  const orders = r.pnl_orders ?? 0;
+  const units = r.pnl_qty ?? 0;
+  const coinOrders = r.silver_coin_orders ?? 0;
+  const adSpend = r.spend ?? 0;
+
+  const cancellation = sales * a.cancelRate;
+  const netSales = sales - cancellation;
+  const adGst = adSpend * a.gstRate;
+  const logistics = orders * a.logistics;
+  const pgFees = netSales * a.pgRate;
+  const coins = coinOrders * a.coinCost;
+  const cogs = netSales * a.cogsRate;
+  const totalDeductions = adSpend + adGst + logistics + pgFees + coins + cogs;
+  const cm = netSales - totalDeductions;
+
+  return {
+    sales, orders, units, coinOrders,
+    asp: units ? sales / units : null,
+    aov: orders ? sales / orders : null,
+    cancellation, netSales, adSpend, adGst, logistics, pgFees, coins, cogs,
+    totalDeductions, cm, cmPct: netSales ? cm / netSales : null,
+  };
+}
+
 const money = (n: number | null | undefined, dp = 0) =>
   n === null || n === undefined || !Number.isFinite(n) ? "—"
     : n.toLocaleString("en-IN", { style: "currency", currency: "INR",
@@ -96,7 +136,13 @@ function save(next: Assumptions) {
   listeners.forEach((fn) => fn());
 }
 
-export function LivePnl({ totals }: { totals: HourlyTotals | null }) {
+export function LivePnl({ totals, rows, liveHour }: {
+  totals: HourlyTotals | null;
+  /** The day's hours, for the breakdown under the summary. */
+  rows?: HourlyRow[];
+  /** Still filling: its margin is real but its hour is not over. */
+  liveHour?: number | null;
+}) {
   const a = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const [open, setOpen] = useState(false);
 
@@ -104,35 +150,28 @@ export function LivePnl({ totals }: { totals: HourlyTotals | null }) {
 
   if (!totals || !totals.pnl_orders) return null;
 
-  const sales = totals.pnl_sales;
-  const orders = totals.pnl_orders;
-  const units = totals.pnl_qty;
-
-  const asp = units ? sales / units : null;
-  const aov = orders ? sales / orders : null;
-
-  const cancellation = sales * a.cancelRate;
-  const netSales = sales - cancellation;
-
-  const adSpend = totals.spend;
-  const adGst = adSpend * a.gstRate;
-  const logistics = orders * a.logistics;
-  const pgFees = netSales * a.pgRate;
-  const coins = totals.silver_coin_orders * a.coinCost;
-  const cogs = netSales * a.cogsRate;
+  const d = computePnl(totals, a);
+  const { sales, orders, units, asp, aov, cancellation, netSales, cm, cmPct,
+          totalDeductions } = d;
 
   const deductions: { label: string; value: number; note?: string }[] = [
-    { label: "Ad spend", value: adSpend, note: "Meta + Google + Kwikchat" },
-    { label: "GST on ad spend", value: adGst },
-    { label: "Logistics", value: logistics, note: `${orders.toLocaleString("en-IN")} orders` },
-    { label: "PG fees", value: pgFees },
-    { label: "Silver coin", value: coins,
+    { label: "Ad spend", value: d.adSpend, note: "Meta + Google + Kwikchat" },
+    { label: "GST on ad spend", value: d.adGst },
+    { label: "Logistics", value: d.logistics, note: `${orders.toLocaleString("en-IN")} orders` },
+    { label: "PG fees", value: d.pgFees },
+    { label: "Silver coin", value: d.coins,
       note: `${totals.silver_coin_orders.toLocaleString("en-IN")} orders` },
-    { label: "COGS", value: cogs },
+    { label: "COGS", value: d.cogs },
   ];
-  const totalDeductions = deductions.reduce((s, d) => s + d.value, 0);
-  const cm = netSales - totalDeductions;
-  const cmPct = netSales ? cm / netSales : null;
+
+  // Newest first, and only hours that actually sold: an hour with no
+  // orders has no ASP, no AOV and a margin that is just negative ad
+  // spend, which says nothing and crowds out the hours that do.
+  const hourly = (rows ?? [])
+    .filter((r) => (r.pnl_orders ?? 0) > 0)
+    .map((r) => ({ hour: r.hour_of_day, p: computePnl(r, a) }))
+    .sort((x, y) => y.hour - x.hour);
+  const worstCm = Math.max(1, ...hourly.map((h) => Math.abs(h.p.cm)));
 
   return (
     <div className="rounded-md border border-border-primary bg-bg-white p-4">
@@ -202,6 +241,82 @@ export function LivePnl({ totals }: { totals: HourlyTotals | null }) {
         <Line label="Contribution margin" value={money(cm)} strong rule
               note={cmPct !== null ? `${pct(cmPct)} of net sales` : undefined} />
       </div>
+
+      {hourly.length > 0 && (
+        <div className="mt-5 border-t border-border-soft pt-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h4 className="text-[12px] font-medium text-text-primary">Hour by hour</h4>
+            <span className="text-[10.5px] text-text-tertiary">
+              Same assumptions. Bars are contribution margin, right for a profit
+              and left for a loss, on one scale.
+            </span>
+          </div>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full border-collapse text-[11.5px]">
+              <thead>
+                <tr className="text-right text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                  <th className="py-1 pr-3 text-left font-medium">Hour</th>
+                  <th className="py-1 pr-3 font-medium">Sales</th>
+                  <th className="py-1 pr-3 font-medium">Orders</th>
+                  <th className="py-1 pr-3 font-medium">ASP</th>
+                  <th className="py-1 pr-3 font-medium">AOV</th>
+                  <th className="py-1 pr-3 font-medium">Net sales</th>
+                  <th className="py-1 pr-3 font-medium">Spend</th>
+                  <th className="py-1 pr-3 font-medium">CM</th>
+                  <th className="py-1 pr-3 font-medium">CM %</th>
+                  <th className="w-[120px] py-1 font-medium" />
+                </tr>
+              </thead>
+              <tbody>
+                {hourly.map(({ hour, p }) => {
+                  const live = liveHour != null && hour === liveHour;
+                  const frac = Math.min(Math.abs(p.cm) / worstCm, 1) * 50;
+                  return (
+                    <tr key={hour} className="border-t border-border-soft text-right tabular-nums">
+                      <td className="py-[3px] pr-3 text-left text-text-primary">
+                        {String(hour).padStart(2, "0")}:00
+                        {live && (
+                          <span className="ml-1.5 text-[9px] uppercase tracking-wide text-text-tertiary">
+                            live
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-[3px] pr-3 text-text-primary">{money(p.sales)}</td>
+                      <td className="py-[3px] pr-3 text-text-secondary">
+                        {p.orders.toLocaleString("en-IN")}
+                      </td>
+                      <td className="py-[3px] pr-3 text-text-secondary">{money(p.asp, 0)}</td>
+                      <td className="py-[3px] pr-3 text-text-secondary">{money(p.aov, 0)}</td>
+                      <td className="py-[3px] pr-3 text-text-secondary">{money(p.netSales)}</td>
+                      <td className="py-[3px] pr-3 text-text-secondary">{money(p.adSpend)}</td>
+                      <td className={`py-[3px] pr-3 font-medium ${
+                        p.cm >= 0 ? "text-success-text" : "text-warning-text"}`}>
+                        {money(p.cm)}
+                      </td>
+                      <td className={`py-[3px] pr-3 ${
+                        p.cm >= 0 ? "text-success-text" : "text-warning-text"}`}>
+                        {pct(p.cmPct)}
+                      </td>
+                      <td className="py-[3px]">
+                        <div className="relative h-2.5" aria-hidden="true">
+                          <div className="absolute inset-y-0 left-1/2 w-px bg-border-primary" />
+                          <div
+                            className={`absolute inset-y-0 ${
+                              p.cm >= 0 ? "rounded-r-sm bg-success-mid" : "rounded-l-sm bg-warning-text"}`}
+                            style={p.cm >= 0
+                              ? { left: "50%", width: `${frac}%` }
+                              : { right: "50%", width: `${frac}%` }}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <p className="mt-3 border-t border-border-soft pt-2 text-[11px] leading-snug text-text-tertiary">
         Only total sales, orders and units are measured. Everything below the
