@@ -3619,7 +3619,9 @@ export interface HourlyRow {
   /** Orders on the same denominators as the session buckets. Sum to orders. */
   orders_paid: number | null;
   orders_direct: number | null;
-  /** Cancelled or returned, and therefore NOT in revenue/orders above. */
+  /** Cancelled, returned, or tagged Return_Prime, and therefore NOT in
+   *  revenue/orders above. Report orders (`inf`) ARE counted here —
+   *  that is the one tag the tracker and the P&L disagree about. */
   orders_excluded: number | null;
   revenue_excluded: number | null;
   /** The P&L basis — drops orders tagged `inf` or `Return_Prime`, and

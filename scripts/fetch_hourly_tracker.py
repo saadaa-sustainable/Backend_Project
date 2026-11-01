@@ -304,10 +304,30 @@ def source_label(src: str) -> str:
 def is_excluded_order(cancelled_at: str | None, tags: list[str] | None) -> bool:
     """Orders this tracker does not count as revenue.
 
-    Cancelled, or returned. An EXCHANGE is kept: the customer swapped
-    for something of equal value, so the money stayed. An order tagged
-    both Return and Exchange is the exchange leg of a swap, not a
-    refund, and is kept for the same reason.
+    Cancelled, returned, or carrying `Return_Prime`. An EXCHANGE is
+    kept: the customer swapped for something of equal value, so the
+    money stayed. An order tagged both Return and Exchange is the
+    exchange leg of a swap, not a refund, and is kept for the same
+    reason.
+
+    `Return_Prime` marks a return flowing back through the returns
+    platform, so it is not a sale and does not belong in revenue. It is
+    dropped UNCONDITIONALLY -- an Exchange tag does not rescue it, the
+    way it rescues a plain `Return`, because the tag means the order
+    itself is the return leg rather than an order that was later
+    returned.
+
+    These orders are overwhelmingly worth ZERO, so dropping them barely
+    moves revenue but removes of the order of a hundred orders a day
+    from the count -- which lifts AOV and lowers conversion rate. That
+    is the point: a return flowing backwards was never an order this
+    campaign hour won.
+
+    `inf` is deliberately NOT excluded here, though the P&L drops it.
+    The P&L asks what the day earned, and goods that went out with no
+    sale behind them did not earn anything; the tracker asks what the
+    hour produced, and a report order is still something the hour
+    produced.
 
     This deliberately differs from the daily dashboard, which drops
     exchanges too. The tracker answers "what did this campaign hour
@@ -320,6 +340,8 @@ def is_excluded_order(cancelled_at: str | None, tags: list[str] | None) -> bool:
     if cancelled_at:
         return True
     t = {str(x).strip().lower() for x in (tags or [])}
+    if "return_prime" in t:
+        return True
     return "return" in t and "exchange" not in t
 
 
