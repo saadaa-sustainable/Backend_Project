@@ -31,6 +31,7 @@ const Instagram = dynamic(() => import("./Instagram").then((m) => m.Instagram), 
 const UntestedAssets = dynamic(() => import("./UntestedAssets").then((m) => m.UntestedAssets), { loading: TabLoading });
 const CampaignTracker = dynamic(() => import("./CampaignTracker").then((m) => m.CampaignTracker), { loading: TabLoading });
 const HourlyTracker = dynamic(() => import("./HourlyTracker").then((m) => m.HourlyTracker), { loading: TabLoading });
+const LivePnlSection = dynamic(() => import("./LivePnlSection").then((m) => m.LivePnlSection), { loading: TabLoading });
 const ShopifyAnalytics = dynamic(() => import("./ShopifyAnalytics").then((m) => m.ShopifyAnalytics), { loading: TabLoading });
 const Help = dynamic(() => import("./Help").then((m) => m.Help), { loading: TabLoading });
 const AssetAnalysis = dynamic(() => import("./AssetAnalysis").then((m) => m.AssetAnalysis), { loading: TabLoading });
@@ -63,6 +64,7 @@ const TAB_META: Record<Tab, { label: string; render: () => React.ReactNode }> = 
   "untested-assets": { label: "Untested Assets", render: () => <UntestedAssets /> },
   "campaign-tracker": { label: "Campaign Tracker", render: () => <CampaignTracker /> },
   "hourly-tracker": { label: "Hourly Tracker", render: () => <HourlyTracker /> },
+  "live-pnl": { label: "Live P&L", render: () => <LivePnlSection /> },
   instagram: { label: "Instagram", render: () => <Instagram /> },
   "shopify-analytics": { label: "Shopify Analytics", render: () => <ShopifyAnalytics /> },
   "shopify-explorer": { label: "Shopify Explorer", render: () => <ShopifyExplorer /> },

@@ -13782,6 +13782,7 @@ SELECT hour, day_ist, hour_of_day,
        sessions_by_source,
        revenue, orders, orders_paid, orders_direct,
        orders_excluded, revenue_excluded,
+       pnl_sales, pnl_orders, pnl_qty, silver_coin_orders,
        revenue_shopifyql,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
@@ -13818,6 +13819,19 @@ class HourlyRow(BaseModel):
     #: Surfaced so a gap against Shopify's own admin has an explanation.
     orders_excluded: int | None = None
     revenue_excluded: float | None = None
+    #: The P&L basis, which is NOT the revenue basis above: it drops
+    #: orders tagged `inf` or `Return_Prime` and KEEPS cancelled ones,
+    #: because the P&L models cancellation as a rate rather than
+    #: excluding them order by order.
+    #:
+    #: Returned raw, not as a finished margin. Every deduction in that
+    #: margin is an assumption the reader is meant to argue with, so the
+    #: page recomputes from these and the numbers move as they type.
+    pnl_sales: float | None = None
+    pnl_orders: int | None = None
+    #: Units sold with the gift coin taken out -- it is not an item sold.
+    pnl_qty: int | None = None
+    silver_coin_orders: int | None = None
     #: ShopifyQL's own total for the hour, a deliberately different
     #: measure kept as a cross-check. Typically within half a per cent.
     revenue_shopifyql: float | None
@@ -13920,6 +13934,10 @@ class HourlyTotals(BaseModel):
     orders_direct: int
     orders_excluded: int
     revenue_excluded: float
+    pnl_sales: float
+    pnl_orders: int
+    pnl_qty: int
+    silver_coin_orders: int
     spend: float
     meta_impressions: int
     meta_spend: float
@@ -14004,6 +14022,8 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         revenue=revenue, orders=orders,
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
+        pnl_sales=s("pnl_sales"), pnl_orders=s("pnl_orders"),
+        pnl_qty=s("pnl_qty"), silver_coin_orders=s("silver_coin_orders"),
         spend=spend, meta_impressions=s("meta_impressions"),
         meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
         google_spend=s("google_spend"),
