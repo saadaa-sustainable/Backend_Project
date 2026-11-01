@@ -561,7 +561,8 @@ function render(d, day) {
   // --- the P&L view owns the whole page when it is on -----------------
   if (VIEW === "pnl") {
     TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
-    drawPnl(t, rows, isToday ? d.latest_hour : null);
+    drawPnl(t, rows, isToday ? d.latest_hour : null,
+            c, d.compare_rows || [], c ? c.day : "");
     $("footnote").textContent = "";
     return;
   }
@@ -856,12 +857,18 @@ function computePnl(r, a) {
            cmPct: net ? cm / net : null };
 }
 
-function drawPnlHourly(rows, a, liveHour) {
+function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
+  const byHour = new Map((cmpRows || []).map(r => [r.hour_of_day, r]));
   // Only hours that actually sold. An hour with no orders has no ASP,
   // no AOV and a margin that is just negative ad spend -- it says
   // nothing and crowds out the hours that do.
   const hrs = (rows || []).filter(r => (r.pnl_orders || 0) > 0)
-    .map(r => ({ h: r.hour_of_day, p: computePnl(r, a) }))
+    .map(r => {
+      const prev = byHour.get(r.hour_of_day);
+      // Through the SAME function, so a difference between the two is
+      // the day's and never the arithmetic's.
+      return { h: r.hour_of_day, p: computePnl(r, a), q: prev ? computePnl(prev, a) : null };
+    })
     .sort((x, y) => y.h - x.h);
   if (!hrs.length) { $("pnl-hourly").innerHTML = ""; return; }
 
@@ -876,10 +883,11 @@ function drawPnlHourly(rows, a, liveHour) {
     '<span class="sub">Same assumptions. Bars are contribution margin, right for a profit ' +
     'and left for a loss, on one scale.</span></div>' +
     '<table class="pnl-hrs"><thead><tr>' +
-    ["Hour","Sales","Orders","ASP","AOV","Net sales","Spend","CM","CM %",""]
+    ["Hour","Sales","Orders","ASP","AOV","Net sales","Spend","CM","CM %"]
+      .concat(cmpRows && cmpRows.length ? ["vs"] : []).concat([""])
       .map(h => "<th>" + esc(h) + "</th>").join("") +
     "</tr></thead><tbody>" +
-    hrs.map(({ h, p }) => {
+    hrs.map(({ h, p, q }) => {
       const live = liveHour != null && h === liveHour;
       const frac = Math.min(Math.abs(p.cm) / worst, 1) * 50;
       const good = p.cm >= 0;
@@ -894,6 +902,11 @@ function drawPnlHourly(rows, a, liveHour) {
         '<td class="flat">' + inr(p.adSpend, 0) + "</td>" +
         '<td class="' + cls + '">' + inr(p.cm, 0) + "</td>" +
         '<td class="' + cls + '">' + pc(p.cmPct, 1) + "</td>" +
+        (cmpRows && cmpRows.length
+          ? '<td style="font-size:11px">' +
+            (live ? '<span class="flat">\u2014</span>' : changeHTML(p.cm, q ? q.cm : null, "up"))
+            + "</td>"
+          : "") +
         '<td><div class="pnl-bar"><div class="z"></div>' +
         '<div class="f" style="' + (good ? "left:50%" : "right:50%") +
         ";width:" + frac + "%;background:var(--" + (good ? "good" : "bad") + ')"></div>' +
@@ -901,11 +914,12 @@ function drawPnlHourly(rows, a, liveHour) {
     }).join("") + "</tbody></table>";
 }
 
-function drawPnl(t, rows, liveHour) {
+function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   if (VIEW !== "pnl" || !t || !t.pnl_orders) { $("pnlcard").hidden = true; return; }
   $("pnlcard").hidden = false;
 
   const a = pnlAssumptions();
+  const c = cmp ? computePnl(cmp, a) : null;
   const sales = t.pnl_sales, orders = t.pnl_orders, units = t.pnl_qty;
   const asp = units ? sales / units : null;
   const aov = orders ? sales / orders : null;
@@ -925,12 +939,17 @@ function drawPnl(t, rows, liveHour) {
   const cmPct = net ? cm / net : null;
 
   $("pnl-kpis").innerHTML = [
-    ["ASP", inr(asp)],
-    ["AOV", inr(aov)],
-    ["Net sales", inr(net, 0)],
-    ["Contribution margin", inr(cm, 0)],
-    ["CM %", pc(cmPct, 1)],
-  ].map(([k, v]) => '<div><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div></div>").join("");
+    ["ASP", inr(asp), c ? inr(c.asp) : null, asp, c ? c.asp : null],
+    ["AOV", inr(aov), c ? inr(c.aov) : null, aov, c ? c.aov : null],
+    ["Net sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null],
+    ["Contribution margin", inr(cm, 0), c ? inr(c.cm, 0) : null, cm, c ? c.cm : null],
+    ["CM %", pc(cmPct, 1), c ? pc(c.cmPct, 1) : null, cmPct, c ? c.cmPct : null],
+  ].map(([k, v, was, now, prev]) =>
+    '<div><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div>" +
+    (was === null ? "" :
+      '<div class="h-prev">' + was + " " + changeHTML(now, prev, "up") +
+      (cmpDay ? ' <span class="sub">' + esc(cmpDay) + "</span>" : "") + "</div>") +
+    "</div>").join("");
 
   $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct]) =>
     "<label>" + esc(label) +
@@ -942,21 +961,28 @@ function drawPnl(t, rows, liveHour) {
     "Percentages on COGS and PG fees apply to <strong>net</strong> sales; cancellation " +
     "applies to total sales.</p>";
 
-  const line = (label, value, note, cls) =>
+  const line = (label, value, note, cls, was) =>
     '<div class="pnl-l ' + (cls || "") + '"><span>' + esc(label) +
     (note ? '<span class="sub2">' + esc(note) + "</span>" : "") +
-    "</span><span>" + value + "</span></div>";
+    '</span><span>' +
+    (was ? '<span class="sub2" style="margin:0 8px 0 0">' + was + "</span>" : "") +
+    value + "</span></div>";
 
   $("pnl-lines").innerHTML =
-    line("Total sales", inr(sales, 0), num(orders) + " orders \u00b7 " + num(units) + " units", "strong") +
-    line("Cancellation / RTO (" + pc(a.cancelRate, 1) + ")", "\u2212 " + inr(cancellation, 0), "") +
-    line("Net sales", inr(net, 0), "", "strong rule") + "<div></div>" +
-    ded.map(d => line(d[0], "\u2212 " + inr(d[1], 0), d[2])).join("") +
-    line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule") +
+    line("Total sales", inr(sales, 0), num(orders) + " orders \u00b7 " + num(units) + " units",
+         "strong", c ? inr(c.sales, 0) : null) +
+    line("Cancellation / RTO (" + pc(a.cancelRate, 1) + ")", "\u2212 " + inr(cancellation, 0), "",
+         "", c ? "\u2212 " + inr(c.cancellation, 0) : null) +
+    line("Net sales", inr(net, 0), "", "strong rule", c ? inr(c.net, 0) : null) + "<div></div>" +
+    ded.map((d, i) => line(d[0], "\u2212 " + inr(d[1], 0), d[2], "",
+         c ? "\u2212 " + inr([c.adSpend, c.adGst, c.logistics, c.pgFees, c.coins, c.cogs][i], 0) : null)).join("") +
+    line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule",
+         c ? "\u2212 " + inr(c.totalDed, 0) : null) +
     line("Contribution margin", inr(cm, 0),
-         cmPct === null ? "" : pc(cmPct, 1) + " of net sales", "strong rule");
+         cmPct === null ? "" : pc(cmPct, 1) + " of net sales", "strong rule",
+         c ? inr(c.cm, 0) : null);
 
-  drawPnlHourly(rows, a, liveHour);
+  drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour);
 }
 
 // Delegated, because drawPnl replaces the inputs on every change.
@@ -970,7 +996,9 @@ $("pnl-assump").addEventListener("input", e => {
   try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
   const hidden = $("pnl-assump").hidden;
   drawPnl(LAST.d.today, LAST.d.rows || [],
-          LAST.day === istToday() ? LAST.d.latest_hour : null);
+          LAST.day === istToday() ? LAST.d.latest_hour : null,
+          LAST.d.compare, LAST.d.compare_rows || [],
+          LAST.d.compare ? LAST.d.compare.day : "");
   $("pnl-assump").hidden = hidden;
   // Redrawing blew away focus mid-keystroke; put it back.
   const again = $("pnl-assump").querySelector('input[data-k="' + el.getAttribute("data-k") + '"]');

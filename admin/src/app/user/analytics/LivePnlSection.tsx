@@ -32,12 +32,14 @@ export function LivePnlSection() {
   /** Did someone CHOOSE this day, or did it default to today? Only the
    *  default may roll forward at midnight. */
   const [dayPinned, setDayPinned] = useState(false);
+  const [compareTo, setCompareTo] = useState("");
   const [data, setData] = useState<HourlyTrackerResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
-  const params = useMemo(() => ({ day }), [day]);
+  const params = useMemo(
+    () => ({ day, compare_to: compareTo || undefined }), [day, compareTo]);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +79,11 @@ export function LivePnlSection() {
                  onChange={(e) => { setDayPinned(true); setDay(e.target.value); }}
                  className={filterControlClass} />
         </FilterCell>
+        <FilterCell label="Compare to" className="w-48" htmlFor="pnl-cmp">
+          <input id="pnl-cmp" type="date" value={compareTo} max={istToday()}
+                 onChange={(e) => setCompareTo(e.target.value)}
+                 className={filterControlClass} />
+        </FilterCell>
         <button type="button" onClick={refresh}
                 className="rounded-md border border-border-primary px-3 py-1.5 text-[12.5px] text-text-primary hover:bg-bg-muted">
           Refresh
@@ -97,6 +104,9 @@ export function LivePnlSection() {
         </p>
       ) : (
         <LivePnl totals={t} rows={data?.rows ?? []}
+                 compare={data?.compare ?? null}
+                 compareRows={data?.compare_rows ?? []}
+                 compareDay={data?.compare?.day ?? ""}
                  liveHour={isToday ? data?.latest_hour : null} />
       )}
     </div>
