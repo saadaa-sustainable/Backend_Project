@@ -137,6 +137,14 @@
   .hd-bar .cap { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
   .hd-bar.none { background: var(--border-soft); border-radius: 2px; opacity: .4; }
   .hd-note { margin-top: 4px; font-size: 10.5px; line-height: 1.4; color: var(--text-3); }
+  /* Two views, not two pages. The tracker asks whether the day is
+     working; the P&L asks whether it is paying. Same data, same
+     fetch -- only what is shown changes, so switching is instant. */
+  .views { display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
+           overflow: hidden; }
+  .views button { border: 0; border-radius: 0; padding: 6px 14px; font-size: 12.5px;
+                  background: transparent; color: var(--text-2); }
+  .views button[aria-selected="true"] { background: var(--text); color: var(--bg); font-weight: 600; }
   .pnl-kpis { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0,1fr)); margin-top: 12px; }
   @media (min-width: 900px) { .pnl-kpis { grid-template-columns: repeat(5, minmax(0,1fr)); } }
   .pnl-kpis .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
@@ -206,6 +214,10 @@
   </header>
 
   <div class="controls">
+    <div class="views" role="tablist">
+      <button id="view-tracker" role="tab" aria-selected="true">Hourly Tracker</button>
+      <button id="view-pnl" role="tab" aria-selected="false">Live P&amp;L</button>
+    </div>
     <label class="f">Day <input type="date" id="day"></label>
     <label class="f">Compare to <input type="date" id="cmp"></label>
     <label class="f"><input type="checkbox" id="deltas" checked> % change</label>
@@ -226,7 +238,7 @@
     <div class="heroes" id="heroes"></div>
   </div>
 
-  <div class="card" id="pnlcard" style="margin-top:16px" hidden>
+  <div class="card" id="pnlcard" hidden>
     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
       <strong style="font-size:13px">Live P&amp;L · day to date</strong>
       <button id="pnl-toggle" style="font-size:11.5px;padding:2px 8px">Assumptions</button>
@@ -533,6 +545,15 @@ function render(d, day) {
   const baselineDay = $("cmp").value ||
     new Date(new Date(day + "T00:00:00Z").getTime() - 86400000).toISOString().slice(0, 10);
 
+  // --- the P&L view owns the whole page when it is on -----------------
+  if (VIEW === "pnl") {
+    TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
+    drawPnl(t);
+    $("footnote").textContent = "";
+    return;
+  }
+  $("pnlcard").hidden = true;
+
   // --- totals ---
   if (t) {
     const base = c || {};                  // no baseline: every read is undefined
@@ -562,7 +583,6 @@ function render(d, day) {
   }
 
   drawChart(rows, d.compare_rows || [], c ? c.day : "");
-  drawPnl(t);
   drawDonut(d.sources || []);
   drawCompare(rows, d.compare_rows || [], c ? c.day : baselineDay,
               isToday ? d.latest_hour : null);
@@ -781,8 +801,30 @@ function pnlAssumptions() {
   return Object.assign({}, PNL_DEFAULTS);
 }
 
+//: Which view is on screen. Both are drawn from the same payload, so
+//: switching never refetches -- it only changes what is hidden.
+let VIEW = "tracker";
+
+//: Everything the tracker view owns. The P&L card is the other view.
+const TRACKER_CARDS = ["totals", "chartcard", "donutcard", "cmpcard", "tablewrap"];
+
+function applyView() {
+  const pnl = VIEW === "pnl";
+  $("view-tracker").setAttribute("aria-selected", String(!pnl));
+  $("view-pnl").setAttribute("aria-selected", String(pnl));
+  // Hiding only. Showing is the drawing code's job, so a card with
+  // nothing to show stays hidden rather than flashing empty -- and
+  // render() below re-applies the gate anyway.
+  if (pnl) TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
+  else $("pnlcard").hidden = true;
+  if (LAST) render(LAST.d, LAST.day);
+}
+
+$("view-tracker").onclick = () => { if (VIEW !== "tracker") { VIEW = "tracker"; applyView(); } };
+$("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView(); } };
+
 function drawPnl(t) {
-  if (!t || !t.pnl_orders) { $("pnlcard").hidden = true; return; }
+  if (VIEW !== "pnl" || !t || !t.pnl_orders) { $("pnlcard").hidden = true; return; }
   $("pnlcard").hidden = false;
 
   const a = pnlAssumptions();

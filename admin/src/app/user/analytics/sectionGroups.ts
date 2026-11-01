@@ -30,6 +30,7 @@ export type Tab =
   | "untested-assets"
   | "campaign-tracker"
   | "hourly-tracker"
+  | "live-pnl"
   | "instagram"
   | "shopify-analytics"
   | "shopify-explorer"
@@ -45,7 +46,8 @@ export interface Group {
 }
 
 export const GROUPS: Group[] = [
-  { key: "overview", label: "Overview", tabs: ["dashboard", "hourly-tracker", "comparative", "blended-mer"] },
+  { key: "overview", label: "Overview",
+    tabs: ["dashboard", "hourly-tracker", "live-pnl", "comparative", "blended-mer"] },
   { key: "creative", label: "Creative", tabs: ["creative-testing", "asset-analysis", "untested-assets", "campaign-tracker", "instagram"] },
   { key: "attribution", label: "Attribution", tabs: ["last-click-utm", "first-click", "customer-journey", "landing-page"] },
   { key: "product", label: "Product", tabs: ["ads-analyse", "cpis", "meta-hypothesis"] },
