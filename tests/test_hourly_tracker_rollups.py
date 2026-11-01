@@ -186,6 +186,16 @@ def test_day_with_no_orders_has_no_aov():
     (None, ["return"], True, "Shopify tags are not case-stable"),
     (None, ["Prepaid", " RETURN "], True, "tag lists carry unrelated tags"),
     (None, None, False, "an order with no tags at all"),
+    # Return Prime: the order IS the return leg, not an order that was
+    # later returned, so no tag rescues it.
+    (None, ["Return_Prime"], True, "a return flowing back is not revenue"),
+    (None, ["return_prime"], True, "typed by hand, so never case-stable"),
+    (None, [" RETURN_PRIME "], True, "nor whitespace-stable"),
+    (None, ["Return_Prime", "Exchange"], True,
+     "Exchange rescues a plain Return, NOT a Return Prime leg"),
+    # `inf` stays IN the tracker on purpose, though the P&L drops it.
+    (None, ["inf"], False, "a report order is still something the hour produced"),
+    (None, ["influencer-order"], False, "same, under its other spelling"),
 ])
 def test_tracker_exclusion_rule(cancelled, tags, excluded, why):
     assert is_excluded_order(cancelled, tags) is excluded, why
@@ -402,3 +412,33 @@ def test_an_impossible_date_is_refused_rather_than_rolled():
         parse_day("32-10-2026")
     with pytest.raises(ValueError):
         parse_day("2026-10-03")
+
+
+# --- the two rules overlap on Return_Prime and disagree on inf --------
+
+def test_both_rules_drop_return_prime():
+    """It is a return flowing backwards. Neither question it is not a
+    sale, so neither population counts it."""
+    assert is_excluded_order(None, ["Return_Prime"]) is True
+    assert is_pnl_excluded(["Return_Prime"]) is True
+
+
+def test_only_the_pnl_drops_report_orders():
+    """The one tag the two rules deliberately disagree about.
+
+    The P&L asks what the day EARNED, and goods that went out with no
+    sale behind them earned nothing. The tracker asks what the hour
+    PRODUCED, and a report order is still something it produced.
+
+    Asserted rather than assumed: if someone ever makes these agree it
+    should be a decision, not a quiet edit.
+    """
+    assert is_excluded_order(None, ["inf"]) is False
+    assert is_pnl_excluded(["inf"]) is True
+
+
+def test_exchange_rescues_a_return_but_not_a_return_prime():
+    """An Exchange tag means the money stayed, which is true of a swap
+    and not of a return leg."""
+    assert is_excluded_order(None, ["Return", "Exchange"]) is False
+    assert is_excluded_order(None, ["Return_Prime", "Exchange"]) is True

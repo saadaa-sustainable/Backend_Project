@@ -265,11 +265,12 @@
     <div id="pnl-lines"></div>
     <div id="pnl-hourly"></div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
-      Sales, orders, units, cancellations and refunds are measured. Everything below the Total sales line is a
-      model built from the rates above, and the day is still running — a margin here is an
-      estimate, not a result. Orders tagged <code>inf</code> (daily report) and
-      <code>Return_Prime</code> are excluded; cancelled orders are kept in the population and
-      deducted on their own line, so the deduction can be read rather than assumed.
+      The top line is <strong>Shopify's own Total sales</strong>, stored verbatim, so it equals
+      what the Shopify admin shows. It still contains cancellations Shopify has not refunded — a
+      COD order cancelled before payment produces no refund — and only that unrefunded part is
+      deducted below, never the whole cancelled value. Everything under the Realisable sales line
+      is a model built from the rates above, and the day is still running, so a margin here is an
+      estimate rather than a result.
     </p>
   </div>
 
@@ -438,7 +439,7 @@ const METRICS = [
   ["cost_per_paid_session", "Cost / paid sess", v => inr(v), "down"],
   // The numerator of both CR and AOV, which had no column of its own.
   ["orders", "Orders", num, "up"],
-  ["revenue", "Revenue", v => inr(v, 0), "up"],
+  ["revenue", "Total sales", v => inr(v, 0), "up"],
   // Basket size, not traffic quality: the one revenue column whose
   // denominator is ORDERS rather than sessions. An hour can lift
   // Rev / session by converting more of the same traffic while AOV
@@ -459,7 +460,7 @@ const METRICS = [
 const HEROES = [
   ["sessions", "Sessions", num, "up"],
   ["spend", "Spend", v => inr(v, 0), "up"],
-  ["revenue", "Revenue", v => inr(v, 0), "up"],
+  ["revenue", "Total sales", v => inr(v, 0), "up"],
   ["cost_per_session", "Cost / session", v => inr(v), "down"],
   ["revenue_per_session", "Rev / session", v => inr(v), "up"],
   ["aov", "AOV", v => inr(v), "up"],
@@ -849,7 +850,12 @@ $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView();
 // The day row and every hour row both come through here, so the summary
 // cannot drift from the breakdown beneath it.
 function computePnl(r, a) {
-  const sales = r.pnl_sales || 0, orders = r.pnl_orders || 0;
+  // Shopify's own Total sales, so the P&L opens on the number the
+  // Shopify admin shows. Falls back to the order-derived figure only
+  // for rows written before the column existed.
+  const sales = (r.shopify_total_sales != null ? r.shopify_total_sales
+                                               : (r.pnl_sales || 0));
+  const orders = r.pnl_orders || 0;
   const units = r.pnl_qty || 0, coinOrders = r.silver_coin_orders || 0;
   const adSpend = r.spend || 0;
 
@@ -860,7 +866,13 @@ function computePnl(r, a) {
   // Rows written before these columns existed report null, which reads
   // as no cancellation -- an understatement that re-ingesting the day
   // fixes, and better than inventing a rate for them.
-  const cancellation = r.pnl_cancelled_sales || 0;
+  // Only the part Shopify has NOT already taken out. Its Total sales
+  // removes a cancellation via `returns`, which exists only when the
+  // order was refunded; a COD order cancelled before payment produces
+  // no refund and is still sitting in the figure above. Deducting the
+  // whole cancelled value would take the refunded part out twice.
+  const cancellation = Math.max(
+    0, (r.pnl_cancelled_sales || 0) - (r.pnl_cancelled_refunded || 0));
   const cancelledOrders = r.pnl_cancelled_orders || 0;
   // Money already handed back on orders that still stand. Shopify nets
   // this off and we did not, which is most of why our figure read high
@@ -934,7 +946,7 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
     '<span class="sub">Same assumptions. Bars are contribution margin, right for a profit ' +
     'and left for a loss, on one scale.</span></div>' +
     '<table class="pnl-hrs"><thead><tr>' +
-    ["Hour","Sales","Orders","ASP","AOV","Total sales","Spend","CM","CM %"]
+    ["Hour","Sales","Orders","ASP","AOV","Realisable","Spend","CM","CM %"]
       .concat(cmpRows && cmpRows.length ? ["vs"] : []).concat([""])
       .map(h => "<th>" + esc(h) + "</th>").join("") +
     "</tr></thead><tbody>" +
@@ -1002,7 +1014,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ["AOV", inr(d.aov), c ? inr(c.aov) : null, d.aov, c ? c.aov : null, "up"],
     ["Units sold", num(liveUnits), c ? num(c.liveUnits) : null,
      liveUnits, c ? c.liveUnits : null, "up"],
-    ["Total sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null, "up"],
+    ["Realisable sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null, "up"],
     ["Cancellation %", pc(cancelPct, 1), c ? pc(c.cancelPct, 1) : null,
      cancelPct, c ? c.cancelPct : null, "down"],
     ["Contribution margin", inr(cm, 0), c ? inr(c.cm, 0) : null, cm, c ? c.cm : null, "up"],
@@ -1022,7 +1034,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
     (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
-    "Percentages on COGS and PG fees apply to <strong>total</strong> sales. " +
+    "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
     "Cancellations and refunds are counted from the orders themselves; only " +
     "<strong>Further cancellation</strong> is an allowance, and it may be set " +
     "negative to take the figure back down.</p>";
@@ -1036,10 +1048,12 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
 
   $("pnl-lines").innerHTML =
     '<div class="pnl-bridge">' +
-    line("Net sales", inr(sales, 0), num(orders) + " orders placed",
+    line("Total sales (Shopify)", inr(sales, 0),
+         "gross less discounts and returns, plus tax",
          "strong", c ? inr(c.sales, 0) : null) +
-    line("Cancelled orders", "\u2212 " + inr(cancellation, 0),
-         num(cancelledOrders) + " orders \u00b7 " + pc(cancelPct, 1),
+    line("Cancelled, not refunded", "\u2212 " + inr(cancellation, 0),
+         num(cancelledOrders) + " cancelled \u00b7 " + pc(cancelPct, 1)
+         + " \u2014 the part Shopify has not already removed",
          "", c ? "\u2212 " + inr(c.cancellation, 0) : null) +
     // Only when there is something to show: this store refunds a
     // standing order so rarely that the line was zero on every day of
@@ -1054,7 +1068,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     line("Further cancellation (" + pc(a.extraCancelRate, 1) + ")",
          signedDed(extraCancellation), "allowance, not measured",
          "", c ? signedDed(c.extraCancellation) : null) +
-    line("Total sales", inr(net, 0),
+    line("Realisable sales", inr(net, 0),
          num(liveOrders) + " orders \u00b7 " + num(liveUnits) + " units",
          "strong rule", c ? inr(c.net, 0) : null) +
     // Close the bridge and start a fresh two-column grid for the
@@ -1067,7 +1081,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule",
          c ? "\u2212 " + inr(c.totalDed, 0) : null) +
     line("Contribution margin", inr(cm, 0),
-         cmPct === null ? "" : pc(cmPct, 1) + " of total sales", "strong rule",
+         cmPct === null ? "" : pc(cmPct, 1) + " of realisable sales", "strong rule",
          c ? inr(c.cm, 0) : null) +
     "</div>";
 
@@ -1129,8 +1143,8 @@ const HD_GROUPS = [
     ["conversion_rate_paid", "CR / paid", v => pc(v, 2), "pt"],
     ["conversion_rate_direct", "CR / direct", v => pc(v, 2), "pt"],
   ]],
-  ["Revenue", "", [
-    ["revenue", "Revenue", v => inr(v, 0), ""],
+  ["Total sales", "", [
+    ["revenue", "Total sales", v => inr(v, 0), ""],
     ["revenue_paid", "Paid revenue", v => inr(v, 0), ""],
     ["aov", "AOV", v => inr(v), ""],
     ["revenue_per_session", "Rev / session", v => inr(v), ""],
@@ -1157,7 +1171,7 @@ const HD_GROUPS = [
     ["ga4_revenue", "Revenue (GA4)", v => inr(v, 0), ""],
     ["ga4_arpu", "ARPU", v => inr(v), ""],
   ]],
-  ["Not counted", "Cancelled, or returned without an exchange. Set aside rather than dropped silently, so a gap against Shopify's admin has an explanation.", [
+  ["Not counted", "Cancelled, returned without an exchange, or tagged Return_Prime — a return flowing back is not a sale. Report orders (inf) are still counted. Set aside rather than dropped silently, so a gap against Shopify's admin has an explanation.", [
     ["orders_excluded", "Orders excluded", num, "flat"],
     ["revenue_excluded", "Revenue excluded", v => inr(v, 0), "flat"],
   ]],
@@ -1231,7 +1245,7 @@ function hourDetailHTML(r, p, baseDay, live, width) {
 const CMP_METRICS = [
   ["sessions", "Sessions", num],
   ["orders", "Orders", num],
-  ["revenue", "Revenue", v => inr(v, 0)],
+  ["revenue", "Total sales", v => inr(v, 0)],
   ["spend", "Spend", v => inr(v, 0)],
   ["cost_per_session", "Cost / session", v => inr(v, 0), true],
   ["revenue_per_session", "Rev / session", v => inr(v, 0)],
@@ -1431,7 +1445,7 @@ const TIP_ROWS = [
   ["revenue_per_session", "Revenue / session", v => inr(v)],
   ["amer", "AMER", xx],
   ["spend", "Spend", v => inr(v, 0)],
-  ["revenue", "Revenue", v => inr(v, 0)],
+  ["revenue", "Total sales", v => inr(v, 0)],
   ["pct_paid", "% paid", v => pc(v)],
 ];
 

@@ -3619,7 +3619,9 @@ export interface HourlyRow {
   /** Orders on the same denominators as the session buckets. Sum to orders. */
   orders_paid: number | null;
   orders_direct: number | null;
-  /** Cancelled or returned, and therefore NOT in revenue/orders above. */
+  /** Cancelled, returned, or tagged Return_Prime, and therefore NOT in
+   *  revenue/orders above. Report orders (`inf`) ARE counted here —
+   *  that is the one tag the tracker and the P&L disagree about. */
   orders_excluded: number | null;
   revenue_excluded: number | null;
   /** The P&L basis — drops orders tagged `inf` or `Return_Prime`, and
@@ -3642,8 +3644,17 @@ export interface HourlyRow {
   /** Refunded on orders this hour placed, cancelled ones excluded (they
    *  are already deducted at full price). NOT Shopify's `returns`. */
   pnl_refunds: number | null;
+  /** How much of the cancelled value Shopify has ALREADY refunded, and
+   *  therefore already removed from Total sales. */
+  pnl_cancelled_refunded: number | null;
   /** ShopifyQL's own total, a different measure kept as a cross-check. */
   revenue_shopifyql: number | null;
+  /** Shopify's OWN Total sales, verbatim — the headline. Returns in it
+   *  are dated by the day the REFUND was issued, and cancelled orders
+   *  never refunded are still inside it. */
+  shopify_total_sales: number | null;
+  /** Negative, as ShopifyQL reports it. */
+  shopify_returns: number | null;
   revenue_meta: number | null;
   revenue_google: number | null;
   revenue_paid: number | null;
@@ -3706,6 +3717,7 @@ export interface HourlyTotals {
   pnl_cancelled_sales: number;
   pnl_cancelled_qty: number;
   pnl_refunds: number;
+  pnl_cancelled_refunded: number;
   spend: number;
   meta_impressions: number;
   meta_spend: number;

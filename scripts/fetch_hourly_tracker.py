@@ -127,6 +127,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- ShopifyQL's own total for the hour, net of returns. A
     -- cross-check, deliberately a different measure.
     revenue_shopifyql       numeric,
+    -- Shopify's own Total sales for the hour, stored verbatim so the
+    -- headline can EQUAL what the Shopify admin shows rather than
+    -- approach it. Gross, less discounts, less returns, plus shipping
+    -- and tax.
+    --
+    -- Returns here are dated by the day the REFUND was issued, not the
+    -- day the order was placed, so an hour can be pulled down by a
+    -- refund on a much older order. That is Shopify's convention and
+    -- the price of matching it exactly.
+    shopify_total_sales     numeric,
+    -- Negative, as ShopifyQL reports it.
+    shopify_returns         numeric,
     revenue_meta            numeric,
     revenue_google          numeric,
     revenue_paid            numeric,
@@ -185,6 +197,16 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- latter -- otherwise a refund on a three-week-old order makes this
     -- afternoon's hour look bad.
     pnl_refunds             numeric,
+    -- How much of the CANCELLED value Shopify has already refunded.
+    --
+    -- This exists because Shopify's Total sales removes a cancellation
+    -- only when it was refunded. A COD order cancelled before payment
+    -- produces no refund, so it stays inside Total sales -- money that
+    -- will never arrive. The P&L deducts exactly the unrefunded part:
+    --   pnl_cancelled_sales - pnl_cancelled_refunded
+    -- Deducting the whole cancelled value instead would double-count
+    -- the part Shopify had already taken out.
+    pnl_cancelled_refunded  numeric,
     -- Orders CONTAINING a coin, not coins sold -- the cost is per
     -- order that shipped one.
     silver_coin_orders      integer,
@@ -230,18 +252,23 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_refunds numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_total_sales numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_returns numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_refunded numeric",
 ]
 
 COLUMNS = [
     "hour", "day_ist", "hour_of_day",
     "sessions", "sessions_paid", "sessions_direct", "sessions_meta", "sessions_google",
     "sessions_by_source",
-    "revenue", "orders", "revenue_shopifyql", "revenue_meta", "revenue_google",
+    "revenue", "orders", "revenue_shopifyql",
+    "shopify_total_sales", "shopify_returns",
+    "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
     "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders",
     "pnl_cancelled_orders", "pnl_cancelled_sales", "pnl_cancelled_qty",
-    "pnl_refunds",
+    "pnl_refunds", "pnl_cancelled_refunded",
     "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
     "google_spend", "google_spend_as_of",
@@ -304,10 +331,30 @@ def source_label(src: str) -> str:
 def is_excluded_order(cancelled_at: str | None, tags: list[str] | None) -> bool:
     """Orders this tracker does not count as revenue.
 
-    Cancelled, or returned. An EXCHANGE is kept: the customer swapped
-    for something of equal value, so the money stayed. An order tagged
-    both Return and Exchange is the exchange leg of a swap, not a
-    refund, and is kept for the same reason.
+    Cancelled, returned, or carrying `Return_Prime`. An EXCHANGE is
+    kept: the customer swapped for something of equal value, so the
+    money stayed. An order tagged both Return and Exchange is the
+    exchange leg of a swap, not a refund, and is kept for the same
+    reason.
+
+    `Return_Prime` marks a return flowing back through the returns
+    platform, so it is not a sale and does not belong in revenue. It is
+    dropped UNCONDITIONALLY -- an Exchange tag does not rescue it, the
+    way it rescues a plain `Return`, because the tag means the order
+    itself is the return leg rather than an order that was later
+    returned.
+
+    These orders are overwhelmingly worth ZERO, so dropping them barely
+    moves revenue but removes of the order of a hundred orders a day
+    from the count -- which lifts AOV and lowers conversion rate. That
+    is the point: a return flowing backwards was never an order this
+    campaign hour won.
+
+    `inf` is deliberately NOT excluded here, though the P&L drops it.
+    The P&L asks what the day earned, and goods that went out with no
+    sale behind them did not earn anything; the tracker asks what the
+    hour produced, and a report order is still something the hour
+    produced.
 
     This deliberately differs from the daily dashboard, which drops
     exchanges too. The tracker answers "what did this campaign hour
@@ -320,6 +367,8 @@ def is_excluded_order(cancelled_at: str | None, tags: list[str] | None) -> bool:
     if cancelled_at:
         return True
     t = {str(x).strip().lower() for x in (tags or [])}
+    if "return_prime" in t:
+        return True
     return "return" in t and "exchange" not in t
 
 
@@ -414,11 +463,31 @@ async def fetch_sessions(client, store, day: date) -> dict[datetime, dict]:
 
 
 async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
-    """The authoritative revenue and order count per hour."""
+    """Shopify's OWN sales figures per hour, straight from ShopifyQL.
+
+    `shopify_total_sales` is the number Shopify's admin shows as Total
+    sales: gross, less discounts, less returns, plus shipping and tax.
+    It is stored verbatim so the dashboard's headline can equal what
+    anyone sees in Shopify, rather than approaching it.
+
+    It is NOT the same measure as the order-derived `revenue` beside
+    it, and the difference is not drift:
+
+      * RETURNS are dated by the day the REFUND was issued, against an
+        order from any day. Our order-derived figures date everything by
+        the order. So an hour's total_sales can be pulled down by a
+        refund on a three-week-old order.
+      * Cancelled orders that were never REFUNDED stay inside it. A COD
+        order cancelled before payment produces no refund, so Shopify
+        still counts it; the P&L deducts it separately.
+
+    Both are kept because they answer different questions, and a single
+    number cannot be both Shopify-identical and attributable by channel.
+    """
     from ingest_shopify import SHOPIFYQL_QUERY  # noqa: PLC0415
     from shopify_client import graphql_request  # noqa: PLC0415
 
-    q = (f"FROM sales SHOW total_sales, returns, orders "
+    q = (f"FROM sales SHOW total_sales, returns, gross_sales, orders "
          f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
          f"GROUP BY hour ORDER BY hour LIMIT 100")
     resp = (await graphql_request(client, store, SHOPIFYQL_QUERY, {"q": q}))["shopifyqlQuery"]
@@ -427,11 +496,15 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
     out = {}
     for row in (resp.get("tableData") or {}).get("rows", []):
         hour = ist_hour(datetime.fromisoformat(row["hour"].replace("Z", "+00:00")))
-        # total_sales is net of returns; adding them back gives the
-        # gross figure the orders carry, which is what this compares to.
+        total = float(row.get("total_sales") or 0)
+        # `returns` arrives NEGATIVE. Subtracting it adds the refunds
+        # back, which is the like-for-like comparison against the
+        # order-derived figure -- that one has no returns in it either.
+        rets = float(row.get("returns") or 0)
         out[hour] = {
-            "revenue_shopifyql": (float(row.get("total_sales") or 0)
-                                  - float(row.get("returns") or 0)),
+            "shopify_total_sales": total,
+            "shopify_returns": rets,
+            "revenue_shopifyql": total - rets,
         }
     return out
 
@@ -501,7 +574,8 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                                           silver_coin_orders=0,
                                           pnl_cancelled_orders=0,
                                           pnl_cancelled_sales=0.0,
-                                          pnl_cancelled_qty=0, pnl_refunds=0.0))
+                                          pnl_cancelled_qty=0, pnl_refunds=0.0,
+                                          pnl_cancelled_refunded=0.0))
 
             # The P&L basis is accumulated BEFORE the revenue
             # exclusions, because the two answer different questions
@@ -513,17 +587,20 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                 b["pnl_qty"] += units
                 if has_coin:
                     b["silver_coin_orders"] += 1
+                refunded = float((n.get("totalRefundedSet") or {})
+                                 .get("shopMoney", {}).get("amount") or 0)
                 if n.get("cancelledAt"):
                     b["pnl_cancelled_orders"] += 1
                     b["pnl_cancelled_sales"] += price
                     b["pnl_cancelled_qty"] += units
+                    # Shopify has already taken this part out of Total
+                    # sales, via `returns`. Only the rest is still in.
+                    b["pnl_cancelled_refunded"] += refunded
                 else:
                     # Only on orders that stand. A cancelled order is
                     # deducted at full price above; refunding it too
                     # would deduct the same money twice.
-                    b["pnl_refunds"] += float(
-                        (n.get("totalRefundedSet") or {})
-                        .get("shopMoney", {}).get("amount") or 0)
+                    b["pnl_refunds"] += refunded
 
             # Counted and set aside, not skipped silently: an hour whose
             # orders do not match Shopify's admin should say why.

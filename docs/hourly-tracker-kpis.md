@@ -66,11 +66,29 @@ per-channel columns add up against it exactly.
 **What is excluded** (`is_excluded_order`):
 
 ```
-cancelled_at is set          -> excluded
-tagged Return, no Exchange   -> excluded
-tagged Exchange              -> KEPT
-tagged Return AND Exchange   -> KEPT  (the exchange leg of a swap)
+cancelled_at is set             -> excluded
+tagged Return_Prime             -> excluded  (ALWAYS)
+tagged Return, no Exchange      -> excluded
+tagged Exchange                 -> KEPT
+tagged Return AND Exchange      -> KEPT  (the exchange leg of a swap)
+tagged inf / influencer-order   -> KEPT
 ```
+
+**`Return_Prime` is dropped unconditionally**, and an `Exchange` tag
+does not rescue it the way it rescues a plain `Return`. The tag means
+the order *is* the return leg, not an order that was later returned.
+
+These orders are overwhelmingly worth **zero**, so dropping them barely
+moves revenue — but it removes of the order of a hundred orders a day
+from the count, which **lifts AOV and lowers conversion rate**. That is
+the intended effect: a return flowing backwards was never an order the
+campaign hour won.
+
+**`inf` stays IN the tracker**, though the P&L drops it. This is the one
+tag the two rules deliberately disagree about: the P&L asks what the day
+*earned*, and goods that went out with no sale behind them earned
+nothing; the tracker asks what the hour *produced*, and a report order
+is still something it produced. Both halves are pinned by tests.
 
 An exchange swaps for an item of equal value, so the money stayed and
 this tracker counts it. The dashboard uses a **deliberately different**

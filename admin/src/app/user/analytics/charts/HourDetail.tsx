@@ -74,9 +74,9 @@ const GROUPS: { title: string; note?: string; items: Item[] }[] = [
     ],
   },
   {
-    title: "Revenue",
+    title: "Total sales",
     items: [
-      { key: "revenue", label: "Revenue", fmt: money },
+      { key: "revenue", label: "Total sales", fmt: money },
       { key: "revenue_paid", label: "Paid revenue", fmt: money },
       { key: "aov", label: "AOV", fmt: money2 },
       { key: "revenue_per_session", label: "Rev / session", fmt: money2 },
@@ -117,7 +117,7 @@ const GROUPS: { title: string; note?: string; items: Item[] }[] = [
   },
   {
     title: "Not counted",
-    note: "Cancelled, or returned without an exchange. Set aside rather than dropped silently, so a gap against Shopify's admin has an explanation.",
+    note: "Cancelled, returned without an exchange, or tagged Return_Prime — a return flowing back is not a sale. Report orders (inf) are still counted. Set aside rather than dropped silently, so a gap against Shopify's admin has an explanation.",
     items: [
       { key: "orders_excluded", label: "Orders excluded", fmt: count, neutral: true },
       { key: "revenue_excluded", label: "Revenue excluded", fmt: money, neutral: true },
