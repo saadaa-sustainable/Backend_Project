@@ -65,9 +65,9 @@ export type Pnl = {
   sales: number;
   /** The whole P&L population, cancelled orders included. */
   orders: number; units: number; coinOrders: number;
-  /** The same, with the cancelled ones taken out — what actually sold,
-   *  and the denominator for every figure under the cancellation
-   *  line. */
+  /** The same, with the cancelled ones taken out — what actually sold.
+   *  MEASURED: the Further-cancellation allowance does not touch these,
+   *  so ASP and AOV fall as it rises. */
   liveOrders: number; liveUnits: number;
   asp: number | null; aov: number | null;
   /** Measured, not modelled: the value of the orders actually
@@ -127,17 +127,15 @@ function computePnl(r: {
   // numerator with a gross denominator would understate ASP and AOV by
   // exactly the cancelled share, which is the bug this is written to
   // avoid rather than a nicety.
-  // The allowance is a VOLUME haircut, not just a price one: if 5% more
-  // orders are going to cancel, 5% fewer ship, so the order and unit
-  // counts come down with the money. ASP and AOV are untouched by it,
-  // which is right -- cancelling orders at random does not move the
-  // average price of the ones that remain.
+  // Counts are MEASURED and the allowance does not touch them. It moves
+  // money only: the cancelled-order count stays what the orders
+  // actually say, and so do units and the logistics that follows them.
   //
-  // Refunds deliberately do NOT scale the counts. A refunded order
-  // still shipped, so its logistics was still spent.
-  const keep = 1 - a.extraCancelRate;
-  const liveOrders = Math.max(0, (orders - cancelledOrders) * keep);
-  const liveUnits = Math.max(0, (units - (r.pnl_cancelled_qty ?? 0)) * keep);
+  // The consequence is deliberate and worth knowing: because sales fall
+  // while units and orders do not, ASP and AOV fall as the allowance
+  // rises. Read them as "value per order placed", not as a price.
+  const liveOrders = Math.max(0, orders - cancelledOrders);
+  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty ?? 0));
 
   const adGst = adSpend * a.gstRate;
   // Per order DISPATCHED. A cancelled order is cancelled before it
@@ -267,7 +265,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
     { label: "Ad spend", value: d.adSpend, was: c?.adSpend, note: "Meta + Google + Kwikchat" },
     { label: "GST on ad spend", value: d.adGst, was: c?.adGst },
     { label: "Logistics", value: d.logistics, was: c?.logistics,
-      note: `${Math.round(liveOrders).toLocaleString("en-IN")} dispatched` },
+      note: `${liveOrders.toLocaleString("en-IN")} dispatched` },
     { label: "PG fees", value: d.pgFees, was: c?.pgFees },
     { label: "Silver coin", value: d.coins, was: c?.coins,
       note: `${totals.silver_coin_orders.toLocaleString("en-IN")} orders` },
@@ -305,14 +303,14 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
       <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-7">
         <Kpi label="ASP" value={money(asp, 2)} was={c ? money(c.asp, 2) : undefined}
              now={asp} prev={c?.asp} day={compareDay}
-             hint="Total sales ÷ units sold. The gift coin is not a unit sold, and cancelled orders are out of both sides." />
+             hint="Total sales ÷ units sold. The gift coin is not a unit sold, and cancelled orders are out of both sides. Units are measured, so a Further-cancellation allowance pulls this down." />
         <Kpi label="AOV" value={money(aov, 2)} was={c ? money(c.aov, 2) : undefined}
              now={aov} prev={c?.aov} day={compareDay}
-             hint="Total sales ÷ orders, cancelled orders out of both sides." />
-        <Kpi label="Units sold" value={Math.round(liveUnits).toLocaleString("en-IN")}
-             was={c ? Math.round(c.liveUnits).toLocaleString("en-IN") : undefined}
+             hint="Total sales ÷ orders, cancelled orders out of both sides. Orders are measured, so a Further-cancellation allowance pulls this down." />
+        <Kpi label="Units sold" value={liveUnits.toLocaleString("en-IN")}
+             was={c ? c.liveUnits.toLocaleString("en-IN") : undefined}
              now={liveUnits} prev={c?.liveUnits} day={compareDay}
-             hint="Units on the orders that stand, with the gift coin excluded — it is a gift, not an item sold." />
+             hint="Units on the orders that stand, with the gift coin excluded — it is a gift, not an item sold. Measured: the Further-cancellation allowance does not reduce it." />
         <Kpi label="Total sales" value={money(totalSales)}
              was={c ? money(c.totalSales) : undefined}
              now={totalSales} prev={c?.totalSales} day={compareDay}
@@ -392,7 +390,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
               note="allowance, not measured" />
         <Line label="Total sales" value={money(totalSales)}
               was={c ? money(c.totalSales) : undefined} strong rule
-              note={`${Math.round(liveOrders).toLocaleString("en-IN")} orders · ${Math.round(liveUnits).toLocaleString("en-IN")} units`} />
+              note={`${liveOrders.toLocaleString("en-IN")} orders · ${liveUnits.toLocaleString("en-IN")} units`} />
       </div>
 
       <div className="mt-3 grid gap-x-10 gap-y-1 md:grid-cols-2">

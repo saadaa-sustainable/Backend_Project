@@ -876,16 +876,15 @@ function computePnl(r, a) {
   // Net of cancellation on BOTH sides of every ratio. A net numerator
   // over a gross denominator would understate ASP and AOV by exactly
   // the cancelled share.
-  // The allowance is a VOLUME haircut, not just a price one: if 5% more
-  // orders are going to cancel, 5% fewer ship, so the counts come down
-  // with the money. ASP and AOV are untouched by it -- cancelling
-  // orders at random does not move the average price of the rest.
+  // Counts are MEASURED and the allowance does not touch them. It moves
+  // money only: the cancelled-order count stays what the orders
+  // actually say, and so do units and the logistics that follows them.
   //
-  // Refunds deliberately do NOT scale the counts: a refunded order
-  // still shipped, so its logistics was still spent.
-  const keep = 1 - (a.extraCancelRate || 0);
-  const liveOrders = Math.max(0, (orders - cancelledOrders) * keep);
-  const liveUnits = Math.max(0, (units - (r.pnl_cancelled_qty || 0)) * keep);
+  // The consequence is deliberate: because sales fall while units and
+  // orders do not, ASP and AOV fall as the allowance rises. Read them
+  // as "value per order placed", not as a price.
+  const liveOrders = Math.max(0, orders - cancelledOrders);
+  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty || 0));
 
   const adGst = adSpend * a.gstRate;
   // Per order DISPATCHED: a cancellation is cancelled before it ships
@@ -992,7 +991,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   const ded = [
     ["Ad spend", d.adSpend, "Meta + Google + Kwikchat"],
     ["GST on ad spend", d.adGst, ""],
-    ["Logistics", d.logistics, num(Math.round(liveOrders)) + " dispatched"],
+    ["Logistics", d.logistics, num(liveOrders) + " dispatched"],
     ["PG fees", d.pgFees, ""],
     ["Silver coin", d.coins, num(d.coinOrders) + " orders"],
     ["COGS", d.cogs, ""],
@@ -1001,7 +1000,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   $("pnl-kpis").innerHTML = [
     ["ASP", inr(d.asp), c ? inr(c.asp) : null, d.asp, c ? c.asp : null, "up"],
     ["AOV", inr(d.aov), c ? inr(c.aov) : null, d.aov, c ? c.aov : null, "up"],
-    ["Units sold", num(Math.round(liveUnits)), c ? num(Math.round(c.liveUnits)) : null,
+    ["Units sold", num(liveUnits), c ? num(c.liveUnits) : null,
      liveUnits, c ? c.liveUnits : null, "up"],
     ["Total sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null, "up"],
     ["Cancellation %", pc(cancelPct, 1), c ? pc(c.cancelPct, 1) : null,
@@ -1056,7 +1055,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
          signedDed(extraCancellation), "allowance, not measured",
          "", c ? signedDed(c.extraCancellation) : null) +
     line("Total sales", inr(net, 0),
-         num(Math.round(liveOrders)) + " orders \u00b7 " + num(Math.round(liveUnits)) + " units",
+         num(liveOrders) + " orders \u00b7 " + num(liveUnits) + " units",
          "strong rule", c ? inr(c.net, 0) : null) +
     // Close the bridge and start a fresh two-column grid for the
     // deductions. The bridge has a variable number of lines -- Refunds

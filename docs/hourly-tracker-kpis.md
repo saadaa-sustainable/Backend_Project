@@ -255,20 +255,22 @@ cancellations cannot apply to orders that have already cancelled. It is
 *signed*: set it negative on a day whose cancellations have all landed,
 and it takes the figure back up. Default 5%.
 
-It is a **volume** haircut, not only a price one. If 5% more orders are
-going to cancel then 5% fewer ship, so it scales the order and unit
-counts as well as the money — which is why logistics falls with it and
-**ASP and AOV do not move**. Cancelling orders at random does not change
-the average price of the ones that remain.
+It moves **money only**. The cancelled-order count stays what the orders
+actually say, and so do units and the logistics that follows them — the
+allowance is an assumption about value at risk, not a claim that fewer
+orders were placed.
 
-Refunds deliberately do *not* scale the counts: a refunded order still
-shipped, so its logistics was still spent.
+The consequence is deliberate and worth knowing: because sales fall
+while orders and units do not, **ASP and AOV fall as the allowance
+rises**. With an allowance set, read them as value per order *placed*
+rather than as a price. Set the allowance to zero to see the measured
+price.
 
 | KPI | Definition |
 |---|---|
 | **ASP** | total sales ÷ units sold |
 | **AOV** | total sales ÷ orders |
-| **Units sold** | units on the orders that stand, gift coin excluded |
+| **Units sold** | units on the orders that stand, gift coin excluded — measured, so the allowance does not reduce it |
 | **Total sales** | net sales less cancelled orders, refunds and the allowance |
 | **Cancellation %** | cancelled orders ÷ orders placed |
 | **Contribution margin** | total sales less every deduction |
