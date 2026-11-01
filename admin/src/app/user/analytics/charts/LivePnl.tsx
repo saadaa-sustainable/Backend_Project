@@ -60,8 +60,12 @@ const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: strin
 /** One period's P&L. The day and each hour run through this, so the
  *  footer cannot drift from the rows beneath it. */
 export type Pnl = {
-  /** Shopify's own net sales for the P&L population — cancelled orders
-   *  still in it, because the statement deducts them visibly below. */
+  /** Shopify's OWN Total sales: gross, less discounts, less returns,
+   *  plus tax. The same number the Shopify admin shows.
+   *
+   *  It still contains cancellations Shopify has NOT refunded — a COD
+   *  order cancelled before payment produces no refund — which is what
+   *  the line below deducts. */
   sales: number;
   /** The whole P&L population, cancelled orders included. */
   orders: number; units: number; coinOrders: number;
@@ -96,8 +100,12 @@ function computePnl(r: {
   silver_coin_orders: number | null; spend: number | null;
   pnl_cancelled_orders?: number | null; pnl_cancelled_sales?: number | null;
   pnl_cancelled_qty?: number | null; pnl_refunds?: number | null;
+  pnl_cancelled_refunded?: number | null; shopify_total_sales?: number | null;
 }, a: Assumptions): Pnl {
-  const sales = r.pnl_sales ?? 0;
+  // Shopify's own Total sales, so the P&L opens on the number the
+  // Shopify admin shows. Falls back to the order-derived figure only
+  // for rows written before the column existed.
+  const sales = r.shopify_total_sales ?? r.pnl_sales ?? 0;
   const orders = r.pnl_orders ?? 0;
   const units = r.pnl_qty ?? 0;
   const coinOrders = r.silver_coin_orders ?? 0;
@@ -111,7 +119,13 @@ function computePnl(r: {
   // read as no cancellation, which understates the deduction -- but
   // inventing a rate for them would be worse, and re-ingesting the day
   // fixes it.
-  const cancellation = r.pnl_cancelled_sales ?? 0;
+  // Only the part Shopify has NOT already taken out. Its Total sales
+  // removes a cancellation via `returns`, which exists only when the
+  // order was refunded; a COD order cancelled before payment produces
+  // no refund and is still sitting in the figure above. Deducting the
+  // whole cancelled value would take the refunded part out twice.
+  const cancellation = Math.max(
+    0, (r.pnl_cancelled_sales ?? 0) - (r.pnl_cancelled_refunded ?? 0));
   const cancelledOrders = r.pnl_cancelled_orders ?? 0;
   const refunds = r.pnl_refunds ?? 0;
   // Money already handed back on orders that still stand. Shopify nets
@@ -311,20 +325,20 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
              was={c ? c.liveUnits.toLocaleString("en-IN") : undefined}
              now={liveUnits} prev={c?.liveUnits} day={compareDay}
              hint="Units on the orders that stand, with the gift coin excluded — it is a gift, not an item sold. Measured: the Further-cancellation allowance does not reduce it." />
-        <Kpi label="Total sales" value={money(totalSales)}
+        <Kpi label="Realisable sales" value={money(totalSales)}
              was={c ? money(c.totalSales) : undefined}
              now={totalSales} prev={c?.totalSales} day={compareDay}
-             hint={`Net sales ${money(sales)} less ${money(cancellation)} cancelled${refunds > 0 ? `, ${money(refunds)} refunded` : ""} and a ${pct(a.extraCancelRate)} allowance.`} />
+             hint={`Shopify Total sales ${money(sales)}, less ${money(cancellation)} of cancellations it has not yet removed${refunds > 0 ? ` and ${money(refunds)} refunded` : ""}, less a ${pct(a.extraCancelRate)} allowance. This is the money that can still arrive.`} />
         <Kpi label="Cancellation %" value={pct(cancelPct)}
              was={c ? pct(c.cancelPct) : undefined}
              now={cancelPct} prev={c?.cancelPct} day={compareDay} lowerIsBetter
              hint={`${cancelledOrders.toLocaleString("en-IN")} of ${orders.toLocaleString("en-IN")} orders cancelled, worth ${money(cancellation)}. Measured, not assumed.`} />
         <Kpi label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
              now={cm} prev={c?.cm} day={compareDay}
-             hint="Total sales less every deduction below." />
+             hint="Realisable sales less every deduction below." />
         <Kpi label="CM %" value={pct(cmPct)} was={c ? pct(c.cmPct) : undefined}
              now={cmPct} prev={c?.cmPct} day={compareDay}
-             hint="Contribution margin ÷ total sales." />
+             hint="Contribution margin ÷ realisable sales." />
       </dl>
 
       {open && (
@@ -355,7 +369,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
           </div>
           <p className="mt-2 text-[10.5px] text-text-tertiary">
             Saved in this browser. Percentages on COGS and PG fees apply to
-            <strong> total</strong> sales — net sales after cancelled orders.
+            <strong> realisable</strong> sales.
             Cancellation and refunds are counted from the orders themselves;
             only <strong>Further cancellation</strong> is an allowance, and it
             may be set negative to take the figure back down.
@@ -369,11 +383,12 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
           flowing it left-right put Total sales mid-row and left a hole
           where the spacer fell. A bridge reads top to bottom anyway. */}
       <div className="mt-4 grid max-w-xl gap-y-1">
-        <Line label="Net sales" value={money(sales)} was={c ? money(c.sales) : undefined} strong
-              note={`${orders.toLocaleString("en-IN")} orders placed`} />
-        <Line label="Cancelled orders" value={`− ${money(cancellation)}`}
+        <Line label="Total sales (Shopify)" value={money(sales)}
+              was={c ? money(c.sales) : undefined} strong
+              note="gross less discounts and returns, plus tax" />
+        <Line label="Cancelled, not refunded" value={`− ${money(cancellation)}`}
               was={c ? `− ${money(c.cancellation)}` : undefined}
-              note={`${cancelledOrders.toLocaleString("en-IN")} orders · ${pct(cancelPct)}`} />
+              note={`${cancelledOrders.toLocaleString("en-IN")} cancelled · ${pct(cancelPct)} — the part Shopify has not already removed`} />
         {/* Only when there is something to show. This store refunds a
             standing order so rarely that the line was zero on every day
             of the backfill, and a permanent "− ₹0" row is noise in a
@@ -388,7 +403,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
               value={deduction(extraCancellation)}
               was={c ? deduction(c.extraCancellation) : undefined}
               note="allowance, not measured" />
-        <Line label="Total sales" value={money(totalSales)}
+        <Line label="Realisable sales" value={money(totalSales)}
               was={c ? money(c.totalSales) : undefined} strong rule
               note={`${liveOrders.toLocaleString("en-IN")} orders · ${liveUnits.toLocaleString("en-IN")} units`} />
       </div>
@@ -402,7 +417,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
               was={c ? `− ${money(c.totalDeductions)}` : undefined} rule />
         <Line label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
               strong rule
-              note={cmPct !== null ? `${pct(cmPct)} of total sales` : undefined} />
+              note={cmPct !== null ? `${pct(cmPct)} of realisable sales` : undefined} />
       </div>
 
       {hourly.length > 0 && (
@@ -423,7 +438,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
                   <th className="py-1 pr-3 font-medium">Orders</th>
                   <th className="py-1 pr-3 font-medium">ASP</th>
                   <th className="py-1 pr-3 font-medium">AOV</th>
-                  <th className="py-1 pr-3 font-medium">Total sales</th>
+                  <th className="py-1 pr-3 font-medium">Realisable</th>
                   <th className="py-1 pr-3 font-medium">Spend</th>
                   <th className="py-1 pr-3 font-medium">CM</th>
                   <th className="py-1 pr-3 font-medium">CM %</th>
@@ -492,12 +507,13 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
       )}
 
       <p className="mt-3 border-t border-border-soft pt-2 text-[11px] leading-snug text-text-tertiary">
-        Sales, orders, units, cancellations and refunds are measured. Everything below
-        the Total sales line is a model built from the rates above, and the day
-        is still running — a margin here is an estimate, not a result. Orders
-        tagged <code>inf</code> (daily report) and <code>Return_Prime</code> are
-        excluded; cancelled orders are kept in the population and deducted on
-        their own line, so the deduction can be seen rather than assumed.
+        The top line is <strong>Shopify&rsquo;s own Total sales</strong>, stored
+        verbatim, so it equals what the Shopify admin shows. It still contains
+        cancellations Shopify has not refunded — a COD order cancelled before
+        payment produces no refund — and only that unrefunded part is deducted
+        below, never the whole cancelled value. Everything under the Realisable
+        sales line is a model built from the rates above, and the day is still
+        running, so a margin here is an estimate rather than a result.
       </p>
     </div>
   );
