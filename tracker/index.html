@@ -260,11 +260,11 @@
     <div class="pnl-lines" id="pnl-lines"></div>
     <div id="pnl-hourly"></div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
-      Only total sales, orders and units are measured. Everything below the Net sales line is a
+      Sales, orders, units and cancellations are measured. Everything below the Total sales line is a
       model built from the rates above, and the day is still running — a margin here is an
       estimate, not a result. Orders tagged <code>inf</code> (daily report) and
-      <code>Return_Prime</code> are excluded; cancelled orders are kept, because cancellation is
-      applied as a rate rather than order by order.
+      <code>Return_Prime</code> are excluded; cancelled orders are kept in the population and
+      deducted on their own line, so the deduction can be read rather than assumed.
     </p>
   </div>
 
@@ -664,7 +664,8 @@ function render(d, day) {
     "day here will drift down as they land. Spend is Meta plus Google plus Kwikchat, but only " +
     "Meta is measured by the hour. Google arrives as one daily total from a BigQuery export and " +
     "is shared across the hours in proportion to that hour's Google-driven sessions; Kwikchat is " +
-    "a flat ₹30,000 a day over 24. The totals are real — the hourly SHAPE of them is inferred, so " +
+    "Kwikchat likewise arrives as a daily total, shared out evenly — there is no Kwikchat " +
+    "session column to shape it by. The totals are real — the hourly SHAPE of them is inferred, so " +
     "read an hour's Google figure as an allocation rather than a measurement. On a day still " +
     "running, Google's total is whatever had been spent when the export ran this morning, so it " +
     "reaches only the hours before that; later hours show a dash rather than a false zero. " +
@@ -780,14 +781,13 @@ $("donutbody").addEventListener("pointerleave", () => {
 // Contribution margin for the day so far, from the day's own numbers
 // and six assumptions.
 //
-// Every deduction below the Net sales line is an estimate, not a
+// Every deduction below the Total sales line is an estimate, not a
 // measurement -- a rate someone chose. So the rates are INPUTS rather
 // than constants: the question this section exists to answer is "at
 // what COGS does this day stop working", and that needs the figure to
 // move while you type.
 const PNL_KEY = "tracker_pnl_assumptions";
 const PNL_DEFAULTS = {
-  cancelRate: 0.05,
   // 18% is the Indian GST on advertising services. Not given in the
   // brief, so a default to correct rather than a claim.
   gstRate: 0.18,
@@ -797,7 +797,6 @@ const PNL_DEFAULTS = {
   cogsRate: 0.28,
 };
 const PNL_FIELDS = [
-  ["cancelRate", "Cancellation / RTO", true],
   ["cogsRate", "COGS", true],
   ["gstRate", "GST on ad spend", true],
   ["pgRate", "PG fees", true],
@@ -837,23 +836,49 @@ function applyView() {
 $("view-tracker").onclick = () => { if (VIEW !== "tracker") { VIEW = "tracker"; applyView(); } };
 $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView(); } };
 
+// The day row and every hour row both come through here, so the summary
+// cannot drift from the breakdown beneath it.
 function computePnl(r, a) {
   const sales = r.pnl_sales || 0, orders = r.pnl_orders || 0;
   const units = r.pnl_qty || 0, coinOrders = r.silver_coin_orders || 0;
   const adSpend = r.spend || 0;
-  const cancellation = sales * a.cancelRate;
+
+  // Cancellation used to be a flat 5% of sales. It is counted from the
+  // orders now, so the deduction is the real one and the rate is an
+  // output rather than an input.
+  //
+  // Rows written before these columns existed report null, which reads
+  // as no cancellation -- an understatement that re-ingesting the day
+  // fixes, and better than inventing a rate for them.
+  const cancellation = r.pnl_cancelled_sales || 0;
+  const cancelledOrders = r.pnl_cancelled_orders || 0;
   const net = sales - cancellation;
+
+  // Net of cancellation on BOTH sides of every ratio. A net numerator
+  // over a gross denominator would understate ASP and AOV by exactly
+  // the cancelled share.
+  const liveOrders = Math.max(0, orders - cancelledOrders);
+  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty || 0));
+
   const adGst = adSpend * a.gstRate;
-  const logistics = orders * a.logistics;
+  // Per order DISPATCHED: a cancellation is cancelled before it ships
+  // in all but the rare post-dispatch case, which Shopify tags as a
+  // return rather than a cancellation -- so charging it logistics would
+  // be inventing a cost.
+  const logistics = liveOrders * a.logistics;
   const pgFees = net * a.pgRate;
+  // Still on the whole population, deliberately: the gift ships with
+  // the order and there is no per-order coin flag to net it down by.
   const coins = coinOrders * a.coinCost;
   const cogs = net * a.cogsRate;
   const totalDed = adSpend + adGst + logistics + pgFees + coins + cogs;
   const cm = net - totalDed;
-  return { sales, orders, units, coinOrders, adSpend, cancellation, net,
+  return { sales, orders, units, coinOrders, adSpend, cancellation,
+           cancelledOrders, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, cogs, totalDed, cm,
-           asp: units ? sales / units : null,
-           aov: orders ? sales / orders : null,
+           asp: liveUnits ? net / liveUnits : null,
+           aov: liveOrders ? net / liveOrders : null,
+           cancelPct: orders ? cancelledOrders / orders : null,
            cmPct: net ? cm / net : null };
 }
 
@@ -883,7 +908,7 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
     '<span class="sub">Same assumptions. Bars are contribution margin, right for a profit ' +
     'and left for a loss, on one scale.</span></div>' +
     '<table class="pnl-hrs"><thead><tr>' +
-    ["Hour","Sales","Orders","ASP","AOV","Net sales","Spend","CM","CM %"]
+    ["Hour","Sales","Orders","ASP","AOV","Total sales","Spend","CM","CM %"]
       .concat(cmpRows && cmpRows.length ? ["vs"] : []).concat([""])
       .map(h => "<th>" + esc(h) + "</th>").join("") +
     "</tr></thead><tbody>" +
@@ -919,35 +944,37 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   $("pnlcard").hidden = false;
 
   const a = pnlAssumptions();
+  // The day goes through computePnl exactly as the hours do. It used to
+  // repeat the six deductions inline, which is two copies of the same
+  // arithmetic waiting to disagree with each other.
+  const d = computePnl(t, a);
   const c = cmp ? computePnl(cmp, a) : null;
-  const sales = t.pnl_sales, orders = t.pnl_orders, units = t.pnl_qty;
-  const asp = units ? sales / units : null;
-  const aov = orders ? sales / orders : null;
-  const cancellation = sales * a.cancelRate;
-  const net = sales - cancellation;
+  const { sales, orders, cancellation, cancelledOrders, cancelPct,
+          liveOrders, liveUnits, net, cm, cmPct, totalDed } = d;
 
   const ded = [
-    ["Ad spend", t.spend, "Meta + Google + Kwikchat"],
-    ["GST on ad spend", t.spend * a.gstRate, ""],
-    ["Logistics", orders * a.logistics, num(orders) + " orders"],
-    ["PG fees", net * a.pgRate, ""],
-    ["Silver coin", t.silver_coin_orders * a.coinCost, num(t.silver_coin_orders) + " orders"],
-    ["COGS", net * a.cogsRate, ""],
+    ["Ad spend", d.adSpend, "Meta + Google + Kwikchat"],
+    ["GST on ad spend", d.adGst, ""],
+    ["Logistics", d.logistics, num(liveOrders) + " dispatched"],
+    ["PG fees", d.pgFees, ""],
+    ["Silver coin", d.coins, num(d.coinOrders) + " orders"],
+    ["COGS", d.cogs, ""],
   ];
-  const totalDed = ded.reduce((s2, d) => s2 + d[1], 0);
-  const cm = net - totalDed;
-  const cmPct = net ? cm / net : null;
 
   $("pnl-kpis").innerHTML = [
-    ["ASP", inr(asp), c ? inr(c.asp) : null, asp, c ? c.asp : null],
-    ["AOV", inr(aov), c ? inr(c.aov) : null, aov, c ? c.aov : null],
-    ["Net sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null],
-    ["Contribution margin", inr(cm, 0), c ? inr(c.cm, 0) : null, cm, c ? c.cm : null],
-    ["CM %", pc(cmPct, 1), c ? pc(c.cmPct, 1) : null, cmPct, c ? c.cmPct : null],
-  ].map(([k, v, was, now, prev]) =>
+    ["ASP", inr(d.asp), c ? inr(c.asp) : null, d.asp, c ? c.asp : null, "up"],
+    ["AOV", inr(d.aov), c ? inr(c.aov) : null, d.aov, c ? c.aov : null, "up"],
+    ["Units sold", num(liveUnits), c ? num(c.liveUnits) : null,
+     liveUnits, c ? c.liveUnits : null, "up"],
+    ["Total sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null, "up"],
+    ["Cancellation %", pc(cancelPct, 1), c ? pc(c.cancelPct, 1) : null,
+     cancelPct, c ? c.cancelPct : null, "down"],
+    ["Contribution margin", inr(cm, 0), c ? inr(c.cm, 0) : null, cm, c ? c.cm : null, "up"],
+    ["CM %", pc(cmPct, 1), c ? pc(c.cmPct, 1) : null, cmPct, c ? c.cmPct : null, "up"],
+  ].map(([k, v, was, now, prev, dir]) =>
     '<div><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div>" +
     (was === null ? "" :
-      '<div class="h-prev">' + was + " " + changeHTML(now, prev, "up") +
+      '<div class="h-prev">' + was + " " + changeHTML(now, prev, dir) +
       (cmpDay ? ' <span class="sub">' + esc(cmpDay) + "</span>" : "") + "</div>") +
     "</div>").join("");
 
@@ -958,8 +985,9 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
     (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
-    "Percentages on COGS and PG fees apply to <strong>net</strong> sales; cancellation " +
-    "applies to total sales.</p>";
+    "Percentages on COGS and PG fees apply to <strong>total</strong> sales \u2014 net " +
+    "sales after cancelled orders. Cancellation is no longer an assumption: it is " +
+    "counted from the orders themselves.</p>";
 
   const line = (label, value, note, cls, was) =>
     '<div class="pnl-l ' + (cls || "") + '"><span>' + esc(label) +
@@ -969,17 +997,20 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     value + "</span></div>";
 
   $("pnl-lines").innerHTML =
-    line("Total sales", inr(sales, 0), num(orders) + " orders \u00b7 " + num(units) + " units",
+    line("Net sales", inr(sales, 0), num(orders) + " orders placed",
          "strong", c ? inr(c.sales, 0) : null) +
-    line("Cancellation / RTO (" + pc(a.cancelRate, 1) + ")", "\u2212 " + inr(cancellation, 0), "",
+    line("Cancelled orders", "\u2212 " + inr(cancellation, 0),
+         num(cancelledOrders) + " orders \u00b7 " + pc(cancelPct, 1),
          "", c ? "\u2212 " + inr(c.cancellation, 0) : null) +
-    line("Net sales", inr(net, 0), "", "strong rule", c ? inr(c.net, 0) : null) + "<div></div>" +
+    line("Total sales", inr(net, 0),
+         num(liveOrders) + " orders \u00b7 " + num(liveUnits) + " units",
+         "strong rule", c ? inr(c.net, 0) : null) + "<div></div>" +
     ded.map((d, i) => line(d[0], "\u2212 " + inr(d[1], 0), d[2], "",
          c ? "\u2212 " + inr([c.adSpend, c.adGst, c.logistics, c.pgFees, c.coins, c.cogs][i], 0) : null)).join("") +
     line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule",
          c ? "\u2212 " + inr(c.totalDed, 0) : null) +
     line("Contribution margin", inr(cm, 0),
-         cmPct === null ? "" : pc(cmPct, 1) + " of net sales", "strong rule",
+         cmPct === null ? "" : pc(cmPct, 1) + " of total sales", "strong rule",
          c ? inr(c.cm, 0) : null);
 
   drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour);

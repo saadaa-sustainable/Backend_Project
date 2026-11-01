@@ -20,8 +20,10 @@ from app.api.routers.analytics import (
 from scripts.fetch_hourly_tracker import (
     distribute_daily,
     is_excluded_order,
+    is_pnl_excluded,
     is_unsettled,
 )
+from scripts.import_kwikchat_spend import parse_amount, parse_day
 
 
 def row(hour: int, by_source: dict[str, int] | None) -> HourlyRow:
@@ -338,3 +340,65 @@ def test_the_boundary_is_the_day_s_own_midnight():
     midnight = _ist(2026, 10, 31, 0, 0)
     assert is_unsettled(date(2026, 10, 30), midnight - timedelta(seconds=1), 23) is True
     assert is_unsettled(date(2026, 10, 30), midnight, 23) is False
+
+
+# --- the P&L population is not the revenue population -----------------
+# The tracker drops a cancelled order outright. The P&L keeps it, counts
+# it, and deducts it on its own line -- so the deduction can be read
+# instead of assumed. These two rules must not collapse into one.
+
+def test_pnl_keeps_the_orders_the_tracker_drops():
+    """A cancelled, untagged order: out of revenue, in the P&L basis."""
+    assert is_excluded_order("2026-10-30T10:00:00Z", []) is True
+    assert is_pnl_excluded([]) is False
+
+
+def test_pnl_drops_the_report_and_return_prime_tags():
+    assert is_pnl_excluded(["inf"]) is True
+    assert is_pnl_excluded(["influencer-order"]) is True
+    assert is_pnl_excluded(["Return_Prime"]) is True
+    # Typed by hand, so never case- or whitespace-stable.
+    assert is_pnl_excluded([" RETURN_PRIME "]) is True
+    assert is_pnl_excluded(["Exchange", "Prepaid"]) is False
+    assert is_pnl_excluded(None) is False
+
+
+def test_a_cancelled_report_order_is_out_of_both():
+    """The two rules overlap rather than partition, and that is fine --
+    what must not happen is one of them quietly deciding the other."""
+    assert is_excluded_order("2026-10-30T10:00:00Z", ["inf"]) is True
+    assert is_pnl_excluded(["inf"]) is True
+
+
+# --- the Kwikchat export ----------------------------------------------
+# A manual CSV download, so its two fragile fields are parsed here
+# rather than trusted: Indian digit grouping, and a day/month order that
+# the American reading would silently swap.
+
+@pytest.mark.parametrize("raw, want, why", [
+    ("\u20b90", 0.0, "a day with no spend"),
+    ("\u20b966.7", 66.7, "no grouping needed"),
+    ("\u20b94,921.42", 4921.42, "thousands separator"),
+    ("\u20b980,717.01", 80717.01, "the blast days are five figures"),
+    ("\u20b91,00,000.50", 100000.5, "Indian grouping is not every three digits"),
+    ("  \u20b9 1,234  ", 1234.0, "padded by the export"),
+    ("", 0.0, "an empty cell is no spend, not a crash"),
+    ("-", 0.0, "a dash is how the console writes nothing"),
+])
+def test_parse_amount(raw, want, why):
+    assert parse_amount(raw) == pytest.approx(want), why
+
+
+def test_dates_are_read_day_first():
+    """03-10-2026 is the third of October. Read the American way it is
+    the tenth of March, and a month of spend lands in the wrong month
+    without anything failing."""
+    assert parse_day("03-10-2026") == date(2026, 10, 3)
+    assert parse_day("31-10-2026") == date(2026, 10, 31)
+
+
+def test_an_impossible_date_is_refused_rather_than_rolled():
+    with pytest.raises(ValueError):
+        parse_day("32-10-2026")
+    with pytest.raises(ValueError):
+        parse_day("2026-10-03")

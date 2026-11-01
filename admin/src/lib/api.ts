@@ -3623,13 +3623,22 @@ export interface HourlyRow {
   orders_excluded: number | null;
   revenue_excluded: number | null;
   /** The P&L basis — drops orders tagged `inf` or `Return_Prime`, and
-   *  KEEPS cancelled ones, because the P&L applies cancellation as a
-   *  rate rather than excluding them order by order. */
+   *  KEEPS cancelled ones, which are reported separately below so the
+   *  statement can deduct them on their own line. */
   pnl_sales: number | null;
   pnl_orders: number | null;
   /** Units sold with the gift coin excluded; it is not an item sold. */
   pnl_qty: number | null;
   silver_coin_orders: number | null;
+  /** Cancellations inside the P&L population — a SUBSET of the three
+   *  above, measured rather than assumed, and dated by the order's own
+   *  hour so the hours still sum to the day.
+   *
+   *  Null on rows written before these columns existed; that reads as
+   *  no cancellation, which re-ingesting the day fixes. */
+  pnl_cancelled_orders: number | null;
+  pnl_cancelled_sales: number | null;
+  pnl_cancelled_qty: number | null;
   /** ShopifyQL's own total, a different measure kept as a cross-check. */
   revenue_shopifyql: number | null;
   revenue_meta: number | null;
@@ -3690,6 +3699,9 @@ export interface HourlyTotals {
   pnl_orders: number;
   pnl_qty: number;
   silver_coin_orders: number;
+  pnl_cancelled_orders: number;
+  pnl_cancelled_sales: number;
+  pnl_cancelled_qty: number;
   spend: number;
   meta_impressions: number;
   meta_spend: number;

@@ -13783,6 +13783,7 @@ SELECT hour, day_ist, hour_of_day,
        revenue, orders, orders_paid, orders_direct,
        orders_excluded, revenue_excluded,
        pnl_sales, pnl_orders, pnl_qty, silver_coin_orders,
+       pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
        revenue_shopifyql,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
@@ -13821,8 +13822,8 @@ class HourlyRow(BaseModel):
     revenue_excluded: float | None = None
     #: The P&L basis, which is NOT the revenue basis above: it drops
     #: orders tagged `inf` or `Return_Prime` and KEEPS cancelled ones,
-    #: because the P&L models cancellation as a rate rather than
-    #: excluding them order by order.
+    #: which are then reported separately so the statement can deduct
+    #: them on their own line.
     #:
     #: Returned raw, not as a finished margin. Every deduction in that
     #: margin is an assumption the reader is meant to argue with, so the
@@ -13832,6 +13833,15 @@ class HourlyRow(BaseModel):
     #: Units sold with the gift coin taken out -- it is not an item sold.
     pnl_qty: int | None = None
     silver_coin_orders: int | None = None
+    #: Cancellations inside the P&L population -- a SUBSET of
+    #: pnl_sales/pnl_orders, measured, not a rate. Dated by the order's
+    #: own hour rather than the hour it was cancelled in, so the hours
+    #: still sum to the day.
+    pnl_cancelled_orders: int | None = None
+    pnl_cancelled_sales: float | None = None
+    #: Units on the cancelled orders, so ASP divides a net numerator by
+    #: a net denominator.
+    pnl_cancelled_qty: int | None = None
     #: ShopifyQL's own total for the hour, a deliberately different
     #: measure kept as a cross-check. Typically within half a per cent.
     revenue_shopifyql: float | None
@@ -13938,6 +13948,9 @@ class HourlyTotals(BaseModel):
     pnl_orders: int
     pnl_qty: int
     silver_coin_orders: int
+    pnl_cancelled_orders: int
+    pnl_cancelled_sales: float
+    pnl_cancelled_qty: int
     spend: float
     meta_impressions: int
     meta_spend: float
@@ -14024,6 +14037,9 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
         pnl_sales=s("pnl_sales"), pnl_orders=s("pnl_orders"),
         pnl_qty=s("pnl_qty"), silver_coin_orders=s("silver_coin_orders"),
+        pnl_cancelled_orders=s("pnl_cancelled_orders"),
+        pnl_cancelled_sales=s("pnl_cancelled_sales"),
+        pnl_cancelled_qty=s("pnl_cancelled_qty"),
         spend=spend, meta_impressions=s("meta_impressions"),
         meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
         google_spend=s("google_spend"),

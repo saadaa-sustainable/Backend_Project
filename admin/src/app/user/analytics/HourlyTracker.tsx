@@ -383,9 +383,10 @@ export function HourlyTracker() {
               <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-3 lg:grid-cols-3">
                 <Hero label="Sessions" value={compact(t.sessions)} was={compact(c?.sessions)} />
                 <Hero label="Spend" value={money(t.spend, 0)} was={money(c?.spend, 0)}
-                      hint={"Meta is measured hourly. Google is a daily total shared across the"
-                            + " hours by each hour's share of Google-driven sessions, and"
-                            + " Kwikchat is a flat \u20B930,000 a day over 24."}
+                      hint={"Meta is measured hourly. Google and Kwikchat are daily totals:"
+                            + " Google is shared across the hours by each hour's share of"
+                            + " Google-driven sessions, Kwikchat evenly, there being no"
+                            + " Kwikchat session column to shape it by."}
                       parts={[
                         { label: "Meta", value: money(t.meta_spend, 0) },
                         { label: "Google", value: money(t.google_spend, 0) },
@@ -653,7 +654,8 @@ export function HourlyTracker() {
         is what makes the paid column add up against it. Spend is all three channels, but only
         Meta is measured by the hour. Google arrives as one daily total from a BigQuery export
         and is shared across the hours in proportion to that hour&rsquo;s Google-driven sessions;
-        Kwikchat is a flat &#8377;30,000 a day over 24. Both totals are real &mdash; the hourly
+        Kwikchat likewise arrives as a daily total and is shared out evenly, there being no
+        Kwikchat session column to shape it by. All three totals are real &mdash; the hourly
         <em>shape</em> of them is inferred, so read an individual hour&rsquo;s Google figure as an
         allocation, not a measurement. On a day still running, Google&rsquo;s total is whatever
         had been spent when the export ran this morning, so it only reaches the hours before
