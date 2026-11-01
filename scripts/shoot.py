@@ -31,6 +31,9 @@ def main() -> int:
                     help="seconds to let the client fetches settle")
     ap.add_argument("--clip-text", default=None,
                     help="screenshot only the section whose heading contains this")
+    ap.add_argument("--click", default=None, action="append",
+                    help="click this text before shooting; repeatable, applied "
+                         "in order. For a view behind a tab, which no URL names.")
     ap.add_argument("--full", action="store_true", help="full scrollable page")
     args = ap.parse_args()
 
@@ -48,6 +51,17 @@ def main() -> int:
         pg.on("pageerror", lambda e: errors.append(f"[pageerror] {str(e)[:160]}"))
         pg.goto(args.base + args.path, wait_until="networkidle", timeout=90_000)
         pg.wait_for_timeout(int(args.wait * 1000))
+
+        for label in (args.click or []):
+            el = pg.locator(f"text={label}").first
+            if not el.count():
+                print(f"  '{label}' not found; nothing clicked")
+                continue
+            el.click()
+            # The views here redraw synchronously off a payload already
+            # in hand, but a tab that refetches would still be mid-flight
+            # a frame later.
+            pg.wait_for_timeout(1200)
 
         target = pg
         if args.clip_text:
