@@ -18,6 +18,7 @@ import {
 import { HourDetail } from "./charts/HourDetail";
 import { HourlyCompareChart } from "./charts/HourlyCompareChart";
 import { HourlyTrendChart } from "./charts/HourlyTrendChart";
+import { LivePnl } from "./charts/LivePnl";
 import { SessionSourceDonut } from "./charts/SessionSourceDonut";
 
 /**
@@ -451,6 +452,8 @@ export function HourlyTracker() {
               </div>
             </div>
           )}
+
+          <LivePnl totals={t} />
 
           <div className="grid gap-4 lg:grid-cols-[1fr_minmax(320px,0.52fr)]">
             <HourlyTrendChart rows={rows} baseline={data?.compare_rows ?? []}

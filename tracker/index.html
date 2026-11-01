@@ -137,6 +137,25 @@
   .hd-bar .cap { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
   .hd-bar.none { background: var(--border-soft); border-radius: 2px; opacity: .4; }
   .hd-note { margin-top: 4px; font-size: 10.5px; line-height: 1.4; color: var(--text-3); }
+  .pnl-kpis { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0,1fr)); margin-top: 12px; }
+  @media (min-width: 900px) { .pnl-kpis { grid-template-columns: repeat(5, minmax(0,1fr)); } }
+  .pnl-kpis .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
+  .pnl-kpis .v { font-size: 21px; font-weight: 650; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .pnl-assump { display: grid; gap: 6px 20px; margin-top: 12px; padding-top: 10px;
+                border-top: 1px solid var(--border-soft); }
+  @media (min-width: 760px) { .pnl-assump { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+  .pnl-assump label { display: flex; align-items: center; justify-content: space-between;
+                      gap: 8px; font-size: 11.5px; color: var(--text-2); }
+  .pnl-assump input { width: 72px; text-align: right; font: inherit; font-size: 11.5px;
+                      background: transparent; color: var(--text); border: 1px solid var(--border);
+                      border-radius: 4px; padding: 2px 5px; font-variant-numeric: tabular-nums; }
+  .pnl-lines { display: grid; gap: 0 40px; margin-top: 14px; }
+  @media (min-width: 760px) { .pnl-lines { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  .pnl-l { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+           padding: 3px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .pnl-l.rule { border-top: 1px solid var(--border-soft); padding-top: 6px; }
+  .pnl-l.strong { font-weight: 650; color: var(--text); }
+  .pnl-l .sub2 { font-size: 10.5px; color: var(--text-3); margin-left: 6px; }
   .note { color: var(--text-3); font-size: 11.5px; margin-top: 10px; line-height: 1.6; }
   .err { border: 1px solid var(--bad); color: var(--bad); border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 13px; }
   /* The chart and the donut sit side by side on a desktop and stack on
@@ -205,6 +224,23 @@
       <span class="sub" id="ttl-vs"></span>
     </div>
     <div class="heroes" id="heroes"></div>
+  </div>
+
+  <div class="card" id="pnlcard" style="margin-top:16px" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">Live P&amp;L · day to date</strong>
+      <button id="pnl-toggle" style="font-size:11.5px;padding:2px 8px">Assumptions</button>
+    </div>
+    <div class="pnl-kpis" id="pnl-kpis"></div>
+    <div class="pnl-assump" id="pnl-assump" hidden></div>
+    <div class="pnl-lines" id="pnl-lines"></div>
+    <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
+      Only total sales, orders and units are measured. Everything below the Net sales line is a
+      model built from the rates above, and the day is still running — a margin here is an
+      estimate, not a result. Orders tagged <code>inf</code> (daily report) and
+      <code>Return_Prime</code> are excluded; cancelled orders are kept, because cancellation is
+      applied as a rate rather than order by order.
+    </p>
   </div>
 
   <div class="charts">
@@ -481,7 +517,7 @@ function render(d, day) {
 
   if (!rows.length) {
     $("totals").hidden = $("chartcard").hidden = $("tablewrap").hidden = true;
-    $("donutcard").hidden = $("cmpcard").hidden = true;
+    $("donutcard").hidden = $("cmpcard").hidden = $("pnlcard").hidden = true;
     $("footnote").textContent =
       (d.first_day && d.last_day
         ? "This tracker holds " + d.first_day + " to " + d.last_day + ". "
@@ -526,6 +562,7 @@ function render(d, day) {
   }
 
   drawChart(rows, d.compare_rows || [], c ? c.day : "");
+  drawPnl(t);
   drawDonut(d.sources || []);
   drawCompare(rows, d.compare_rows || [], c ? c.day : baselineDay,
               isToday ? d.latest_hour : null);
@@ -704,6 +741,120 @@ $("donutbody").addEventListener("pointerover", e => {
 $("donutbody").addEventListener("pointerleave", () => {
   if (DONUT.length) paintDonut(null);
 });
+
+// --- live P&L ---------------------------------------------------------
+// Contribution margin for the day so far, from the day's own numbers
+// and six assumptions.
+//
+// Every deduction below the Net sales line is an estimate, not a
+// measurement -- a rate someone chose. So the rates are INPUTS rather
+// than constants: the question this section exists to answer is "at
+// what COGS does this day stop working", and that needs the figure to
+// move while you type.
+const PNL_KEY = "tracker_pnl_assumptions";
+const PNL_DEFAULTS = {
+  cancelRate: 0.05,
+  // 18% is the Indian GST on advertising services. Not given in the
+  // brief, so a default to correct rather than a claim.
+  gstRate: 0.18,
+  logistics: 120,
+  pgRate: 0.01,
+  coinCost: 500,
+  cogsRate: 0.28,
+};
+const PNL_FIELDS = [
+  ["cancelRate", "Cancellation / RTO", true],
+  ["cogsRate", "COGS", true],
+  ["gstRate", "GST on ad spend", true],
+  ["pgRate", "PG fees", true],
+  ["logistics", "Logistics / order", false],
+  ["coinCost", "Silver coin / order", false],
+];
+
+function pnlAssumptions() {
+  // Every access guarded: a private window, blocked site data or
+  // corrupt JSON must not take the section down with it.
+  try {
+    const raw = localStorage.getItem(PNL_KEY);
+    if (raw) return Object.assign({}, PNL_DEFAULTS, JSON.parse(raw));
+  } catch {}
+  return Object.assign({}, PNL_DEFAULTS);
+}
+
+function drawPnl(t) {
+  if (!t || !t.pnl_orders) { $("pnlcard").hidden = true; return; }
+  $("pnlcard").hidden = false;
+
+  const a = pnlAssumptions();
+  const sales = t.pnl_sales, orders = t.pnl_orders, units = t.pnl_qty;
+  const asp = units ? sales / units : null;
+  const aov = orders ? sales / orders : null;
+  const cancellation = sales * a.cancelRate;
+  const net = sales - cancellation;
+
+  const ded = [
+    ["Ad spend", t.spend, "Meta + Google + Kwikchat"],
+    ["GST on ad spend", t.spend * a.gstRate, ""],
+    ["Logistics", orders * a.logistics, num(orders) + " orders"],
+    ["PG fees", net * a.pgRate, ""],
+    ["Silver coin", t.silver_coin_orders * a.coinCost, num(t.silver_coin_orders) + " orders"],
+    ["COGS", net * a.cogsRate, ""],
+  ];
+  const totalDed = ded.reduce((s2, d) => s2 + d[1], 0);
+  const cm = net - totalDed;
+  const cmPct = net ? cm / net : null;
+
+  $("pnl-kpis").innerHTML = [
+    ["ASP", inr(asp)],
+    ["AOV", inr(aov)],
+    ["Net sales", inr(net, 0)],
+    ["Contribution margin", inr(cm, 0)],
+    ["CM %", pc(cmPct, 1)],
+  ].map(([k, v]) => '<div><div class="k">' + esc(k) + '</div><div class="v">' + v + "</div></div>").join("");
+
+  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct]) =>
+    "<label>" + esc(label) +
+    '<span><input type="number" min="0" step="' + (isPct ? "0.1" : "1") +
+    '" data-k="' + key + '" data-pct="' + (isPct ? "1" : "") + '" value="' +
+    (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
+    (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
+    '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
+    "Percentages on COGS and PG fees apply to <strong>net</strong> sales; cancellation " +
+    "applies to total sales.</p>";
+
+  const line = (label, value, note, cls) =>
+    '<div class="pnl-l ' + (cls || "") + '"><span>' + esc(label) +
+    (note ? '<span class="sub2">' + esc(note) + "</span>" : "") +
+    "</span><span>" + value + "</span></div>";
+
+  $("pnl-lines").innerHTML =
+    line("Total sales", inr(sales, 0), num(orders) + " orders \u00b7 " + num(units) + " units", "strong") +
+    line("Cancellation / RTO (" + pc(a.cancelRate, 1) + ")", "\u2212 " + inr(cancellation, 0), "") +
+    line("Net sales", inr(net, 0), "", "strong rule") + "<div></div>" +
+    ded.map(d => line(d[0], "\u2212 " + inr(d[1], 0), d[2])).join("") +
+    line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule") +
+    line("Contribution margin", inr(cm, 0),
+         cmPct === null ? "" : pc(cmPct, 1) + " of net sales", "strong rule");
+}
+
+// Delegated, because drawPnl replaces the inputs on every change.
+$("pnl-assump").addEventListener("input", e => {
+  const el = e.target.closest("input[data-k]");
+  if (!el || !LAST) return;
+  const v = Number(el.value);
+  if (!isFinite(v) || v < 0) return;
+  const a = pnlAssumptions();
+  a[el.getAttribute("data-k")] = el.getAttribute("data-pct") ? v / 100 : v;
+  try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
+  const hidden = $("pnl-assump").hidden;
+  drawPnl(LAST.d.today);
+  $("pnl-assump").hidden = hidden;
+  // Redrawing blew away focus mid-keystroke; put it back.
+  const again = $("pnl-assump").querySelector('input[data-k="' + el.getAttribute("data-k") + '"]');
+  if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+});
+
+$("pnl-toggle").onclick = () => { $("pnl-assump").hidden = !$("pnl-assump").hidden; };
 
 // --- one hour, opened out --------------------------------------------
 // The table carries only as many metrics as fit across a screen, and

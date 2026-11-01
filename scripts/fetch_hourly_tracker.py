@@ -143,6 +143,22 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- first question when this row stops matching Shopify's own admin.
     orders_excluded         integer,
     revenue_excluded        numeric,
+
+    -- The P&L basis, which is NOT the revenue basis above.
+    --
+    -- It drops orders tagged `inf` (the daily-report / influencer
+    -- orders) and `Return_Prime`, and it KEEPS cancelled orders --
+    -- cancellation is modelled as a rate in the P&L rather than
+    -- excluded order by order, so excluding them here would deduct it
+    -- twice.
+    pnl_sales               numeric,
+    pnl_orders              integer,
+    -- Units sold, with the Saadaa Silver Coin taken out: it is a gift
+    -- line, not an item sold, and counting it would deflate ASP.
+    pnl_qty                 integer,
+    -- Orders CONTAINING a coin, not coins sold -- the cost is per
+    -- order that shipped one.
+    silver_coin_orders      integer,
     new_customers           integer,
     new_customer_revenue    numeric,
 
@@ -177,6 +193,10 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS revenue_excluded numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS google_spend numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS google_spend_as_of timestamptz",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_sales numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_qty integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_orders integer",
 ]
 
 COLUMNS = [
@@ -186,6 +206,7 @@ COLUMNS = [
     "revenue", "orders", "revenue_shopifyql", "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
+    "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders",
     "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
     "google_spend", "google_spend_as_of",
@@ -267,6 +288,50 @@ def is_excluded_order(cancelled_at: str | None, tags: list[str] | None) -> bool:
     return "return" in t and "exchange" not in t
 
 
+#: The gift coin, identified by SKU rather than title: the title
+#: carries an emoji that moves around ("Saadaa Silver Coin\U0001F381",
+#: "\U0001F381 Saadaa Silver Coin", and one with a stray space), so
+#: matching on it would miss orders. The SKU is stable.
+SILVER_COIN_SKU = "SDSILVER"
+
+#: Orders the P&L does not count. `inf` marks the daily-report and
+#: influencer orders -- goods that went out without a sale behind them
+#: -- and `Return_Prime` marks a return flowing back through the returns
+#: partner. Neither belongs in a contribution margin.
+#:
+#: Matched case-insensitively, because these are typed by hand: the
+#: warehouse holds `inf`, `influencer-order` and `Return_Prime`, and a
+#: capitalisation that drifts should not quietly re-admit an order.
+PNL_EXCLUDED_TAGS = {"inf", "influencer-order", "return_prime"}
+
+
+def is_pnl_excluded(tags: list[str] | None) -> bool:
+    """Out of the P&L basis -- which is NOT the revenue basis.
+
+    Cancelled orders stay IN. Cancellation is modelled as a rate in the
+    P&L, so dropping them here as well would deduct it twice.
+    """
+    return bool(PNL_EXCLUDED_TAGS & {str(t).strip().lower() for t in (tags or [])})
+
+
+def count_units(line_items: dict | None) -> tuple[int, bool]:
+    """(units sold excluding the gift coin, did this order carry one).
+
+    The coin is a gift line, not an item sold. Leaving it in the unit
+    count deflates ASP, and on 2,490 coins over a fortnight that is not
+    a rounding error.
+    """
+    units, has_coin = 0, False
+    for edge in ((line_items or {}).get("edges") or []):
+        node = edge.get("node") or {}
+        qty = int(node.get("quantity") or 0)
+        if (node.get("sku") or "").strip().upper() == SILVER_COIN_SKU:
+            has_coin = True
+            continue
+        units += qty
+    return units, has_coin
+
+
 def ist_hour(instant: datetime) -> datetime:
     """Normalise any aware datetime to the UTC instant starting its IST hour."""
     local = instant.astimezone(IST)
@@ -346,6 +411,9 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         totalPriceSet { shopMoney { amount } }
         cancelledAt
         tags
+        lineItems(first: 100) {
+          edges { node { sku quantity } }
+        }
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -392,7 +460,20 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                                           revenue_google=0.0, revenue_paid=0.0,
                                           orders_meta=0, orders_paid=0, orders_direct=0,
                                           orders_excluded=0, revenue_excluded=0.0,
-                                          new_customers=0, new_customer_revenue=0.0))
+                                          new_customers=0, new_customer_revenue=0.0,
+                                          pnl_sales=0.0, pnl_orders=0, pnl_qty=0,
+                                          silver_coin_orders=0))
+
+            # The P&L basis is accumulated BEFORE the revenue
+            # exclusions, because the two answer different questions
+            # and share only the order feed.
+            if not is_pnl_excluded(n.get("tags")):
+                units, has_coin = count_units(n.get("lineItems"))
+                b["pnl_sales"] += price
+                b["pnl_orders"] += 1
+                b["pnl_qty"] += units
+                if has_coin:
+                    b["silver_coin_orders"] += 1
 
             # Counted and set aside, not skipped silently: an hour whose
             # orders do not match Shopify's admin should say why.
