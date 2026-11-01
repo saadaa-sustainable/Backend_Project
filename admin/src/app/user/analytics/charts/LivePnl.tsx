@@ -21,6 +21,11 @@ import type { HourlyRow, HourlyTotals } from "@/lib/api";
 const KEY = "tracker_pnl_assumptions";
 
 type Assumptions = {
+  /** An allowance for cancellations that have NOT happened yet, on top
+   *  of the ones counted from the orders. Signed: a negative value
+   *  takes the measured figure down, for a day whose cancellations
+   *  have already landed. */
+  extraCancelRate: number;
   gstRate: number;      // GST charged on ad spend
   logistics: number;    // rupees per order
   pgRate: number;       // payment-gateway fee, share of total sales
@@ -29,6 +34,7 @@ type Assumptions = {
 };
 
 const DEFAULTS: Assumptions = {
+  extraCancelRate: 0.05,
   // 18% is the Indian GST on advertising services. Not given in the
   // brief, so it is a default to correct rather than a claim.
   gstRate: 0.18,
@@ -38,7 +44,10 @@ const DEFAULTS: Assumptions = {
   cogsRate: 0.28,
 };
 
-const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: string }[] = [
+const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: string;
+                signed?: boolean }[] = [
+  { key: "extraCancelRate", label: "Further cancellation", pct: true, signed: true,
+    hint: "On top of the cancellations already counted — an allowance for the ones still to come. Negative takes it back down." },
   { key: "cogsRate", label: "COGS", pct: true, hint: "Share of total sales." },
   { key: "gstRate", label: "GST on ad spend", pct: true,
     hint: "18% is the Indian GST on advertising services — a default, not a measured figure." },
@@ -56,15 +65,20 @@ export type Pnl = {
   sales: number;
   /** The whole P&L population, cancelled orders included. */
   orders: number; units: number; coinOrders: number;
-  /** The same, with the cancelled ones taken out — what actually sold,
-   *  and the denominator for every figure under the cancellation
-   *  line. */
+  /** The same, with the cancelled ones taken out — what actually sold.
+   *  MEASURED: the Further-cancellation allowance does not touch these,
+   *  so ASP and AOV fall as it rises. */
   liveOrders: number; liveUnits: number;
   asp: number | null; aov: number | null;
   /** Measured, not modelled: the value of the orders actually
    *  cancelled. */
   cancellation: number;
   cancelledOrders: number;
+  /** Refunded on orders that were NOT cancelled — cancelled ones are
+   *  already deducted at full price. */
+  refunds: number;
+  /** The editable allowance for cancellations still to come. */
+  extraCancellation: number;
   /** Share of orders cancelled. Taken on ORDERS rather than on value,
    *  which is the figure that gets quoted — and the one that does not
    *  move just because a big order happened to be among them. */
@@ -81,7 +95,7 @@ function computePnl(r: {
   pnl_sales: number | null; pnl_orders: number | null; pnl_qty: number | null;
   silver_coin_orders: number | null; spend: number | null;
   pnl_cancelled_orders?: number | null; pnl_cancelled_sales?: number | null;
-  pnl_cancelled_qty?: number | null;
+  pnl_cancelled_qty?: number | null; pnl_refunds?: number | null;
 }, a: Assumptions): Pnl {
   const sales = r.pnl_sales ?? 0;
   const orders = r.pnl_orders ?? 0;
@@ -99,11 +113,27 @@ function computePnl(r: {
   // fixes it.
   const cancellation = r.pnl_cancelled_sales ?? 0;
   const cancelledOrders = r.pnl_cancelled_orders ?? 0;
-  const totalSales = sales - cancellation;
+  const refunds = r.pnl_refunds ?? 0;
+  // Money already handed back on orders that still stand. Shopify nets
+  // this off and we did not, which is most of why our figure read high
+  // against theirs.
+  const afterRefunds = sales - cancellation - refunds;
+  // Applied to what is left, not to gross: an allowance for the
+  // cancellations still to come can only apply to orders that have not
+  // already cancelled.
+  const extraCancellation = afterRefunds * a.extraCancelRate;
+  const totalSales = afterRefunds - extraCancellation;
   // Net of cancellation on both sides of every ratio. Mixing a net
   // numerator with a gross denominator would understate ASP and AOV by
   // exactly the cancelled share, which is the bug this is written to
   // avoid rather than a nicety.
+  // Counts are MEASURED and the allowance does not touch them. It moves
+  // money only: the cancelled-order count stays what the orders
+  // actually say, and so do units and the logistics that follows them.
+  //
+  // The consequence is deliberate and worth knowing: because sales fall
+  // while units and orders do not, ASP and AOV fall as the allowance
+  // rises. Read them as "value per order placed", not as a price.
   const liveOrders = Math.max(0, orders - cancelledOrders);
   const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty ?? 0));
 
@@ -128,7 +158,7 @@ function computePnl(r: {
     // cancelled order sold nothing.
     asp: liveUnits ? totalSales / liveUnits : null,
     aov: liveOrders ? totalSales / liveOrders : null,
-    cancellation, cancelledOrders,
+    cancellation, cancelledOrders, refunds, extraCancellation,
     cancelPct: orders ? cancelledOrders / orders : null,
     totalSales, adSpend, adGst, logistics, pgFees, coins, cogs,
     totalDeductions, cm, cmPct: totalSales ? cm / totalSales : null,
@@ -139,6 +169,11 @@ const money = (n: number | null | undefined, dp = 0) =>
   n === null || n === undefined || !Number.isFinite(n) ? "—"
     : n.toLocaleString("en-IN", { style: "currency", currency: "INR",
         minimumFractionDigits: dp, maximumFractionDigits: dp });
+/** A deduction, signed. The allowance is the one line that can go
+ *  negative, and "− -₹57,277" reads as a typo rather than as money
+ *  going back on. A negative deduction is an addition. */
+const deduction = (n: number, dp = 0) =>
+  n < 0 ? `+ ${money(-n, dp)}` : `− ${money(n, dp)}`;
 const pct = (n: number | null | undefined, dp = 1) =>
   n === null || n === undefined || !Number.isFinite(n) ? "—" : `${(n * 100).toFixed(dp)}%`;
 
@@ -223,7 +258,8 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
   const c = compare ? computePnl(compare, a) : null;
   const byHour = new Map((compareRows ?? []).map((r) => [r.hour_of_day, r]));
   const { sales, orders, asp, aov, cancellation, cancelledOrders, cancelPct,
-          totalSales, liveOrders, liveUnits, cm, cmPct, totalDeductions } = d;
+          refunds, extraCancellation, totalSales, liveOrders, liveUnits,
+          cm, cmPct, totalDeductions } = d;
 
   const deductions: { label: string; value: number; was?: number; note?: string }[] = [
     { label: "Ad spend", value: d.adSpend, was: c?.adSpend, note: "Meta + Google + Kwikchat" },
@@ -267,18 +303,18 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
       <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-7">
         <Kpi label="ASP" value={money(asp, 2)} was={c ? money(c.asp, 2) : undefined}
              now={asp} prev={c?.asp} day={compareDay}
-             hint="Total sales ÷ units sold. The gift coin is not a unit sold, and cancelled orders are out of both sides." />
+             hint="Total sales ÷ units sold. The gift coin is not a unit sold, and cancelled orders are out of both sides. Units are measured, so a Further-cancellation allowance pulls this down." />
         <Kpi label="AOV" value={money(aov, 2)} was={c ? money(c.aov, 2) : undefined}
              now={aov} prev={c?.aov} day={compareDay}
-             hint="Total sales ÷ orders, cancelled orders out of both sides." />
+             hint="Total sales ÷ orders, cancelled orders out of both sides. Orders are measured, so a Further-cancellation allowance pulls this down." />
         <Kpi label="Units sold" value={liveUnits.toLocaleString("en-IN")}
              was={c ? c.liveUnits.toLocaleString("en-IN") : undefined}
              now={liveUnits} prev={c?.liveUnits} day={compareDay}
-             hint="Units on the orders that stand, with the gift coin excluded — it is a gift, not an item sold." />
+             hint="Units on the orders that stand, with the gift coin excluded — it is a gift, not an item sold. Measured: the Further-cancellation allowance does not reduce it." />
         <Kpi label="Total sales" value={money(totalSales)}
              was={c ? money(c.totalSales) : undefined}
              now={totalSales} prev={c?.totalSales} day={compareDay}
-             hint={`Net sales ${money(sales)} less ${money(cancellation)} of cancelled orders.`} />
+             hint={`Net sales ${money(sales)} less ${money(cancellation)} cancelled${refunds > 0 ? `, ${money(refunds)} refunded` : ""} and a ${pct(a.extraCancelRate)} allowance.`} />
         <Kpi label="Cancellation %" value={pct(cancelPct)}
              was={c ? pct(c.cancelPct) : undefined}
              now={cancelPct} prev={c?.cancelPct} day={compareDay} lowerIsBetter
@@ -302,11 +338,12 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
                   <input
                     type="number"
                     step={f.pct ? 0.1 : 1}
-                    min={0}
+                    min={f.signed ? undefined : 0}
                     value={f.pct ? +(a[f.key] * 100).toFixed(2) : a[f.key]}
                     onChange={(e) => {
                       const v = Number(e.target.value);
-                      if (!Number.isFinite(v) || v < 0) return;
+                      if (!Number.isFinite(v)) return;
+                      if (v < 0 && !f.signed) return;
                       set(f.key, f.pct ? v / 100 : v);
                     }}
                     className="w-20 rounded border border-border-primary bg-bg-white px-1.5 py-0.5 text-right tabular-nums"
@@ -319,22 +356,44 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
           <p className="mt-2 text-[10.5px] text-text-tertiary">
             Saved in this browser. Percentages on COGS and PG fees apply to
             <strong> total</strong> sales — net sales after cancelled orders.
-            Cancellation is no longer an assumption: it is counted from the
-            orders themselves.
+            Cancellation and refunds are counted from the orders themselves;
+            only <strong>Further cancellation</strong> is an allowance, and it
+            may be set negative to take the figure back down.
           </p>
         </div>
       )}
 
-      <div className="mt-4 grid gap-x-10 gap-y-1 md:grid-cols-2">
+      {/* The sales bridge is its own single column, NOT part of the
+          two-column deduction grid below. It has a variable number of
+          lines — Refunds appears only when there is a refund — so
+          flowing it left-right put Total sales mid-row and left a hole
+          where the spacer fell. A bridge reads top to bottom anyway. */}
+      <div className="mt-4 grid max-w-xl gap-y-1">
         <Line label="Net sales" value={money(sales)} was={c ? money(c.sales) : undefined} strong
               note={`${orders.toLocaleString("en-IN")} orders placed`} />
         <Line label="Cancelled orders" value={`− ${money(cancellation)}`}
               was={c ? `− ${money(c.cancellation)}` : undefined}
               note={`${cancelledOrders.toLocaleString("en-IN")} orders · ${pct(cancelPct)}`} />
+        {/* Only when there is something to show. This store refunds a
+            standing order so rarely that the line was zero on every day
+            of the backfill, and a permanent "− ₹0" row is noise in a
+            statement people read quickly. It still appears the moment a
+            refund lands outside a cancellation. */}
+        {(refunds > 0 || (c?.refunds ?? 0) > 0) && (
+          <Line label="Refunds" value={`− ${money(refunds)}`}
+                was={c ? `− ${money(c.refunds)}` : undefined}
+                note="on orders that still stand" />
+        )}
+        <Line label={`Further cancellation (${pct(a.extraCancelRate)})`}
+              value={deduction(extraCancellation)}
+              was={c ? deduction(c.extraCancellation) : undefined}
+              note="allowance, not measured" />
         <Line label="Total sales" value={money(totalSales)}
               was={c ? money(c.totalSales) : undefined} strong rule
               note={`${liveOrders.toLocaleString("en-IN")} orders · ${liveUnits.toLocaleString("en-IN")} units`} />
-        <div />
+      </div>
+
+      <div className="mt-3 grid gap-x-10 gap-y-1 md:grid-cols-2">
         {deductions.map((row) => (
           <Line key={row.label} label={row.label} value={`− ${money(row.value)}`}
                 was={row.was !== undefined ? `− ${money(row.was)}` : undefined} note={row.note} />
@@ -433,7 +492,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
       )}
 
       <p className="mt-3 border-t border-border-soft pt-2 text-[11px] leading-snug text-text-tertiary">
-        Sales, orders, units and cancellations are measured. Everything below
+        Sales, orders, units, cancellations and refunds are measured. Everything below
         the Total sales line is a model built from the rates above, and the day
         is still running — a margin here is an estimate, not a result. Orders
         tagged <code>inf</code> (daily report) and <code>Return_Prime</code> are

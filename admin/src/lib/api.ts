@@ -3639,6 +3639,9 @@ export interface HourlyRow {
   pnl_cancelled_orders: number | null;
   pnl_cancelled_sales: number | null;
   pnl_cancelled_qty: number | null;
+  /** Refunded on orders this hour placed, cancelled ones excluded (they
+   *  are already deducted at full price). NOT Shopify's `returns`. */
+  pnl_refunds: number | null;
   /** ShopifyQL's own total, a different measure kept as a cross-check. */
   revenue_shopifyql: number | null;
   revenue_meta: number | null;
@@ -3702,6 +3705,7 @@ export interface HourlyTotals {
   pnl_cancelled_orders: number;
   pnl_cancelled_sales: number;
   pnl_cancelled_qty: number;
+  pnl_refunds: number;
   spend: number;
   meta_impressions: number;
   meta_spend: number;
