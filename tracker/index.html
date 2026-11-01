@@ -171,6 +171,11 @@
   .pnl-bar .f { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
   .pnl-lines { display: grid; gap: 0 40px; margin-top: 14px; }
   @media (min-width: 760px) { .pnl-lines { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  /* The sales bridge stays ONE column. It has a variable number of
+     lines -- Refunds shows only when there is a refund -- so flowing it
+     through two columns put Total sales mid-row and left a hole where
+     the spacer fell. A bridge reads top to bottom. */
+  .pnl-bridge { display: grid; margin-top: 14px; max-width: 560px; }
   .pnl-l { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
            padding: 3px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
   .pnl-l.rule { border-top: 1px solid var(--border-soft); padding-top: 6px; }
@@ -257,10 +262,10 @@
     </div>
     <div class="pnl-kpis" id="pnl-kpis"></div>
     <div class="pnl-assump" id="pnl-assump" hidden></div>
-    <div class="pnl-lines" id="pnl-lines"></div>
+    <div id="pnl-lines"></div>
     <div id="pnl-hourly"></div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
-      Sales, orders, units and cancellations are measured. Everything below the Total sales line is a
+      Sales, orders, units, cancellations and refunds are measured. Everything below the Total sales line is a
       model built from the rates above, and the day is still running — a margin here is an
       estimate, not a result. Orders tagged <code>inf</code> (daily report) and
       <code>Return_Prime</code> are excluded; cancelled orders are kept in the population and
@@ -788,6 +793,10 @@ $("donutbody").addEventListener("pointerleave", () => {
 // move while you type.
 const PNL_KEY = "tracker_pnl_assumptions";
 const PNL_DEFAULTS = {
+  // An allowance for cancellations that have NOT happened yet, on top
+  // of those counted from the orders. Signed: negative takes the
+  // measured figure back down.
+  extraCancelRate: 0.05,
   // 18% is the Indian GST on advertising services. Not given in the
   // brief, so a default to correct rather than a claim.
   gstRate: 0.18,
@@ -797,6 +806,7 @@ const PNL_DEFAULTS = {
   cogsRate: 0.28,
 };
 const PNL_FIELDS = [
+  ["extraCancelRate", "Further cancellation", true, true],
   ["cogsRate", "COGS", true],
   ["gstRate", "GST on ad spend", true],
   ["pgRate", "PG fees", true],
@@ -852,13 +862,30 @@ function computePnl(r, a) {
   // fixes, and better than inventing a rate for them.
   const cancellation = r.pnl_cancelled_sales || 0;
   const cancelledOrders = r.pnl_cancelled_orders || 0;
-  const net = sales - cancellation;
+  // Money already handed back on orders that still stand. Shopify nets
+  // this off and we did not, which is most of why our figure read high
+  // against theirs. Cancelled orders are excluded from it -- they are
+  // already deducted at full price.
+  const refunds = r.pnl_refunds || 0;
+  const afterRefunds = sales - cancellation - refunds;
+  // On what is left, not on gross: an allowance for cancellations still
+  // to come can only apply to orders that have not already cancelled.
+  const extraCancellation = afterRefunds * (a.extraCancelRate || 0);
+  const net = afterRefunds - extraCancellation;
 
   // Net of cancellation on BOTH sides of every ratio. A net numerator
   // over a gross denominator would understate ASP and AOV by exactly
   // the cancelled share.
-  const liveOrders = Math.max(0, orders - cancelledOrders);
-  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty || 0));
+  // The allowance is a VOLUME haircut, not just a price one: if 5% more
+  // orders are going to cancel, 5% fewer ship, so the counts come down
+  // with the money. ASP and AOV are untouched by it -- cancelling
+  // orders at random does not move the average price of the rest.
+  //
+  // Refunds deliberately do NOT scale the counts: a refunded order
+  // still shipped, so its logistics was still spent.
+  const keep = 1 - (a.extraCancelRate || 0);
+  const liveOrders = Math.max(0, (orders - cancelledOrders) * keep);
+  const liveUnits = Math.max(0, (units - (r.pnl_cancelled_qty || 0)) * keep);
 
   const adGst = adSpend * a.gstRate;
   // Per order DISPATCHED: a cancellation is cancelled before it ships
@@ -874,7 +901,7 @@ function computePnl(r, a) {
   const totalDed = adSpend + adGst + logistics + pgFees + coins + cogs;
   const cm = net - totalDed;
   return { sales, orders, units, coinOrders, adSpend, cancellation,
-           cancelledOrders, liveOrders, liveUnits, net,
+           cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
            aov: liveOrders ? net / liveOrders : null,
@@ -939,6 +966,16 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
     }).join("") + "</tbody></table>";
 }
 
+/** A deduction, signed. The allowance is the one line that can go the
+ *  other way, and a double negative reads as a typo.
+ *
+ *  NOT named `ded`: drawPnl has a local `const ded` holding the
+ *  deduction rows, which shadows the outer name and turns a call into
+ *  "ded is not a function". */
+function signedDed(n) {
+  return n < 0 ? "+ " + inr(-n, 0) : "\u2212 " + inr(n, 0);
+}
+
 function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   if (VIEW !== "pnl" || !t || !t.pnl_orders) { $("pnlcard").hidden = true; return; }
   $("pnlcard").hidden = false;
@@ -949,13 +986,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   // arithmetic waiting to disagree with each other.
   const d = computePnl(t, a);
   const c = cmp ? computePnl(cmp, a) : null;
-  const { sales, orders, cancellation, cancelledOrders, cancelPct,
-          liveOrders, liveUnits, net, cm, cmPct, totalDed } = d;
+  const { sales, orders, cancellation, cancelledOrders, cancelPct, refunds,
+          extraCancellation, liveOrders, liveUnits, net, cm, cmPct, totalDed } = d;
 
   const ded = [
     ["Ad spend", d.adSpend, "Meta + Google + Kwikchat"],
     ["GST on ad spend", d.adGst, ""],
-    ["Logistics", d.logistics, num(liveOrders) + " dispatched"],
+    ["Logistics", d.logistics, num(Math.round(liveOrders)) + " dispatched"],
     ["PG fees", d.pgFees, ""],
     ["Silver coin", d.coins, num(d.coinOrders) + " orders"],
     ["COGS", d.cogs, ""],
@@ -964,7 +1001,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   $("pnl-kpis").innerHTML = [
     ["ASP", inr(d.asp), c ? inr(c.asp) : null, d.asp, c ? c.asp : null, "up"],
     ["AOV", inr(d.aov), c ? inr(c.aov) : null, d.aov, c ? c.aov : null, "up"],
-    ["Units sold", num(liveUnits), c ? num(c.liveUnits) : null,
+    ["Units sold", num(Math.round(liveUnits)), c ? num(Math.round(c.liveUnits)) : null,
      liveUnits, c ? c.liveUnits : null, "up"],
     ["Total sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null, "up"],
     ["Cancellation %", pc(cancelPct, 1), c ? pc(c.cancelPct, 1) : null,
@@ -978,16 +1015,18 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
       (cmpDay ? ' <span class="sub">' + esc(cmpDay) + "</span>" : "") + "</div>") +
     "</div>").join("");
 
-  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct]) =>
+  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) =>
     "<label>" + esc(label) +
-    '<span><input type="number" min="0" step="' + (isPct ? "0.1" : "1") +
-    '" data-k="' + key + '" data-pct="' + (isPct ? "1" : "") + '" value="' +
+    '<span><input type="number" ' + (signed ? "" : 'min="0" ') + 'step="' + (isPct ? "0.1" : "1") +
+    '" data-k="' + key + '" data-pct="' + (isPct ? "1" : "") +
+    '" data-signed="' + (signed ? "1" : "") + '" value="' +
     (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
     (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
-    "Percentages on COGS and PG fees apply to <strong>total</strong> sales \u2014 net " +
-    "sales after cancelled orders. Cancellation is no longer an assumption: it is " +
-    "counted from the orders themselves.</p>";
+    "Percentages on COGS and PG fees apply to <strong>total</strong> sales. " +
+    "Cancellations and refunds are counted from the orders themselves; only " +
+    "<strong>Further cancellation</strong> is an allowance, and it may be set " +
+    "negative to take the figure back down.</p>";
 
   const line = (label, value, note, cls, was) =>
     '<div class="pnl-l ' + (cls || "") + '"><span>' + esc(label) +
@@ -997,21 +1036,41 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     value + "</span></div>";
 
   $("pnl-lines").innerHTML =
+    '<div class="pnl-bridge">' +
     line("Net sales", inr(sales, 0), num(orders) + " orders placed",
          "strong", c ? inr(c.sales, 0) : null) +
     line("Cancelled orders", "\u2212 " + inr(cancellation, 0),
          num(cancelledOrders) + " orders \u00b7 " + pc(cancelPct, 1),
          "", c ? "\u2212 " + inr(c.cancellation, 0) : null) +
+    // Only when there is something to show: this store refunds a
+    // standing order so rarely that the line was zero on every day of
+    // the backfill, and a permanent "- Rs 0" row is noise. It returns
+    // the moment a refund lands outside a cancellation.
+    (refunds > 0 || (c && c.refunds > 0)
+      ? line("Refunds", "\u2212 " + inr(refunds, 0), "on orders that still stand",
+             "", c ? "\u2212 " + inr(c.refunds, 0) : null)
+      : "") +
+    // A negative deduction is an addition: "- -Rs 57,277" reads as a
+    // typo rather than as money going back on.
+    line("Further cancellation (" + pc(a.extraCancelRate, 1) + ")",
+         signedDed(extraCancellation), "allowance, not measured",
+         "", c ? signedDed(c.extraCancellation) : null) +
     line("Total sales", inr(net, 0),
-         num(liveOrders) + " orders \u00b7 " + num(liveUnits) + " units",
-         "strong rule", c ? inr(c.net, 0) : null) + "<div></div>" +
+         num(Math.round(liveOrders)) + " orders \u00b7 " + num(Math.round(liveUnits)) + " units",
+         "strong rule", c ? inr(c.net, 0) : null) +
+    // Close the bridge and start a fresh two-column grid for the
+    // deductions. The bridge has a variable number of lines -- Refunds
+    // shows only when there is one -- so flowing it through the same
+    // two columns put Total sales mid-row and left a hole.
+    '</div><div class="pnl-lines">' +
     ded.map((d, i) => line(d[0], "\u2212 " + inr(d[1], 0), d[2], "",
          c ? "\u2212 " + inr([c.adSpend, c.adGst, c.logistics, c.pgFees, c.coins, c.cogs][i], 0) : null)).join("") +
     line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule",
          c ? "\u2212 " + inr(c.totalDed, 0) : null) +
     line("Contribution margin", inr(cm, 0),
          cmPct === null ? "" : pc(cmPct, 1) + " of total sales", "strong rule",
-         c ? inr(c.cm, 0) : null);
+         c ? inr(c.cm, 0) : null) +
+    "</div>";
 
   drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour);
 }
@@ -1021,7 +1080,8 @@ $("pnl-assump").addEventListener("input", e => {
   const el = e.target.closest("input[data-k]");
   if (!el || !LAST) return;
   const v = Number(el.value);
-  if (!isFinite(v) || v < 0) return;
+  if (!isFinite(v)) return;
+  if (v < 0 && !el.getAttribute("data-signed")) return;
   const a = pnlAssumptions();
   a[el.getAttribute("data-k")] = el.getAttribute("data-pct") ? v / 100 : v;
   try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}

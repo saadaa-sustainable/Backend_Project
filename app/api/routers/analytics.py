@@ -13784,6 +13784,7 @@ SELECT hour, day_ist, hour_of_day,
        orders_excluded, revenue_excluded,
        pnl_sales, pnl_orders, pnl_qty, silver_coin_orders,
        pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
+       pnl_refunds,
        revenue_shopifyql,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
@@ -13842,6 +13843,11 @@ class HourlyRow(BaseModel):
     #: Units on the cancelled orders, so ASP divides a net numerator by
     #: a net denominator.
     pnl_cancelled_qty: int | None = None
+    #: Refunded on orders this hour placed, excluding cancelled ones
+    #: (already deducted at full price). NOT Shopify's `returns`, which
+    #: counts by the day a refund was ISSUED rather than the day the
+    #: order was placed.
+    pnl_refunds: float | None = None
     #: ShopifyQL's own total for the hour, a deliberately different
     #: measure kept as a cross-check. Typically within half a per cent.
     revenue_shopifyql: float | None
@@ -13951,6 +13957,7 @@ class HourlyTotals(BaseModel):
     pnl_cancelled_orders: int
     pnl_cancelled_sales: float
     pnl_cancelled_qty: int
+    pnl_refunds: float
     spend: float
     meta_impressions: int
     meta_spend: float
@@ -14040,6 +14047,7 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         pnl_cancelled_orders=s("pnl_cancelled_orders"),
         pnl_cancelled_sales=s("pnl_cancelled_sales"),
         pnl_cancelled_qty=s("pnl_cancelled_qty"),
+        pnl_refunds=s("pnl_refunds"),
         spend=spend, meta_impressions=s("meta_impressions"),
         meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
         google_spend=s("google_spend"),

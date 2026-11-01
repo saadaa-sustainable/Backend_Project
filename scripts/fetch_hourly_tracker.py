@@ -173,6 +173,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- cancellations taken out while the unit count still carried them,
     -- which understates ASP by exactly the cancelled share.
     pnl_cancelled_qty       integer,
+    -- Money refunded on orders this day PLACED, counted only on orders
+    -- that were not cancelled -- a cancelled order is already deducted
+    -- at its full price above, so adding its refund would deduct it
+    -- twice.
+    --
+    -- This is NOT Shopify's `returns` figure and cannot be made to
+    -- match it. ShopifyQL counts refunds by the day they were ISSUED,
+    -- against an order from any day; this counts them against the day
+    -- the order was placed. An hourly campaign tracker has to do the
+    -- latter -- otherwise a refund on a three-week-old order makes this
+    -- afternoon's hour look bad.
+    pnl_refunds             numeric,
     -- Orders CONTAINING a coin, not coins sold -- the cost is per
     -- order that shipped one.
     silver_coin_orders      integer,
@@ -217,6 +229,7 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_qty integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_refunds numeric",
 ]
 
 COLUMNS = [
@@ -228,6 +241,7 @@ COLUMNS = [
     "orders_excluded", "revenue_excluded",
     "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders",
     "pnl_cancelled_orders", "pnl_cancelled_sales", "pnl_cancelled_qty",
+    "pnl_refunds",
     "new_customers", "new_customer_revenue",
     "meta_spend", "meta_impressions", "kwikchat_spend",
     "google_spend", "google_spend_as_of",
@@ -430,6 +444,7 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         id
         createdAt
         totalPriceSet { shopMoney { amount } }
+        totalRefundedSet { shopMoney { amount } }
         cancelledAt
         tags
         lineItems(first: 100) {
@@ -486,7 +501,7 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                                           silver_coin_orders=0,
                                           pnl_cancelled_orders=0,
                                           pnl_cancelled_sales=0.0,
-                                          pnl_cancelled_qty=0))
+                                          pnl_cancelled_qty=0, pnl_refunds=0.0))
 
             # The P&L basis is accumulated BEFORE the revenue
             # exclusions, because the two answer different questions
@@ -502,6 +517,13 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                     b["pnl_cancelled_orders"] += 1
                     b["pnl_cancelled_sales"] += price
                     b["pnl_cancelled_qty"] += units
+                else:
+                    # Only on orders that stand. A cancelled order is
+                    # deducted at full price above; refunding it too
+                    # would deduct the same money twice.
+                    b["pnl_refunds"] += float(
+                        (n.get("totalRefundedSet") or {})
+                        .get("shopMoney", {}).get("amount") or 0)
 
             # Counted and set aside, not skipped silently: an hour whose
             # orders do not match Shopify's admin should say why.

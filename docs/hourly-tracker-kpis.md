@@ -235,19 +235,41 @@ Keeping them is what lets the statement show the deduction instead of
 handing you a number that has quietly already had it taken out.
 
 ```
-Net sales          pnl_sales            Shopify's own total for the population
-  less  Cancelled orders                pnl_cancelled_sales, MEASURED
-= Total sales                           everything below is taken on this
+Net sales              pnl_sales              total order value, incl. tax
+  less  Cancelled orders                      pnl_cancelled_sales, MEASURED
+  less  Refunds                               pnl_refunds, MEASURED
+  less  Further cancellation                  an ALLOWANCE, editable, signed
+= Total sales                                 everything below is taken on this
   less  Ad spend, GST on it, logistics, PG fees, silver coin, COGS
 = Contribution margin
 ```
+
+**Refunds are counted only on orders that were not cancelled.** A
+cancelled order is already deducted at its full price, so adding its
+refund would deduct the same money twice.
+
+**Further cancellation is the one allowance in the sales bridge.** It is
+an editable rate for cancellations that have not happened yet, applied
+to what is left after the measured deductions — an allowance for future
+cancellations cannot apply to orders that have already cancelled. It is
+*signed*: set it negative on a day whose cancellations have all landed,
+and it takes the figure back up. Default 5%.
+
+It is a **volume** haircut, not only a price one. If 5% more orders are
+going to cancel then 5% fewer ship, so it scales the order and unit
+counts as well as the money — which is why logistics falls with it and
+**ASP and AOV do not move**. Cancelling orders at random does not change
+the average price of the ones that remain.
+
+Refunds deliberately do *not* scale the counts: a refunded order still
+shipped, so its logistics was still spent.
 
 | KPI | Definition |
 |---|---|
 | **ASP** | total sales ÷ units sold |
 | **AOV** | total sales ÷ orders |
 | **Units sold** | units on the orders that stand, gift coin excluded |
-| **Total sales** | net sales less cancelled orders |
+| **Total sales** | net sales less cancelled orders, refunds and the allowance |
 | **Cancellation %** | cancelled orders ÷ orders placed |
 | **Contribution margin** | total sales less every deduction |
 | **CM %** | contribution margin ÷ total sales |
@@ -256,6 +278,24 @@ Net sales          pnl_sales            Shopify's own total for the population
 you could type over. It is now counted from `cancelledAt` on the orders
 themselves, which is what makes Cancellation % a reading rather than an
 echo of the input.
+
+### Why this will never equal Shopify's Total sales
+
+`pnl_refunds` counts refunds against **the day the order was placed**.
+ShopifyQL's `returns` counts them against **the day the refund was
+issued**, on an order from any day. The two answer different questions
+and no change to our rule can reconcile them.
+
+An hourly campaign tracker has to date a refund by the order, not by the
+refund: otherwise a refund on a three-week-old order lands on this
+afternoon's hour and makes a perfectly good hour read badly. On
+2026-11-01 that distinction was most of a 2.4% gap — ₹31,726 of refunds
+belonged to the day's own orders, while Shopify's ₹2,48,992 of
+"returns" was overwhelmingly older orders being refunded that day.
+
+There are two further standing differences: our figure is `totalPrice`
+and so **includes tax**, which Shopify's `net_sales` excludes; and
+`Return_Prime`-tagged orders are dropped from the population entirely.
 
 **Every ratio is net of cancellation on both sides.** A net numerator
 over a gross denominator would understate ASP and AOV by exactly the
