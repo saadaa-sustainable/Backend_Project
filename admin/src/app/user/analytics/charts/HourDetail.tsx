@@ -74,9 +74,9 @@ const GROUPS: { title: string; note?: string; items: Item[] }[] = [
     ],
   },
   {
-    title: "Revenue",
+    title: "Total sales",
     items: [
-      { key: "revenue", label: "Revenue", fmt: money },
+      { key: "revenue", label: "Total sales", fmt: money },
       { key: "revenue_paid", label: "Paid revenue", fmt: money },
       { key: "aov", label: "AOV", fmt: money2 },
       { key: "revenue_per_session", label: "Rev / session", fmt: money2 },

@@ -13784,8 +13784,8 @@ SELECT hour, day_ist, hour_of_day,
        orders_excluded, revenue_excluded,
        pnl_sales, pnl_orders, pnl_qty, silver_coin_orders,
        pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
-       pnl_refunds,
-       revenue_shopifyql,
+       pnl_refunds, pnl_cancelled_refunded,
+       revenue_shopifyql, shopify_total_sales, shopify_returns,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
@@ -13848,9 +13848,26 @@ class HourlyRow(BaseModel):
     #: counts by the day a refund was ISSUED rather than the day the
     #: order was placed.
     pnl_refunds: float | None = None
+    #: How much of the cancelled value Shopify has ALREADY refunded and
+    #: therefore already removed from Total sales. The P&L deducts only
+    #: `pnl_cancelled_sales - pnl_cancelled_refunded`, or it would take
+    #: the same money out twice.
+    pnl_cancelled_refunded: float | None = None
     #: ShopifyQL's own total for the hour, a deliberately different
     #: measure kept as a cross-check. Typically within half a per cent.
     revenue_shopifyql: float | None
+    #: Shopify's OWN Total sales, stored verbatim so the headline can
+    #: equal what the Shopify admin shows. Returns in it are dated by
+    #: the day the REFUND was issued, not the day the order was placed,
+    #: and cancelled orders that were never refunded are still inside
+    #: it -- a COD order cancelled before payment produces no refund.
+    shopify_total_sales: float | None = None
+    #: Negative, as ShopifyQL reports it.
+    shopify_returns: float | None = None
+    #: The ORDER-derived total, which is what the per-channel splits are
+    #: carved from. Gross of returns, so it does not tie to `revenue`
+    #: above -- a refund belongs to no campaign hour.
+    revenue_attributed: float | None = None
     revenue_meta: float | None
     revenue_google: float | None
     revenue_paid: float | None
@@ -13913,18 +13930,46 @@ def _derive_hourly(m: dict) -> HourlyRow:
              + (m.get("kwikchat_spend") or 0)
              + (m.get("google_spend") or 0))
     sessions = m.get("sessions") or 0
+
+    # THE HEADLINE IS SHOPIFY'S OWN TOTAL SALES.
+    #
+    # `revenue` as stored is derived from the orders: it is gross of
+    # returns and drops whole orders by tag. That is the right basis for
+    # splitting revenue by channel -- ShopifyQL cannot do it at all --
+    # but it is NOT the number anyone sees in the Shopify admin, and a
+    # dashboard whose headline disagrees with Shopify is a dashboard
+    # nobody trusts.
+    #
+    # So the order-derived figure moves to `revenue_attributed`, where
+    # the channel splits live, and `revenue` becomes Shopify's Total
+    # sales. The two do not tie, and cannot: returns are dated by the
+    # day the refund was ISSUED, so they belong to no campaign hour.
+    #
+    # Falls back to the order figure only for rows written before the
+    # column existed, so history renders rather than showing a dash.
+    attributed = m.pop("revenue", None)
+    headline = m.pop("shopify_total_sales", None)
+    # Popped as well: a caller may hand us a dict built off the model
+    # itself, which already carries the key we are about to set.
+    m.pop("revenue_attributed", None)
+    if headline is None:
+        headline = attributed
+
     return HourlyRow(
         **m,
+        revenue=headline,
+        revenue_attributed=attributed,
+        shopify_total_sales=headline,
         spend=spend or None,
         cost_per_session=over(spend, sessions),
         cost_per_paid_session=over(spend, m.get("sessions_paid")),
         pct_paid=over(m.get("sessions_paid"), sessions),
         pct_direct=over(m.get("sessions_direct"), sessions),
-        revenue_per_session=over(m.get("revenue"), sessions),
+        revenue_per_session=over(headline, sessions),
         revenue_per_meta_session=over(m.get("revenue_meta"), m.get("sessions_meta")),
         revenue_per_google_session=over(m.get("revenue_google"), m.get("sessions_google")),
         revenue_per_paid_session=over(m.get("revenue_paid"), m.get("sessions_paid")),
-        aov=over(m.get("revenue"), m.get("orders")),
+        aov=over(headline, m.get("orders")),
         conversion_rate=over(m.get("orders"), sessions),
         conversion_rate_paid=over(m.get("orders_paid"), m.get("sessions_paid")),
         conversion_rate_direct=over(m.get("orders_direct"), m.get("sessions_direct")),
@@ -13944,7 +13989,13 @@ class HourlyTotals(BaseModel):
     sessions_direct: int
     sessions_meta: int
     sessions_google: int
+    #: Shopify's own Total sales for the span -- the headline.
     revenue: float
+    shopify_total_sales: float
+    shopify_returns: float
+    #: The order-derived total the channel splits are carved from.
+    #: Gross of returns, so it does NOT tie to `revenue`.
+    revenue_attributed: float
     orders: int
     orders_paid: int
     orders_direct: int
@@ -13958,6 +14009,7 @@ class HourlyTotals(BaseModel):
     pnl_cancelled_sales: float
     pnl_cancelled_qty: int
     pnl_refunds: float
+    pnl_cancelled_refunded: float
     spend: float
     meta_impressions: int
     meta_spend: float
@@ -14033,13 +14085,21 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         return any(getattr(r, k) is not None for r in rows)
 
     sessions, paid = s("sessions"), s("sessions_paid")
-    spend, revenue, orders = s("spend"), s("revenue"), s("orders")
+    spend, orders = s("spend"), s("orders")
+    # Summed from the rows, where _derive_hourly has already made
+    # `revenue` Shopify's Total sales. The ratios below re-divide from
+    # that, never from the order-derived figure, or the day would
+    # disagree with its own hours.
+    revenue = s("revenue")
     ncr, users = s("new_customer_revenue"), s("ga4_active_users")
     return HourlyTotals(
         day=day, hours=len(rows),
         sessions=sessions, sessions_paid=paid, sessions_direct=s("sessions_direct"),
         sessions_meta=s("sessions_meta"), sessions_google=s("sessions_google"),
         revenue=revenue, orders=orders,
+        shopify_total_sales=revenue,
+        shopify_returns=s("shopify_returns"),
+        revenue_attributed=s("revenue_attributed"),
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
         pnl_sales=s("pnl_sales"), pnl_orders=s("pnl_orders"),
@@ -14048,6 +14108,7 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         pnl_cancelled_sales=s("pnl_cancelled_sales"),
         pnl_cancelled_qty=s("pnl_cancelled_qty"),
         pnl_refunds=s("pnl_refunds"),
+        pnl_cancelled_refunded=s("pnl_cancelled_refunded"),
         spend=spend, meta_impressions=s("meta_impressions"),
         meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
         google_spend=s("google_spend"),

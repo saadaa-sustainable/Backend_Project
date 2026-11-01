@@ -210,7 +210,7 @@ const METRICS: {
   { key: "cost_per_session", label: "Cost / session", fmt: (n) => money(n), dir: "down", w: 115 },
   { key: "cost_per_paid_session", label: "Cost / paid sess", fmt: (n) => money(n), dir: "down", w: 125 },
   { key: "orders", label: "Orders", fmt: compact, dir: "up", w: 85 },
-  { key: "revenue", label: "Revenue", fmt: (n) => money(n, 0), dir: "up", w: 115 },
+  { key: "revenue", label: "Total sales", fmt: (n) => money(n, 0), dir: "up", w: 115 },
   // Basket size, not traffic quality: the one revenue column here whose
   // denominator is orders rather than sessions. An hour can lift
   // Rev / session by converting more of the same traffic while AOV sits
@@ -392,7 +392,13 @@ export function HourlyTracker() {
                         { label: "Google", value: money(t.google_spend, 0) },
                         { label: "Kwikchat", value: money(t.kwikchat_spend, 0) },
                       ]} />
-                <Hero label="Revenue" value={money(t.revenue, 0)} was={money(c?.revenue, 0)} />
+                <Hero label="Total sales" value={money(t.revenue, 0)}
+                      was={money(c?.revenue, 0)}
+                      hint={"Shopify's own Total sales: gross, less discounts, less returns,"
+                            + " plus tax. Stored verbatim so this equals what the Shopify"
+                            + " admin shows. Returns in it are dated by the day the REFUND"
+                            + " was issued, so they belong to no campaign hour \u2014 which"
+                            + " is why the per-channel splits do not sum to it."} />
                 <Hero label="Cost / session" value={money(t.cost_per_session)}
                       was={money(c?.cost_per_session)} />
                 <Hero label="Rev / session" value={money(t.revenue_per_session)}

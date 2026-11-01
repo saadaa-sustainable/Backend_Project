@@ -53,7 +53,7 @@ const ratio: Fmt = (n) =>
 const METRICS: { key: keyof HourlyRow; label: string; fmt: Fmt; lowerIsBetter?: boolean }[] = [
   { key: "sessions", label: "Sessions", fmt: count },
   { key: "orders", label: "Orders", fmt: count },
-  { key: "revenue", label: "Revenue", fmt: money },
+  { key: "revenue", label: "Total sales", fmt: money },
   { key: "spend", label: "Spend", fmt: money },
   { key: "cost_per_session", label: "Cost / session", fmt: money, lowerIsBetter: true },
   { key: "revenue_per_session", label: "Rev / session", fmt: money },
