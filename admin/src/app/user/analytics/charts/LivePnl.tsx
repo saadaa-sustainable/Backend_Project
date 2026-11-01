@@ -136,10 +136,34 @@ function save(next: Assumptions) {
   listeners.forEach((fn) => fn());
 }
 
-export function LivePnl({ totals, rows, liveHour }: {
+/** The change, as a line of its own. `lowerIsBetter` only for the
+ *  deduction rows, where spending less is the win. */
+function Change({ now, was, lowerIsBetter }: {
+  now: number | null | undefined; was: number | null | undefined; lowerIsBetter?: boolean;
+}) {
+  if (now === null || now === undefined || !was) {
+    return <span className="text-text-tertiary">—</span>;
+  }
+  const ch = (now - was) / Math.abs(was);
+  const flat = Math.abs(ch) < 0.005;
+  const good = lowerIsBetter ? ch < 0 : ch > 0;
+  return (
+    <span className={flat ? "text-text-tertiary" : good ? "text-success-text" : "text-warning-text"}>
+      {flat ? "" : ch > 0 ? "↗ " : "↘ "}{Math.abs(ch * 100).toFixed(0)}%
+    </span>
+  );
+}
+
+export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHour }: {
   totals: HourlyTotals | null;
   /** The day's hours, for the breakdown under the summary. */
   rows?: HourlyRow[];
+  /** The comparison day, already CLAMPED by the endpoint to the hours
+   *  this day has reached — a part-finished day against a complete one
+   *  flatters the complete one every time. */
+  compare?: HourlyTotals | null;
+  compareRows?: HourlyRow[];
+  compareDay?: string;
   /** Still filling: its margin is real but its hour is not over. */
   liveHour?: number | null;
 }) {
@@ -151,17 +175,22 @@ export function LivePnl({ totals, rows, liveHour }: {
   if (!totals || !totals.pnl_orders) return null;
 
   const d = computePnl(totals, a);
+  // Run through the SAME function, so a difference between the two is
+  // the day's, never the arithmetic's.
+  const c = compare ? computePnl(compare, a) : null;
+  const byHour = new Map((compareRows ?? []).map((r) => [r.hour_of_day, r]));
   const { sales, orders, units, asp, aov, cancellation, netSales, cm, cmPct,
           totalDeductions } = d;
 
-  const deductions: { label: string; value: number; note?: string }[] = [
-    { label: "Ad spend", value: d.adSpend, note: "Meta + Google + Kwikchat" },
-    { label: "GST on ad spend", value: d.adGst },
-    { label: "Logistics", value: d.logistics, note: `${orders.toLocaleString("en-IN")} orders` },
-    { label: "PG fees", value: d.pgFees },
-    { label: "Silver coin", value: d.coins,
+  const deductions: { label: string; value: number; was?: number; note?: string }[] = [
+    { label: "Ad spend", value: d.adSpend, was: c?.adSpend, note: "Meta + Google + Kwikchat" },
+    { label: "GST on ad spend", value: d.adGst, was: c?.adGst },
+    { label: "Logistics", value: d.logistics, was: c?.logistics,
+      note: `${orders.toLocaleString("en-IN")} orders` },
+    { label: "PG fees", value: d.pgFees, was: c?.pgFees },
+    { label: "Silver coin", value: d.coins, was: c?.coins,
       note: `${totals.silver_coin_orders.toLocaleString("en-IN")} orders` },
-    { label: "COGS", value: d.cogs },
+    { label: "COGS", value: d.cogs, was: c?.cogs },
   ];
 
   // Newest first, and only hours that actually sold: an hour with no
@@ -169,7 +198,14 @@ export function LivePnl({ totals, rows, liveHour }: {
   // spend, which says nothing and crowds out the hours that do.
   const hourly = (rows ?? [])
     .filter((r) => (r.pnl_orders ?? 0) > 0)
-    .map((r) => ({ hour: r.hour_of_day, p: computePnl(r, a) }))
+    .map((r) => {
+      const prev = byHour.get(r.hour_of_day);
+      return {
+        hour: r.hour_of_day,
+        p: computePnl(r, a),
+        q: prev ? computePnl(prev, a) : null,
+      };
+    })
     .sort((x, y) => y.hour - x.hour);
   const worstCm = Math.max(1, ...hourly.map((h) => Math.abs(h.p.cm)));
 
@@ -186,14 +222,20 @@ export function LivePnl({ totals, rows, liveHour }: {
       </div>
 
       <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-5">
-        <Kpi label="ASP" value={money(asp, 2)}
+        <Kpi label="ASP" value={money(asp, 2)} was={c ? money(c.asp, 2) : undefined}
+             now={asp} prev={c?.asp} day={compareDay}
              hint="Total sales ÷ units sold, with the gift coin excluded from units — it is not an item sold." />
-        <Kpi label="AOV" value={money(aov, 2)} hint="Total sales ÷ orders." />
-        <Kpi label="Net sales" value={money(netSales)}
+        <Kpi label="AOV" value={money(aov, 2)} was={c ? money(c.aov, 2) : undefined}
+             now={aov} prev={c?.aov} day={compareDay} hint="Total sales ÷ orders." />
+        <Kpi label="Net sales" value={money(netSales)} was={c ? money(c.netSales) : undefined}
+             now={netSales} prev={c?.netSales} day={compareDay}
              hint={`Total sales ${money(sales)} less ${pct(a.cancelRate)} cancellation.`} />
-        <Kpi label="Contribution margin" value={money(cm)}
+        <Kpi label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
+             now={cm} prev={c?.cm} day={compareDay}
              hint="Net sales less every deduction below." />
-        <Kpi label="CM %" value={pct(cmPct)} hint="Contribution margin ÷ net sales." />
+        <Kpi label="CM %" value={pct(cmPct)} was={c ? pct(c.cmPct) : undefined}
+             now={cmPct} prev={c?.cmPct} day={compareDay}
+             hint="Contribution margin ÷ net sales." />
       </dl>
 
       {open && (
@@ -229,16 +271,21 @@ export function LivePnl({ totals, rows, liveHour }: {
       )}
 
       <div className="mt-4 grid gap-x-10 gap-y-1 md:grid-cols-2">
-        <Line label="Total sales" value={money(sales)} strong
+        <Line label="Total sales" value={money(sales)} was={c ? money(c.sales) : undefined} strong
               note={`${orders.toLocaleString("en-IN")} orders · ${units.toLocaleString("en-IN")} units`} />
-        <Line label={`Cancellation / RTO (${pct(a.cancelRate)})`} value={`− ${money(cancellation)}`} />
-        <Line label="Net sales" value={money(netSales)} strong rule />
+        <Line label={`Cancellation / RTO (${pct(a.cancelRate)})`} value={`− ${money(cancellation)}`}
+              was={c ? `− ${money(c.cancellation)}` : undefined} />
+        <Line label="Net sales" value={money(netSales)} was={c ? money(c.netSales) : undefined}
+              strong rule />
         <div />
-        {deductions.map((d) => (
-          <Line key={d.label} label={d.label} value={`− ${money(d.value)}`} note={d.note} />
+        {deductions.map((row) => (
+          <Line key={row.label} label={row.label} value={`− ${money(row.value)}`}
+                was={row.was !== undefined ? `− ${money(row.was)}` : undefined} note={row.note} />
         ))}
-        <Line label="Total deductions" value={`− ${money(totalDeductions)}`} rule />
-        <Line label="Contribution margin" value={money(cm)} strong rule
+        <Line label="Total deductions" value={`− ${money(totalDeductions)}`}
+              was={c ? `− ${money(c.totalDeductions)}` : undefined} rule />
+        <Line label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
+              strong rule
               note={cmPct !== null ? `${pct(cmPct)} of net sales` : undefined} />
       </div>
 
@@ -264,11 +311,12 @@ export function LivePnl({ totals, rows, liveHour }: {
                   <th className="py-1 pr-3 font-medium">Spend</th>
                   <th className="py-1 pr-3 font-medium">CM</th>
                   <th className="py-1 pr-3 font-medium">CM %</th>
+                  {c && <th className="py-1 pr-3 font-medium">vs</th>}
                   <th className="w-[120px] py-1 font-medium" />
                 </tr>
               </thead>
               <tbody>
-                {hourly.map(({ hour, p }) => {
+                {hourly.map(({ hour, p, q }) => {
                   const live = liveHour != null && hour === liveHour;
                   const frac = Math.min(Math.abs(p.cm) / worstCm, 1) * 50;
                   return (
@@ -297,6 +345,15 @@ export function LivePnl({ totals, rows, liveHour }: {
                         p.cm >= 0 ? "text-success-text" : "text-warning-text"}`}>
                         {pct(p.cmPct)}
                       </td>
+                      {c && (
+                        <td className="py-[3px] pr-3 text-[11px]">
+                          {/* The same hour of the comparison day, by CM.
+                              A margin that halved matters more than one
+                              that merely fell. */}
+                          {live ? <span className="text-text-tertiary">—</span>
+                                : <Change now={p.cm} was={q?.cm} />}
+                        </td>
+                      )}
                       <td className="py-[3px]">
                         <div className="relative h-2.5" aria-hidden="true">
                           <div className="absolute inset-y-0 left-1/2 w-px bg-border-primary" />
@@ -330,7 +387,10 @@ export function LivePnl({ totals, rows, liveHour }: {
   );
 }
 
-function Kpi({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Kpi({ label, value, was, now, prev, day, hint }: {
+  label: string; value: string; was?: string;
+  now?: number | null; prev?: number | null; day?: string; hint?: string;
+}) {
   return (
     <div className="min-w-0">
       <dt className="text-[11px] uppercase tracking-wide text-text-tertiary" title={hint}>
@@ -339,12 +399,20 @@ function Kpi({ label, value, hint }: { label: string; value: string; hint?: stri
       <dd className="mt-1 truncate tabular-nums text-xl font-semibold text-text-primary">
         {value}
       </dd>
+      {was !== undefined && (
+        <dd className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[11.5px]">
+          <span className="tabular-nums text-text-tertiary">{was}</span>
+          <span className="text-[11px]"><Change now={now} was={prev} /></span>
+          {day && <span className="text-[10px] text-text-tertiary">{day}</span>}
+        </dd>
+      )}
     </div>
   );
 }
 
-function Line({ label, value, note, strong, rule }: {
-  label: string; value: string; note?: string; strong?: boolean; rule?: boolean;
+function Line({ label, value, was, note, strong, rule }: {
+  label: string; value: string; was?: string; note?: string;
+  strong?: boolean; rule?: boolean;
 }) {
   return (
     <div className={`flex items-baseline justify-between gap-3 py-[3px] text-[12px] ${
@@ -353,8 +421,13 @@ function Line({ label, value, note, strong, rule }: {
         {label}
         {note && <span className="ml-1.5 text-[10.5px] text-text-tertiary">{note}</span>}
       </span>
-      <span className={`tabular-nums ${strong ? "font-semibold text-text-primary" : "text-text-secondary"}`}>
-        {value}
+      <span className="flex items-baseline gap-2 tabular-nums">
+        {was !== undefined && (
+          <span className="text-[11px] text-text-tertiary">{was}</span>
+        )}
+        <span className={strong ? "font-semibold text-text-primary" : "text-text-secondary"}>
+          {value}
+        </span>
       </span>
     </div>
   );
