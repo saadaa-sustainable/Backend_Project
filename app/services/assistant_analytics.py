@@ -330,7 +330,11 @@ when summed daily. Use the session_trend tool's aligned results for session rati
 Null means unavailable; do not replace it with zero. Include coverage/partial-data caveats
 returned by tools. A cached response and its retrieval time are NOT an ingestion timestamp.
 Use get_refresh_status for cron runs, step outcomes and schedules, get_data_freshness for
-latest available dates, and get_table_info for table/column metadata. Database running records
+latest available dates, and get_table_info for table/column metadata. This database declares
+NO foreign keys, so column names alone never establish that two tables can be joined: call
+get_table_doc before writing or describing any join, before choosing between similarly named
+tables, and before stating what a row represents. When a table's notes say the semantics are
+not yet written, say they are undocumented rather than inferring meaning from column names. Database running records
 are not verified live GitHub status; cron success is not proof of complete data. Always state
 this distinction. Schema row counts are estimates. Do not claim exact counts or full table
 coverage. If a table or freshness check is unavailable, say unknown and explain the reason.
