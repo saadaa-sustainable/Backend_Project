@@ -226,8 +226,48 @@
   .inv-virtual .vlab { color: var(--text-3); }
   .inv-virtual code { font-size: 10.5px; background: rgba(127,127,127,.14);
                       padding: 1px 6px; border-radius: 4px; }
-  .inv-virtual input[type=file] { font-size: 11px; max-width: 230px; }
+  .inv-btns { margin-left: auto; display: flex; gap: 8px; }
+  .inv-btn { cursor: pointer; font-size: 11px; padding: 3px 11px;
+             border-radius: 6px; border: 1px solid rgba(124,111,240,.45);
+             color: #a79bf5; background: transparent; white-space: nowrap;
+             transition: background .12s; }
+  .inv-btn:hover { background: rgba(124,111,240,.14); }
   .inv-diff { width: 100%; font-size: 11px; color: var(--text-2); }
+  /* Laid out like the spreadsheet it came from -- row numbers, column
+     letters, visible cell borders -- so it can be checked against the
+     file side by side without translating between two shapes. */
+  /* A real overlay, not an expanding row. 280 rows pushed the whole
+     inventory table off the screen, and the file is a thing you glance
+     at and dismiss rather than read alongside. */
+  .inv-modal { position: fixed; inset: 0; z-index: 50; display: flex;
+               align-items: center; justify-content: center; padding: 28px;
+               background: rgba(0,0,0,.55); }
+  /* `display:flex` above out-specifies the browser's own [hidden] rule,
+     so without this the closed overlay stays laid out and silently
+     swallows every click on the page behind it. */
+  .inv-modal[hidden] { display: none; }
+  .inv-modal-box { background: var(--surface); border: 1px solid var(--border);
+                   border-radius: 12px; width: min(760px, 100%); max-height: 86vh;
+                   display: flex; flex-direction: column; padding: 14px 16px 10px;
+                   box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+  .inv-modal-head { display: flex; align-items: baseline; gap: 12px; padding-bottom: 10px;
+                    border-bottom: 1px solid var(--border-soft); }
+  .inv-modal-head .inv-btn { margin-left: auto; }
+  .inv-xl { width: 100%; flex: 1; min-height: 0; overflow: auto; margin-top: 10px; }
+  .inv-xl table { border-collapse: collapse; font-size: 11px;
+                  font-variant-numeric: tabular-nums; background: var(--surface); }
+  .inv-xl th, .inv-xl td { border: 1px solid var(--border); padding: 2px 9px;
+                           white-space: nowrap; }
+  .inv-xl thead th { position: sticky; top: 0; background: var(--surface);
+                     color: var(--text-3); font-weight: 500; text-align: left; z-index: 1; }
+  .inv-xl thead tr.cols th { text-align: center; font-size: 10px; color: var(--text-3);
+                             background: rgba(127,127,127,.10); }
+  .inv-xl td.rn, .inv-xl th.rn { background: rgba(127,127,127,.10); color: var(--text-3);
+                                 text-align: right; font-size: 10px;
+                                 position: sticky; left: 0; }
+  .inv-xl td.n { text-align: right; }
+  .inv-xl tr.unmatched td { color: var(--text-3); }
+  .inv-xl tr.unmatched td.rn::after { content: " \u2022"; color: var(--bad,#dc2626); }
   .inv-diff b.up { color: var(--good,#16a34a); } .inv-diff b.dn { color: var(--bad,#dc2626); }
   .k-shop-t  { color: #58a6ff; }
   .k-sheet-t { color: #d9a441; }
@@ -318,6 +358,17 @@
     </div>
     <div class="heroes" id="inv-kpis"></div>
     <div id="inv-virtual" class="inv-virtual"></div>
+    <div id="inv-modal" class="inv-modal" hidden>
+      <div class="inv-modal-box" role="dialog" aria-modal="true" aria-label="Virtual inventory file">
+        <div class="inv-modal-head">
+          <strong id="inv-modal-title">Virtual inventory</strong>
+          <span class="vlab" id="inv-modal-sub"></span>
+          <button type="button" class="inv-btn" id="inv-modal-close">Close</button>
+        </div>
+        <div class="inv-xl" id="inv-vsheet"></div>
+        <div class="vlab" id="inv-modal-foot"></div>
+      </div>
+    </div>
     <div class="inv-key">
       <span>Source:</span>
       <b class="k-shop">Shopify</b>
@@ -1150,6 +1201,52 @@ function loadInventory() {
     });
 }
 
+let VSHEET = null, VSHEET_OPEN = false, VSHEET_LOADING = false;
+
+function drawVirtualSheet() {
+  const box = $("inv-vsheet");
+  $("inv-modal").hidden = !VSHEET_OPEN;
+  if (!VSHEET_OPEN) { box.innerHTML = ""; return; }
+  if (!VSHEET) { box.innerHTML = '<span class="vlab">Loading\u2026</span>'; return; }
+  const r = VSHEET.rows;
+  const unmatched = r.filter(x => !x.matched).length;
+  $("inv-modal-sub").textContent = VSHEET.source_file || "";
+  box.innerHTML =
+    '<table><thead>' +
+    '<tr class="cols"><th class="rn"></th><th>A</th><th>B</th><th>C</th></tr>' +
+    '<tr><th class="rn">1</th><th>Sku</th><th>Size</th><th>Dynamic Virtual Inventory</th></tr>' +
+    "</thead><tbody>" +
+    r.map((x, i) =>
+      '<tr class="' + (x.matched ? "" : "unmatched") + '">' +
+      '<td class="rn">' + (i + 2) + "</td>" +
+      "<td>" + esc(x.variant_sku) + "</td>" +
+      "<td>" + esc(x.size || "") + "</td>" +
+      '<td class="n">' + num(x.virtual_units) + "</td></tr>").join("") +
+    "</tbody></table>";
+  $("inv-modal-foot").innerHTML = num(r.length) + " rows \u00b7 " +
+    num(r.reduce((a, x) => a + x.virtual_units, 0)) + " units" +
+    (unmatched ? " \u00b7 " + num(unmatched) +
+      " row(s) marked \u2022 match no Shopify variant and do not appear on the inventory table"
+      : "");
+}
+
+function closeVirtualSheet() { VSHEET_OPEN = false; drawVirtualSheet(); }
+
+function toggleVirtualSheet() {
+  VSHEET_OPEN = !VSHEET_OPEN;
+  if (!VSHEET_OPEN || VSHEET || VSHEET_LOADING) { drawVirtualSheet(); return; }
+  VSHEET_LOADING = true;
+  drawVirtualSheet();
+  fetch(apiBase() + "/admin/analytics/inventory/virtual")
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(d => { VSHEET = d; VSHEET_LOADING = false; drawVirtualSheet(); })
+    .catch(e => {
+      VSHEET_LOADING = false;
+      $("inv-vsheet").innerHTML = '<span class="vlab">Could not load: ' +
+        esc(String(e.message || e)) + "</span>";
+    });
+}
+
 function drawVirtualPanel() {
   const v = (INV && INV.virtual) || {};
   const when = v.imported_at ? String(v.imported_at).replace("T", " ").slice(0, 16) : null;
@@ -1158,12 +1255,17 @@ function drawVirtualPanel() {
     (v.skus
       ? '<span><b class="virt">' + num(v.units) + "</b> units across " + num(v.skus) + " SKUs</span>" +
         '<span class="vlab">from <code>' + esc(v.source_file || "?") + "</code></span>" +
-        '<span class="vlab">loaded ' + esc(when || "?") + "</span>" +
-        (v.unmatched ? '<span class="bad">' + num(v.unmatched) +
-                       " SKU(s) match no Shopify variant</span>" : "")
+        '<span class="vlab">loaded ' + esc(when || "?") + "</span>"
       : '<span class="vlab">nothing ingested yet</span>') +
-    '<label class="vlab">Preview a file: <input type="file" id="inv-vfile" ' +
-      'accept=".csv,.xlsx"></label>' +
+    // The native file input is the ugliest control the browser has, so
+    // it is hidden and a label drives it. Unmatched SKUs are no longer
+    // surfaced here -- it has been the gift coin every time, and a
+    // warning that is always the same thing stops being read.
+    '<span class="inv-btns">' +
+      '<button type="button" class="inv-btn" id="inv-vpreview">Preview file</button>' +
+      '<label class="inv-btn">Import file' +
+        '<input type="file" id="inv-vfile" accept=".csv,.xlsx" hidden></label>' +
+    "</span>" +
     '<div class="inv-diff" id="inv-vdiff"></div>';
 }
 
@@ -1171,6 +1273,19 @@ function drawVirtualPanel() {
 // and /admin/* carries no authentication, so an upload endpoint here
 // would let anyone overwrite inventory. Previewing locally gives the
 // numbers immediately and writes nothing; the CLI below persists them.
+$("inv-virtual").addEventListener("click", e => {
+  if (e.target.closest("#inv-vpreview")) toggleVirtualSheet();
+});
+
+// Close on the button, on the backdrop, and on Escape. A modal with
+// only one way out is a trap.
+$("inv-modal").addEventListener("click", e => {
+  if (e.target.id === "inv-modal" || e.target.closest("#inv-modal-close")) closeVirtualSheet();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && VSHEET_OPEN) closeVirtualSheet();
+});
+
 $("inv-virtual").addEventListener("change", e => {
   const f = e.target.files && e.target.files[0];
   if (!f) return;
