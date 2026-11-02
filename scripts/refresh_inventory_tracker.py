@@ -31,6 +31,24 @@ garment ACTIVE and ARCHIVED. Counting both double-counts the stock, so
 exactly one row per SKU survives, the ACTIVE listing preferred. This is
 the same rule CPIS uses for Units in Stock, and the two must agree.
 
+Where SEVERAL listings are ACTIVE and disagree, the quantity is the
+MEDIAN OF THE NON-ZERO ones, falling back to zero only when every
+listing is zero. Two failure shapes exist and they want opposite
+rules:
+
+  SUPFHBE_M   Unisex 48, Men 0, Women 0
+              -- the zeros are storefront duplicates holding no
+              inventory. A plain median returns 0 and reports a
+              stocked hoodie as out of stock.
+
+  SDCPWH_XL   128, 559, 126, all ACTIVE and all real
+              -- the maximum is the outlier and inflates the rate.
+
+Ignoring zeros and then taking the median is right on both. Note that
+it was NOT chosen by fitting to the production sheet: that sheet is a
+separate source which legitimately differs, so tuning this rule to
+agree with it would be circular.
+
 WHICH PRODUCTS APPEAR
 ---------------------
 Masters with at least one ACTIVE listing: 82 of them, against 111 if
@@ -72,6 +90,10 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- and a buyer needs to see it.
     oversold        boolean,
     product_status  text,
+    -- How many listings held this SKU at its best tier. Above 1 means
+    -- the quantity is a median across listings that disagreed, which
+    -- is worth knowing before trusting it to the unit.
+    listing_ct      smallint,
     product_title   text,
     variant_title   text,
     -- NULL when the SKU parsed cleanly.
@@ -101,12 +123,43 @@ raw AS (
 ),
 -- One quantity per SKU, ACTIVE preferred. Without this a garment listed
 -- twice contributes its stock twice and the in-stock rate drifts up.
+-- The best listing TIER present for each SKU: ACTIVE if it has one,
+-- else DRAFT, else archived. Rank first so the median below is taken
+-- within one tier rather than across a live listing and a dead one.
+ranked AS (
+    SELECT r.*,
+           CASE product_status WHEN 'ACTIVE' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END AS tier,
+           min(CASE product_status WHEN 'ACTIVE' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END)
+               OVER (PARTITION BY variant_sku) AS best_tier
+      FROM raw r
+),
 dedup AS (
-    SELECT DISTINCT ON (variant_sku) *
-      FROM raw
-     ORDER BY variant_sku,
-              CASE product_status WHEN 'ACTIVE' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END,
-              units DESC NULLS LAST
+    SELECT variant_sku,
+           min(product_status)                                   AS product_status,
+           min(product_title)                                    AS product_title,
+           min(product_variant_title)                            AS product_variant_title,
+           -- Median of the NON-ZERO listings, falling back to zero
+           -- only when every listing is zero.
+           --
+           -- Two distinct failure shapes, and they want opposite
+           -- rules. SUPFHBE_M is Unisex 48, Men 0, Women 0 -- the
+           -- zeros are storefront duplicates carrying no inventory, so
+           -- a plain median returns 0 and reports a stocked hoodie as
+           -- out. SDCPWH_XL is 128, 559, 126, all real and all
+           -- disagreeing, where the maximum is the outlier.
+           --
+           -- Ignoring zeros and then taking the median is the only one
+           -- of the four strategies tried that is right on both: 48
+           -- for the first, 128 for the second.
+           COALESCE(
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY units)
+                   FILTER (WHERE units <> 0),
+               0)                                                AS units,
+           min(as_of)                                            AS as_of,
+           count(*)                                              AS listing_ct
+      FROM ranked
+     WHERE tier = best_tier
+     GROUP BY variant_sku
 ),
 parsed AS (
     SELECT d.*,
@@ -137,7 +190,7 @@ SELECT k.variant_sku, k.colour_sku, k.master_sku, k.size,
        k.units::int,
        (k.units > 0) AS in_stock,
        (k.units < 0) AS oversold,
-       k.product_status, k.product_title, k.product_variant_title,
+       k.product_status, k.listing_ct::smallint, k.product_title, k.product_variant_title,
        k.unparsed_reason, k.as_of
   FROM keyed k
   LEFT JOIN active_masters a USING (master_sku)
@@ -151,6 +204,7 @@ SELECT count(*) FILTER (WHERE unparsed_reason IS NULL)                      AS v
        count(*) FILTER (WHERE in_stock)                                     AS in_stock,
        count(*) FILTER (WHERE oversold)                                     AS oversold,
        count(*) FILTER (WHERE unparsed_reason IS NOT NULL)                  AS unparsed,
+       count(*) FILTER (WHERE listing_ct > 1)                               AS multi_listed,
        max(as_of_date)                                                      AS as_of
   FROM {TABLE}
 """
@@ -174,7 +228,7 @@ def main() -> int:
         cur.execute(f"""
             INSERT INTO {TABLE} (
                 variant_sku, colour_sku, master_sku, size, size_rank, units,
-                in_stock, oversold, product_status, product_title,
+                in_stock, oversold, product_status, listing_ct, product_title,
                 variant_title, unparsed_reason, as_of_date)
             {BUILD}""")
         written = cur.rowcount
@@ -189,6 +243,8 @@ def main() -> int:
     print(f"     in stock {s['in_stock']:,} ({rate:.1f}%)")
     if s["oversold"]:
         print(f"     [warn] {s['oversold']} variant(s) oversold (negative units)")
+    if s["multi_listed"]:
+        print(f"     {s['multi_listed']} sku(s) on several listings; quantity is their median")
     if s["unparsed"]:
         print(f"     [warn] {s['unparsed']} sku(s) could not be parsed; kept and flagged")
     return 0
