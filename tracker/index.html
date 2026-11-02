@@ -945,6 +945,20 @@ const PNL_DEFAULTS = {
   // of those counted from the orders. Signed: negative takes the
   // measured figure back down.
   extraCancelRate: 0.05,
+  // Share of orders that come back as an exchange, and what one costs
+  // to service. An exchange ships twice and collects once, so the cost
+  // is per EXCHANGE, not per order -- see the deduction below.
+  //
+  // 1% is MEASURED, from three samples of the whole order history
+  // reading 1.26%, 0.93% and 0.99%. TABLESAMPLE draws PAGES, not rows,
+  // so it is cluster-biased and a single sample is not enough -- the
+  // first one alone would have set this 30% too high.
+  //
+  // Deliberately lifetime rather than recent: the Exchange tag lands
+  // days after the order, so a recent window understates it. An
+  // editable default, not a law.
+  exchangeRate: 0.01,
+  exchangeCost: 200,
   // 18% is the Indian GST on advertising services. Not given in the
   // brief, so a default to correct rather than a claim.
   gstRate: 0.18,
@@ -955,6 +969,8 @@ const PNL_DEFAULTS = {
 };
 const PNL_FIELDS = [
   ["extraCancelRate", "Further cancellation", true, true],
+  ["exchangeRate", "Exchange %", true],
+  ["exchangeCost", "Cost / exchange", false],
   ["cogsRate", "COGS", true],
   ["gstRate", "GST on ad spend", true],
   ["pgRate", "PG fees", true],
@@ -1060,15 +1076,27 @@ function computePnl(r, a) {
   // Still on the whole population, deliberately: the gift ships with
   // the order and there is no per-order coin flag to net it down by.
   const coins = coinOrders * a.coinCost;
+  // Exchanges, on orders that SHIPPED. An exchange is a second
+  // dispatch and a collection on an order that already counted its
+  // logistics once, so this is an additional cost and not a
+  // replacement for it. Revenue is untouched: the customer swapped for
+  // equal value, which is exactly why the tracker keeps exchanges in
+  // revenue in the first place.
+  const exchanges = liveOrders * (a.exchangeRate || 0);
+  const exchangeCost = exchanges * (a.exchangeCost || 0);
   const cogs = net * a.cogsRate;
-  const totalDed = adSpend + adGst + logistics + pgFees + coins + cogs;
+  const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
   return { sales, orders, units, coinOrders, adSpend, cancellation,
            cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
-           adGst, logistics, pgFees, coins, cogs, totalDed, cm,
+           adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
            aov: liveOrders ? net / liveOrders : null,
            cancelPct: orders ? cancelledOrders / orders : null,
+           // Over ALL orders in the P&L population, which is the same
+           // denominator the coin COST uses -- the gift ships with the
+           // order whether or not that order later cancelled.
+           coinPct: orders ? coinOrders / orders : null,
            cmPct: net ? cm / net : null };
 }
 
@@ -1454,6 +1482,8 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ["Logistics", d.logistics, num(liveOrders) + " dispatched"],
     ["PG fees", d.pgFees, ""],
     ["Silver coin", d.coins, num(d.coinOrders) + " orders"],
+    ["Exchanges", d.exchangeCost,
+     num(Math.round(d.exchanges)) + " at " + inr(a.exchangeCost, 0) + " each"],
     ["COGS", d.cogs, ""],
   ];
 
@@ -1465,6 +1495,10 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ["Realisable sales", inr(net, 0), c ? inr(c.net, 0) : null, net, c ? c.net : null, "up"],
     ["Cancellation %", pc(cancelPct, 1), c ? pc(c.cancelPct, 1) : null,
      cancelPct, c ? c.cancelPct : null, "down"],
+    // Neither good nor bad on its own -- it is a mix, not a score --
+    // so the arrow reports the direction and the colour stays neutral.
+    ["Coin orders %", pc(d.coinPct, 1), c ? pc(c.coinPct, 1) : null,
+     d.coinPct, c ? c.coinPct : null, "flat"],
     ["Contribution margin", inr(cm, 0), c ? inr(c.cm, 0) : null, cm, c ? c.cm : null, "up"],
     ["CM %", pc(cmPct, 1), c ? pc(c.cmPct, 1) : null, cmPct, c ? c.cmPct : null, "up"],
   ].map(([k, v, was, now, prev, dir]) =>
@@ -1525,7 +1559,8 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     // two columns put Total sales mid-row and left a hole.
     '</div><div class="pnl-lines">' +
     ded.map((d, i) => line(d[0], "\u2212 " + inr(d[1], 0), d[2], "",
-         c ? "\u2212 " + inr([c.adSpend, c.adGst, c.logistics, c.pgFees, c.coins, c.cogs][i], 0) : null)).join("") +
+         c ? "\u2212 " + inr([c.adSpend, c.adGst, c.logistics, c.pgFees, c.coins,
+                               c.exchangeCost, c.cogs][i], 0) : null)).join("") +
     line("Total deductions", "\u2212 " + inr(totalDed, 0), "", "rule",
          c ? "\u2212 " + inr(c.totalDed, 0) : null) +
     line("Contribution margin", inr(cm, 0),
