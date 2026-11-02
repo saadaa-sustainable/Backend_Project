@@ -14238,11 +14238,29 @@ async def get_hourly_tracker(
 # one-quantity-per-SKU rule (ACTIVE listing preferred) that CPIS uses --
 # the two must agree or the same garment reads differently in two places.
 _INVENTORY_SQL = """
-SELECT master_sku, colour_sku, variant_sku, size, size_rank,
-       units, in_stock, oversold, product_title, variant_title
-  FROM public.inventory_variant_current
- WHERE unparsed_reason IS NULL
- ORDER BY master_sku, colour_sku, size_rank NULLS LAST, variant_sku
+SELECT i.master_sku, i.colour_sku, i.variant_sku, i.size, i.size_rank,
+       i.units, i.in_stock, i.oversold, i.product_title, i.variant_title,
+       -- Virtual stock is PROMISED, not held, so it is carried beside
+       -- the real count and never folded into it. A left join: most
+       -- SKUs have none, and absent means none rather than unknown.
+       COALESCE(v.virtual_units, 0) AS virtual_units
+  FROM public.inventory_variant_current i
+  LEFT JOIN public.virtual_inventory_current v
+         ON v.variant_sku = upper(i.variant_sku)
+ WHERE i.unparsed_reason IS NULL
+ ORDER BY i.master_sku, i.colour_sku, i.size_rank NULLS LAST, i.variant_sku
+"""
+
+#: The production sheet, at colour grain, for the side-by-side.
+#:
+#: Its rate is taken AS THE SHEET WRITES IT and never recomputed from
+#: its own size columns: the comparison is only honest if each side
+#: keeps its own arithmetic, and a difference in the rate is itself a
+#: finding rather than something to normalise away.
+_SHEET_SQL = """
+SELECT colour_sku, total_stock, colour_instock_rate, stock_by_size,
+       colour_instock_status, scm_comment, sheet_as_of
+  FROM public.production_sheet_oos
 """
 
 
@@ -14252,6 +14270,8 @@ class InventoryVariant(BaseModel):
     units: int | None
     in_stock: bool
     oversold: bool
+    #: Promised, not held. Never added to `units`.
+    virtual_units: int = 0
 
 
 class InventoryNode(BaseModel):
@@ -14271,15 +14291,53 @@ class InventoryNode(BaseModel):
     #: variants and still offer every size somewhere.
     size_in_stock_rate: float | None
     units: int
+    #: Virtual (promised) stock, summed. Deliberately NOT added to
+    #: `units` anywhere -- a shelf count and a promise are different
+    #: things, and a page that quietly sums them tells you that you
+    #: have stock you cannot ship.
+    virtual_units: int = 0
     oversold: int
+    #: The production sheet's figures for the same SKU, and the gap.
+    #: None means the sheet does not carry this SKU at all.
+    sheet_units: int | None = None
+    sheet_rate: float | None = None
+    #: shopify units - sheet units. Positive means Shopify reads higher.
+    gap: int | None = None
+    sheet_status: str | None = None
     colours: list["InventoryNode"] | None = None
     items: list[InventoryVariant] | None = None
 
 
+class VirtualImport(BaseModel):
+    """Provenance of the virtual-inventory load currently on screen.
+
+    This table has no automatic refresh by design -- the file is
+    maintained by hand -- so a figure with no visible age is a figure
+    nobody can judge. Which file, how many SKUs, and when.
+    """
+    source_file: str | None = None
+    imported_at: datetime | None = None
+    skus: int = 0
+    units: int = 0
+    #: In the file but matching no Shopify variant, so invisible on the
+    #: page. Reported rather than dropped.
+    unmatched: int = 0
+
+
 class InventoryResponse(BaseModel):
     as_of: date | None
+    #: When the SHEET last recalculated. Shown beside `as_of` because
+    #: the two sides are snapshots of different moments and every gap
+    #: has to be read in that light.
+    sheet_as_of: datetime | None = None
     masters: list[InventoryNode]
     totals: InventoryNode
+    #: Colours present in one source only. NOT a stock discrepancy --
+    #: a SKU the other side has never heard of is a catalogue
+    #: difference, and ranking it as a gap would bury the real ones.
+    shopify_only: list[str] = []
+    sheet_only: list[str] = []
+    virtual: VirtualImport = VirtualImport()
 
 
 def _roll_up(sku: str, title: str | None, rows: list[dict]) -> dict:
@@ -14299,6 +14357,7 @@ def _roll_up(sku: str, title: str | None, rows: list[dict]) -> dict:
         "sizes": len(sizes), "sizes_in_stock": len(in_sizes),
         "size_in_stock_rate": (len(in_sizes) / len(sizes)) if sizes else None,
         "units": sum(r["units"] or 0 for r in rows),
+        "virtual_units": sum(r.get("virtual_units") or 0 for r in rows),
         "oversold": sum(1 for r in rows if r["oversold"]),
     }
 
@@ -14313,6 +14372,9 @@ async def get_inventory(session: SessionDep) -> InventoryResponse:
         empty = _roll_up("ALL", None, [])
         return InventoryResponse(as_of=None, masters=[], totals=InventoryNode(**empty))
 
+    sheet_rows = await session.execute(text(_SHEET_SQL))
+    sheet = {r["colour_sku"].upper(): dict(r) for r in sheet_rows.mappings()}
+
     by_master: dict[str, list[dict]] = {}
     for r in rows:
         by_master.setdefault(r["master_sku"], []).append(r)
@@ -14322,27 +14384,71 @@ async def get_inventory(session: SessionDep) -> InventoryResponse:
         by_colour: dict[str, list[dict]] = {}
         for r in mrows:
             by_colour.setdefault(r["colour_sku"], []).append(r)
-        colours = [
-            InventoryNode(
-                **_roll_up(csku, crows[0]["product_title"], crows),
+        colours = []
+        for csku, crows in by_colour.items():
+            node = _roll_up(csku, crows[0]["product_title"], crows)
+            sh = sheet.get(csku.upper())
+            if sh is not None:
+                node["sheet_units"] = sh["total_stock"]
+                node["sheet_rate"] = (float(sh["colour_instock_rate"])
+                                      if sh["colour_instock_rate"] is not None else None)
+                node["sheet_status"] = sh["colour_instock_status"]
+                if sh["total_stock"] is not None:
+                    node["gap"] = node["units"] - sh["total_stock"]
+            colours.append(InventoryNode(
+                **node,
                 items=[InventoryVariant(variant_sku=r["variant_sku"], size=r["size"],
                                         units=r["units"], in_stock=r["in_stock"],
-                                        oversold=r["oversold"]) for r in crows],
-            )
-            for csku, crows in by_colour.items()
-        ]
-        masters.append(InventoryNode(**_roll_up(msku, mrows[0]["product_title"], mrows),
-                                     colours=colours))
+                                        oversold=r["oversold"],
+                                        virtual_units=r["virtual_units"] or 0)
+                       for r in crows],
+            ))
+
+        mnode = _roll_up(msku, mrows[0]["product_title"], mrows)
+        # A master's sheet figure is the sum of the colours the sheet
+        # actually carries. Colours it has never heard of are left out
+        # rather than counted as zero -- a missing SKU is not empty
+        # stock, and treating it as such would invent a gap the size of
+        # the whole colour.
+        known = [c for c in colours if c.sheet_units is not None]
+        if known:
+            mnode["sheet_units"] = sum(c.sheet_units for c in known)
+            mnode["gap"] = sum(c.units for c in known) - mnode["sheet_units"]
+            rates = [c.sheet_rate for c in known if c.sheet_rate is not None]
+            mnode["sheet_rate"] = (sum(rates) / len(rates)) if rates else None
+        masters.append(InventoryNode(**mnode, colours=colours))
 
     # Worst first: an inventory page is opened to find what is broken.
     masters.sort(key=lambda m: (m.var_in_stock_rate if m.var_in_stock_rate is not None else 1))
 
     as_of = await session.execute(
         text("SELECT max(as_of_date) AS d FROM public.inventory_variant_current"))
+
+    shop_colours = {r["colour_sku"].upper() for r in rows}
+    totals = _totals_node(rows, masters)
+    matched = [c for m in masters for c in (m.colours or []) if c.sheet_units is not None]
+    if matched:
+        totals["sheet_units"] = sum(c.sheet_units for c in matched)
+        totals["gap"] = sum(c.units for c in matched) - totals["sheet_units"]
+
+    vmeta = await session.execute(text("""
+        SELECT max(source_file) AS source_file, max(imported_at) AS imported_at,
+               count(*)::int AS skus, COALESCE(sum(virtual_units),0)::int AS units,
+               count(*) FILTER (WHERE i.variant_sku IS NULL)::int AS unmatched
+          FROM public.virtual_inventory_current v
+          LEFT JOIN public.inventory_variant_current i
+                 ON upper(i.variant_sku) = v.variant_sku AND i.unparsed_reason IS NULL
+    """))
+    vrow = vmeta.mappings().first()
+
     return InventoryResponse(
         as_of=as_of.mappings().first()["d"],
+        virtual=VirtualImport(**dict(vrow)) if vrow else VirtualImport(),
+        sheet_as_of=next((v["sheet_as_of"] for v in sheet.values() if v["sheet_as_of"]), None),
         masters=masters,
-        totals=InventoryNode(**_totals_node(rows, masters)),
+        totals=InventoryNode(**totals),
+        shopify_only=sorted(shop_colours - set(sheet)),
+        sheet_only=sorted(set(sheet) - shop_colours),
     )
 
 

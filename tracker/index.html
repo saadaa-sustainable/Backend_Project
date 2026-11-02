@@ -197,6 +197,40 @@
   /* Out of stock is the thing being looked for, so it is the loud one. */
   .inv-chip.out  { opacity: .45; }
   .inv-chip.bad  { border-color: rgba(220,38,38,.6); color: var(--bad, #dc2626); }
+  /* Virtual stock: a distinct colour everywhere, because it must never
+     be mistaken for stock on a shelf. */
+  .virt, #inv-table td.virt { color: #7c6ff0; font-style: normal; }
+  /* SOURCE is a background band; VALUE stays the text colour. Two
+     meanings fighting over one channel is why this needed separating:
+     a red cell should mean "this number is bad", never "this came from
+     the sheet". */
+  #inv-table th.src-shop,  #inv-table td.src-shop  { background: rgba(56,139,253,.07); }
+  #inv-table th.src-sheet, #inv-table td.src-sheet { background: rgba(219,154,4,.09); }
+  #inv-table th.src-virt,  #inv-table td.src-virt  { background: rgba(124,111,240,.09); }
+  /* A rule down the left of each band, so the groups stay legible when
+     a row is hovered and the tints wash out. */
+  #inv-table th.band, #inv-table td.band { border-left: 1px solid var(--border); }
+  #inv-table th.src-shop  { color: #58a6ff; }
+  #inv-table th.src-sheet { color: #d9a441; }
+  #inv-table th.src-virt  { color: #a79bf5; }
+  .inv-key { display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+             font-size: 11px; color: var(--text-3); margin-top: 12px; }
+  .inv-key b { font-weight: 500; padding: 1px 7px; border-radius: 4px; }
+  .inv-key b.k-shop  { background: rgba(56,139,253,.14); color: #58a6ff; }
+  .inv-key b.k-virt  { background: rgba(124,111,240,.16); color: #a79bf5; }
+  .inv-key b.k-sheet { background: rgba(219,154,4,.16); color: #d9a441; }
+  .inv-virtual { margin-top: 14px; padding: 10px 12px; border-radius: 8px;
+                 border: 1px solid rgba(124,111,240,.35); background: rgba(124,111,240,.06);
+                 font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 10px 18px;
+                 align-items: center; }
+  .inv-virtual .vlab { color: var(--text-3); }
+  .inv-virtual code { font-size: 10.5px; background: rgba(127,127,127,.14);
+                      padding: 1px 6px; border-radius: 4px; }
+  .inv-virtual input[type=file] { font-size: 11px; max-width: 230px; }
+  .inv-diff { width: 100%; font-size: 11px; color: var(--text-2); }
+  .inv-diff b.up { color: var(--good,#16a34a); } .inv-diff b.dn { color: var(--bad,#dc2626); }
+  .k-shop-t  { color: #58a6ff; }
+  .k-sheet-t { color: #d9a441; }
   .pnl-l { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
            padding: 3px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
   .pnl-l.rule { border-top: 1px solid var(--border-soft); padding-top: 6px; }
@@ -283,6 +317,15 @@
       <span class="sub" id="inv-asof"></span>
     </div>
     <div class="heroes" id="inv-kpis"></div>
+    <div id="inv-virtual" class="inv-virtual"></div>
+    <div class="inv-key">
+      <span>Source:</span>
+      <b class="k-shop">Shopify</b>
+      <b class="k-virt">Virtual (promised, never added to Shopify)</b>
+      <b class="k-sheet">Production sheet</b>
+      <span>&mdash; background shows the source; red/amber/green shows whether the number is
+      healthy.</span>
+    </div>
     <div id="inv-tablewrap" style="margin-top:14px;overflow:auto">
       <table id="inv-table"><thead id="inv-thead"></thead><tbody id="inv-tbody"></tbody></table>
     </div>
@@ -296,7 +339,15 @@
       catches size-run gaps the variant rate hides, and a product can be 31% on one and 100% on the
       other. Store-wide, the size rate is the MEAN of the per-product rates: taken literally across
       every product it would read 100% whenever the store sells each size somewhere.
-      Daily snapshot, not live to the minute.
+      <br><strong>Sheet comparison</strong> &mdash; the &ldquo;OOS as per Production Plan&rdquo; tab of
+      the FY26-27 Production Sheet, at the same colour grain. Its in-stock % is shown
+      <em>as the sheet computes it</em>, never recomputed: a difference in the rate is itself a
+      finding. The two sides are snapshots of <em>different moments</em> &mdash; both stamps are in
+      the header &mdash; so a small gap is a day&rsquo;s trading, and only a gap over 5% of the
+      sheet&rsquo;s own figure is coloured. A dash means that SKU is absent from the sheet, which is
+      a catalogue difference and not a stock discrepancy.
+      <br><strong>Virtual gap</strong> is Shopify minus virtual, shown only where virtual stock
+      exists. Negative means more has been promised than Shopify can ship today.
     </p>
   </div>
 
@@ -1034,12 +1085,53 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
 let INV = null, INV_LOADING = false;
 const INV_OPEN = new Set();   // master or colour SKUs expanded by the reader
 
-function pctCell(v) {
-  if (v == null) return '<td class="num">\u2014</td>';
+/** Shopify units, the sheet's, and the difference.
+ *
+ *  A blank sheet figure means the sheet has never heard of this SKU.
+ *  That is a CATALOGUE difference, not a stock discrepancy, so it shows
+ *  as a dash and is never coloured -- ranking it as a gap would bury
+ *  the real ones under products the other side does not stock.
+ */
+function gapCells(n) {
+  // Virtual stock is promised, not held. Shown beside the real count
+  // and never added to it -- a page that sums them tells you that you
+  // have stock you cannot ship. Zero is a dash, so the column reads as
+  // "these few SKUs have virtual stock" rather than a wall of noughts.
+  const v = n.virtual_units || 0;
+  // Shopify minus virtual, and ONLY where virtual exists. Without that
+  // guard the column would repeat the Shopify count on every row that
+  // has no virtual stock, which is most of them -- noise that would
+  // bury the few rows where the promise actually matters.
+  //
+  // Negative means the promise is larger than the shelf: stock has been
+  // committed that Shopify cannot currently ship. That is the case
+  // worth seeing, so it is the one that colours.
+  const vgap = v ? n.units - v : null;
+  const shop = '<td class="num src-shop band">' + num(n.units) + "</td>" +
+               '<td class="num src-virt band' + (v ? " virt" : " sub") + '">' +
+               (v ? num(v) : "\u2014") + "</td>" +
+               '<td class="num src-virt ' + (vgap == null ? "sub" : vgap < 0 ? "bad" : "good") + '">' +
+               (vgap == null ? "\u2014" : (vgap > 0 ? "+" : "") + num(vgap)) + "</td>";
+  if (n.sheet_units == null) {
+    return shop + '<td class="num src-sheet band sub">\u2014</td>' +
+                  '<td class="num src-sheet sub">not in sheet</td>';
+  }
+  const g = n.gap;
+  // Five per cent of the sheet's own figure. Below that is a day's
+  // trading between two snapshots; above it is worth a look.
+  const big = Math.abs(g) / Math.max(1, n.sheet_units) > 0.05;
+  return shop + '<td class="num src-sheet band">' + num(n.sheet_units) + "</td>" +
+         '<td class="num src-sheet ' + (big ? "bad" : "good") + '">' +
+         (g > 0 ? "+" : "") + num(g) + "</td>";
+}
+
+function pctCell(v, src) {
+  const band = src || "";
+  if (v == null) return '<td class="num ' + band + '">\u2014</td>';
   // Red below half, amber to four fifths. A size run with a third of it
   // missing should not read the same as one that is nearly whole.
   const cls = v < 0.5 ? "bad" : v < 0.8 ? "warn" : "good";
-  return '<td class="num ' + cls + '">' + Math.round(v * 100) + "%</td>";
+  return '<td class="num ' + band + " " + cls + '">' + Math.round(v * 100) + "%</td>";
 }
 
 function loadInventory() {
@@ -1058,11 +1150,82 @@ function loadInventory() {
     });
 }
 
+function drawVirtualPanel() {
+  const v = (INV && INV.virtual) || {};
+  const when = v.imported_at ? String(v.imported_at).replace("T", " ").slice(0, 16) : null;
+  $("inv-virtual").innerHTML =
+    '<span class="vlab">Virtual inventory \u2014 ingested manually</span>' +
+    (v.skus
+      ? '<span><b class="virt">' + num(v.units) + "</b> units across " + num(v.skus) + " SKUs</span>" +
+        '<span class="vlab">from <code>' + esc(v.source_file || "?") + "</code></span>" +
+        '<span class="vlab">loaded ' + esc(when || "?") + "</span>" +
+        (v.unmatched ? '<span class="bad">' + num(v.unmatched) +
+                       " SKU(s) match no Shopify variant</span>" : "")
+      : '<span class="vlab">nothing ingested yet</span>') +
+    '<label class="vlab">Preview a file: <input type="file" id="inv-vfile" ' +
+      'accept=".csv,.xlsx"></label>' +
+    '<div class="inv-diff" id="inv-vdiff"></div>';
+}
+
+// Parsed in the BROWSER, never uploaded. The page is served publicly
+// and /admin/* carries no authentication, so an upload endpoint here
+// would let anyone overwrite inventory. Previewing locally gives the
+// numbers immediately and writes nothing; the CLI below persists them.
+$("inv-virtual").addEventListener("change", e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const out = $("inv-vdiff");
+  if (/\.xlsx$/i.test(f.name)) {
+    out.innerHTML = 'Reading <code>.xlsx</code> in the browser needs a spreadsheet library this ' +
+      'page deliberately does not load. Either save the sheet as CSV to preview it here, or ' +
+      'ingest it directly:<br><code>.venv/bin/python scripts/import_virtual_inventory.py ' +
+      '"' + esc(f.name) + '"</code>';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const lines = String(reader.result).split(/\r?\n/).filter(l => l.trim());
+    if (lines.length < 2) { out.textContent = "No data rows in that file."; return; }
+    const hdr = lines[0].split(",").map(h => h.trim().toLowerCase().replace(/^"|"$/g, ""));
+    const iSku = hdr.findIndex(h => /^(sku|variant[ _]sku)$/.test(h));
+    const iQty = hdr.findIndex(h => /virtual|qty|quantity/.test(h));
+    if (iSku < 0 || iQty < 0) {
+      out.innerHTML = "Could not find a SKU column and a quantity column. Header was: <code>" +
+        esc(lines[0].slice(0, 120)) + "</code>";
+      return;
+    }
+    let skus = 0, units = 0;
+    for (const line of lines.slice(1)) {
+      const c = line.split(",");
+      const q = parseFloat((c[iQty] || "").replace(/[",]/g, ""));
+      if (!c[iSku] || !isFinite(q)) continue;
+      skus++; units += q;
+    }
+    const cur = (INV && INV.virtual) || {};
+    const dU = units - (cur.units || 0), dS = skus - (cur.skus || 0);
+    const sign = n => (n > 0 ? "+" : "") + num(n);
+    out.innerHTML = "<strong>" + esc(f.name) + "</strong> \u2014 " + num(units) +
+      " units across " + num(skus) + " SKUs &nbsp;|&nbsp; against what is ingested: " +
+      '<b class="' + (dU < 0 ? "dn" : "up") + '">' + sign(dU) + " units</b>, " +
+      '<b class="' + (dS < 0 ? "dn" : "up") + '">' + sign(dS) + " SKUs</b>" +
+      "<br>Preview only \u2014 nothing was uploaded. To ingest it: <code>" +
+      ".venv/bin/python scripts/import_virtual_inventory.py \u0022" + esc(f.name) + "\u0022</code>";
+  };
+  reader.readAsText(f);
+});
+
 function drawInventory() {
   if (!INV || VIEW !== "inv") return;
   const t = INV.totals;
-  $("inv-asof").textContent = INV.as_of ? "as of " + INV.as_of : "";
+  drawVirtualPanel();
+  // Both moments, always. A daily Shopify snapshot against a sheet
+  // that recalculated minutes ago will always show churn, and the gap
+  // cannot be read without knowing which two instants it spans.
+  $("inv-asof").textContent =
+    (INV.as_of ? "Shopify " + INV.as_of : "") +
+    (INV.sheet_as_of ? "  \u00b7  sheet " + String(INV.sheet_as_of).replace("T", " ").slice(0, 16) : "");
 
+  const gap = t.gap, shopU = t.units, sheetU = t.sheet_units;
   $("inv-kpis").innerHTML = [
     ["Products", num(INV.masters.length)],
     ["Variants", num(t.variants)],
@@ -1070,13 +1233,29 @@ function drawInventory() {
     ["Var in-stock %", pc(t.var_in_stock_rate, 1)],
     ["Size in-stock %", pc(t.size_in_stock_rate, 1)],
     ["Full size run", num(t.sizes_in_stock) + " / " + num(t.sizes)],
+    ["Units \u00b7 Shopify", '<span class="k-shop-t">' + num(shopU) + "</span>"],
+    ["Units \u00b7 virtual", '<span class="virt">' + num(t.virtual_units || 0) + "</span>"],
+    ["Units \u00b7 sheet", '<span class="k-sheet-t">' +
+       (sheetU == null ? "\u2014" : num(sheetU)) + "</span>"],
+    ["Gap", gap == null ? "\u2014" :
+       '<span class="' + (Math.abs(gap) / Math.max(1, sheetU) > 0.05 ? "bad" : "good") + '">' +
+       (gap > 0 ? "+" : "") + num(gap) + "</span>"],
   ].map(([k, v]) => '<div><div class="h-label">' + esc(k) + '</div>' +
                     '<div class="h-value">' + v + "</div></div>").join("");
 
   $("inv-thead").innerHTML =
+    '<tr><th colspan="4"></th>' +
+    '<th class="src-shop band" colspan="3">Shopify</th>' +
+    '<th class="src-shop band">Shopify</th>' +
+    '<th class="src-virt band" colspan="2">Virtual</th>' +
+    '<th class="src-sheet band" colspan="3">Production sheet</th></tr>' +
     "<tr><th>SKU</th><th>Product</th><th>Colours</th><th>Variants</th>" +
-    "<th>In stock</th><th>Var in-stock %</th><th>Sizes</th><th>Size in-stock %</th>" +
-    "<th>Units</th></tr>";
+    '<th class="src-shop band">In stock</th><th class="src-shop">Var in-stock %</th>' +
+    '<th class="src-shop">Size in-stock %</th>' +
+    '<th class="src-shop band">Units</th>' +
+    '<th class="src-virt band">Units</th><th class="src-virt">Gap</th>' +
+    '<th class="src-sheet band">Units</th><th class="src-sheet">Gap</th>' +
+    '<th class="src-sheet">In-stock %</th></tr>';
 
   const out = [];
   for (const m of INV.masters) {
@@ -1086,11 +1265,11 @@ function drawInventory() {
       "<td>" + esc(m.title || "") + "</td>" +
       '<td class="num">' + num(m.colours.length) + "</td>" +
       '<td class="num">' + num(m.variants) + "</td>" +
-      '<td class="num">' + num(m.in_stock) + "</td>" +
-      pctCell(m.var_in_stock_rate) +
-      '<td class="num">' + num(m.sizes) + "</td>" +
-      pctCell(m.size_in_stock_rate) +
-      '<td class="num">' + num(m.units) + "</td></tr>");
+      '<td class="num src-shop band">' + num(m.in_stock) + "</td>" +
+      pctCell(m.var_in_stock_rate, "src-shop") +
+      pctCell(m.size_in_stock_rate, "src-shop") +
+      gapCells(m) +
+      pctCell(m.sheet_rate, "src-sheet") + "</tr>");
     if (!open) continue;
 
     for (const c of m.colours) {
@@ -1100,19 +1279,23 @@ function drawInventory() {
         '<td class="sub">' + esc(c.title || "") + "</td>" +
         '<td class="num"></td>' +
         '<td class="num">' + num(c.variants) + "</td>" +
-        '<td class="num">' + num(c.in_stock) + "</td>" +
-        pctCell(c.var_in_stock_rate) +
-        '<td class="num">' + num(c.sizes) + "</td>" +
-        pctCell(c.size_in_stock_rate) +
-        '<td class="num">' + num(c.units) + "</td></tr>");
+        '<td class="num src-shop band">' + num(c.in_stock) + "</td>" +
+        pctCell(c.var_in_stock_rate, "src-shop") +
+        pctCell(c.size_in_stock_rate, "src-shop") +
+        gapCells(c) +
+        pctCell(c.sheet_rate, "src-sheet") + "</tr>");
       if (!copen) continue;
 
       // The size run as chips, in size order, so a gap is visible as a
       // gap rather than something to work out from a percentage.
       const chips = c.items.map(i =>
         '<span class="inv-chip ' + (i.oversold ? "bad" : i.in_stock ? "good" : "out") + '">' +
-        esc(i.size || "\u2014") + " <b>" + num(i.units) + "</b></span>").join("");
-      out.push('<tr class="inv-v"><td></td><td colspan="8">' + chips + "</td></tr>");
+        esc(i.size || "\u2014") + " <b>" + num(i.units) + "</b>" +
+        // Virtual shown as "+N", visibly an addition that has NOT
+        // been made rather than part of the count.
+        (i.virtual_units ? ' <i class="virt">+' + num(i.virtual_units) + "</i>" : "") +
+        "</span>").join("");
+      out.push('<tr class="inv-v"><td></td><td colspan="13">' + chips + "</td></tr>");
     }
   }
   $("inv-tbody").innerHTML = out.join("");

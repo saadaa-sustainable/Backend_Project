@@ -31,14 +31,23 @@ garment ACTIVE and ARCHIVED. Counting both double-counts the stock, so
 exactly one row per SKU survives, the ACTIVE listing preferred. This is
 the same rule CPIS uses for Units in Stock, and the two must agree.
 
-Where SEVERAL listings are ACTIVE and disagree, the median wins, not
-the maximum. SDCPWH_XL is the case that proves it: three ACTIVE
-listings holding 128, 559 and 126 of the same physical garment.
-Max picks 559 -- the outlier -- and does it systematically, which
-inflates every rate it touches. Measured against the production
-sheet across ~4,000 size cells, max was the worst of the four
-strategies tried (28,138 total units of error against 20,033 for the
-median) and the median matched the most cells outright.
+Where SEVERAL listings are ACTIVE and disagree, the quantity is the
+MEDIAN OF THE NON-ZERO ones, falling back to zero only when every
+listing is zero. Two failure shapes exist and they want opposite
+rules:
+
+  SUPFHBE_M   Unisex 48, Men 0, Women 0
+              -- the zeros are storefront duplicates holding no
+              inventory. A plain median returns 0 and reports a
+              stocked hoodie as out of stock.
+
+  SDCPWH_XL   128, 559, 126, all ACTIVE and all real
+              -- the maximum is the outlier and inflates the rate.
+
+Ignoring zeros and then taking the median is right on both. Note that
+it was NOT chosen by fitting to the production sheet: that sheet is a
+separate source which legitimately differs, so tuning this rule to
+agree with it would be circular.
 
 WHICH PRODUCTS APPEAR
 ---------------------
@@ -129,9 +138,23 @@ dedup AS (
            min(product_status)                                   AS product_status,
            min(product_title)                                    AS product_title,
            min(product_variant_title)                            AS product_variant_title,
-           -- Median, not max: duplicate listings of one garment
-           -- disagree, and the maximum is reliably the outlier.
-           percentile_cont(0.5) WITHIN GROUP (ORDER BY units)    AS units,
+           -- Median of the NON-ZERO listings, falling back to zero
+           -- only when every listing is zero.
+           --
+           -- Two distinct failure shapes, and they want opposite
+           -- rules. SUPFHBE_M is Unisex 48, Men 0, Women 0 -- the
+           -- zeros are storefront duplicates carrying no inventory, so
+           -- a plain median returns 0 and reports a stocked hoodie as
+           -- out. SDCPWH_XL is 128, 559, 126, all real and all
+           -- disagreeing, where the maximum is the outlier.
+           --
+           -- Ignoring zeros and then taking the median is the only one
+           -- of the four strategies tried that is right on both: 48
+           -- for the first, 128 for the second.
+           COALESCE(
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY units)
+                   FILTER (WHERE units <> 0),
+               0)                                                AS units,
            min(as_of)                                            AS as_of,
            count(*)                                              AS listing_ct
       FROM ranked
