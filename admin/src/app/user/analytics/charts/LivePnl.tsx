@@ -86,7 +86,10 @@ export type Pnl = {
    *  the line below deducts. */
   sales: number;
   /** The whole P&L population, cancelled orders included. */
-  orders: number; units: number; coinOrders: number;
+  orders: number; units: number;
+  /** Orders containing a coin, and the number of COINS in them. They
+   *  differ: an order can ship more than one. */
+  coinOrders: number; coinQty: number;
   /** The same, with the cancelled ones taken out — what actually sold.
    *  MEASURED: the Further-cancellation allowance does not touch these,
    *  so ASP and AOV fall as it rises. */
@@ -121,7 +124,8 @@ export type Pnl = {
 
 function computePnl(r: {
   pnl_sales: number | null; pnl_orders: number | null; pnl_qty: number | null;
-  silver_coin_orders: number | null; spend: number | null;
+  silver_coin_orders: number | null; silver_coin_qty?: number | null;
+  spend: number | null;
   pnl_cancelled_orders?: number | null; pnl_cancelled_sales?: number | null;
   pnl_cancelled_qty?: number | null; pnl_refunds?: number | null;
   pnl_cancelled_refunded?: number | null; shopify_total_sales?: number | null;
@@ -133,6 +137,12 @@ function computePnl(r: {
   const orders = r.pnl_orders ?? 0;
   const units = r.pnl_qty ?? 0;
   const coinOrders = r.silver_coin_orders ?? 0;
+  // COINS, not coin orders. Costing per order undercharges an order
+  // that shipped two, and made this line disagree with the Coin
+  // Orders section. Falls back to the order count when the column is
+  // absent — one coin per order is the right assumption when the true
+  // count is unknown, and it is never an overcharge.
+  const coinQty = r.silver_coin_qty ?? coinOrders;
   const adSpend = r.spend ?? 0;
 
   // Cancellation used to be a flat 5% of sales. It is now counted from
@@ -185,7 +195,7 @@ function computePnl(r: {
   // Still on the whole population, deliberately: the gift ships with
   // the order and there is no per-order coin flag to net it down by.
   // Errs towards charging a cost rather than hiding one.
-  const coins = coinOrders * a.coinCost;
+  const coins = coinQty * a.coinCost;
   // On orders that SHIPPED. An exchange is a second dispatch and a
   // collection on an order that already counted its logistics once, so
   // this is additional cost, not a replacement. Revenue is untouched:
@@ -199,7 +209,7 @@ function computePnl(r: {
   const cm = totalSales - totalDeductions;
 
   return {
-    sales, orders, units, coinOrders, liveOrders, liveUnits,
+    sales, orders, units, coinOrders, coinQty, liveOrders, liveUnits,
     // On total sales, consistent with every figure below it -- a
     // cancelled order sold nothing.
     asp: liveUnits ? totalSales / liveUnits : null,
@@ -316,7 +326,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
       note: `${liveOrders.toLocaleString("en-IN")} dispatched` },
     { label: "PG fees", value: d.pgFees, was: c?.pgFees },
     { label: "Silver coin", value: d.coins, was: c?.coins,
-      note: `${totals.silver_coin_orders.toLocaleString("en-IN")} orders` },
+      note: `${d.coinQty.toLocaleString("en-IN")} coins in ${d.coinOrders.toLocaleString("en-IN")} orders` },
     { label: "Exchanges", value: d.exchangeCost, was: c?.exchangeCost,
       note: `${Math.round(d.exchanges).toLocaleString("en-IN")} at ${money(a.exchangeCost)} each` },
     { label: "COGS", value: d.cogs, was: c?.cogs },

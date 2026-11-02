@@ -1065,6 +1065,15 @@ function computePnl(r, a) {
                                                : (r.pnl_sales || 0));
   const orders = r.pnl_orders || 0;
   const units = r.pnl_qty || 0, coinOrders = r.silver_coin_orders || 0;
+  // COINS, not coin orders. An order can ship more than one, so
+  // costing per order undercharges -- and it made this line disagree
+  // with the Coin Orders section, which counts coins.
+  //
+  // Falls back to the order count for rows written before the column
+  // existed, or by a cron still on older code: one coin per order is
+  // the right assumption when the true count is unknown, and it is
+  // never an overcharge.
+  const coinQty = r.silver_coin_qty != null ? r.silver_coin_qty : coinOrders;
   const adSpend = r.spend || 0;
 
   // Cancellation used to be a flat 5% of sales. It is counted from the
@@ -1115,7 +1124,7 @@ function computePnl(r, a) {
   const pgFees = net * a.pgRate;
   // Still on the whole population, deliberately: the gift ships with
   // the order and there is no per-order coin flag to net it down by.
-  const coins = coinOrders * a.coinCost;
+  const coins = coinQty * a.coinCost;
   // Exchanges, on orders that SHIPPED. An exchange is a second
   // dispatch and a collection on an order that already counted its
   // logistics once, so this is an additional cost and not a
@@ -1127,7 +1136,7 @@ function computePnl(r, a) {
   const cogs = net * a.cogsRate;
   const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
-  return { sales, orders, units, coinOrders, adSpend, cancellation,
+  return { sales, orders, units, coinOrders, coinQty, adSpend, cancellation,
            cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
@@ -1584,7 +1593,8 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ["GST on ad spend", d.adGst, ""],
     ["Logistics", d.logistics, num(liveOrders) + " dispatched"],
     ["PG fees", d.pgFees, ""],
-    ["Silver coin", d.coins, num(d.coinOrders) + " orders"],
+    ["Silver coin", d.coins,
+     num(d.coinQty) + " coins in " + num(d.coinOrders) + " orders"],
     ["Exchanges", d.exchangeCost,
      num(Math.round(d.exchanges)) + " at " + inr(a.exchangeCost, 0) + " each"],
     ["COGS", d.cogs, ""],
