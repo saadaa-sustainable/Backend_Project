@@ -14475,3 +14475,50 @@ def _totals_node(rows: list[dict], masters: list[InventoryNode]) -> dict:
                                  and m.size_in_stock_rate >= 0.999)
     node["sizes"] = len(rates)
     return node
+
+
+# ----------------------------------------------------------------------
+class VirtualRow(BaseModel):
+    variant_sku: str
+    size: str | None
+    virtual_units: int
+    #: False when no Shopify variant carries this SKU, so the row is
+    #: stored but invisible on the inventory page. Shown here because
+    #: this view is the file as ingested, and a row silently missing
+    #: from the page should still be findable.
+    matched: bool
+
+
+class VirtualSheet(BaseModel):
+    source_file: str | None
+    imported_at: datetime | None
+    rows: list[VirtualRow]
+
+
+@router.get("/inventory/virtual", response_model=VirtualSheet)
+@cached_analytics(ttl=300.0)
+async def get_virtual_inventory(session: SessionDep) -> VirtualSheet:
+    """The ingested virtual-inventory file, as rows.
+
+    Separate from /inventory rather than folded into it: the tree
+    endpoint is already half a megabyte and almost nobody opening the
+    inventory page wants all 280 source rows with it.
+    """
+    result = await session.execute(text("""
+        SELECT v.variant_sku, v.size, v.virtual_units,
+               (i.variant_sku IS NOT NULL) AS matched,
+               v.source_file, v.imported_at
+          FROM public.virtual_inventory_current v
+          LEFT JOIN public.inventory_variant_current i
+                 ON upper(i.variant_sku) = v.variant_sku
+                AND i.unparsed_reason IS NULL
+         ORDER BY v.variant_sku
+    """))
+    rows = [dict(r) for r in result.mappings()]
+    return VirtualSheet(
+        source_file=rows[0]["source_file"] if rows else None,
+        imported_at=rows[0]["imported_at"] if rows else None,
+        rows=[VirtualRow(**{k: r[k] for k in
+                            ("variant_sku", "size", "virtual_units", "matched")})
+              for r in rows],
+    )

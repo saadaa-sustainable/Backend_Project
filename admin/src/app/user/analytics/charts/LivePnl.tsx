@@ -26,6 +26,11 @@ type Assumptions = {
    *  takes the measured figure down, for a day whose cancellations
    *  have already landed. */
   extraCancelRate: number;
+  /** Share of shipped orders that come back as an exchange. */
+  exchangeRate: number;
+  /** Rupees to service one exchange — a second dispatch and a
+   *  collection on an order that already paid its logistics once. */
+  exchangeCost: number;
   gstRate: number;      // GST charged on ad spend
   logistics: number;    // rupees per order
   pgRate: number;       // payment-gateway fee, share of total sales
@@ -35,6 +40,15 @@ type Assumptions = {
 
 const DEFAULTS: Assumptions = {
   extraCancelRate: 0.05,
+  // 1% is MEASURED, from three samples of the whole order history
+  // reading 1.26%, 0.93% and 0.99%. TABLESAMPLE draws PAGES, not rows,
+  // so it is cluster-biased and a single sample is not enough -- the
+  // first one alone would have set this 30% too high.
+  //
+  // Deliberately lifetime rather than recent: the Exchange tag lands
+  // days after the order, so a recent window understates it.
+  exchangeRate: 0.01,
+  exchangeCost: 200,
   // 18% is the Indian GST on advertising services. Not given in the
   // brief, so it is a default to correct rather than a claim.
   gstRate: 0.18,
@@ -48,6 +62,10 @@ const FIELDS: { key: keyof Assumptions; label: string; pct: boolean; hint: strin
                 signed?: boolean }[] = [
   { key: "extraCancelRate", label: "Further cancellation", pct: true, signed: true,
     hint: "On top of the cancellations already counted — an allowance for the ones still to come. Negative takes it back down." },
+  { key: "exchangeRate", label: "Exchange %", pct: true,
+    hint: "Share of shipped orders exchanged. Default 1%, measured across the whole order history — the exchange tag lands days after the order, so a recent window understates it." },
+  { key: "exchangeCost", label: "Cost / exchange", pct: false,
+    hint: "Rupees per exchange: a second dispatch plus a collection. Charged ON TOP of logistics, which the original order already paid." },
   { key: "cogsRate", label: "COGS", pct: true, hint: "Share of total sales." },
   { key: "gstRate", label: "GST on ad spend", pct: true,
     hint: "18% is the Indian GST on advertising services — a default, not a measured figure." },
@@ -87,11 +105,17 @@ export type Pnl = {
    *  which is the figure that gets quoted — and the one that does not
    *  move just because a big order happened to be among them. */
   cancelPct: number | null;
+  /** Orders shipping a gift coin, over ALL orders in the population —
+   *  the same denominator the coin cost uses. */
+  coinPct: number | null;
   /** Net sales less cancelled orders. Everything below is taken on
    *  this, because this is the money that can still arrive. */
   totalSales: number;
   adSpend: number; adGst: number; logistics: number;
-  pgFees: number; coins: number; cogs: number;
+  pgFees: number; coins: number;
+  /** Expected exchanges, and what they cost. */
+  exchanges: number; exchangeCost: number;
+  cogs: number;
   totalDeductions: number; cm: number; cmPct: number | null;
 };
 
@@ -162,8 +186,16 @@ function computePnl(r: {
   // the order and there is no per-order coin flag to net it down by.
   // Errs towards charging a cost rather than hiding one.
   const coins = coinOrders * a.coinCost;
+  // On orders that SHIPPED. An exchange is a second dispatch and a
+  // collection on an order that already counted its logistics once, so
+  // this is additional cost, not a replacement. Revenue is untouched:
+  // the customer swapped for equal value, which is why exchanges stay
+  // in revenue at all.
+  const exchanges = liveOrders * a.exchangeRate;
+  const exchangeCost = exchanges * a.exchangeCost;
   const cogs = totalSales * a.cogsRate;
-  const totalDeductions = adSpend + adGst + logistics + pgFees + coins + cogs;
+  const totalDeductions = adSpend + adGst + logistics + pgFees + coins
+                          + exchangeCost + cogs;
   const cm = totalSales - totalDeductions;
 
   return {
@@ -173,7 +205,9 @@ function computePnl(r: {
     asp: liveUnits ? totalSales / liveUnits : null,
     aov: liveOrders ? totalSales / liveOrders : null,
     cancellation, cancelledOrders, refunds, extraCancellation,
+    exchanges, exchangeCost,
     cancelPct: orders ? cancelledOrders / orders : null,
+    coinPct: orders ? coinOrders / orders : null,
     totalSales, adSpend, adGst, logistics, pgFees, coins, cogs,
     totalDeductions, cm, cmPct: totalSales ? cm / totalSales : null,
   };
@@ -283,6 +317,8 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
     { label: "PG fees", value: d.pgFees, was: c?.pgFees },
     { label: "Silver coin", value: d.coins, was: c?.coins,
       note: `${totals.silver_coin_orders.toLocaleString("en-IN")} orders` },
+    { label: "Exchanges", value: d.exchangeCost, was: c?.exchangeCost,
+      note: `${Math.round(d.exchanges).toLocaleString("en-IN")} at ${money(a.exchangeCost)} each` },
     { label: "COGS", value: d.cogs, was: c?.cogs },
   ];
 
@@ -314,7 +350,7 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
         </button>
       </div>
 
-      <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-7">
+      <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-4 sm:grid-cols-4 lg:grid-cols-8">
         <Kpi label="ASP" value={money(asp, 2)} was={c ? money(c.asp, 2) : undefined}
              now={asp} prev={c?.asp} day={compareDay}
              hint="Total sales ÷ units sold. The gift coin is not a unit sold, and cancelled orders are out of both sides. Units are measured, so a Further-cancellation allowance pulls this down." />
@@ -333,6 +369,10 @@ export function LivePnl({ totals, rows, compare, compareRows, compareDay, liveHo
              was={c ? pct(c.cancelPct) : undefined}
              now={cancelPct} prev={c?.cancelPct} day={compareDay} lowerIsBetter
              hint={`${cancelledOrders.toLocaleString("en-IN")} of ${orders.toLocaleString("en-IN")} orders cancelled, worth ${money(cancellation)}. Measured, not assumed.`} />
+        <Kpi label="Coin orders %" value={pct(d.coinPct)}
+             was={c ? pct(c.coinPct) : undefined}
+             now={d.coinPct} prev={c?.coinPct} day={compareDay}
+             hint={`${totals.silver_coin_orders.toLocaleString("en-IN")} of ${orders.toLocaleString("en-IN")} orders shipped a gift coin. A mix, not a score — the arrow shows the direction and the colour stays neutral.`} />
         <Kpi label="Contribution margin" value={money(cm)} was={c ? money(c.cm) : undefined}
              now={cm} prev={c?.cm} day={compareDay}
              hint="Realisable sales less every deduction below." />
