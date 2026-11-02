@@ -207,9 +207,12 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- Deducting the whole cancelled value instead would double-count
     -- the part Shopify had already taken out.
     pnl_cancelled_refunded  numeric,
-    -- Orders CONTAINING a coin, not coins sold -- the cost is per
-    -- order that shipped one.
+    -- Orders CONTAINING a coin, and the number of COINS in them.
+    -- They are not the same: an order can ship more than one, so
+    -- costing per order undercharges. silver_coin_qty is what the
+    -- cost should be taken on.
     silver_coin_orders      integer,
+    silver_coin_qty         integer,
     new_customers           integer,
     new_customer_revenue    numeric,
 
@@ -248,6 +251,7 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_qty integer",
@@ -266,7 +270,7 @@ COLUMNS = [
     "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
-    "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders",
+    "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders", "silver_coin_qty",
     "pnl_cancelled_orders", "pnl_cancelled_sales", "pnl_cancelled_qty",
     "pnl_refunds", "pnl_cancelled_refunded",
     "new_customers", "new_customer_revenue",
@@ -398,22 +402,29 @@ def is_pnl_excluded(tags: list[str] | None) -> bool:
     return bool(PNL_EXCLUDED_TAGS & {str(t).strip().lower() for t in (tags or [])})
 
 
-def count_units(line_items: dict | None) -> tuple[int, bool]:
-    """(units sold excluding the gift coin, did this order carry one).
+def count_units(line_items: dict | None) -> tuple[int, int]:
+    """(units sold excluding the gift coin, HOW MANY coins it carried).
 
     The coin is a gift line, not an item sold. Leaving it in the unit
     count deflates ASP, and on 2,490 coins over a fortnight that is not
     a rounding error.
+
+    The second value used to be a boolean. It is a COUNT because an
+    order can ship more than one coin -- measured on 2026-11-01,
+    2,465 orders carried 2,479 coins, fourteen of them two apiece and
+    one order three. Costing them per ORDER undercharges every such
+    order, and "how many coins have we given away" is unanswerable
+    from a flag.
     """
-    units, has_coin = 0, False
+    units, coins = 0, 0
     for edge in ((line_items or {}).get("edges") or []):
         node = edge.get("node") or {}
         qty = int(node.get("quantity") or 0)
         if (node.get("sku") or "").strip().upper() == SILVER_COIN_SKU:
-            has_coin = True
+            coins += qty
             continue
         units += qty
-    return units, has_coin
+    return units, coins
 
 
 def ist_hour(instant: datetime) -> datetime:
@@ -571,7 +582,7 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                                           orders_excluded=0, revenue_excluded=0.0,
                                           new_customers=0, new_customer_revenue=0.0,
                                           pnl_sales=0.0, pnl_orders=0, pnl_qty=0,
-                                          silver_coin_orders=0,
+                                          silver_coin_orders=0, silver_coin_qty=0,
                                           pnl_cancelled_orders=0,
                                           pnl_cancelled_sales=0.0,
                                           pnl_cancelled_qty=0, pnl_refunds=0.0,
@@ -581,12 +592,13 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
             # exclusions, because the two answer different questions
             # and share only the order feed.
             if not is_pnl_excluded(n.get("tags")):
-                units, has_coin = count_units(n.get("lineItems"))
+                units, coins = count_units(n.get("lineItems"))
                 b["pnl_sales"] += price
                 b["pnl_orders"] += 1
                 b["pnl_qty"] += units
-                if has_coin:
+                if coins:
                     b["silver_coin_orders"] += 1
+                    b["silver_coin_qty"] += coins
                 refunded = float((n.get("totalRefundedSet") or {})
                                  .get("shopMoney", {}).get("amount") or 0)
                 if n.get("cancelledAt"):
