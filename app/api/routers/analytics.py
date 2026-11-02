@@ -13782,7 +13782,7 @@ SELECT hour, day_ist, hour_of_day,
        sessions_by_source,
        revenue, orders, orders_paid, orders_direct,
        orders_excluded, revenue_excluded,
-       pnl_sales, pnl_orders, pnl_qty, silver_coin_orders,
+       pnl_sales, pnl_orders, pnl_qty, silver_coin_orders, silver_coin_qty,
        pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
        pnl_refunds, pnl_cancelled_refunded,
        revenue_shopifyql, shopify_total_sales, shopify_returns,
@@ -13834,6 +13834,9 @@ class HourlyRow(BaseModel):
     #: Units sold with the gift coin taken out -- it is not an item sold.
     pnl_qty: int | None = None
     silver_coin_orders: int | None = None
+    #: COINS, not orders. An order can ship more than one, so the cost
+    #: is taken on this and not on the order count.
+    silver_coin_qty: int | None = None
     #: Cancellations inside the P&L population -- a SUBSET of
     #: pnl_sales/pnl_orders, measured, not a rate. Dated by the order's
     #: own hour rather than the hour it was cancelled in, so the hours
@@ -14005,6 +14008,7 @@ class HourlyTotals(BaseModel):
     pnl_orders: int
     pnl_qty: int
     silver_coin_orders: int
+    silver_coin_qty: int
     pnl_cancelled_orders: int
     pnl_cancelled_sales: float
     pnl_cancelled_qty: int
@@ -14104,6 +14108,7 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
         pnl_sales=s("pnl_sales"), pnl_orders=s("pnl_orders"),
         pnl_qty=s("pnl_qty"), silver_coin_orders=s("silver_coin_orders"),
+        silver_coin_qty=s("silver_coin_qty"),
         pnl_cancelled_orders=s("pnl_cancelled_orders"),
         pnl_cancelled_sales=s("pnl_cancelled_sales"),
         pnl_cancelled_qty=s("pnl_cancelled_qty"),
@@ -14521,4 +14526,84 @@ async def get_virtual_inventory(session: SessionDep) -> VirtualSheet:
         rows=[VirtualRow(**{k: r[k] for k in
                             ("variant_sku", "size", "virtual_units", "matched")})
               for r in rows],
+    )
+
+
+
+# ----------------------------------------------------------------------
+class CoinDay(BaseModel):
+    day: date
+    orders: int
+    coin_orders: int
+    coins: int
+    attach_rate: float | None
+    cost: float
+
+
+class CoinsResponse(BaseModel):
+    """The gift-coin promotion, every day it has run.
+
+    Separate from the P&L because the question is cumulative -- how
+    many have gone out and what have they cost -- while the P&L asks
+    what one day earned.
+    """
+    #: Rupees per COIN. Mirrors the P&L's editable rate; the page can
+    #: override it, and the API states what it used.
+    coin_cost: float
+    first_day: date | None
+    last_day: date | None
+    days: list[CoinDay]
+    total_orders: int
+    total_coin_orders: int
+    total_coins: int
+    total_cost: float
+    #: Coin orders over all orders, across the whole run.
+    attach_rate: float | None
+
+
+_COINS_SQL = """
+SELECT day_ist AS day,
+       COALESCE(sum(pnl_orders), 0)::int         AS orders,
+       COALESCE(sum(silver_coin_orders), 0)::int AS coin_orders,
+       COALESCE(sum(silver_coin_qty), 0)::int    AS coins
+  FROM public.hourly_campaign_tracker
+ GROUP BY day_ist
+HAVING COALESCE(sum(silver_coin_orders), 0) > 0
+ ORDER BY day_ist
+"""
+
+
+@router.get("/coins", response_model=CoinsResponse)
+@cached_analytics(ttl=120.0)
+async def get_coins(
+    session: SessionDep,
+    coin_cost: float = Query(default=500.0, ge=0, le=100000,
+                             description="Rupees per coin. Default 500."),
+) -> CoinsResponse:
+    """Silver coin orders and their cost, for every day the promotion ran."""
+    result = await session.execute(text(_COINS_SQL))
+    rows = [dict(r) for r in result.mappings()]
+
+    days = [
+        CoinDay(day=r["day"], orders=r["orders"], coin_orders=r["coin_orders"],
+                coins=r["coins"],
+                # Attach is on ORDERS -- the share of baskets carrying a
+                # coin. Cost is on COINS, because an order can ship more
+                # than one. Mixing the two would make the cost disagree
+                # with the rate beside it.
+                attach_rate=(r["coin_orders"] / r["orders"]) if r["orders"] else None,
+                cost=r["coins"] * coin_cost)
+        for r in rows
+    ]
+    t_orders = sum(d.orders for d in days)
+    t_coin_orders = sum(d.coin_orders for d in days)
+    t_coins = sum(d.coins for d in days)
+    return CoinsResponse(
+        coin_cost=coin_cost,
+        first_day=days[0].day if days else None,
+        last_day=days[-1].day if days else None,
+        days=days,
+        total_orders=t_orders, total_coin_orders=t_coin_orders, total_coins=t_coins,
+        total_cost=t_coins * coin_cost,
+        attach_rate=(t_coin_orders / t_orders) if t_orders else None,
     )

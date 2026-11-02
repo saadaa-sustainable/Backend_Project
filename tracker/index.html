@@ -177,6 +177,17 @@
      the spacer fell. A bridge reads top to bottom. */
   .pnl-bridge { display: grid; margin-top: 14px; max-width: 560px; }
   /* Inventory */
+  #coin-table { width: 100%; border-collapse: collapse; font-size: 12px;
+                font-variant-numeric: tabular-nums; }
+  #coin-table th { text-align: right; font-weight: 500; color: var(--text-3); font-size: 10.5px;
+                   text-transform: uppercase; letter-spacing: .04em; padding: 6px 10px;
+                   border-bottom: 1px solid var(--border); white-space: nowrap; }
+  #coin-table th:first-child { text-align: left; }
+  #coin-table td { padding: 5px 10px; border-bottom: 1px solid var(--border-soft);
+                   text-align: right; }
+  #coin-table td:first-child { text-align: left; }
+  #coin-table tr.tot td { font-weight: 650; border-top: 1px solid var(--border);
+                          border-bottom: none; }
   #inv-table { width: 100%; border-collapse: collapse; font-size: 12px;
                font-variant-numeric: tabular-nums; }
   #inv-table th { text-align: right; font-weight: 500; color: var(--text-3);
@@ -330,6 +341,7 @@
       <button id="view-tracker" role="tab" aria-selected="true">Hourly Tracker</button>
       <button id="view-pnl" role="tab" aria-selected="false">Live P&amp;L</button>
       <button id="view-inv" role="tab" aria-selected="false">Inventory</button>
+      <button id="view-coin" role="tab" aria-selected="false">Coin Orders</button>
     </div>
     <label class="f">Day <input type="date" id="day"></label>
     <label class="f">Compare to <input type="date" id="cmp"></label>
@@ -349,6 +361,30 @@
       <span class="sub" id="ttl-vs"></span>
     </div>
     <div class="heroes" id="heroes"></div>
+  </div>
+
+  <div class="card" id="coincard" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">Coin Orders &middot; Saadaa Silver Coin</strong>
+      <span class="sub" id="coin-span"></span>
+    </div>
+    <div class="heroes" id="coin-kpis"></div>
+    <div class="inv-key">
+      <label class="vlab">Cost per coin &nbsp;<input type="number" id="coin-cost" min="0" step="10"
+        value="500" style="width:80px"> &#8377;</label>
+      <span>&mdash; the whole promotion since it started, not one day.</span>
+    </div>
+    <div style="margin-top:12px;overflow:auto">
+      <table id="coin-table"><thead id="coin-thead"></thead><tbody id="coin-tbody"></tbody></table>
+    </div>
+    <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
+      <strong>Coins</strong> and <strong>coin orders</strong> are different numbers: an order can
+      ship more than one, so cost is taken on COINS while the attach rate is taken on ORDERS.
+      Matched by SKU <code>SDSILVER</code>, not by title &mdash; the title carries an emoji that has
+      moved three times. Orders tagged <code>inf</code> or <code>Return_Prime</code> are excluded,
+      on the same basis as the P&amp;L. A coin is counted on the order that shipped it, even if that
+      order later cancelled: the coin still went out.
+    </p>
   </div>
 
   <div class="card" id="invcard" hidden>
@@ -999,21 +1035,25 @@ function applyView() {
   $("view-tracker").setAttribute("aria-selected", String(VIEW === "tracker"));
   $("view-pnl").setAttribute("aria-selected", String(VIEW === "pnl"));
   $("view-inv").setAttribute("aria-selected", String(VIEW === "inv"));
+  $("view-coin").setAttribute("aria-selected", String(VIEW === "coin"));
   // Hiding only. Showing is the drawing code's job, so a card with
   // nothing to show stays hidden rather than flashing empty -- and
   // render() below re-applies the gate anyway.
   if (VIEW !== "tracker") TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
   if (VIEW !== "pnl") $("pnlcard").hidden = true;
   if (VIEW !== "inv") $("invcard").hidden = true;
+  if (VIEW !== "coin") $("coincard").hidden = true;
   // Inventory does not move hour to hour and is a separate request, so
   // it is fetched once and then redrawn from memory.
   if (VIEW === "inv") { loadInventory(); return; }
+  if (VIEW === "coin") { loadCoins(); return; }
   if (LAST) render(LAST.d, LAST.day);
 }
 
 $("view-tracker").onclick = () => { if (VIEW !== "tracker") { VIEW = "tracker"; applyView(); } };
 $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView(); } };
 $("view-inv").onclick = () => { if (VIEW !== "inv") { VIEW = "inv"; applyView(); } };
+$("view-coin").onclick = () => { if (VIEW !== "coin") { VIEW = "coin"; applyView(); } };
 
 // The day row and every hour row both come through here, so the summary
 // cannot drift from the breakdown beneath it.
@@ -1156,6 +1196,69 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
         "</div></td></tr>";
     }).join("") + "</tbody></table>";
 }
+
+// --- coin orders -----------------------------------------------------
+// The whole promotion, not one day: "how many have gone out and what
+// have they cost" is cumulative, which is why this is its own section
+// and not another P&L line.
+let COINS = null, COINS_LOADING = false;
+
+function loadCoins() {
+  $("coincard").hidden = false;
+  if (COINS) { drawCoins(); return; }
+  if (COINS_LOADING) return;
+  COINS_LOADING = true;
+  $("coin-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
+  const cost = Number($("coin-cost").value) || 500;
+  fetch(apiBase() + "/admin/analytics/coins?coin_cost=" + encodeURIComponent(cost))
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(d => { COINS = d; COINS_LOADING = false; drawCoins(); })
+    .catch(e => {
+      COINS_LOADING = false;
+      $("coin-kpis").innerHTML = '<div class="sub">Could not load: ' +
+        esc(String(e.message || e)) + "</div>";
+    });
+}
+
+function drawCoins() {
+  if (!COINS || VIEW !== "coin") return;
+  const d = COINS;
+  $("coin-span").textContent = d.first_day
+    ? d.first_day + " \u2192 " + d.last_day + "  \u00b7  " + d.days.length + " days"
+    : "no coin orders yet";
+
+  $("coin-kpis").innerHTML = [
+    ["Coins sold", num(d.total_coins)],
+    ["Coin orders", num(d.total_coin_orders)],
+    ["Cost @ " + inr(d.coin_cost, 0), '<span class="bad">' + inr(d.total_cost, 0) + "</span>"],
+    ["Attach rate", pc(d.attach_rate, 1)],
+    ["Orders in period", num(d.total_orders)],
+    // Coins minus coin orders: the orders that took more than one.
+    ["Multi-coin orders", num(d.total_coins - d.total_coin_orders)],
+  ].map(([k, v]) => '<div><div class="h-label">' + esc(k) + '</div>' +
+                    '<div class="h-value">' + v + "</div></div>").join("");
+
+  $("coin-thead").innerHTML =
+    "<tr><th>Day</th><th>Orders</th><th>Coin orders</th><th>Attach %</th>" +
+    "<th>Coins</th><th>Cost</th></tr>";
+  // Newest first: the question is usually about today or yesterday.
+  const rows = d.days.slice().reverse();
+  $("coin-tbody").innerHTML =
+    rows.map(r =>
+      "<tr><td>" + esc(r.day) + "</td>" +
+      "<td>" + num(r.orders) + "</td>" +
+      "<td>" + num(r.coin_orders) + "</td>" +
+      "<td>" + pc(r.attach_rate, 1) + "</td>" +
+      "<td>" + num(r.coins) + "</td>" +
+      "<td>" + inr(r.cost, 0) + "</td></tr>").join("") +
+    '<tr class="tot"><td>Total</td><td>' + num(d.total_orders) + "</td><td>" +
+      num(d.total_coin_orders) + "</td><td>" + pc(d.attach_rate, 1) + "</td><td>" +
+      num(d.total_coins) + "</td><td>" + inr(d.total_cost, 0) + "</td></tr>";
+}
+
+// Re-fetch on a new cost rather than scaling client-side, so the figure
+// shown is always the one the API computed.
+$("coin-cost").addEventListener("change", () => { COINS = null; loadCoins(); });
 
 // --- inventory -------------------------------------------------------
 // Fetched once per page load rather than on the tracker's hourly
