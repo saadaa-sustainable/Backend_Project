@@ -14228,3 +14228,144 @@ async def get_hourly_tracker(
         first_day=span_row.get("first_day"),
         last_day=span_row.get("last_day"),
     )
+
+
+# ----------------------------------------------------------------------
+# Inventory tracker: master SKU -> colour SKU -> variant SKU
+#
+# Built from Shopify alone. The codes are parsed out of the variant SKU
+# by scripts/refresh_inventory_tracker.py, which also applies the
+# one-quantity-per-SKU rule (ACTIVE listing preferred) that CPIS uses --
+# the two must agree or the same garment reads differently in two places.
+_INVENTORY_SQL = """
+SELECT master_sku, colour_sku, variant_sku, size, size_rank,
+       units, in_stock, oversold, product_title, variant_title
+  FROM public.inventory_variant_current
+ WHERE unparsed_reason IS NULL
+ ORDER BY master_sku, colour_sku, size_rank NULLS LAST, variant_sku
+"""
+
+
+class InventoryVariant(BaseModel):
+    variant_sku: str
+    size: str | None
+    units: int | None
+    in_stock: bool
+    oversold: bool
+
+
+class InventoryNode(BaseModel):
+    """A master or a colour. Both carry the same three measures, so a
+    colour can be judged by the same yardstick as the product above it."""
+    sku: str
+    title: str | None = None
+    variants: int
+    #: Variant SKUs with units > 0. A COUNT, as CPIS reports it.
+    in_stock: int
+    #: in_stock / variants.
+    var_in_stock_rate: float | None
+    sizes: int
+    sizes_in_stock: int
+    #: Distinct sizes available in ANY colour / distinct sizes. Catches
+    #: size-run gaps the variant rate hides: a product can be 31% on
+    #: variants and still offer every size somewhere.
+    size_in_stock_rate: float | None
+    units: int
+    oversold: int
+    colours: list["InventoryNode"] | None = None
+    items: list[InventoryVariant] | None = None
+
+
+class InventoryResponse(BaseModel):
+    as_of: date | None
+    masters: list[InventoryNode]
+    totals: InventoryNode
+
+
+def _roll_up(sku: str, title: str | None, rows: list[dict]) -> dict:
+    """The three measures for one group of variant rows.
+
+    Sizes are counted DISTINCT across the group, so at master level a
+    size counts as available when any colour has it -- which is the
+    definition, and why this cannot be summed from the colour rows
+    beneath it.
+    """
+    sizes = {r["size"] for r in rows if r["size"]}
+    in_sizes = {r["size"] for r in rows if r["size"] and r["in_stock"]}
+    n_in = sum(1 for r in rows if r["in_stock"])
+    return {
+        "sku": sku, "title": title, "variants": len(rows), "in_stock": n_in,
+        "var_in_stock_rate": (n_in / len(rows)) if rows else None,
+        "sizes": len(sizes), "sizes_in_stock": len(in_sizes),
+        "size_in_stock_rate": (len(in_sizes) / len(sizes)) if sizes else None,
+        "units": sum(r["units"] or 0 for r in rows),
+        "oversold": sum(1 for r in rows if r["oversold"]),
+    }
+
+
+@router.get("/inventory", response_model=InventoryResponse)
+@cached_analytics(ttl=300.0)
+async def get_inventory(session: SessionDep) -> InventoryResponse:
+    """Live inventory, master SKU to colour SKU to variant SKU."""
+    result = await session.execute(text(_INVENTORY_SQL))
+    rows = [dict(r) for r in result.mappings()]
+    if not rows:
+        empty = _roll_up("ALL", None, [])
+        return InventoryResponse(as_of=None, masters=[], totals=InventoryNode(**empty))
+
+    by_master: dict[str, list[dict]] = {}
+    for r in rows:
+        by_master.setdefault(r["master_sku"], []).append(r)
+
+    masters: list[InventoryNode] = []
+    for msku, mrows in by_master.items():
+        by_colour: dict[str, list[dict]] = {}
+        for r in mrows:
+            by_colour.setdefault(r["colour_sku"], []).append(r)
+        colours = [
+            InventoryNode(
+                **_roll_up(csku, crows[0]["product_title"], crows),
+                items=[InventoryVariant(variant_sku=r["variant_sku"], size=r["size"],
+                                        units=r["units"], in_stock=r["in_stock"],
+                                        oversold=r["oversold"]) for r in crows],
+            )
+            for csku, crows in by_colour.items()
+        ]
+        masters.append(InventoryNode(**_roll_up(msku, mrows[0]["product_title"], mrows),
+                                     colours=colours))
+
+    # Worst first: an inventory page is opened to find what is broken.
+    masters.sort(key=lambda m: (m.var_in_stock_rate if m.var_in_stock_rate is not None else 1))
+
+    as_of = await session.execute(
+        text("SELECT max(as_of_date) AS d FROM public.inventory_variant_current"))
+    return InventoryResponse(
+        as_of=as_of.mappings().first()["d"],
+        masters=masters,
+        totals=InventoryNode(**_totals_node(rows, masters)),
+    )
+
+
+def _totals_node(rows: list[dict], masters: list[InventoryNode]) -> dict:
+    """The store-wide row.
+
+    Everything rolls up by summing EXCEPT the size rate, which cannot.
+    Taken across all 80 products, "distinct sizes available in any
+    colour" is every size the store sells, so it reads 100% on a day
+    when half the range has holes in it -- true by the definition and
+    worthless as a headline.
+
+    So the store-wide size rate is the MEAN of the per-product rates,
+    which is the question anyone asking it means: how complete is a
+    typical product's size run. Each product counts once, a six-variant
+    product the same as a seventy-variant one, because the rate being
+    averaged is already a proportion.
+    """
+    node = _roll_up("ALL", None, rows)
+    rates = [m.size_in_stock_rate for m in masters if m.size_in_stock_rate is not None]
+    node["size_in_stock_rate"] = (sum(rates) / len(rates)) if rates else None
+    node["sizes_in_stock"] = sum(1 for m in masters
+                                 if m.size_in_stock_rate is not None
+                                 and m.size_in_stock_rate >= 0.999)
+    node["sizes"] = len(rates)
+    return node

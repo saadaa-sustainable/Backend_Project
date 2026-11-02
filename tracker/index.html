@@ -176,6 +176,27 @@
      through two columns put Total sales mid-row and left a hole where
      the spacer fell. A bridge reads top to bottom. */
   .pnl-bridge { display: grid; margin-top: 14px; max-width: 560px; }
+  /* Inventory */
+  #inv-table { width: 100%; border-collapse: collapse; font-size: 12px;
+               font-variant-numeric: tabular-nums; }
+  #inv-table th { text-align: right; font-weight: 500; color: var(--text-3);
+                  font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+                  padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  #inv-table th:first-child, #inv-table th:nth-child(2) { text-align: left; }
+  #inv-table td { padding: 5px 10px; border-bottom: 1px solid var(--border-soft); }
+  #inv-table td.num { text-align: right; }
+  #inv-table tr.inv-m, #inv-table tr.inv-c { cursor: pointer; }
+  #inv-table tr.inv-m:hover td, #inv-table tr.inv-c:hover td { background: var(--hover, rgba(127,127,127,.08)); }
+  #inv-table tr.inv-c td { color: var(--text-2); }
+  #inv-table td.good { color: var(--good, #16a34a); }
+  #inv-table td.warn { color: #b45309; }
+  #inv-table td.bad  { color: var(--bad, #dc2626); }
+  .inv-chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 7px; border-radius: 10px;
+              font-size: 10.5px; border: 1px solid var(--border); }
+  .inv-chip.good { border-color: rgba(22,163,74,.45); }
+  /* Out of stock is the thing being looked for, so it is the loud one. */
+  .inv-chip.out  { opacity: .45; }
+  .inv-chip.bad  { border-color: rgba(220,38,38,.6); color: var(--bad, #dc2626); }
   .pnl-l { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
            padding: 3px 0; font-size: 12px; font-variant-numeric: tabular-nums; }
   .pnl-l.rule { border-top: 1px solid var(--border-soft); padding-top: 6px; }
@@ -234,6 +255,7 @@
     <div class="views" role="tablist">
       <button id="view-tracker" role="tab" aria-selected="true">Hourly Tracker</button>
       <button id="view-pnl" role="tab" aria-selected="false">Live P&amp;L</button>
+      <button id="view-inv" role="tab" aria-selected="false">Inventory</button>
     </div>
     <label class="f">Day <input type="date" id="day"></label>
     <label class="f">Compare to <input type="date" id="cmp"></label>
@@ -253,6 +275,29 @@
       <span class="sub" id="ttl-vs"></span>
     </div>
     <div class="heroes" id="heroes"></div>
+  </div>
+
+  <div class="card" id="invcard" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">Inventory &middot; master &rarr; colour &rarr; variant</strong>
+      <span class="sub" id="inv-asof"></span>
+    </div>
+    <div class="heroes" id="inv-kpis"></div>
+    <div id="inv-tablewrap" style="margin-top:14px;overflow:auto">
+      <table id="inv-table"><thead id="inv-thead"></thead><tbody id="inv-tbody"></tbody></table>
+    </div>
+    <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
+      Shopify only &mdash; every code is parsed out of the variant SKU
+      (<code>SMCCPBE_2XL</code> &rarr; master <code>SMCCP</code>, colour <code>BE</code>, size
+      <code>2XL</code>). One quantity per SKU, ACTIVE listing preferred, the same rule CPIS uses.
+      <strong>In stock</strong> is <code>inventoryQuantity &gt; 0</code>, so oversold counts as out.
+      <strong>Var in-stock %</strong> is variants holding stock over all variants.
+      <strong>Size in-stock %</strong> is distinct sizes available in <em>any</em> colour &mdash; it
+      catches size-run gaps the variant rate hides, and a product can be 31% on one and 100% on the
+      other. Store-wide, the size rate is the MEAN of the per-product rates: taken literally across
+      every product it would read 100% whenever the store sells each size somewhere.
+      Daily snapshot, not live to the minute.
+    </p>
   </div>
 
   <div class="card" id="pnlcard" hidden>
@@ -833,19 +878,24 @@ let VIEW = "tracker";
 const TRACKER_CARDS = ["totals", "chartcard", "donutcard", "cmpcard", "tablewrap"];
 
 function applyView() {
-  const pnl = VIEW === "pnl";
-  $("view-tracker").setAttribute("aria-selected", String(!pnl));
-  $("view-pnl").setAttribute("aria-selected", String(pnl));
+  $("view-tracker").setAttribute("aria-selected", String(VIEW === "tracker"));
+  $("view-pnl").setAttribute("aria-selected", String(VIEW === "pnl"));
+  $("view-inv").setAttribute("aria-selected", String(VIEW === "inv"));
   // Hiding only. Showing is the drawing code's job, so a card with
   // nothing to show stays hidden rather than flashing empty -- and
   // render() below re-applies the gate anyway.
-  if (pnl) TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
-  else $("pnlcard").hidden = true;
+  if (VIEW !== "tracker") TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
+  if (VIEW !== "pnl") $("pnlcard").hidden = true;
+  if (VIEW !== "inv") $("invcard").hidden = true;
+  // Inventory does not move hour to hour and is a separate request, so
+  // it is fetched once and then redrawn from memory.
+  if (VIEW === "inv") { loadInventory(); return; }
   if (LAST) render(LAST.d, LAST.day);
 }
 
 $("view-tracker").onclick = () => { if (VIEW !== "tracker") { VIEW = "tracker"; applyView(); } };
 $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView(); } };
+$("view-inv").onclick = () => { if (VIEW !== "inv") { VIEW = "inv"; applyView(); } };
 
 // The day row and every hour row both come through here, so the summary
 // cannot drift from the breakdown beneath it.
@@ -976,6 +1026,106 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
         "</div></td></tr>";
     }).join("") + "</tbody></table>";
 }
+
+// --- inventory -------------------------------------------------------
+// Fetched once per page load rather than on the tracker's hourly
+// refresh: it is a DAILY snapshot, so re-requesting half a megabyte
+// every hour would buy nothing.
+let INV = null, INV_LOADING = false;
+const INV_OPEN = new Set();   // master or colour SKUs expanded by the reader
+
+function pctCell(v) {
+  if (v == null) return '<td class="num">\u2014</td>';
+  // Red below half, amber to four fifths. A size run with a third of it
+  // missing should not read the same as one that is nearly whole.
+  const cls = v < 0.5 ? "bad" : v < 0.8 ? "warn" : "good";
+  return '<td class="num ' + cls + '">' + Math.round(v * 100) + "%</td>";
+}
+
+function loadInventory() {
+  $("invcard").hidden = false;
+  if (INV) { drawInventory(); return; }
+  if (INV_LOADING) return;
+  INV_LOADING = true;
+  $("inv-kpis").innerHTML = '<div class="sub">Loading inventory\u2026</div>';
+  fetch(apiBase() + "/admin/analytics/inventory")
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(d => { INV = d; INV_LOADING = false; drawInventory(); })
+    .catch(e => {
+      INV_LOADING = false;
+      $("inv-kpis").innerHTML = '<div class="sub">Could not load inventory: ' +
+        esc(String(e.message || e)) + "</div>";
+    });
+}
+
+function drawInventory() {
+  if (!INV || VIEW !== "inv") return;
+  const t = INV.totals;
+  $("inv-asof").textContent = INV.as_of ? "as of " + INV.as_of : "";
+
+  $("inv-kpis").innerHTML = [
+    ["Products", num(INV.masters.length)],
+    ["Variants", num(t.variants)],
+    ["In stock", num(t.in_stock)],
+    ["Var in-stock %", pc(t.var_in_stock_rate, 1)],
+    ["Size in-stock %", pc(t.size_in_stock_rate, 1)],
+    ["Full size run", num(t.sizes_in_stock) + " / " + num(t.sizes)],
+  ].map(([k, v]) => '<div><div class="h-label">' + esc(k) + '</div>' +
+                    '<div class="h-value">' + v + "</div></div>").join("");
+
+  $("inv-thead").innerHTML =
+    "<tr><th>SKU</th><th>Product</th><th>Colours</th><th>Variants</th>" +
+    "<th>In stock</th><th>Var in-stock %</th><th>Sizes</th><th>Size in-stock %</th>" +
+    "<th>Units</th></tr>";
+
+  const out = [];
+  for (const m of INV.masters) {
+    const open = INV_OPEN.has(m.sku);
+    out.push('<tr class="inv-m" data-sku="' + esc(m.sku) + '">' +
+      "<td><strong>" + (open ? "\u25be " : "\u25b8 ") + esc(m.sku) + "</strong></td>" +
+      "<td>" + esc(m.title || "") + "</td>" +
+      '<td class="num">' + num(m.colours.length) + "</td>" +
+      '<td class="num">' + num(m.variants) + "</td>" +
+      '<td class="num">' + num(m.in_stock) + "</td>" +
+      pctCell(m.var_in_stock_rate) +
+      '<td class="num">' + num(m.sizes) + "</td>" +
+      pctCell(m.size_in_stock_rate) +
+      '<td class="num">' + num(m.units) + "</td></tr>");
+    if (!open) continue;
+
+    for (const c of m.colours) {
+      const copen = INV_OPEN.has(c.sku);
+      out.push('<tr class="inv-c" data-sku="' + esc(c.sku) + '">' +
+        '<td style="padding-left:22px">' + (copen ? "\u25be " : "\u25b8 ") + esc(c.sku) + "</td>" +
+        '<td class="sub">' + esc(c.title || "") + "</td>" +
+        '<td class="num"></td>' +
+        '<td class="num">' + num(c.variants) + "</td>" +
+        '<td class="num">' + num(c.in_stock) + "</td>" +
+        pctCell(c.var_in_stock_rate) +
+        '<td class="num">' + num(c.sizes) + "</td>" +
+        pctCell(c.size_in_stock_rate) +
+        '<td class="num">' + num(c.units) + "</td></tr>");
+      if (!copen) continue;
+
+      // The size run as chips, in size order, so a gap is visible as a
+      // gap rather than something to work out from a percentage.
+      const chips = c.items.map(i =>
+        '<span class="inv-chip ' + (i.oversold ? "bad" : i.in_stock ? "good" : "out") + '">' +
+        esc(i.size || "\u2014") + " <b>" + num(i.units) + "</b></span>").join("");
+      out.push('<tr class="inv-v"><td></td><td colspan="8">' + chips + "</td></tr>");
+    }
+  }
+  $("inv-tbody").innerHTML = out.join("");
+}
+
+// Delegated: the rows are replaced on every redraw.
+$("inv-tbody").addEventListener("click", e => {
+  const row = e.target.closest("tr.inv-m, tr.inv-c");
+  if (!row) return;
+  const sku = row.getAttribute("data-sku");
+  if (INV_OPEN.has(sku)) INV_OPEN.delete(sku); else INV_OPEN.add(sku);
+  drawInventory();
+});
 
 /** A deduction, signed. The allowance is the one line that can go the
  *  other way, and a double negative reads as a typo.
