@@ -127,6 +127,32 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- ShopifyQL's own total for the hour, net of returns. A
     -- cross-check, deliberately a different measure.
     revenue_shopifyql       numeric,
+    -- Shopify's own quantity_ordered for the hour. NOT pnl_qty: that
+    -- one is counted from the orders and drops the gift coin, so the
+    -- two legitimately differ and neither is a correction of the
+    -- other.
+    qty_ordered             integer,
+    -- Shopify's OWN first-time/returning split, kept apart from the
+    -- tracker's new_customers (derived from each order's lifetime
+    -- count). The two use different bases and will not agree; neither
+    -- is a correction of the other.
+    --
+    -- The rate and the average order value are NOT stored: both are
+    -- ratios, and a stored ratio cannot be re-divided when hours are
+    -- summed. They are computed on read from these counts.
+    ql_orders               integer,
+    ql_net_sales            numeric,
+    ql_customers            integer,
+    ql_new_customers        integer,
+    ql_returning_customers  integer,
+    ql_sales_returning      numeric,
+    ql_sales_first_time     numeric,
+    -- Basket-size mix for the hour: an object keyed by
+    -- number_of_products_bought_together, each holding qty, orders and
+    -- sales. Stored whole rather than as columns because the set of
+    -- basket sizes is open-ended -- a single eight-item order creates
+    -- a bucket that did not exist yesterday.
+    basket_mix              jsonb,
     -- Shopify's own Total sales for the hour, stored verbatim so the
     -- headline can EQUAL what the Shopify admin shows rather than
     -- approach it. Gross, less discounts, less returns, plus shipping
@@ -258,6 +284,15 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_refunds numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_total_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_returns numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS qty_ordered integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS basket_mix jsonb",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_net_sales numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_customers integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_new_customers integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_returning_customers integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_sales_returning numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_sales_first_time numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_refunded numeric",
 ]
 
@@ -266,7 +301,9 @@ COLUMNS = [
     "sessions", "sessions_paid", "sessions_direct", "sessions_meta", "sessions_google",
     "sessions_by_source",
     "revenue", "orders", "revenue_shopifyql",
-    "shopify_total_sales", "shopify_returns",
+    "shopify_total_sales", "shopify_returns", "qty_ordered", "basket_mix",
+    "ql_orders", "ql_net_sales", "ql_customers", "ql_new_customers", "ql_returning_customers",
+    "ql_sales_returning", "ql_sales_first_time",
     "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
@@ -498,7 +535,18 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
     from ingest_shopify import SHOPIFYQL_QUERY  # noqa: PLC0415
     from shopify_client import graphql_request  # noqa: PLC0415
 
-    q = (f"FROM sales SHOW total_sales, returns, gross_sales, orders "
+    q = (f"FROM sales SHOW total_sales, returns, gross_sales, net_sales, "
+         f"orders, quantity_ordered, "
+         f"customers, new_customers, returning_customers, "
+         f"total_sales_returning, total_sales_first_time "
+         # Return Prime's zero-value return orders are excluded, the
+         # same exclusion the Shopify report uses. Checked on three
+         # days: total_sales, returns and gross_sales come back
+         # IDENTICAL either way, because those orders carry no money --
+         # so the headline stays exact to the paisa while the COUNTS
+         # stop being inflated. Left unfiltered they ran a few percent
+         # over the report on both orders and units.
+         f"WHERE sales_channel != 'Return Prime: Order Return' "
          f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
          f"GROUP BY hour ORDER BY hour LIMIT 100")
     resp = (await graphql_request(client, store, SHOPIFYQL_QUERY, {"q": q}))["shopifyqlQuery"]
@@ -516,6 +564,49 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
             "shopify_total_sales": total,
             "shopify_returns": rets,
             "revenue_shopifyql": total - rets,
+            # Shopify's own units count. Deliberately kept apart from
+            # pnl_qty, which is derived from the orders and excludes
+            # the gift coin: the two answer different questions and a
+            # difference between them is informative, not an error.
+            "qty_ordered": int(float(row.get("quantity_ordered") or 0)),
+            # Shopify's own order count, kept apart from the tracker's
+            # `orders`, which is derived from the orders themselves and
+            # drops a different set. Units per order and AOV are
+            # divided by THIS one, so both numerator and denominator
+            # come from the same population.
+            "ql_orders": int(float(row.get("orders") or 0)),
+            # The numerator of Shopify's average_order_value, which is
+            # NOT total_sales / orders: that reads a few percent low.
+            # Shopify divides net sales BEFORE returns, i.e.
+            # net_sales - returns (returns arrive negative). Checked
+            # against its own average_order_value on four days at both
+            # day and hour grain -- nearly every row agreed to five
+            # significant figures, the two others to within a percent.
+            # Stored as the numerator, never as the ratio: a stored
+            # average cannot be re-divided when hours are summed.
+            "ql_net_sales": round(float(row.get("net_sales") or 0), 2),
+            # Shopify's own first-time/returning split. The tracker
+            # already derives new_customers from the orders using
+            # Shopify's lifetime order count, but THIS is Shopify's own
+            # classification on its own basis -- kept under distinct
+            # names so a difference between the two is visible rather
+            # than one silently overwriting the other.
+            # Shopify's returning_customer_rate is
+            # returning_customers / customers -- NOT
+            # returning / (new + returning). Verified against a
+            # day-grain pull: returning / customers reproduced its rate
+            # to six decimals, while new + returning summed HIGHER than
+            # the customer count, so the buckets overlap and cannot
+            # serve as the denominator. `customers` is a DISTINCT
+            # count, so summing the hours overstates the day by about
+            # two percent, moving the rate a quarter of a point.
+            # Stored per hour anyway, because that makes each hour's
+            # rate exact and the day's near enough to read.
+            "ql_customers": int(float(row.get("customers") or 0)),
+            "ql_new_customers": int(float(row.get("new_customers") or 0)),
+            "ql_returning_customers": int(float(row.get("returning_customers") or 0)),
+            "ql_sales_returning": round(float(row.get("total_sales_returning") or 0), 2),
+            "ql_sales_first_time": round(float(row.get("total_sales_first_time") or 0), 2),
         }
     return out
 
@@ -858,18 +949,62 @@ def needs_settling(day: date) -> bool:
     return is_unsettled(day, last_write, latest_hour)
 
 
+async def fetch_basket_mix(client, store, day: date) -> dict[datetime, dict]:
+    """Basket-size mix per hour: how many items people bought at once.
+
+    `number_of_products_bought_together` is Shopify's own dimension, so
+    this is the hourly version of the Quantity report rather than a
+    reconstruction of it.
+
+    Return Prime's channel is excluded, matching the report: a return
+    flowing back is not a basket. Without that filter a refund lands in
+    a phantom bucket 0 carrying negative sales and no orders.
+    """
+    from ingest_shopify import SHOPIFYQL_QUERY  # noqa: PLC0415
+    from shopify_client import graphql_request  # noqa: PLC0415
+
+    q = (f"FROM sales SHOW quantity_ordered, orders, total_sales "
+         f"WHERE sales_channel != 'Return Prime: Order Return' "
+         f"GROUP BY hour, number_of_products_bought_together "
+         f"SINCE {day.isoformat()} UNTIL {day.isoformat()} LIMIT 1000")
+    resp = (await graphql_request(client, store, SHOPIFYQL_QUERY, {"q": q}))["shopifyqlQuery"]
+    if resp.get("parseErrors"):
+        raise RuntimeError(f"basket mix parseErrors: {resp['parseErrors']}")
+
+    out: dict[datetime, dict] = {}
+    for row in (resp.get("tableData") or {}).get("rows", []):
+        if not row.get("hour"):
+            continue
+        hour = ist_hour(datetime.fromisoformat(row["hour"].replace("Z", "+00:00")))
+        size = str(row.get("number_of_products_bought_together") or "").strip()
+        # Bucket 0 is the refund residue the channel filter does not
+        # always catch. It has no orders and carries negative sales, so
+        # it is not a basket anyone bought.
+        if not size or size == "0":
+            continue
+        bucket = out.setdefault(hour, {"basket_mix": {}})["basket_mix"]
+        bucket[size] = {
+            "qty": int(float(row.get("quantity_ordered") or 0)),
+            "orders": int(float(row.get("orders") or 0)),
+            "sales": round(float(row.get("total_sales") or 0), 2),
+        }
+    return out
+
+
 async def build_day(client, store, day: date) -> list[dict]:
-    sessions, sales, orders, meta = await asyncio.gather(
+    sessions, sales, orders, meta, baskets = await asyncio.gather(
         fetch_sessions(client, store, day),
         fetch_sales(client, store, day),
         fetch_orders(client, store, day),
         fetch_meta(client, day),
+        fetch_basket_mix(client, store, day),
     )
     ga4 = fetch_ga4(day)
     google_total, google_as_of = fetch_google_spend(day)
     kwikchat_total = fetch_kwikchat_spend(day)
 
-    hours = sorted(set(sessions) | set(sales) | set(orders) | set(meta) | set(ga4))
+    hours = sorted(set(sessions) | set(sales) | set(orders) | set(meta) | set(ga4)
+                   | set(baskets))
 
     # Spread over the hours that HAVE HAPPENED, not all 24. Giving a
     # future hour its share would silently inflate the day's spend and
@@ -905,8 +1040,11 @@ async def build_day(client, store, day: date) -> list[dict]:
             if hour in google_by_hour:
                 row["google_spend"] = round(google_by_hour[hour], 4)
             row["google_spend_as_of"] = google_as_of
-        for source in (sessions, sales, orders, meta, ga4):
+        for source in (sessions, sales, orders, meta, ga4, baskets):
             row.update(source.get(hour, {}))
+        # psycopg2 has no adapter for a dict; jsonb wants text.
+        if isinstance(row.get("basket_mix"), dict):
+            row["basket_mix"] = json.dumps(row["basket_mix"])
         rows.append(row)
     return rows
 

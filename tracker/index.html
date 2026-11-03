@@ -177,6 +177,19 @@
      the spacer fell. A bridge reads top to bottom. */
   .pnl-bridge { display: grid; margin-top: 14px; max-width: 560px; }
   /* Inventory */
+  #qty-table { width: 100%; border-collapse: collapse; font-size: 12px;
+               font-variant-numeric: tabular-nums; }
+  #qty-table th { text-align: right; font-weight: 500; color: var(--text-3); font-size: 10.5px;
+                  text-transform: uppercase; letter-spacing: .04em; padding: 6px 9px;
+                  border-bottom: 1px solid var(--border); white-space: nowrap; }
+  #qty-table th:first-child { text-align: left; }
+  #qty-table td { padding: 5px 9px; border-bottom: 1px solid var(--border-soft);
+                  text-align: right; }
+  #qty-table td:first-child { text-align: left; }
+  #qty-table tr.tot td { font-weight: 650; border-top: 1px solid var(--border);
+                         border-bottom: none; }
+  #qty-table td.b { color: var(--text-2); }
+  #qty-table td.b0 { opacity: .3; }
   #coin-table { width: 100%; border-collapse: collapse; font-size: 12px;
                 font-variant-numeric: tabular-nums; }
   #coin-table th { text-align: right; font-weight: 500; color: var(--text-3); font-size: 10.5px;
@@ -342,6 +355,7 @@
       <button id="view-pnl" role="tab" aria-selected="false">Live P&amp;L</button>
       <button id="view-inv" role="tab" aria-selected="false">Inventory</button>
       <button id="view-coin" role="tab" aria-selected="false">Coin Orders</button>
+      <button id="view-qty" role="tab" aria-selected="false">Quantity</button>
     </div>
     <label class="f">Day <input type="date" id="day"></label>
     <label class="f">Compare to <input type="date" id="cmp"></label>
@@ -361,6 +375,40 @@
       <span class="sub" id="ttl-vs"></span>
     </div>
     <div class="heroes" id="heroes"></div>
+  </div>
+
+  <div class="card" id="qtycard" hidden>
+    <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
+      <strong style="font-size:13px">Quantity &middot; units ordered by the hour</strong>
+      <span class="sub" id="qty-span"></span>
+    </div>
+    <div class="heroes" id="qty-kpis"></div>
+    <div style="margin-top:12px;overflow:auto">
+      <table id="qty-table"><thead id="qty-thead"></thead><tbody id="qty-tbody"></tbody></table>
+    </div>
+    <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
+      Shopify&rsquo;s own <code>quantity_ordered</code>, grouped by
+      <code>number_of_products_bought_together</code> &mdash; the hourly version of the Quantity
+      report, with the same Return&nbsp;Prime channel excluded. <strong>Units</strong> here counts
+      the gift coin; <strong>P&amp;L units</strong> does not, and also drops <code>inf</code> and
+      <code>Return_Prime</code> orders, so the two legitimately differ and neither corrects the
+      other. Basket 0 is dropped: it is refund residue carrying negative sales and no orders, not
+      something anyone bought. Rates are re-divided from the summed counts, never averaged across
+      hours.
+    </p>
+    <p class="note">
+      <strong>AOV</strong> is Shopify&rsquo;s <code>average_order_value</code>: net sales
+      <em>before</em> returns over orders. It is <em>not</em> Total&nbsp;sales &divide; orders,
+      which reads a few percent low. <strong>Ret.&nbsp;rate</strong> is returning &divide;
+      <em>customers</em>, Shopify&rsquo;s own denominator &mdash; not returning &divide;
+      (new&nbsp;+&nbsp;returning), because the two buckets overlap and sum higher than the customer
+      count. Customers is a <em>distinct</em> count, so each hour is exact but the Day row sums
+      anyone who ordered in two hours twice &mdash; about two percent over Shopify&rsquo;s own
+      day figure, moving the rate a quarter of a point. <strong>New customers</strong> sums exactly
+      &mdash; nobody is new twice in a day. These are Shopify&rsquo;s own classification and will
+      not match the tracker&rsquo;s <code>new_customers</code>, which is derived from each
+      order&rsquo;s lifetime count.
+    </p>
   </div>
 
   <div class="card" id="coincard" hidden>
@@ -1036,6 +1084,7 @@ function applyView() {
   $("view-pnl").setAttribute("aria-selected", String(VIEW === "pnl"));
   $("view-inv").setAttribute("aria-selected", String(VIEW === "inv"));
   $("view-coin").setAttribute("aria-selected", String(VIEW === "coin"));
+  $("view-qty").setAttribute("aria-selected", String(VIEW === "qty"));
   // Hiding only. Showing is the drawing code's job, so a card with
   // nothing to show stays hidden rather than flashing empty -- and
   // render() below re-applies the gate anyway.
@@ -1043,10 +1092,17 @@ function applyView() {
   if (VIEW !== "pnl") $("pnlcard").hidden = true;
   if (VIEW !== "inv") $("invcard").hidden = true;
   if (VIEW !== "coin") $("coincard").hidden = true;
+  if (VIEW !== "qty") $("qtycard").hidden = true;
+  // The footnote belongs to the Hourly Tracker and explains ITS
+  // columns. Left on screen under another section it describes figures
+  // that are not there, which is worse than no note at all. render()
+  // rewrites it when the tracker view comes back.
+  if (VIEW !== "tracker") $("footnote").textContent = "";
   // Inventory does not move hour to hour and is a separate request, so
   // it is fetched once and then redrawn from memory.
   if (VIEW === "inv") { loadInventory(); return; }
   if (VIEW === "coin") { loadCoins(); return; }
+  if (VIEW === "qty") { loadQty(); return; }
   if (LAST) render(LAST.d, LAST.day);
 }
 
@@ -1054,6 +1110,7 @@ $("view-tracker").onclick = () => { if (VIEW !== "tracker") { VIEW = "tracker"; 
 $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView(); } };
 $("view-inv").onclick = () => { if (VIEW !== "inv") { VIEW = "inv"; applyView(); } };
 $("view-coin").onclick = () => { if (VIEW !== "coin") { VIEW = "coin"; applyView(); } };
+$("view-qty").onclick = () => { if (VIEW !== "qty") { VIEW = "qty"; applyView(); } };
 
 // The day row and every hour row both come through here, so the summary
 // cannot drift from the breakdown beneath it.
@@ -1204,6 +1261,83 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
         ";width:" + frac + "%;background:var(--" + (good ? "good" : "bad") + ')"></div>' +
         "</div></td></tr>";
     }).join("") + "</tbody></table>";
+}
+
+// --- quantity --------------------------------------------------------
+// Unlike Inventory and Coins, this one IS per-day and follows the date
+// picker, so it is dropped whenever the day changes.
+let QTY = null, QTY_DAY = null, QTY_LOADING = false;
+
+function loadQty() {
+  $("qtycard").hidden = false;
+  const day = $("day").value || istToday();
+  if (QTY && QTY_DAY === day) { drawQty(); return; }
+  if (QTY_LOADING) return;
+  QTY_LOADING = true; QTY_DAY = day;
+  $("qty-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
+  fetch(apiBase() + "/admin/analytics/quantity?day=" + encodeURIComponent(day))
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(d => { QTY = d; QTY_LOADING = false; drawQty(); })
+    .catch(e => {
+      QTY_LOADING = false;
+      $("qty-kpis").innerHTML = '<div class="sub">Could not load: ' +
+        esc(String(e.message || e)) + "</div>";
+    });
+}
+
+function drawQty() {
+  if (!QTY || VIEW !== "qty") return;
+  const d = QTY;
+  $("qty-span").textContent = d.day + "  \u00b7  " + d.hours.length + " hours";
+
+  const coinGap = d.qty - d.pnl_qty;
+  $("qty-kpis").innerHTML = [
+    ["Units ordered", num(d.qty)],
+    ["Orders", num(d.orders)],
+    ["Units / order", d.qty_per_order == null ? "\u2014" : d.qty_per_order.toFixed(2)],
+    ["Avg order value", inr(d.aov, 0)],
+    ["Customers", num(d.customers)],
+    ["New customers", num(d.new_customers)],
+    ["Returning", num(d.returning_customers)],
+    ["Returning rate", pc(d.returning_rate)],
+    ["First-time sales", inr(d.sales_first_time, 0)],
+    ["Returning sales", inr(d.sales_returning, 0)],
+    ["P&L units", num(d.pnl_qty)],
+    // Named rather than left as an unexplained discrepancy: it is
+    // almost entirely the gift coin, which Shopify counts and the P&L
+    // does not.
+    ["Difference", '<span class="virt">' + num(coinGap) + "</span>"],
+    ["Total sales", inr(d.sales, 0)],
+  ].map(([k, v]) => '<div><div class="h-label">' + esc(k) + '</div>' +
+                    '<div class="h-value">' + v + "</div></div>").join("");
+
+  // Columns are the basket sizes that actually occurred, in order.
+  // Hard-coding 1..8 would print empty columns most days and still
+  // miss the day somebody buys nine.
+  const sizes = Object.keys(d.mix).sort((a, b) => a - b);
+  $("qty-thead").innerHTML =
+    "<tr><th>Hour</th><th>Units</th><th>Orders</th><th>Units / order</th>" +
+    "<th>Total sales</th><th>AOV</th><th>Cust.</th><th>New</th><th>Returning</th>" +
+    "<th>Ret. rate</th><th>First-time \u20b9</th><th>Returning \u20b9</th>" +
+    sizes.map(z => "<th>" + esc(z) + "&times;</th>").join("") + "</tr>";
+
+  const cells = h =>
+    "<td>" + num(h.qty) + "</td><td>" + num(h.orders) + "</td>" +
+    "<td>" + (h.qty_per_order == null ? "\u2014" : h.qty_per_order.toFixed(2)) + "</td>" +
+    "<td>" + inr(h.sales, 0) + "</td><td>" + inr(h.aov, 0) + "</td>" +
+    "<td>" + num(h.customers) + "</td><td>" + num(h.new_customers) + "</td>" +
+    "<td>" + num(h.returning_customers) + "</td><td>" + pc(h.returning_rate) + "</td>" +
+    "<td>" + inr(h.sales_first_time, 0) + "</td>" +
+    "<td>" + inr(h.sales_returning, 0) + "</td>" +
+    sizes.map(z => {
+      const v = h.mix[z] || 0;
+      return '<td class="b' + (v ? "" : " b0") + '">' + (v ? num(v) : "\u2014") + "</td>";
+    }).join("");
+
+  $("qty-tbody").innerHTML =
+    d.hours.slice().reverse().map(h =>
+      "<tr><td>" + String(h.hour).padStart(2, "0") + ":00</td>" + cells(h) + "</tr>").join("") +
+    '<tr class="tot"><td>Day</td>' + cells(d) + "</tr>";
 }
 
 // --- coin orders -----------------------------------------------------
@@ -2114,7 +2248,7 @@ $("chart").addEventListener("pointermove", hoverAt);
 $("chart").addEventListener("pointerleave", hideTip);
 
 $("refresh").onclick = load;
-$("day").onchange = () => { DAY_PINNED = true; load(); };
+$("day").onchange = () => { DAY_PINNED = true; QTY = null; load(); };
 $("cmp").onchange = load;
 // A re-render, not a re-fetch: the figures are already in hand and the
 // toggle only decides whether the third line is drawn.

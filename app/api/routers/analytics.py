@@ -14607,3 +14607,142 @@ async def get_coins(
         total_cost=t_coins * coin_cost,
         attach_rate=(t_coin_orders / t_orders) if t_orders else None,
     )
+
+
+# ----------------------------------------------------------------------
+class QuantityHour(BaseModel):
+    hour: int
+    qty: int
+    #: Shopify's order count on the report's population, which is not
+    #: the tracker's `orders` elsewhere in this API.
+    orders: int
+    #: qty / orders, re-divided per hour rather than averaged.
+    qty_per_order: float | None
+    sales: float
+    #: Shopify's average_order_value: net sales BEFORE returns over
+    #: orders, which is NOT total_sales / orders -- that reads low.
+    aov: float | None
+    #: Distinct customers who ordered. Shopify's own denominator for
+    #: the returning rate, and NOT new + returning: the two buckets
+    #: overlap, so they sum higher than this.
+    customers: int
+    new_customers: int
+    returning_customers: int
+    #: returning / customers, Shopify's definition.
+    returning_rate: float | None
+    sales_returning: float
+    sales_first_time: float
+    #: Basket size -> units. Sizes are open-ended, so this is a map.
+    mix: dict[str, int]
+
+
+class QuantityResponse(BaseModel):
+    """The Quantity report, hour by hour.
+
+    Mirrors the Shopify report that groups by
+    `number_of_products_bought_together`, with the same Return Prime
+    channel exclusion, but broken down by IST hour so the day can be
+    watched as it runs rather than read afterwards.
+    """
+    day: date
+    hours: list[QuantityHour]
+    qty: int
+    orders: int
+    qty_per_order: float | None
+    sales: float
+    aov: float | None
+    #: Summed from the hours, so a customer who ordered in two hours is
+    #: counted twice. Measured against Shopify's own day-grain figure
+    #: it ran about two percent over, moving the rate a quarter of a
+    #: point. Close enough to read, not exact.
+    customers: int
+    #: This one DOES sum exactly: "new" is a once-ever classification,
+    #: so nobody can be new in two hours of the same day.
+    new_customers: int
+    returning_customers: int
+    returning_rate: float | None
+    sales_returning: float
+    sales_first_time: float
+    #: Day-level basket mix, summed from the hours.
+    mix: dict[str, int]
+    #: Units from the ORDERS, excluding the gift coin. A deliberately
+    #: different measure kept beside Shopify's own, not a correction of
+    #: it — the two answer different questions.
+    pnl_qty: int
+
+
+_QUANTITY_SQL = """
+SELECT hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
+       shopify_total_sales, shopify_returns,
+       ql_orders, ql_net_sales, ql_customers, ql_new_customers, ql_returning_customers,
+       ql_sales_returning, ql_sales_first_time
+  FROM public.hourly_campaign_tracker
+ WHERE day_ist = :day
+ ORDER BY hour_of_day
+"""
+
+
+@router.get("/quantity", response_model=QuantityResponse)
+@cached_analytics(ttl=120.0)
+async def get_quantity(
+    session: SessionDep,
+    day: date | None = Query(default=None, description="IST day. Default: today."),
+) -> QuantityResponse:
+    """Units ordered and basket mix, by the hour."""
+    target = day or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+    result = await session.execute(text(_QUANTITY_SQL), {"day": target})
+    rows = [dict(r) for r in result.mappings()]
+
+    hours: list[QuantityHour] = []
+    total_mix: dict[str, int] = {}
+    for r in rows:
+        mix_raw = r["basket_mix"] or {}
+        mix = {k: int(v.get("qty") or 0) for k, v in mix_raw.items()}
+        for k, v in mix.items():
+            total_mix[k] = total_mix.get(k, 0) + v
+        qty = r["qty_ordered"] or 0
+        # Shopify's own order count, NOT the tracker's `orders`. Both
+        # the units and the sales on this tab come from Shopify, and
+        # dividing one population by another produced a units/order
+        # that matched neither side.
+        orders = r["ql_orders"] or 0
+        sales = float(r["shopify_total_sales"] or 0)
+        # returns arrive negative, so subtracting adds them back.
+        aov_base = float(r["ql_net_sales"] or 0) - float(r["shopify_returns"] or 0)
+        cust = r["ql_customers"] or 0
+        ret = r["ql_returning_customers"] or 0
+        hours.append(QuantityHour(
+            hour=r["hour_of_day"], qty=qty, orders=orders,
+            qty_per_order=(qty / orders) if orders else None,
+            sales=sales, aov=(aov_base / orders) if orders else None,
+            customers=cust, new_customers=r["ql_new_customers"] or 0,
+            returning_customers=ret,
+            returning_rate=(ret / cust) if cust else None,
+            sales_returning=float(r["ql_sales_returning"] or 0),
+            sales_first_time=float(r["ql_sales_first_time"] or 0),
+            mix=mix))
+
+    t_qty = sum(h.qty for h in hours)
+    t_orders = sum(h.orders for h in hours)
+    t_sales = sum(h.sales for h in hours)
+    t_aov_base = sum(float(r["ql_net_sales"] or 0) - float(r["shopify_returns"] or 0)
+                     for r in rows)
+    t_cust = sum(h.customers for h in hours)
+    t_ret = sum(h.returning_customers for h in hours)
+    return QuantityResponse(
+        day=target, hours=hours,
+        qty=t_qty, orders=t_orders,
+        # Re-divided from the sums, never averaged across hours: a dead
+        # 4am hour must not weigh the same as a 9pm peak.
+        qty_per_order=(t_qty / t_orders) if t_orders else None,
+        sales=t_sales,
+        aov=(t_aov_base / t_orders) if t_orders else None,
+        customers=t_cust,
+        new_customers=sum(h.new_customers for h in hours),
+        returning_customers=t_ret,
+        returning_rate=(t_ret / t_cust) if t_cust else None,
+        sales_returning=sum(h.sales_returning for h in hours),
+        sales_first_time=sum(h.sales_first_time for h in hours),
+        mix=dict(sorted(total_mix.items(), key=lambda kv: int(kv[0]))),
+        pnl_qty=sum(r["pnl_qty"] or 0 for r in rows),
+    )
