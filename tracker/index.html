@@ -598,6 +598,19 @@ const xx  = n => n === null || n === undefined ? "—" : n.toFixed(2) + "x";
 // utm_source is whatever was in the URL that sent the session, so it is
 // attacker-controlled text arriving through the API. Anything built into
 // innerHTML or an SVG attribute goes through here first.
+// Every clock on this page is IST. A timestamp from the API is UTC, and
+// printing it raw makes a reading taken minutes ago look five and a half
+// hours old -- which on an HOURLY tracker reads as a dead cron.
+const ist = v => {
+  if (!v) return "";
+  const d = new Date(v);
+  if (isNaN(d)) return String(v).replace("T", " ").slice(0, 16);
+  return d.toLocaleString("en-GB", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit",
+    day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).replace(",", "");
+};
+
 const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
   ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 
@@ -1611,8 +1624,8 @@ function drawInventory() {
   // that recalculated minutes ago will always show churn, and the gap
   // cannot be read without knowing which two instants it spans.
   $("inv-asof").textContent =
-    (INV.as_of ? "Shopify " + INV.as_of : "") +
-    (INV.sheet_as_of ? "  \u00b7  sheet " + String(INV.sheet_as_of).replace("T", " ").slice(0, 16) : "");
+    (INV.as_of ? "Shopify " + ist(INV.as_of) + " IST" : "") +
+    (INV.sheet_as_of ? "  \u00b7  sheet " + ist(INV.sheet_as_of) + " IST" : "");
 
   const gap = t.gap, shopU = t.units, sheetU = t.sheet_units;
   $("inv-kpis").innerHTML = [
