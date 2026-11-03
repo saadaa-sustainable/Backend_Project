@@ -160,6 +160,37 @@ jobs:
           echo "Running: scripts/fetch_hourly_tracker.py $ARGS"
           python scripts/fetch_hourly_tracker.py $ARGS
 
+      # AFTER the tracker, deliberately. The tracker does not read
+      # inventory, so nothing here can change its row -- and putting a
+      # ~3 minute Shopify products fetch in front of it would delay the
+      # hour's figures for a section that does not feed them.
+      - name: Refresh inventory (live Shopify stock)
+        # continue-on-error because a failed inventory refresh must not
+        # fail the hour: the tracker row is already written and correct
+        # by this point, and a red run would hide that.
+        #
+        # The refresh script refuses to truncate on an empty build, so a
+        # half-failed fetch leaves the last good reading in place rather
+        # than emptying the tab, which would read as "everything is out
+        # of stock".
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          SHOP_NAME: ${{ secrets.SHOP_NAME }}
+          SHOP_DOMAIN: ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN: ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_API_VERSION: ${{ secrets.SHOPIFY_API_VERSION }}
+        run: |
+          # NOT --incremental. Incremental only re-pulls products whose
+          # updated_at moved, which leaves most listings carrying the
+          # quantity they had when they last changed. The refresh then
+          # discards anything older than the newest fetch, so an
+          # incremental run here would shrink the tracker to whichever
+          # products happened to change this hour.
+          python scripts/ingest_shopify.py --object-types products
+          python scripts/refresh_inventory_tracker.py --source live
+
       - name: How far behind is it now?
         # The ingest exiting 0 does not prove the row landed, and a
         # tracker that silently stops is indistinguishable from a quiet

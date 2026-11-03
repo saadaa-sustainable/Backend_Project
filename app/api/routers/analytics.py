@@ -14330,7 +14330,10 @@ class VirtualImport(BaseModel):
 
 
 class InventoryResponse(BaseModel):
-    as_of: date | None
+    #: When the Shopify reading was taken, to the second. A date would
+    #: read as frozen now that the refresh is hourly -- the whole point
+    #: of an hourly tracker is being able to see that it moved.
+    as_of: datetime | None
     #: When the SHEET last recalculated. Shown beside `as_of` because
     #: the two sides are snapshots of different moments and every gap
     #: has to be read in that light.
@@ -14427,7 +14430,11 @@ async def get_inventory(session: SessionDep) -> InventoryResponse:
     masters.sort(key=lambda m: (m.var_in_stock_rate if m.var_in_stock_rate is not None else 1))
 
     as_of = await session.execute(
-        text("SELECT max(as_of_date) AS d FROM public.inventory_variant_current"))
+        # COALESCE because a row built from the daily export has no
+        # instant to report, only a date. Casting the date rather than
+        # returning null keeps the field populated through the switch.
+        text("SELECT COALESCE(max(as_of_at), max(as_of_date)::timestamptz) AS d "
+             "  FROM public.inventory_variant_current"))
 
     shop_colours = {r["colour_sku"].upper() for r in rows}
     totals = _totals_node(rows, masters)
