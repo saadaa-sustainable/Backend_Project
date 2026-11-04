@@ -544,6 +544,10 @@ CREATE TABLE IF NOT EXISTS {COIN_TABLE} (
     -- explained to the person who has to act on it.
     bucket          text,
     bucket_reason   text,
+    -- An OVERLAY, not a bucket: a watchlisted order still sits in
+    -- Ship now or the Call list and still has to be dispatched or
+    -- called. This only says it is worth a second look.
+    watchlist       text,
     -- "flag" means deliverable but worth knowing -- a shop or a
     -- hostel room. It never holds the order.
     address_flag    text,
@@ -557,13 +561,14 @@ CREATE INDEX IF NOT EXISTS ix_coin_order_day ON {COIN_TABLE} (day_ist);
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bucket text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bucket_reason text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address_flag text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS watchlist text;
 CREATE INDEX IF NOT EXISTS ix_coin_order_bucket ON {COIN_TABLE} (bucket);
 """
 
 COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "units",
                 "amount", "payment", "fulfillment", "risk_tag", "customer_orders",
                 "is_returning", "city", "state", "pincode", "coin_only",
-                "bucket", "bucket_reason", "address_flag"]
+                "bucket", "bucket_reason", "address_flag", "watchlist"]
 
 COIN_UPSERT = f"""
 INSERT INTO {COIN_TABLE} ({", ".join(COIN_COLUMNS)}) VALUES %s
@@ -959,6 +964,31 @@ async def fetch_orders(client, store, day: date,
                 # have had a coin.
                 elif not coins and units >= 2 and coin_ok:
                     b["bundle_no_coin_orders"] += 1
+                    if coin_rows is not None:
+                        addr = n.get("shippingAddress") or {}
+                        nord = cust.get("numberOfOrders")
+                        nord = int(nord) if str(nord or "").isdigit() else None
+                        coin_rows.append({
+                            "order_id": n["id"], "order_name": n.get("name"),
+                            "created_at": created,
+                            "day_ist": created.astimezone(IST).date(),
+                            "coins": 0, "units": units, "amount": price,
+                            "payment": PAYMENT_LABEL.get(
+                                (n.get("displayFinancialStatus") or "").upper()),
+                            "fulfillment": (n.get("displayFulfillmentStatus")
+                                            or "").title() or None,
+                            "risk_tag": risk_of(n.get("tags")),
+                            "customer_orders": nord,
+                            "is_returning": (nord > 1) if nord is not None else None,
+                            "city": addr.get("city"), "state": addr.get("province"),
+                            "pincode": addr.get("zip"), "coin_only": False,
+                            "_customer_id": (cust.get("id") or None),
+                            "_address1": addr.get("address1"),
+                            "_address2": addr.get("address2"),
+                            "_phone": (addr.get("phone") or "").strip(),
+                            "_fake_order": "fake order" in {
+                                str(t).strip().lower() for t in (n.get("tags") or [])},
+                        })
                 refunded = float((n.get("totalRefundedSet") or {})
                                  .get("shopMoney", {}).get("amount") or 0)
                 if n.get("cancelledAt"):
@@ -1266,7 +1296,8 @@ def classify_coin_rows(coin_rows: list[dict]) -> None:
     Runs AFTER the day is gathered, because the duplicate-same-day-COD
     test needs to see the day's other orders.
     """
-    from coin_dispatch import address_verdict, classify  # noqa: PLC0415
+    from coin_dispatch import (address_verdict, classify,  # noqa: PLC0415
+                               is_watchlisted)
 
     hist = fetch_customer_history(
         sorted({r["_customer_id"] for r in coin_rows if r.get("_customer_id")}))
@@ -1280,6 +1311,18 @@ def classify_coin_rows(coin_rows: list[dict]) -> None:
         if key[1]:
             seen[key] = seen.get(key, 0) + 1
 
+    # Repeat buyers: the same phone or address on two or more COIN
+    # orders, across the whole campaign rather than one day. Counted
+    # on coin orders only, because that is the promotion being
+    # watched.
+    repeat: dict[str, int] = {}
+    for r in coin_rows:
+        if not r.get("coins"):
+            continue
+        who = r.get("_phone") or (r.get("_address1") or "").lower()
+        if who:
+            repeat[who] = repeat.get(who, 0) + 1
+
     for r in coin_rows:
         verdict, reason = address_verdict(r.pop("_address1", None),
                                           r.pop("_address2", None))
@@ -1291,6 +1334,10 @@ def classify_coin_rows(coin_rows: list[dict]) -> None:
              "fake_order": r.get("_fake_order")},
             hist.get(r.get("_customer_id") or ""), bool(dup))
         r["bucket"], r["bucket_reason"] = bucket, why
+        who = r.get("_phone") or ""
+        r["watchlist"] = is_watchlisted(
+            {**r, "fake_order": r.get("_fake_order")},
+            bool(who and repeat.get(who, 0) > 1))
         for k in ("_customer_id", "_phone", "_fake_order"):
             r.pop(k, None)
 

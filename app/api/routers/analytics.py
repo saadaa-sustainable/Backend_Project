@@ -14590,6 +14590,8 @@ class CoinsResponse(BaseModel):
     total_ship_now: int
     total_call_list: int
     total_address_bad: int
+    #: Crosses the buckets rather than partitioning them.
+    total_watchlist: int
     #: NOT part of the coin counts -- these orders carry no coin at
     #: all. Orders that looked eligible and went out without one.
     total_bundle_no_coin: int
@@ -14643,6 +14645,13 @@ async def get_coins(
                 address_bad=r["address_bad"])
         for r in rows
     ]
+    # Counted from the order rows, not the hourly table: the
+    # watchlist crosses buckets, so there is no per-hour column that
+    # could be summed without double counting.
+    watch_q = await session.execute(text(
+        "SELECT count(*) AS n FROM public.silver_coin_order "
+        " WHERE watchlist IS NOT NULL AND bucket <> 'bundle_no_coin'"))
+    watch = watch_q.mappings().first()["n"]
     t_orders = sum(d.orders for d in days)
     t_coin_orders = sum(d.coin_orders for d in days)
     t_coins = sum(d.coins for d in days)
@@ -14663,6 +14672,7 @@ async def get_coins(
         total_ship_now=sum(d.ship_now for d in days),
         total_call_list=sum(d.call_list for d in days),
         total_address_bad=sum(d.address_bad for d in days),
+        total_watchlist=watch,
     )
 
 
@@ -14675,6 +14685,9 @@ class CoinOrderRow(BaseModel):
     #: Deliverable but worth knowing -- a shop or a hostel room. Never
     #: a reason to hold.
     address_flag: str | None
+    #: An OVERLAY, not a bucket: a watchlisted order still sits in the
+    #: queue it belongs to. Says only that it is worth a second look.
+    watchlist: str | None
     created_at: datetime
     coins: int
     amount: float | None
@@ -14701,20 +14714,28 @@ class CoinOrdersResponse(BaseModel):
 
 
 _COIN_ORDERS_SQL = """
-SELECT order_name, bucket, bucket_reason, address_flag, created_at, coins,
+SELECT order_name, bucket, bucket_reason, address_flag, watchlist, created_at, coins,
        amount, payment, fulfillment, risk_tag, customer_orders, is_returning,
        city, state, pincode, coin_only
   FROM public.silver_coin_order
  -- CAST because asyncpg cannot infer the type of a bare parameter
  -- used only in an IS NULL test, and fails the statement outright.
- WHERE (CAST(:bucket AS text) IS NULL OR bucket = CAST(:bucket AS text))
+ --
+ -- With no bucket asked for, bundle-no-coin rows are LEFT OUT: they
+ -- carry no coin, so including them in "all" would quietly inflate
+ -- every coin figure the list is read against.
+ WHERE (CASE WHEN CAST(:bucket AS text) IS NOT NULL THEN bucket = CAST(:bucket AS text)
+             ELSE bucket <> 'bundle_no_coin' END)
+   AND (NOT CAST(:watchlist AS boolean) OR watchlist IS NOT NULL)
  ORDER BY created_at DESC
  LIMIT :limit OFFSET :offset
 """
 
 _COIN_ORDERS_COUNT_SQL = """
 SELECT count(*) AS n FROM public.silver_coin_order
- WHERE (CAST(:bucket AS text) IS NULL OR bucket = CAST(:bucket AS text))
+ WHERE (CASE WHEN CAST(:bucket AS text) IS NOT NULL THEN bucket = CAST(:bucket AS text)
+             ELSE bucket <> 'bundle_no_coin' END)
+   AND (NOT CAST(:watchlist AS boolean) OR watchlist IS NOT NULL)
 """
 
 
@@ -14727,14 +14748,18 @@ async def get_coin_orders(
     # of JSON for a table nobody scrolls to the end of.
     limit: int = Query(default=1000, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
-    bucket: str | None = Query(default=None,
-                               pattern="^(shipped|coin_only|address_bad|call_list|ship_now)$"),
+    bucket: str | None = Query(
+        default=None,
+        pattern="^(shipped|coin_only|address_bad|call_list|ship_now|bundle_no_coin)$"),
+    watchlist: bool = Query(default=False),
 ) -> CoinOrdersResponse:
     """Silver-coin orders, newest first, paged, optionally one bucket."""
-    args = {"limit": limit, "offset": offset, "bucket": bucket}
+    args = {"limit": limit, "offset": offset, "bucket": bucket,
+            "watchlist": watchlist}
     result = await session.execute(text(_COIN_ORDERS_SQL), args)
     rows = [CoinOrderRow(**dict(r)) for r in result.mappings()]
-    total = await session.execute(text(_COIN_ORDERS_COUNT_SQL), {"bucket": bucket})
+    total = await session.execute(text(_COIN_ORDERS_COUNT_SQL),
+                                  {"bucket": bucket, "watchlist": watchlist})
     return CoinOrdersResponse(rows=rows, total=total.mappings().first()["n"],
                               offset=offset, limit=limit)
 

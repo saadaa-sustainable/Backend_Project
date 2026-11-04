@@ -359,8 +359,23 @@
            grid-template-columns: repeat(2, minmax(0,1fr)); }
   @media (min-width: 880px) { .strip { grid-template-columns: repeat(4, minmax(0,1fr)); } }
   .strip > div { background: var(--surface); padding: 15px 17px; }
-  .strip > div.pick { cursor: pointer; }
-  .strip > div.pick:hover { background: var(--muted); }
+  /* The dispatch desk's tab bar: a row of buckets, each with its
+     count in a pill, and the active one underlined. A tab bar beats
+     clicking the KPI cards because the whole set of destinations is
+     visible at once, with their sizes. */
+  .btabs { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 14px;
+           border-bottom: 1px solid var(--border); }
+  .btab { display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+          font: inherit; font-size: 13px; color: var(--text-2); background: none;
+          border: 0; border-bottom: 2px solid transparent; padding: 9px 14px;
+          margin-bottom: -1px; min-height: 44px; }
+  .btab:hover { color: var(--text); }
+  .btab[aria-selected="true"] { color: var(--text); font-weight: 650;
+                                border-bottom-color: var(--s3); }
+  .btab .pill { font-size: 11.5px; font-variant-numeric: tabular-nums;
+                background: var(--muted); border-radius: 999px; padding: 2px 8px;
+                color: var(--text-2); }
+  .btab[aria-selected="true"] .pill { background: var(--border); color: var(--text); }
   .strip .k { font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
               text-transform: uppercase; color: var(--text-3); }
   .strip .v { font-size: 26px; font-weight: 700; letter-spacing: -.025em; margin-top: 6px;
@@ -555,11 +570,9 @@
       <table id="coin-table"><thead id="coin-thead"></thead><tbody id="coin-tbody"></tbody></table>
     </div>
     <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft)">
-      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
-        <button type="button" id="coin-orders-btn">Show orders</button>
-        <span class="sub" id="coin-orders-span"></span>
-      </div>
-      <div style="margin-top:10px;overflow:auto" id="coin-orders-wrap" hidden>
+      <div class="btabs" id="coin-tabs"></div>
+      <div class="sub" id="coin-orders-span" style="margin-top:8px"></div>
+      <div style="margin-top:10px;overflow:auto" id="coin-orders-wrap">
         <table id="coin-orders-table"><thead id="coin-orders-thead"></thead>
           <tbody id="coin-orders-tbody"></tbody></table>
         <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
@@ -1697,37 +1710,28 @@ function drawCoins() {
   // orders carry no coin at all, which is why it is coloured apart.
   $("coin-dispatch").innerHTML = [
     ["Cleared to ship", num(d.total_ship_now), "not yet fulfilled",
-     "var(--good)", "ship_now"],
+     "var(--good)"],
     ["Held for COD call", num(d.total_call_list), "confirm before dispatch",
-     "var(--s3)", "call_list"],
+     "var(--s3)"],
     ["Held for address fix", num(d.total_address_bad), "address cannot be delivered",
-     "var(--bad)", "address_bad"],
+     "var(--bad)"],
     ["Already shipped", num(d.total_shipped),
      pc(d.total_coin_orders ? d.total_shipped / d.total_coin_orders : null, 0) +
-     " of coin orders", "", "shipped"],
+     " of coin orders", ""],
     ["Coin only", num(d.total_coin_only),
      d.total_coin_only ? "held \u00b7 coin and nothing else" : "none", "var(--bad)",
      "coin_only"],
     ["Bundle, no coin", num(d.total_bundle_no_coin),
      "2+ units, coin missing \u00b7 not a coin order", "var(--s3)", ""],
-  ].map(([k, v, sub, colour, bucket]) =>
-    '<div' + (bucket ? ' class="pick" data-bucket="' + bucket + '"' : "") + '>' +
-    '<div class="k">' + esc(k) + "</div>" +
+  ].map(([k, v, sub, colour]) =>
+    "<div><div class=\"k\">" + esc(k) + "</div>" +
     '<div class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" + v + "</div>" +
     '<div class="s">' + esc(sub) + "</div></div>").join("");
 
-  // Clicking a bucket filters the order list to it. The counts and the
-  // list then cannot disagree, because one drives the other.
-  $("coin-dispatch").onclick = e => {
-    const el = e.target.closest("[data-bucket]");
-    if (!el) return;
-    const b = el.getAttribute("data-bucket");
-    COIN_BUCKET = COIN_BUCKET === b ? null : b;
-    COIN_ROWS = []; COIN_TOTAL = null;
-    $("coin-orders-wrap").hidden = false;
-    $("coin-orders-btn").textContent = "Hide orders";
-    loadCoinOrders();
-  };
+  // The tab bar below is the selector now, so the cards are display
+  // only -- two ways to choose the same thing is one too many.
+  drawCoinTabs(d);
+  if (!COIN_ROWS.length) loadCoinOrders();
 
   // The arithmetic, left to right. Coin ORDERS and coin COUNT are
   // different numbers and the chain is where that stops being a
@@ -1775,11 +1779,14 @@ function drawCoins() {
 // JSON for a table most readers never open. Fetched on demand, a
 // thousand at a time.
 const COIN_PAGE = 1000;
-let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false, COIN_BUCKET = null;
+let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false;
+//: null means every coin order. "watchlist" is not a bucket -- it
+//: crosses them -- so it is sent as its own flag.
+let COIN_TAB = "ship_now";
 const BUCKET_LABEL = {
   ship_now: "Cleared to ship", call_list: "Held for COD call",
   address_bad: "Held for address fix", shipped: "Already shipped",
-  coin_only: "Coin only",
+  coin_only: "Coin only", bundle_no_coin: "Bundle, no coin",
 };
 
 function coinOrderCells(r) {
@@ -1821,11 +1828,7 @@ function drawCoinOrders() {
   $("coin-more").hidden = !more;
   $("coin-more-span").textContent = COIN_TOTAL == null ? "" :
     num(COIN_ROWS.length) + " of " + num(COIN_TOTAL) +
-    (COIN_BUCKET ? "  \u00b7  " + BUCKET_LABEL[COIN_BUCKET] + " only" : "") +
     (more ? "" : "  \u00b7  all loaded");
-  $("coin-orders-span").textContent = COIN_BUCKET
-    ? "filtered to " + BUCKET_LABEL[COIN_BUCKET] + " \u2014 click the card again to clear"
-    : "";
 }
 
 function loadCoinOrders() {
@@ -1834,7 +1837,8 @@ function loadCoinOrders() {
   $("coin-more").textContent = "Loading\u2026";
   fetch(apiBase() + "/admin/analytics/coins/orders?limit=" + COIN_PAGE +
         "&offset=" + COIN_ROWS.length +
-        (COIN_BUCKET ? "&bucket=" + encodeURIComponent(COIN_BUCKET) : ""))
+        (COIN_TAB === "watchlist" ? "&watchlist=true"
+          : COIN_TAB ? "&bucket=" + encodeURIComponent(COIN_TAB) : ""))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => {
       COIN_ROWS = COIN_ROWS.concat(d.rows);
@@ -1850,12 +1854,34 @@ function loadCoinOrders() {
     });
 }
 
-$("coin-orders-btn").onclick = () => {
-  const wrap = $("coin-orders-wrap");
-  wrap.hidden = !wrap.hidden;
-  $("coin-orders-btn").textContent = wrap.hidden ? "Show orders" : "Hide orders";
-  if (!wrap.hidden && !COIN_ROWS.length) loadCoinOrders();
-};
+function drawCoinTabs(d) {
+  // Ship now first, because it is the queue people work from.
+  const tabs = [
+    ["ship_now", "Ship now", d.total_ship_now],
+    ["call_list", "Call list", d.total_call_list],
+    ["address_bad", "Address issues", d.total_address_bad],
+    ["coin_only", "Coin only", d.total_coin_only],
+    ["bundle_no_coin", "Bundle, no coin", d.total_bundle_no_coin],
+    ["watchlist", "Watchlist", d.total_watchlist],
+    ["shipped", "Shipped", d.total_shipped],
+    [null, "All coin orders", d.total_coin_orders],
+  ];
+  $("coin-tabs").innerHTML = tabs.map(([k, label, n]) =>
+    '<button type="button" class="btab" role="tab" data-tab="' + (k || "") +
+    '" aria-selected="' + (COIN_TAB === k ? "true" : "false") + '">' +
+    esc(label) + '<span class="pill">' + num(n || 0) + "</span></button>").join("");
+  $("coin-tabs").onclick = e => {
+    const b = e.target.closest("[data-tab]");
+    if (!b) return;
+    const k = b.getAttribute("data-tab") || null;
+    if (k === COIN_TAB) return;
+    COIN_TAB = k;
+    COIN_ROWS = []; COIN_TOTAL = null;
+    drawCoinTabs(d);
+    loadCoinOrders();
+  };
+}
+
 $("coin-more").onclick = loadCoinOrders;
 
 // Re-fetch on a new cost rather than scaling client-side, so the figure

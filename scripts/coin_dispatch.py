@@ -143,6 +143,22 @@ def is_high_rto(prior_shipped: int, prior_rto: int) -> bool:
 
 # --- the decision -----------------------------------------------------
 
+def is_watchlisted(order: dict, repeat_buyer: bool) -> str | None:
+    """Why this order is on the watchlist, or None.
+
+    An OVERLAY, not a bucket: a watchlisted order still sits in Ship
+    now or the Call list and still has to be dispatched or called.
+    This only says it is worth a second look, so it must never remove
+    an order from the queue it belongs in.
+    """
+    if order.get("fake_order") and order.get("payment") == "COD" \
+            and not order.get("is_returning"):
+        return "Fake Order tag, new customer COD"
+    if repeat_buyer:
+        return "repeat buyer, same phone or address"
+    return None
+
+
 def classify(order: dict, hist: dict | None, dup_cod: bool) -> tuple[str, str | None]:
     """(bucket, reason). See the module docstring for the order.
 
@@ -150,6 +166,11 @@ def classify(order: dict, hist: dict | None, dup_cod: bool) -> tuple[str, str | 
     and the address verdict. `hist` is the customer's record before
     this campaign, or None when they have none.
     """
+    # Not a coin order at all -- it is here because it LOOKS eligible
+    # and went out without one. Outside the five-way partition.
+    if order.get("coins", 1) == 0:
+        return "bundle_no_coin", "2+ units, no coin"
+
     if (order.get("fulfillment") or "").lower() == "fulfilled":
         return "shipped", None
 
