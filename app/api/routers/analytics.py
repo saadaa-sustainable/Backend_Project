@@ -14551,6 +14551,9 @@ class CoinDay(BaseModel):
     partial: int
     cod: int
     bundle_no_coin: int
+    ship_now: int
+    call_list: int
+    address_bad: int
 
 
 class CoinsResponse(BaseModel):
@@ -14581,6 +14584,12 @@ class CoinsResponse(BaseModel):
     total_prepaid: int
     total_partial: int
     total_cod: int
+    #: The dispatch buckets. Every counted coin order is in exactly
+    #: one of shipped / coin_only / address_bad / call_list / ship_now,
+    #: so these five sum to total_coin_orders.
+    total_ship_now: int
+    total_call_list: int
+    total_address_bad: int
     #: NOT part of the coin counts -- these orders carry no coin at
     #: all. Orders that looked eligible and went out without one.
     total_bundle_no_coin: int
@@ -14596,7 +14605,10 @@ SELECT day_ist AS day,
        COALESCE(sum(coin_prepaid_orders), 0)::int AS prepaid,
        COALESCE(sum(coin_partial_orders), 0)::int AS partial,
        COALESCE(sum(coin_cod_orders), 0)::int     AS cod,
-       COALESCE(sum(bundle_no_coin_orders), 0)::int AS bundle_no_coin
+       COALESCE(sum(bundle_no_coin_orders), 0)::int AS bundle_no_coin,
+       COALESCE(sum(coin_ship_now_orders), 0)::int    AS ship_now,
+       COALESCE(sum(coin_call_list_orders), 0)::int   AS call_list,
+       COALESCE(sum(coin_address_bad_orders), 0)::int AS address_bad
   FROM public.hourly_campaign_tracker
  GROUP BY day_ist
 HAVING COALESCE(sum(silver_coin_orders), 0) > 0
@@ -14626,7 +14638,9 @@ async def get_coins(
                 cost=r["coins"] * coin_cost,
                 coin_only=r["coin_only"], shipped=r["shipped"],
                 prepaid=r["prepaid"], partial=r["partial"], cod=r["cod"],
-                bundle_no_coin=r["bundle_no_coin"])
+                bundle_no_coin=r["bundle_no_coin"],
+                ship_now=r["ship_now"], call_list=r["call_list"],
+                address_bad=r["address_bad"])
         for r in rows
     ]
     t_orders = sum(d.orders for d in days)
@@ -14646,11 +14660,21 @@ async def get_coins(
         total_partial=sum(d.partial for d in days),
         total_cod=sum(d.cod for d in days),
         total_bundle_no_coin=sum(d.bundle_no_coin for d in days),
+        total_ship_now=sum(d.ship_now for d in days),
+        total_call_list=sum(d.call_list for d in days),
+        total_address_bad=sum(d.address_bad for d in days),
     )
 
 
 class CoinOrderRow(BaseModel):
     order_name: str | None
+    #: shipped | coin_only | address_bad | call_list | ship_now
+    bucket: str | None
+    #: Why it is held, in the words the person acting on it needs.
+    bucket_reason: str | None
+    #: Deliverable but worth knowing -- a shop or a hostel room. Never
+    #: a reason to hold.
+    address_flag: str | None
     created_at: datetime
     coins: int
     amount: float | None
@@ -14677,11 +14701,20 @@ class CoinOrdersResponse(BaseModel):
 
 
 _COIN_ORDERS_SQL = """
-SELECT order_name, created_at, coins, amount, payment, fulfillment,
-       risk_tag, customer_orders, is_returning, city, state, pincode, coin_only
+SELECT order_name, bucket, bucket_reason, address_flag, created_at, coins,
+       amount, payment, fulfillment, risk_tag, customer_orders, is_returning,
+       city, state, pincode, coin_only
   FROM public.silver_coin_order
+ -- CAST because asyncpg cannot infer the type of a bare parameter
+ -- used only in an IS NULL test, and fails the statement outright.
+ WHERE (CAST(:bucket AS text) IS NULL OR bucket = CAST(:bucket AS text))
  ORDER BY created_at DESC
  LIMIT :limit OFFSET :offset
+"""
+
+_COIN_ORDERS_COUNT_SQL = """
+SELECT count(*) AS n FROM public.silver_coin_order
+ WHERE (CAST(:bucket AS text) IS NULL OR bucket = CAST(:bucket AS text))
 """
 
 
@@ -14694,13 +14727,14 @@ async def get_coin_orders(
     # of JSON for a table nobody scrolls to the end of.
     limit: int = Query(default=1000, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
+    bucket: str | None = Query(default=None,
+                               pattern="^(shipped|coin_only|address_bad|call_list|ship_now)$"),
 ) -> CoinOrdersResponse:
-    """Silver-coin orders, newest first, paged."""
-    result = await session.execute(text(_COIN_ORDERS_SQL),
-                                   {"limit": limit, "offset": offset})
+    """Silver-coin orders, newest first, paged, optionally one bucket."""
+    args = {"limit": limit, "offset": offset, "bucket": bucket}
+    result = await session.execute(text(_COIN_ORDERS_SQL), args)
     rows = [CoinOrderRow(**dict(r)) for r in result.mappings()]
-    total = await session.execute(
-        text("SELECT count(*) AS n FROM public.silver_coin_order"))
+    total = await session.execute(text(_COIN_ORDERS_COUNT_SQL), {"bucket": bucket})
     return CoinOrdersResponse(rows=rows, total=total.mappings().first()["n"],
                               offset=offset, limit=limit)
 

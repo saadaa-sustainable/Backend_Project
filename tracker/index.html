@@ -359,6 +359,8 @@
            grid-template-columns: repeat(2, minmax(0,1fr)); }
   @media (min-width: 880px) { .strip { grid-template-columns: repeat(4, minmax(0,1fr)); } }
   .strip > div { background: var(--surface); padding: 15px 17px; }
+  .strip > div.pick { cursor: pointer; }
+  .strip > div.pick:hover { background: var(--muted); }
   .strip .k { font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
               text-transform: uppercase; color: var(--text-3); }
   .strip .v { font-size: 26px; font-weight: 700; letter-spacing: -.025em; margin-top: 6px;
@@ -1689,22 +1691,43 @@ function drawCoins() {
   // The dispatch desk's breakdown of the SAME coin orders, plus the
   // one figure that is not a coin order at all. Kept in its own strip
   // so it reads as a breakdown rather than as more headline numbers.
-  const unful = d.total_coin_orders - d.total_shipped;
+  // The desk's seven buckets. Five of them -- ship now, call list,
+  // address issues, coin only, shipped -- partition the coin orders
+  // exactly, so they sum to the total. Bundle-no-coin does NOT: those
+  // orders carry no coin at all, which is why it is coloured apart.
   $("coin-dispatch").innerHTML = [
+    ["Cleared to ship", num(d.total_ship_now), "not yet fulfilled",
+     "var(--good)", "ship_now"],
+    ["Held for COD call", num(d.total_call_list), "confirm before dispatch",
+     "var(--s3)", "call_list"],
+    ["Held for address fix", num(d.total_address_bad), "address cannot be delivered",
+     "var(--bad)", "address_bad"],
     ["Already shipped", num(d.total_shipped),
      pc(d.total_coin_orders ? d.total_shipped / d.total_coin_orders : null, 0) +
-     " of coin orders", ""],
-    ["Not yet shipped", num(unful), "still to dispatch", ""],
+     " of coin orders", "", "shipped"],
     ["Coin only", num(d.total_coin_only),
-     d.total_coin_only ? "coin and nothing else" : "every order had a product", ""],
-    // Deliberately last and marked: these orders carry NO coin, so
-    // they are not a slice of the figures beside them.
+     d.total_coin_only ? "held \u00b7 coin and nothing else" : "none", "var(--bad)",
+     "coin_only"],
     ["Bundle, no coin", num(d.total_bundle_no_coin),
-     "2+ units, coin missing", "var(--s3)"],
-  ].map(([k, v, sub, colour]) =>
-    '<div><div class="k">' + esc(k) + "</div>" +
+     "2+ units, coin missing \u00b7 not a coin order", "var(--s3)", ""],
+  ].map(([k, v, sub, colour, bucket]) =>
+    '<div' + (bucket ? ' class="pick" data-bucket="' + bucket + '"' : "") + '>' +
+    '<div class="k">' + esc(k) + "</div>" +
     '<div class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" + v + "</div>" +
     '<div class="s">' + esc(sub) + "</div></div>").join("");
+
+  // Clicking a bucket filters the order list to it. The counts and the
+  // list then cannot disagree, because one drives the other.
+  $("coin-dispatch").onclick = e => {
+    const el = e.target.closest("[data-bucket]");
+    if (!el) return;
+    const b = el.getAttribute("data-bucket");
+    COIN_BUCKET = COIN_BUCKET === b ? null : b;
+    COIN_ROWS = []; COIN_TOTAL = null;
+    $("coin-orders-wrap").hidden = false;
+    $("coin-orders-btn").textContent = "Hide orders";
+    loadCoinOrders();
+  };
 
   // The arithmetic, left to right. Coin ORDERS and coin COUNT are
   // different numbers and the chain is where that stops being a
@@ -1752,14 +1775,27 @@ function drawCoins() {
 // JSON for a table most readers never open. Fetched on demand, a
 // thousand at a time.
 const COIN_PAGE = 1000;
-let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false;
+let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false, COIN_BUCKET = null;
+const BUCKET_LABEL = {
+  ship_now: "Cleared to ship", call_list: "Held for COD call",
+  address_bad: "Held for address fix", shipped: "Already shipped",
+  coin_only: "Coin only",
+};
 
 function coinOrderCells(r) {
   const cust = r.is_returning == null ? "\u2014"
     : r.is_returning ? "Returning \u00b7 " + num(r.customer_orders) : "New";
   const place = [r.city, r.state].filter(Boolean).join(", ") || "\u2014";
-  return "<td>" + esc(r.order_name || "\u2014") +
-         (r.coin_only ? ' <span class="tag">coin only</span>' : "") + "</td>" +
+  const held = r.bucket === "call_list" || r.bucket === "address_bad" ||
+               r.bucket === "coin_only";
+  return "<td>" + esc(r.order_name || "\u2014") + "</td>" +
+    '<td style="color:' + (r.bucket === "ship_now" ? "var(--good)"
+      : r.bucket === "address_bad" ? "var(--bad)"
+      : held ? "var(--s3)" : "var(--text-2)") + '">' +
+    esc(BUCKET_LABEL[r.bucket] || r.bucket || "\u2014") +
+    (r.bucket_reason ? '<span class="sub2"> ' + esc(r.bucket_reason) + "</span>" : "") +
+    (r.address_flag ? '<span class="sub2"> ' + esc(r.address_flag) + "</span>" : "") +
+    "</td>" +
     "<td>" + ist(r.created_at) + "</td>" +
     "<td>" + esc(r.payment || "\u2014") + "</td>" +
     // A blank risk tag on a COD order means GoKwik never scored it,
@@ -1776,7 +1812,7 @@ function coinOrderCells(r) {
 
 function drawCoinOrders() {
   $("coin-orders-thead").innerHTML =
-    "<tr><th>Order</th><th>Created (IST)</th><th>Payment</th><th>Risk</th>" +
+    "<tr><th>Order</th><th>Bucket</th><th>Created (IST)</th><th>Payment</th><th>Risk</th>" +
     "<th>Customer</th><th>Amount</th><th>Coins</th><th>City</th>" +
     "<th>Pincode</th><th>Fulfillment</th></tr>";
   $("coin-orders-tbody").innerHTML =
@@ -1785,7 +1821,11 @@ function drawCoinOrders() {
   $("coin-more").hidden = !more;
   $("coin-more-span").textContent = COIN_TOTAL == null ? "" :
     num(COIN_ROWS.length) + " of " + num(COIN_TOTAL) +
+    (COIN_BUCKET ? "  \u00b7  " + BUCKET_LABEL[COIN_BUCKET] + " only" : "") +
     (more ? "" : "  \u00b7  all loaded");
+  $("coin-orders-span").textContent = COIN_BUCKET
+    ? "filtered to " + BUCKET_LABEL[COIN_BUCKET] + " \u2014 click the card again to clear"
+    : "";
 }
 
 function loadCoinOrders() {
@@ -1793,7 +1833,8 @@ function loadCoinOrders() {
   COIN_BUSY = true;
   $("coin-more").textContent = "Loading\u2026";
   fetch(apiBase() + "/admin/analytics/coins/orders?limit=" + COIN_PAGE +
-        "&offset=" + COIN_ROWS.length)
+        "&offset=" + COIN_ROWS.length +
+        (COIN_BUCKET ? "&bucket=" + encodeURIComponent(COIN_BUCKET) : ""))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => {
       COIN_ROWS = COIN_ROWS.concat(d.rows);

@@ -247,6 +247,11 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- window to refresh them.
     coin_only_orders        integer,
     coin_shipped_orders     integer,
+    -- The dispatch buckets, so the KPI strip does not have to read
+    -- every order row to count them.
+    coin_ship_now_orders    integer,
+    coin_call_list_orders   integer,
+    coin_address_bad_orders integer,
     coin_prepaid_orders     integer,
     coin_partial_orders     integer,
     coin_cod_orders         integer,
@@ -299,6 +304,9 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_prepaid_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_shipped_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_only_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_address_bad_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_call_list_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_ship_now_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_qty integer",
@@ -329,7 +337,8 @@ COLUMNS = [
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
     "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders", "silver_coin_qty",
-    "coin_only_orders", "coin_shipped_orders", "coin_prepaid_orders",
+    "coin_only_orders", "coin_shipped_orders", "coin_ship_now_orders",
+    "coin_call_list_orders", "coin_address_bad_orders", "coin_prepaid_orders",
     "coin_partial_orders", "coin_cod_orders", "bundle_no_coin_orders",
     "pnl_cancelled_orders", "pnl_cancelled_sales", "pnl_cancelled_qty",
     "pnl_refunds", "pnl_cancelled_refunded",
@@ -530,15 +539,31 @@ CREATE TABLE IF NOT EXISTS {COIN_TABLE} (
     state           text,
     pincode         text,
     coin_only       boolean,
+    -- Exactly one of: shipped, coin_only, address_bad, call_list,
+    -- ship_now. The reason is stored beside it so a held order can be
+    -- explained to the person who has to act on it.
+    bucket          text,
+    bucket_reason   text,
+    -- "flag" means deliverable but worth knowing -- a shop or a
+    -- hostel room. It never holds the order.
+    address_flag    text,
     fetched_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_coin_order_created ON {COIN_TABLE} (created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_coin_order_day ON {COIN_TABLE} (day_ist);
+-- CREATE TABLE IF NOT EXISTS does nothing to a table that already
+-- exists, so every column added after the first deploy needs its own
+-- ALTER here or the insert fails on a warehouse built yesterday.
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bucket text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bucket_reason text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address_flag text;
+CREATE INDEX IF NOT EXISTS ix_coin_order_bucket ON {COIN_TABLE} (bucket);
 """
 
 COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "units",
                 "amount", "payment", "fulfillment", "risk_tag", "customer_orders",
-                "is_returning", "city", "state", "pincode", "coin_only"]
+                "is_returning", "city", "state", "pincode", "coin_only",
+                "bucket", "bucket_reason", "address_flag"]
 
 COIN_UPSERT = f"""
 INSERT INTO {COIN_TABLE} ({", ".join(COIN_COLUMNS)}) VALUES %s
@@ -549,6 +574,59 @@ ON CONFLICT (order_id) DO UPDATE SET
 
 #: GoKwik writes exactly one of these onto a COD checkout.
 RISK_TAGS = ("high risk", "medium risk", "low risk")
+
+
+#: What each customer did BEFORE this campaign: how many parcels
+#: actually arrived, and how many came back. Read from our own
+#: warehouse rather than from Shopify, because Shopify's order
+#: object carries no delivery outcome -- only the courier knows, and
+#: that lands in shopify_fulfillments.
+CUSTOMER_HISTORY_SQL = """
+WITH prior AS (
+    SELECT o.customer_id,
+           o.name,
+           COALESCE(f.orders_delivered, 0) > 0 AS delivered,
+           (COALESCE(f.orders_delivered, 0) = 0
+            -- tags is jsonb, so cast to text and match as a string: the
+            -- tag vocabulary is not fixed and an exact-element test would
+            -- miss "RTO-Delivered" and the like.
+            AND (lower(COALESCE(o.tags::text, '')) LIKE '%%rto%%'
+                 OR lower(COALESCE(o.return_status, '')) LIKE '%%return%%origin%%'))
+               AS rto,
+           o.fulfillment_status IS NOT NULL AS shipped,
+           row_number() OVER (PARTITION BY o.customer_id
+                              ORDER BY o.created_at DESC) AS rn
+      FROM public.shopify_orders o
+      LEFT JOIN public.shopify_fulfillments f ON f.order_name = o.name
+     WHERE o.customer_id = ANY(%s)
+       AND o.created_at < %s
+       AND o.cancelled_at IS NULL
+)
+SELECT customer_id,
+       count(*) FILTER (WHERE delivered) AS delivered,
+       count(*) FILTER (WHERE shipped)   AS shipped,
+       count(*) FILTER (WHERE rto)       AS rto
+  FROM prior
+ WHERE rn <= 10
+ GROUP BY customer_id
+"""
+
+
+def fetch_customer_history(customer_ids: list[str]) -> dict[str, dict]:
+    """Prior delivery and RTO counts, over each customer's last 10 orders."""
+    if not customer_ids:
+        return {}
+    out: dict[str, dict] = {}
+    # Chunked: the Supabase pooler drops an oversized statement, and a
+    # busy day carries a few thousand distinct customers.
+    with connect() as conn:
+        for i in range(0, len(customer_ids), 1000):
+            with conn.cursor() as cur:
+                cur.execute(CUSTOMER_HISTORY_SQL,
+                            (customer_ids[i:i + 1000], COIN_CAMPAIGN_START))
+                for cid, delivered, shipped, rto in cur.fetchall():
+                    out[cid] = {"delivered": delivered, "shipped": shipped, "rto": rto}
+    return out
 
 
 def risk_of(tags: list[str] | None) -> str | None:
@@ -752,7 +830,7 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         email
         displayFinancialStatus
         displayFulfillmentStatus
-        shippingAddress { city province zip }
+        shippingAddress { address1 address2 city province zip phone }
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -855,6 +933,15 @@ async def fetch_orders(client, store, day: date,
                             "state": addr.get("province"),
                             "pincode": addr.get("zip"),
                             "coin_only": units == 0,
+                            # Classified after the day is gathered: the
+                            # duplicate-COD test needs the other orders
+                            # of the same day, which do not exist yet.
+                            "_customer_id": (cust.get("id") or None),
+                            "_address1": addr.get("address1"),
+                            "_address2": addr.get("address2"),
+                            "_phone": (addr.get("phone") or "").strip(),
+                            "_fake_order": "fake order" in {
+                                str(t).strip().lower() for t in (n.get("tags") or [])},
                         })
                     if (n.get("displayFulfillmentStatus") or "").upper() == "FULFILLED":
                         b["coin_shipped_orders"] += 1
@@ -1173,6 +1260,41 @@ async def fetch_basket_mix(client, store, day: date) -> dict[datetime, dict]:
     return out
 
 
+def classify_coin_rows(coin_rows: list[dict]) -> None:
+    """Put every coin order in exactly one bucket, in place.
+
+    Runs AFTER the day is gathered, because the duplicate-same-day-COD
+    test needs to see the day's other orders.
+    """
+    from coin_dispatch import address_verdict, classify  # noqa: PLC0415
+
+    hist = fetch_customer_history(
+        sorted({r["_customer_id"] for r in coin_rows if r.get("_customer_id")}))
+
+    # Two or more COD orders on one day to the same phone or address.
+    seen: dict[tuple, int] = {}
+    for r in coin_rows:
+        if r.get("payment") != "COD":
+            continue
+        key = (r["day_ist"], r.get("_phone") or (r.get("_address1") or "").lower())
+        if key[1]:
+            seen[key] = seen.get(key, 0) + 1
+
+    for r in coin_rows:
+        verdict, reason = address_verdict(r.pop("_address1", None),
+                                          r.pop("_address2", None))
+        r["address_flag"] = reason if verdict == "flag" else None
+        key = (r["day_ist"], r.get("_phone") or "")
+        dup = r.get("payment") == "COD" and key[1] and seen.get(key, 0) > 1
+        bucket, why = classify(
+            {**r, "address_verdict": verdict, "address_reason": reason,
+             "fake_order": r.get("_fake_order")},
+            hist.get(r.get("_customer_id") or ""), bool(dup))
+        r["bucket"], r["bucket_reason"] = bucket, why
+        for k in ("_customer_id", "_phone", "_fake_order"):
+            r.pop(k, None)
+
+
 async def build_day(client, store, day: date,
                     coin_rows: list | None = None) -> list[dict]:
     sessions, sales, orders, meta, baskets = await asyncio.gather(
@@ -1291,6 +1413,21 @@ async def main() -> int:
         for day in days:
             coin_rows: list[dict] = []
             rows = await build_day(client, store, day, coin_rows)
+            if coin_rows:
+                classify_coin_rows(coin_rows)
+                # Fold the buckets back onto the hour each order
+                # belongs to, so the KPI strip reads the hourly table
+                # rather than scanning every order row.
+                by_hour: dict[int, dict] = {}
+                for r in coin_rows:
+                    h = r["created_at"].astimezone(IST).hour
+                    b = by_hour.setdefault(h, {})
+                    b[r["bucket"]] = b.get(r["bucket"], 0) + 1
+                for row in rows:
+                    b = by_hour.get(row["hour_of_day"], {})
+                    row["coin_ship_now_orders"] = b.get("ship_now", 0)
+                    row["coin_call_list_orders"] = b.get("call_list", 0)
+                    row["coin_address_bad_orders"] = b.get("address_bad", 0)
             sess = sum(r.get("sessions") or 0 for r in rows)
             spend = sum((r.get("meta_spend") or 0) + (r.get("kwikchat_spend") or 0)
                         + (r.get("google_spend") or 0) for r in rows)
@@ -1306,7 +1443,11 @@ async def main() -> int:
                 print(f"          ShopifyQL cross-check Rs {crosscheck:,.0f} "
                       f"({drift:+.1f}%)")
             if coin_rows:
-                print(f"          {len(coin_rows):,} silver-coin orders listed")
+                tally: dict[str, int] = {}
+                for r in coin_rows:
+                    tally[r["bucket"]] = tally.get(r["bucket"], 0) + 1
+                print(f"          {len(coin_rows):,} silver-coin orders listed  "
+                      + " ".join(f"{k} {v}" for k, v in sorted(tally.items())))
             if not args.dry_run:
                 total += write(rows, coin_rows)
 
