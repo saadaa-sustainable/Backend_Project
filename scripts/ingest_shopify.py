@@ -285,6 +285,24 @@ query Orders($first: Int!, $after: String, $query: String) {
         tags
         cancelReason
         cancelledAt
+        # Where it ships, taken at ORDER time.
+        #
+        # The only other source of a region is shopify_fulfillments,
+        # which has a row only once the parcel moves -- so state
+        # coverage decays with order age: 92.6% at four days old, 23.1%
+        # on the day after, 1.6% for yesterday's orders. A state-wise
+        # report on a campaign that ran two days ago therefore saw
+        # almost nothing, while Shopify itself had the address all
+        # along -- an UNFULFILLED order still carries one.
+        #
+        # province is the state name, provinceCode its two-letter form.
+        shippingAddress {
+          province
+          provinceCode
+          city
+          zip
+          country
+        }
         refunds(first: 10) {
           id
           createdAt
@@ -1085,9 +1103,18 @@ async def run_for_admin(
     # __asyncpg_stmt_N__ that the next backend has never seen ->
     # "prepared statement does not exist" mid-write, dropping the
     # whole batch. Live-caught 2026-09-02 mid-orders-insert.
+    #
+    # statement_timeout, explicitly: the server default is 2 MINUTES and
+    # this script never raised it, so a single 500-row insert into
+    # raw_dump_shopify died the moment the buffer cache went cold --
+    # cache hit ratio 64 pct against 256MB of shared_buffers, and the
+    # same fetch that took 188s this morning could not finish one batch.
+    # The fetch is the expensive half; losing it to a write timeout
+    # wastes the API calls as well as the time.
     conn = await asyncpg.connect(
         _to_asyncpg_dsn(database_url),
         statement_cache_size=0,
+        server_settings={"statement_timeout": "900000"},
     )
     any_error = False
     items_so_far = 0
@@ -1636,8 +1663,16 @@ async def _run_and_report(
         # transaction pooler used by the existing ingestion path.
         conn = await asyncpg.connect(
             _to_asyncpg_dsn(database_url), statement_cache_size=0,
-            timeout=10, command_timeout=150,
+            timeout=10, command_timeout=900,
         )
+        # SET, not a startup server_setting: Supavisor pools in
+        # transaction mode and drops startup parameters, so the
+        # connection kept the server's 2-MINUTE default. A 500-row
+        # insert into raw_dump_shopify exceeds that whenever the buffer
+        # cache is cold -- 64 pct hit ratio against 256MB of
+        # shared_buffers -- and the whole fetch is thrown away on the
+        # write.
+        await conn.execute("SET statement_timeout = '900s'")
         try:
             if not index_ready:
                 await _ensure_unique_index(conn)

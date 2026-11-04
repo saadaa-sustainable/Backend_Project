@@ -89,8 +89,22 @@ ALTER TABLE public.ad_media
 ALTER TABLE public.ad_media
     ADD COLUMN IF NOT EXISTS landing_page_source text;
 
-CREATE INDEX IF NOT EXISTS ix_ad_media_landing
-    ON public.ad_media (landing_page_url);
+-- NOT a plain btree on landing_page_url.
+--
+-- Click-to-WhatsApp ads put the whole prefilled message in the query
+-- string: seven adcreatives carry a landing_page_url over 2,704 bytes,
+-- the longest 7,081, and a btree index row cannot exceed 1/3 of an 8kB
+-- page. The rebuild died on it with ProgramLimitExceeded. The TRUNCATE
+-- and the INSERT share one transaction, so the table kept its previous
+-- contents rather than emptying -- it goes stale, it does not vanish.
+--
+-- Nothing looks a full URL up by equality anyway. Every reader either
+-- SELECTs the column or asks whether it IS NULL (the backfill in
+-- scripts/backfill_ad_landing_urls.py), so the index that earns its
+-- keep is a partial one on that predicate.
+DROP INDEX IF EXISTS public.ix_ad_media_landing;
+CREATE INDEX IF NOT EXISTS ix_ad_media_landing_missing
+    ON public.ad_media (ad_id) WHERE landing_page_url IS NULL;
 """
 
 

@@ -62,7 +62,11 @@ def test_organic_ig_rule_needs_utm_content_and_the_cte_exposes_it():
 def test_revenue_prefers_shopify_and_falls_back_to_ga4():
     """The page is GA4's; the money is Shopify's wherever it joins."""
     assert "COALESCE(s.total_price, g.revenue)" in analytics._LP_LAST_CLICK_SQL
-    assert "COALESCE(s.utm_source, g.last_source)" in analytics._LP_LAST_CLICK_SQL
+    # The UTM is Shopify's alone, with no fallback: GA4's last_source
+    # was a second answer to a question our own mapping settles, and it
+    # has been dropped from the database.
+    assert "s.utm_source" in analytics._LP_LAST_CLICK_SQL
+    assert "g.last_source" not in analytics._LP_LAST_CLICK_SQL
 
 
 def test_url_normaliser_matches_the_gold_path_rule():

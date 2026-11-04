@@ -109,9 +109,22 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    # GA4 lands the current day incomplete, so yesterday is the last
-    # day worth storing -- the same cutoff fetch_ga4_daily uses.
-    hi = date.today() - timedelta(days=1)
+    # TODAY IS INCLUDED, and it is incomplete by construction.
+    #
+    # This used to stop at yesterday, which left the hourly tracker
+    # showing a dash for ARPU all day -- the one metric on a page where
+    # every other figure is a running total of a part-finished day. GA4
+    # does answer for today (checked against the tracker: its sessions
+    # and purchases for the day so far land within a percent of the
+    # Shopify figures), so the row is worth storing and labelling rather
+    # than withholding.
+    #
+    # Safe because this runs nightly over a 35-day window: the partial
+    # row written during the day is overwritten by the complete one on
+    # the next run. Between runs it is as stale as the moment it was
+    # fetched, which is why `fetched_at` is stored and the API reports
+    # it -- the same treatment Google spend already gets.
+    hi = date.today()
     lo = hi - timedelta(days=args.days - 1)
     client = _client()
 

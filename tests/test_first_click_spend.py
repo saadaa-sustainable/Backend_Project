@@ -12,7 +12,10 @@ def db():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
-        CREATE TABLE ga4_order_attribution (
+        -- shopify_order_clicks, not ga4_order_attribution: the order
+        -- book and the LAST click are Shopify's, and GA4 supplies only
+        -- the first click, reached by transaction_id.
+        CREATE TABLE shopify_order_clicks (
             order_at TEXT, first_source TEXT, last_source TEXT,
             first_ad_id TEXT, last_ad_id TEXT, first_adset_id TEXT, last_adset_id TEXT,
             revenue REAL, days_to_convert INTEGER, total_sessions INTEGER);
@@ -40,7 +43,7 @@ def db():
         ("2026-10-01 15:00:00", "idle", "b", 90),
     ]
     for at, first, last, revenue in orders:
-        conn.execute("INSERT INTO ga4_order_attribution VALUES (?,?,?,?,?,?,?,?,?,?)",
+        conn.execute("INSERT INTO shopify_order_clicks VALUES (?,?,?,?,?,?,?,?,?,?)",
                      (at, "META", "META", first, last, first, last, revenue, 20, 3))
     spend = [
         ("a", "2026-09-30", 9999), ("a", "2026-10-01", 1100),
