@@ -346,12 +346,56 @@
   .led-bar { display: flex; align-items: center; gap: 11px; padding: 6px 0; }
   .led-bar .l { width: 150px; flex-shrink: 0; font-size: 12.5px; color: var(--text-2); }
   .led-bar .l em { font-style: normal; font-size: 10.5px; color: var(--text-3); margin-left: 4px; }
-  .led-bar .t { flex-grow: 1; height: 8px; background: var(--muted); border-radius: 3px;
-                overflow: hidden; min-width: 40px; }
+  .led-bar .t { position: relative; flex-grow: 1; height: 8px; background: var(--muted);
+                border-radius: 3px; overflow: hidden; min-width: 40px; }
+  /* Where the comparison day sat on the same scale. A notch rather
+     than a second bar: the question is "more or less than last time",
+     and two stacked bars answer it worse than one line to cross. */
+  .led-bar .t > b { position: absolute; top: -2px; bottom: -2px; width: 2px;
+                    background: var(--text-3); opacity: .75; border-radius: 1px; }
   .led-bar .t > span { display: block; height: 100%; background: var(--bad);
                        border-radius: 3px; }
+  /* Ad spend is three platforms, so its bar is cut into three. The
+     segments share the deduction red and separate by weight, because
+     three unrelated hues would read as three unrelated things rather
+     than as parts of one number. */
+  .led-bar .t > span.seg { display: flex; }
+  .led-bar .t > span.seg > i { display: block; height: 100%; }
+  .sw-meta { background: var(--bad); }
+  /* Mixed toward the TEXT colour, not the surface: against a dark
+     surface a 34% mix all but disappears, and the smallest platform is
+     the one whose swatch most needs to be findable. */
+  .sw-google { background: color-mix(in srgb, var(--bad) 66%, var(--text-3)); }
+  .sw-kwik { background: color-mix(in srgb, var(--bad) 34%, var(--text-3)); }
+  /* Named underneath, indented to start where the bar starts: 150px of
+     label column plus the 11px gap. */
+  .led-split { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 2px 0 8px 161px;
+               font-size: 11.5px; color: var(--text-3); }
+  .led-split > span { display: inline-flex; align-items: baseline; gap: 6px; }
+  .led-split i { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0;
+                 transform: translateY(1px); }
+  .led-split strong { font-weight: 650; color: var(--text-2);
+                      font-variant-numeric: tabular-nums; }
+  .led-split em { font-style: normal; }
+  @media (max-width: 760px) { .led-split { margin-left: 0; } }
   .led-bar .v { width: 100px; text-align: right; flex-shrink: 0; font-size: 12.5px;
                 font-variant-numeric: tabular-nums; color: var(--bad); }
+  /* The comparison gets its own column rather than sitting inside the
+     value: run together, two amounts in the same red read as one
+     number that has been corrupted. */
+  .led-bar .wasc { width: 92px; text-align: right; flex-shrink: 0; font-size: 11.5px;
+                   font-variant-numeric: tabular-nums; color: var(--text-3); }
+  .led-bar .chg { width: 62px; text-align: right; flex-shrink: 0;
+                  font-size: 11px; font-variant-numeric: tabular-nums; }
+  /* Inside a ledger row the change sits after the value rather than in
+     a column of its own, and an inline span ignores a width -- which
+     ran the three figures together into one unreadable string. */
+  .led-row .chg { display: inline-block; margin-left: 10px; font-size: 11px;
+                  font-variant-numeric: tabular-nums; }
+  /* Below this the three number columns and the track cannot all fit.
+     The track is the one to drop: it is a sense of scale, and the
+     figures beside it are the thing being compared. */
+  @media (max-width: 920px) { .led-bar .t { display: none; } }
   .led-box { border: 1px solid var(--border-soft); border-radius: 12px; padding: 16px 18px; }
   .led-box h4 { margin: 0 0 10px; font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
                 text-transform: uppercase; color: var(--text-3); }
@@ -1661,6 +1705,13 @@ function computePnl(r, a) {
   // never an overcharge.
   const coinQty = r.silver_coin_qty != null ? r.silver_coin_qty : coinOrders;
   const adSpend = r.spend || 0;
+  // The three platforms behind that one figure. Kept separate rather
+  // than re-summed: `spend` is what the API computed and is the number
+  // the rest of the P&L is built on, so a component that goes missing
+  // must show as a gap in the split, never as a quietly smaller total.
+  const metaSpend = r.meta_spend;
+  const googleSpend = r.google_spend;
+  const kwikSpend = r.kwikchat_spend;
 
   // Cancellation used to be a flat 5% of sales. It is counted from the
   // orders now, so the deduction is the real one and the rate is an
@@ -1723,6 +1774,7 @@ function computePnl(r, a) {
   const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
   return { sales, orders, units, coinOrders, coinQty, adSpend, cancellation,
+           metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
@@ -2652,20 +2704,48 @@ $("x-pnl").onclick = () => {
   // -- the same line on the baseline day. Four columns keep that
   // reading order, which is the whole point of the section. Read whole,
   // a row would come out as "Cancelled, not refunded40 orders - 4.2%".
-  const sel = "#pnl-lines .led-row, #pnl-lines .led-bar, #pnl-lines .led-head";
+  const sel = "#pnl-lines .led-row, #pnl-lines .led-bar, #pnl-lines .led-head, " +
+              "#pnl-lines .led-split > span, #pnl-lines .led-sub > span";
   const rows = [...document.querySelectorAll(sel)].map(r => {
+    // The ad-spend split is not a ledger line: it is three platforms
+    // under one, written as label / share / amount. Indented in the
+    // file so it still reads as a breakdown rather than as three more
+    // deductions that would double-count if someone summed the column.
+    // Two kinds of sub-line hang off the spine: the ad-spend split
+    // (three platforms under one deduction) and the comparison and
+    // per-unit lines under a total. Neither is a ledger line, so both
+    // are indented in the file -- summing that column must not pick
+    // them up and count the same money twice.
+    const par = r.parentElement.classList;
+    if (par.contains("led-split") || par.contains("led-sub")) {
+      const amt = r.querySelector("strong");
+      const share = r.querySelector("em");
+      // changeHTML writes its own good/bad/flat span rather than a
+      // .chg, so it is pulled out by tone here.
+      const ch = r.querySelector(".good, .bad, .flat");
+      return ["\u2007\u2007" + partsText(r, "strong, em, i, .good, .bad, .flat"),
+              share ? partsText(share) : "",
+              amt ? unformat(partsText(amt)) : "", "",
+              ch ? unformat(partsText(ch)) : ""];
+    }
     const l = r.querySelector(".l") || r.querySelector(".lbl");
     const v = r.querySelector(".v") || r.querySelector(".led-big");
     const note = l && l.querySelector("em");
-    const was = v && v.querySelector(".was");
+    // A deduction bar keeps its comparison in a column of its own; a
+    // ledger row keeps it inside the value. Both land in the same file
+    // column, or the file would disagree with the page about which day
+    // a number belongs to.
+    const was = (v && v.querySelector(".was")) || r.querySelector(".wasc");
+    const change = r.querySelector(".chg");
     return [partsText(l, "em"),
             note ? partsText(note) : "",
-            unformat(partsText(v, ".was")),
-            was ? unformat(partsText(was)) : ""];
+            unformat(partsText(v, ".was, .chg")),
+            was ? unformat(partsText(was)) : "",
+            change ? unformat(partsText(change)) : ""];
   }).filter(r => r[0] || r[2]);
   if (!rows.length) return alert("Nothing to export yet — the P&L has not loaded.");
   downloadCsv(csvName("live-pnl", selDay()),
-              csvText(["Line", "Note", "Value", "Compare"], rows));
+              csvText(["Line", "Note", "Value", "Compare", "Change"], rows));
 };
 
 // Re-fetch on a new cost rather than scaling client-side, so the figure
@@ -3055,16 +3135,57 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   const { sales, orders, cancellation, cancelledOrders, cancelPct, refunds,
           extraCancellation, liveOrders, liveUnits, net, cm, cmPct, totalDed } = d;
 
+  // Ad spend is three platforms in one line, and WHICH of them moved is
+  // the first question anyone asks of it. The bar is cut into three and
+  // the figures are named underneath, so the answer is on the page.
+  //
+  // Google arrives as one daily total from the MapleMonk export and is
+  // spread over the hours BEFORE that export ran, so on a live day its
+  // share is complete while Meta's is still filling. The chip says when
+  // the export was taken rather than leaving that to the footnote.
+  const SPEND_PARTS = [
+    ["Meta", "sw-meta", d.metaSpend],
+    ["Google", "sw-google", d.googleSpend],
+    ["Kwikchat", "sw-kwik", d.kwikSpend],
+  ];
+  const adSplit = (() => {
+    const known = SPEND_PARTS.filter(x => x[2] != null);
+    // Nothing to split, or the parts do not account for the total --
+    // which happens on a row written before a column existed. Showing
+    // a split that does not add up would be worse than not showing one.
+    const sum = known.reduce((n, x) => n + x[2], 0);
+    if (known.length < 2 || !d.adSpend || Math.abs(sum - d.adSpend) > 1) {
+      return { note: "Meta + Google + Kwikchat", segs: "" };
+    }
+    const pct = v => (v / d.adSpend * 100);
+    const segs = known.map(([, cls, v]) =>
+      '<i class="' + cls + '" style="width:' + pct(v).toFixed(1) + '%"></i>').join("");
+    const asOf = t.google_spend_as_of
+      ? new Date(t.google_spend_as_of).toLocaleTimeString("en-GB",
+          { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })
+      : null;
+    const split = '<div class="led-split">' + known.map(([label, cls, v]) =>
+      '<span><i class="' + cls + '"></i>' + esc(label) +
+      " <strong>" + inr(v, 0) + "</strong> <em>" + pct(v).toFixed(1) + "%</em>" +
+      (label === "Google" && asOf
+        ? ' <em style="opacity:.75">to ' + esc(asOf) + "</em>" : "") +
+      "</span>").join("") + "</div>";
+    return { note: "", segs: segs, split: split };
+  })();
+
+  // Keyed, so the comparison day's figure for a line is looked up
+  // rather than listed a second time -- two parallel lists are two
+  // chances to pair the wrong numbers.
   const ded = [
-    ["Ad spend", d.adSpend, "Meta + Google + Kwikchat"],
-    ["GST on ad spend", d.adGst, ""],
-    ["Logistics", d.logistics, num(liveOrders) + " dispatched"],
-    ["PG fees", d.pgFees, ""],
-    ["Silver coin", d.coins,
-     num(d.coinQty) + " coins in " + num(d.coinOrders) + " orders"],
-    ["Exchanges", d.exchangeCost,
-     num(Math.round(d.exchanges)) + " at " + inr(a.exchangeCost, 0) + " each"],
-    ["COGS", d.cogs, ""],
+    { key: "adSpend", label: "Ad spend", note: adSplit.note, segs: adSplit.segs },
+    { key: "adGst", label: "GST on ad spend", note: "" },
+    { key: "logistics", label: "Logistics", note: num(liveOrders) + " dispatched" },
+    { key: "pgFees", label: "PG fees", note: "" },
+    { key: "coins", label: "Silver coin",
+      note: num(d.coinQty) + " coins in " + num(d.coinOrders) + " orders" },
+    { key: "exchangeCost", label: "Exchanges",
+      note: num(Math.round(d.exchanges)) + " at " + inr(a.exchangeCost, 0) + " each" },
+    { key: "cogs", label: "COGS", note: "" },
   ];
 
   $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) =>
@@ -3092,22 +3213,47 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     '<div class="led-head"><span class="lbl">' + esc(label) + "</span>" +
     '<span class="led-big' + (big ? " huge" : "") + '">' + value + "</span></div>";
 
-  const row = (label, note, value, was) =>
+  // A deduction that GREW is bad, so every change on this page is read
+  // with dir "down" unless it sits on a line of revenue. Without that
+  // a rise in ad spend would be painted green.
+  const chg = (nowN, wasN, dir) =>
+    c && nowN != null && wasN != null && wasN
+      ? '<span class="chg">' + changeHTML(nowN, wasN, dir || "down") + "</span>" : "";
+
+  const row = (label, note, value, was, nowN, wasN) =>
     '<div class="led-row"><span class="l">' + esc(label) +
     (note ? "<em>" + esc(note) + "</em>" : "") + "</span>" +
     '<span class="v">' + (was ? '<span class="was">' + was + "</span>" : "") +
-    value + "</span></div>";
+    value + chg(nowN, wasN) + "</span></div>";
 
   // Bars are scaled to the LARGEST deduction, not to realisable sales:
   // against revenue every bar but ad spend would be a sliver, and the
   // point of drawing them is comparing deductions with each other.
-  const maxDed = Math.max(...ded.map(x => Math.abs(x[1])), 1);
-  const bar = (label, note, value) =>
+  // Scaled to the largest deduction on EITHER day, so a notch for the
+  // comparison lands in the right place instead of being clamped off
+  // the end whenever the comparison day spent more.
+  const maxDed = Math.max(
+    ...ded.map(x => Math.abs(d[x.key] || 0)),
+    ...(c ? ded.map(x => Math.abs(c[x.key] || 0)) : []), 1);
+  const pctOf = v => Math.min(100, Math.max(0, Math.abs(v)) / maxDed * 100);
+  const bar = (label, note, value, segs, was) =>
     '<div class="led-bar"><span class="l">' + esc(label) +
     (note ? "<em>" + esc(note) + "</em>" : "") + "</span>" +
-    '<span class="t"><span style="width:' +
-    (Math.max(0, Math.abs(value)) / maxDed * 100).toFixed(1) + '%"></span></span>' +
-    '<span class="v">\u2212 ' + inr(value, 0) + "</span></div>";
+    '<span class="t"><span' + (segs ? ' class="seg"' : "") + ' style="width:' +
+    pctOf(value).toFixed(1) + '%">' + (segs || "") + "</span>" +
+    // Clamped, because the comparison day can be larger than the
+    // largest deduction on THIS day, and a notch off the end of the
+    // track would simply vanish rather than say "further right".
+    // Held just inside the track: at a flat 100% the notch is a 2px
+    // mark half of which the overflow clips, and the one line that most
+    // needs reading -- the day that set the scale -- is the faintest.
+    (was != null ? '<b style="left:calc(' + Math.min(99.3, pctOf(was)).toFixed(1) +
+                   '% - 1px)"></b>' : "") +
+    "</span>" +
+    (c ? '<span class="wasc">' + (was != null ? "\u2212 " + inr(was, 0) : "") +
+         "</span>" : "") +
+    '<span class="v">\u2212 ' + inr(value, 0) + "</span>" +
+    (c ? chg(value, was) || '<span class="chg"></span>' : "") + "</div>";
 
   const vs = cmpDay ? " vs " + esc(cmpDay) : "";
 
@@ -3115,19 +3261,23 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     step("measured", "Measured \u2014 Shopify's own figure, stored verbatim",
          "Total sales", inr(sales, 0)) +
     (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
-         inr(c.sales, 0) + "</strong></span></div>" : "") +
+         inr(c.sales, 0) + "</strong> " + changeHTML(sales, c.sales, "up") +
+         "</span></div>" : "") +
     "</div>" +
 
     '<div class="led-step">' +
     row("\u2212 Cancelled, not refunded",
         num(cancelledOrders) + " orders \u00b7 " + pc(cancelPct, 1),
-        "\u2212 " + inr(cancellation, 0), c ? "\u2212 " + inr(c.cancellation, 0) : null) +
+        "\u2212 " + inr(cancellation, 0), c ? "\u2212 " + inr(c.cancellation, 0) : null,
+        cancellation, c ? c.cancellation : null) +
     (refunds > 0 || (c && c.refunds > 0)
       ? row("\u2212 Refunds", "on orders that still stand",
-            "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null)
+            "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null,
+            refunds, c ? c.refunds : null)
       : "") +
     row("\u2212 Further cancellation", pc(a.extraCancelRate, 1) + " allowance, not measured",
-        signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null) +
+        signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
+        extraCancellation, c ? c.extraCancellation : null) +
     "</div>" +
 
     '<div class="led-step total led-sep" style="margin-top:4px">' +
@@ -3142,17 +3292,21 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (d.aov === null ? "\u2014" : inr(d.aov)) + "</strong> AOV</span>" +
     "<span>\u00f7 " + num(liveUnits) + " units = <strong>" +
     (d.asp === null ? "\u2014" : inr(d.asp)) + "</strong> ASP</span>" +
-    (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.net, 0) + "</strong></span>" : "") +
+    (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.net, 0) + "</strong> " +
+         changeHTML(net, c.net, "up") + "</span>" : "") +
     "</div></div>" +
 
     '<div class="led-step" style="margin-top:4px"><div class="led-cap" ' +
     'style="padding-top:14px">Modelled from the assumptions beside this</div>' +
-    ded.map(x => bar(x[0], x[2], x[1])).join("") +
+    ded.map(x => bar(x.label, x.note, d[x.key], x.segs,
+                     c ? c[x.key] : null) +
+                 (x.key === "adSpend" ? (adSplit.split || "") : "")).join("") +
     '<div class="led-row led-sep" style="margin-top:4px">' +
     '<span class="l" style="font-weight:600;color:var(--text)">Total deductions</span>' +
     '<span class="v" style="font-weight:600;color:var(--bad)">' +
     (c ? '<span class="was">\u2212 ' + inr(c.totalDed, 0) + "</span>" : "") +
-    "\u2212 " + inr(totalDed, 0) + "</span></div></div>" +
+    "\u2212 " + inr(totalDed, 0) + chg(totalDed, c ? c.totalDed : null) +
+    "</span></div></div>" +
 
     '<div class="led-step result led-sep" style="margin-top:4px">' +
     '<div class="led-head"><span class="lbl">Contribution margin</span>' +
@@ -3162,7 +3316,8 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     '<span class="led-big huge" style="color:' +
     (cm < 0 ? "var(--bad)" : "var(--good)") + '">' + inr(cm, 0) + "</span></span></div>" +
     (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " at the same hour <strong>" +
-         inr(c.cm, 0) + "</strong> \u00b7 " + pc(c.cmPct, 1) + "</span></div>" : "") +
+         inr(c.cm, 0) + "</strong> \u00b7 " + pc(c.cmPct, 1) + " " +
+         changeHTML(cm, c.cm, "up") + "</span></div>" : "") +
     "</div>";
 
   // The rail: the figures that are NOT part of the chain but are read
