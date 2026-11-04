@@ -552,6 +552,20 @@
     <div style="margin-top:12px;overflow:auto">
       <table id="coin-table"><thead id="coin-thead"></thead><tbody id="coin-tbody"></tbody></table>
     </div>
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft)">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+        <button type="button" id="coin-orders-btn">Show orders</button>
+        <span class="sub" id="coin-orders-span"></span>
+      </div>
+      <div style="margin-top:10px;overflow:auto" id="coin-orders-wrap" hidden>
+        <table id="coin-orders-table"><thead id="coin-orders-thead"></thead>
+          <tbody id="coin-orders-tbody"></tbody></table>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+          <button type="button" id="coin-more" hidden>Load more</button>
+          <span class="sub" id="coin-more-span"></span>
+        </div>
+      </div>
+    </div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
       <strong>Coins</strong> and <strong>coin orders</strong> are different numbers: an order can
       ship more than one, so cost is taken on COINS while the attach rate is taken on ORDERS.
@@ -1732,6 +1746,76 @@ function drawCoins() {
       num(d.total_coin_orders) + "</td><td>" + pc(d.attach_rate, 1) + "</td><td>" +
       num(d.total_coins) + "</td><td>" + inr(d.total_cost, 0) + "</td></tr>";
 }
+
+// --- the order list ---------------------------------------------------
+// Not loaded with the section: several thousand rows is a megabyte of
+// JSON for a table most readers never open. Fetched on demand, a
+// thousand at a time.
+const COIN_PAGE = 1000;
+let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false;
+
+function coinOrderCells(r) {
+  const cust = r.is_returning == null ? "\u2014"
+    : r.is_returning ? "Returning \u00b7 " + num(r.customer_orders) : "New";
+  const place = [r.city, r.state].filter(Boolean).join(", ") || "\u2014";
+  return "<td>" + esc(r.order_name || "\u2014") +
+         (r.coin_only ? ' <span class="tag">coin only</span>' : "") + "</td>" +
+    "<td>" + ist(r.created_at) + "</td>" +
+    "<td>" + esc(r.payment || "\u2014") + "</td>" +
+    // A blank risk tag on a COD order means GoKwik never scored it,
+    // which is not the same as low risk -- so it reads as a dash and
+    // never as reassurance.
+    '<td class="sub">' + esc(r.risk_tag || "\u2014") + "</td>" +
+    "<td>" + esc(cust) + "</td>" +
+    '<td class="num">' + inr(r.amount, 0) + "</td>" +
+    '<td class="num">' + num(r.coins) + "</td>" +
+    "<td>" + esc(place) + "</td>" +
+    '<td class="num">' + esc(r.pincode || "\u2014") + "</td>" +
+    "<td>" + esc(r.fulfillment || "\u2014") + "</td>";
+}
+
+function drawCoinOrders() {
+  $("coin-orders-thead").innerHTML =
+    "<tr><th>Order</th><th>Created (IST)</th><th>Payment</th><th>Risk</th>" +
+    "<th>Customer</th><th>Amount</th><th>Coins</th><th>City</th>" +
+    "<th>Pincode</th><th>Fulfillment</th></tr>";
+  $("coin-orders-tbody").innerHTML =
+    COIN_ROWS.map(r => "<tr>" + coinOrderCells(r) + "</tr>").join("");
+  const more = COIN_TOTAL != null && COIN_ROWS.length < COIN_TOTAL;
+  $("coin-more").hidden = !more;
+  $("coin-more-span").textContent = COIN_TOTAL == null ? "" :
+    num(COIN_ROWS.length) + " of " + num(COIN_TOTAL) +
+    (more ? "" : "  \u00b7  all loaded");
+}
+
+function loadCoinOrders() {
+  if (COIN_BUSY) return;
+  COIN_BUSY = true;
+  $("coin-more").textContent = "Loading\u2026";
+  fetch(apiBase() + "/admin/analytics/coins/orders?limit=" + COIN_PAGE +
+        "&offset=" + COIN_ROWS.length)
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(d => {
+      COIN_ROWS = COIN_ROWS.concat(d.rows);
+      COIN_TOTAL = d.total;
+      COIN_BUSY = false;
+      $("coin-more").textContent = "Load more";
+      drawCoinOrders();
+    })
+    .catch(e => {
+      COIN_BUSY = false;
+      $("coin-more").textContent = "Load more";
+      $("coin-more-span").textContent = "Could not load: " + String(e.message || e);
+    });
+}
+
+$("coin-orders-btn").onclick = () => {
+  const wrap = $("coin-orders-wrap");
+  wrap.hidden = !wrap.hidden;
+  $("coin-orders-btn").textContent = wrap.hidden ? "Show orders" : "Hide orders";
+  if (!wrap.hidden && !COIN_ROWS.length) loadCoinOrders();
+};
+$("coin-more").onclick = loadCoinOrders;
 
 // Re-fetch on a new cost rather than scaling client-side, so the figure
 // shown is always the one the API computed.

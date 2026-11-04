@@ -14649,6 +14649,62 @@ async def get_coins(
     )
 
 
+class CoinOrderRow(BaseModel):
+    order_name: str | None
+    created_at: datetime
+    coins: int
+    amount: float | None
+    payment: str | None
+    fulfillment: str | None
+    #: GoKwik scores COD checkouts only, so null on a COD order means
+    #: NEVER SCORED -- which is not the same as low risk.
+    risk_tag: str | None
+    customer_orders: int | None
+    is_returning: bool | None
+    city: str | None
+    state: str | None
+    pincode: str | None
+    coin_only: bool | None
+
+
+class CoinOrdersResponse(BaseModel):
+    rows: list[CoinOrderRow]
+    #: Every coin order, not just this page -- the page needs it to
+    #: know whether a "Load more" is worth offering.
+    total: int
+    offset: int
+    limit: int
+
+
+_COIN_ORDERS_SQL = """
+SELECT order_name, created_at, coins, amount, payment, fulfillment,
+       risk_tag, customer_orders, is_returning, city, state, pincode, coin_only
+  FROM public.silver_coin_order
+ ORDER BY created_at DESC
+ LIMIT :limit OFFSET :offset
+"""
+
+
+@router.get("/coins/orders", response_model=CoinOrdersResponse)
+@cached_analytics(ttl=120.0)
+async def get_coin_orders(
+    session: SessionDep,
+    # 1000 by default and capped at 2000: the whole promotion is
+    # several thousand rows, and sending them all would be a megabyte
+    # of JSON for a table nobody scrolls to the end of.
+    limit: int = Query(default=1000, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+) -> CoinOrdersResponse:
+    """Silver-coin orders, newest first, paged."""
+    result = await session.execute(text(_COIN_ORDERS_SQL),
+                                   {"limit": limit, "offset": offset})
+    rows = [CoinOrderRow(**dict(r)) for r in result.mappings()]
+    total = await session.execute(
+        text("SELECT count(*) AS n FROM public.silver_coin_order"))
+    return CoinOrdersResponse(rows=rows, total=total.mappings().first()["n"],
+                              offset=offset, limit=limit)
+
+
 # ----------------------------------------------------------------------
 class QuantityHour(BaseModel):
     hour: int

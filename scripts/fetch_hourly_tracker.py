@@ -502,6 +502,66 @@ def is_coin_excluded(order: dict, created: datetime) -> str | None:
     return None
 
 
+COIN_TABLE = "public.silver_coin_order"
+
+#: One row per silver-coin ORDER, which the hourly table cannot hold:
+#: it stores counts per hour, and a list needs the orders themselves.
+#: Keyed on the Shopify order id so a re-ingest CORRECTS a row rather
+#: than duplicating it -- payment and fulfilment both move after the
+#: order is placed, and keeping them current is the whole reason to
+#: re-ingest a past day.
+COIN_DDL = f"""
+CREATE TABLE IF NOT EXISTS {COIN_TABLE} (
+    order_id        text PRIMARY KEY,
+    order_name      text,
+    created_at      timestamptz NOT NULL,
+    day_ist         date NOT NULL,
+    coins           integer NOT NULL,
+    units           integer NOT NULL,
+    amount          numeric,
+    payment         text,
+    fulfillment     text,
+    -- GoKwik scores COD checkouts only, so a blank here on a COD
+    -- order means NEVER SCORED, which is not the same as low risk.
+    risk_tag        text,
+    customer_orders integer,
+    is_returning    boolean,
+    city            text,
+    state           text,
+    pincode         text,
+    coin_only       boolean,
+    fetched_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_coin_order_created ON {COIN_TABLE} (created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_coin_order_day ON {COIN_TABLE} (day_ist);
+"""
+
+COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "units",
+                "amount", "payment", "fulfillment", "risk_tag", "customer_orders",
+                "is_returning", "city", "state", "pincode", "coin_only"]
+
+COIN_UPSERT = f"""
+INSERT INTO {COIN_TABLE} ({", ".join(COIN_COLUMNS)}) VALUES %s
+ON CONFLICT (order_id) DO UPDATE SET
+  {", ".join(f"{c} = EXCLUDED.{c}" for c in COIN_COLUMNS if c != "order_id")},
+  fetched_at = now()
+"""
+
+#: GoKwik writes exactly one of these onto a COD checkout.
+RISK_TAGS = ("high risk", "medium risk", "low risk")
+
+
+def risk_of(tags: list[str] | None) -> str | None:
+    low = {str(t).strip().lower() for t in (tags or [])}
+    for r in RISK_TAGS:
+        if r in low:
+            return r.split()[0].capitalize()
+    return None
+
+
+PAYMENT_LABEL = {"PAID": "Prepaid", "PARTIALLY_PAID": "Partial COD", "PENDING": "COD"}
+
+
 def count_units(line_items: dict | None) -> tuple[int, int]:
     """(units sold excluding the gift coin, HOW MANY coins it carried).
 
@@ -688,9 +748,11 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         lineItems(first: 100) {
           edges { node { sku quantity } }
         }
+        name
         email
         displayFinancialStatus
         displayFulfillmentStatus
+        shippingAddress { city province zip }
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -702,7 +764,8 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
 """
 
 
-async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
+async def fetch_orders(client, store, day: date,
+                       coin_rows: list | None = None) -> dict[datetime, dict]:
     """Per-channel revenue, from the orders themselves.
 
     ShopifyQL cannot split sales by utm_source -- it answers
@@ -769,6 +832,30 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                     # over the line items, which could disagree.
                     if units == 0:
                         b["coin_only_orders"] += 1
+                    if coin_rows is not None:
+                        addr = n.get("shippingAddress") or {}
+                        nord = cust.get("numberOfOrders")
+                        nord = int(nord) if str(nord or "").isdigit() else None
+                        coin_rows.append({
+                            "order_id": n["id"],
+                            "order_name": n.get("name"),
+                            "created_at": created,
+                            "day_ist": created.astimezone(IST).date(),
+                            "coins": coins,
+                            "units": units,
+                            "amount": price,
+                            "payment": PAYMENT_LABEL.get(
+                                (n.get("displayFinancialStatus") or "").upper()),
+                            "fulfillment": (n.get("displayFulfillmentStatus")
+                                            or "").title() or None,
+                            "risk_tag": risk_of(n.get("tags")),
+                            "customer_orders": nord,
+                            "is_returning": (nord > 1) if nord is not None else None,
+                            "city": addr.get("city"),
+                            "state": addr.get("province"),
+                            "pincode": addr.get("zip"),
+                            "coin_only": units == 0,
+                        })
                     if (n.get("displayFulfillmentStatus") or "").upper() == "FULFILLED":
                         b["coin_shipped_orders"] += 1
                     fin = (n.get("displayFinancialStatus") or "").upper()
@@ -1086,11 +1173,12 @@ async def fetch_basket_mix(client, store, day: date) -> dict[datetime, dict]:
     return out
 
 
-async def build_day(client, store, day: date) -> list[dict]:
+async def build_day(client, store, day: date,
+                    coin_rows: list | None = None) -> list[dict]:
     sessions, sales, orders, meta, baskets = await asyncio.gather(
         fetch_sessions(client, store, day),
         fetch_sales(client, store, day),
-        fetch_orders(client, store, day),
+        fetch_orders(client, store, day, coin_rows),
         fetch_meta(client, day),
         fetch_basket_mix(client, store, day),
     )
@@ -1144,7 +1232,7 @@ async def build_day(client, store, day: date) -> list[dict]:
     return rows
 
 
-def write(rows: list[dict]) -> int:
+def write(rows: list[dict], coin_rows: list[dict] | None = None) -> int:
     import psycopg2.extras  # noqa: PLC0415
 
     tuples = [
@@ -1157,6 +1245,15 @@ def write(rows: list[dict]) -> int:
         for statement in MIGRATIONS:
             cur.execute(statement)
         psycopg2.extras.execute_values(cur, UPSERT, tuples, page_size=200)
+        if coin_rows:
+            cur.execute(COIN_DDL)
+            # Written in the same transaction as the hourly counts, so
+            # the list and the totals above it can never be from
+            # different runs of the same day.
+            psycopg2.extras.execute_values(
+                cur, COIN_UPSERT,
+                [tuple(r.get(c) for c in COIN_COLUMNS) for r in coin_rows],
+                page_size=200)
         conn.commit()
     return len(tuples)
 
@@ -1192,7 +1289,8 @@ async def main() -> int:
     total = 0
     async with httpx.AsyncClient(timeout=120) as client:
         for day in days:
-            rows = await build_day(client, store, day)
+            coin_rows: list[dict] = []
+            rows = await build_day(client, store, day, coin_rows)
             sess = sum(r.get("sessions") or 0 for r in rows)
             spend = sum((r.get("meta_spend") or 0) + (r.get("kwikchat_spend") or 0)
                         + (r.get("google_spend") or 0) for r in rows)
@@ -1207,8 +1305,10 @@ async def main() -> int:
                 # see by how much rather than trust one blindly.
                 print(f"          ShopifyQL cross-check Rs {crosscheck:,.0f} "
                       f"({drift:+.1f}%)")
+            if coin_rows:
+                print(f"          {len(coin_rows):,} silver-coin orders listed")
             if not args.dry_run:
-                total += write(rows)
+                total += write(rows, coin_rows)
 
     print(f"\n[{'DRY RUN' if args.dry_run else 'OK'}] "
           f"{total:,} hourly rows {'built' if args.dry_run else 'written'}")
