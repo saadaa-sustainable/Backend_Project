@@ -26,6 +26,12 @@ class LocalConnection:
     async def execute(self, sql, *values):
         assert not self.closed
         self.statements.append((sql, values))
+        # A session GUC is a Postgres thing with no SQLite equivalent.
+        # Recorded above, so a test can still assert it was issued, but
+        # not handed to SQLite -- which answers `near "SET"` and fails
+        # the real assertion this test is making.
+        if sql.lstrip().upper().startswith("SET "):
+            return
         # The generated $n parameters occur once each, in argument order.
         sql = re.sub(r"\$\d+", "?", sql)
         values = [str(v) if isinstance(v, (uuid.UUID, datetime)) else v for v in values]

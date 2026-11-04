@@ -118,6 +118,9 @@ CREATE TABLE IF NOT EXISTS shopify_orders (
     utm_campaign text,
     utm_content text,
     utm_term text,
+    shipping_state text,
+    shipping_city text,
+    shipping_zip text,
     created_at timestamptz,
     updated_at timestamptz,
     processed_at timestamptz,
@@ -142,6 +145,21 @@ _ORDERS_COLUMN_MIGRATIONS = [
     "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS cancelled_at timestamptz",
     "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS refunds jsonb",
     "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS refunded_amount numeric",
+    # Added 2026-11-02 with shippingAddress on ORDERS_QUERY.
+    #
+    # The delivery state used to be reachable only through
+    # shopify_fulfillments, which has a row only once the parcel moves:
+    # on orders a day old that covered 1.6 per cent of them, so a
+    # state-wise report on a live campaign saw almost nothing. Shopify
+    # has the address from the moment the order is placed.
+    #
+    # A column rather than a dig into raw_payload because nothing
+    # indexes raw_payload ->> 'name', and every state query that went
+    # that way passed the statement timeout under load.
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS shipping_state text",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS shipping_city text",
+    "ALTER TABLE IF EXISTS shopify_orders ADD COLUMN IF NOT EXISTS shipping_zip text",
+    "CREATE INDEX IF NOT EXISTS ix_shopify_orders_state ON shopify_orders(shipping_state)",
 ]
 
 _ORDERS_INSERT = f"""
@@ -165,6 +183,7 @@ INSERT INTO shopify_orders (
     subtotal_price, total_price,
     currency, customer_id, customer_email, line_items, customer_journey, custom_attributes,
     utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+    shipping_state, shipping_city, shipping_zip,
     created_at, updated_at, processed_at, extracted_at, flattened_at
 )
 SELECT
@@ -200,6 +219,9 @@ SELECT
     {_custom_attr('utm_campaign')} AS utm_campaign,
     {_custom_attr('utm_content')} AS utm_content,
     {_custom_attr('utm_term')} AS utm_term,
+    a.raw_payload -> 'shippingAddress' ->> 'province' AS shipping_state,
+    a.raw_payload -> 'shippingAddress' ->> 'city'     AS shipping_city,
+    a.raw_payload -> 'shippingAddress' ->> 'zip'      AS shipping_zip,
     NULLIF(a.raw_payload ->> 'createdAt', '')::timestamptz AS created_at,
     NULLIF(a.raw_payload ->> 'updatedAt', '')::timestamptz AS updated_at,
     NULLIF(a.raw_payload ->> 'processedAt', '')::timestamptz AS processed_at,

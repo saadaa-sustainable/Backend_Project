@@ -110,12 +110,6 @@ CREATE TABLE IF NOT EXISTS public.ga4_order_attribution (
     first_adset_id    text,
     first_landing     text,
 
-    last_source       text,
-    last_medium       text,
-    last_campaign     text,
-    last_campaign_id  text,
-    last_ad_id        text,
-    last_adset_id     text,
     last_landing      text,
 
     total_sessions    integer,
@@ -125,16 +119,28 @@ CREATE TABLE IF NOT EXISTS public.ga4_order_attribution (
 );
 CREATE INDEX IF NOT EXISTS ix_ga4_oa_order_at  ON public.ga4_order_attribution(order_at);
 CREATE INDEX IF NOT EXISTS ix_ga4_oa_first_ad  ON public.ga4_order_attribution(first_ad_id);
-CREATE INDEX IF NOT EXISTS ix_ga4_oa_last_ad   ON public.ga4_order_attribution(last_ad_id);
 CREATE INDEX IF NOT EXISTS ix_ga4_oa_user      ON public.ga4_order_attribution(user_pseudo_id);
+
+-- GA4 supplies the FIRST click and nothing else. The last click is
+-- ours: shopify_order_attribution.matched_ad_id, mapped from the UTM
+-- the order itself carries. GA4's last click was a second, conflicting
+-- answer to a question already settled. last_landing stays: it is a
+-- PAGE, not an attribution, and the landing-page section keys on it.
+ALTER TABLE public.ga4_order_attribution
+  DROP COLUMN IF EXISTS last_source,
+  DROP COLUMN IF EXISTS last_medium,
+  DROP COLUMN IF EXISTS last_campaign,
+  DROP COLUMN IF EXISTS last_campaign_id,
+  DROP COLUMN IF EXISTS last_ad_id,
+  DROP COLUMN IF EXISTS last_adset_id;
+DROP INDEX IF EXISTS public.ix_ga4_oa_last_ad;
 """
 
 COLUMNS = [
     "transaction_id", "order_at", "user_pseudo_id", "revenue",
     "first_seen_at", "first_source", "first_medium", "first_campaign",
     "first_campaign_id", "first_ad_id", "first_adset_id", "first_landing",
-    "last_source", "last_medium", "last_campaign", "last_campaign_id",
-    "last_ad_id", "last_adset_id", "last_landing",
+    "last_landing",
     "total_sessions", "sourced_sessions", "days_to_convert",
 ]
 
@@ -146,24 +152,64 @@ ON CONFLICT (transaction_id) DO UPDATE SET
   fetched_at = EXCLUDED.fetched_at
 """
 
-# A session's traffic source is taken with MIN() rather than picked from
-# the session_start event: the UTMs are stamped on session_start and
-# first_visit but NOT on the purchase event, and MIN skips NULLs, so this
-# collapses to the one non-null value per session without a second pass.
+# A session's traffic source is the one its EARLIEST sourced event
+# carries, taken whole.
+#
+# This used to be six separate MIN()s, on the reasoning that MIN skips
+# NULLs and so collapses to "the one non-null value". There is rarely
+# one value. MIN on a string is ALPHABETICAL, and GA4 writes
+# `(organic)`, `(referral)` and `(direct)` as campaign names whenever it
+# classifies traffic itself -- all of which begin with `(`, which sorts
+# before every letter and digit. So any session that also recorded a
+# referral hop (returning from the GoKwik checkout domain, from
+# l.instagram.com, anywhere cross-domain) had its real campaign
+# overwritten by a placeholder, while manual_content survived because
+# the second event left that NULL.
+#
+# Measured when this was fixed: of orders carrying an ad id, the share
+# whose landing URL still held its UTMs went from 58.1% to 97.2%, and
+# ad ids sitting under a placeholder campaign fell from 1,504 to 126.
+#
+# ARRAY_AGG ... ORDER BY event_timestamp LIMIT 1 takes the fields
+# TOGETHER from one event, so a session can no longer report one
+# event's source beside another event's campaign.
 SQL = """
 WITH sess AS (
   SELECT
     user_pseudo_id,
     (SELECT value.int_value FROM UNNEST(event_params) WHERE key='ga_session_id') AS sid,
     MIN(TIMESTAMP_MICROS(event_timestamp))                      AS started_at,
-    MIN(collected_traffic_source.manual_source)                 AS src,
-    MIN(collected_traffic_source.manual_medium)                 AS med,
-    MIN(collected_traffic_source.manual_campaign_name)          AS camp,
-    MIN(collected_traffic_source.manual_campaign_id)            AS camp_id,
-    MIN(collected_traffic_source.manual_content)                AS ad_id,
-    MIN(collected_traffic_source.manual_term)                   AS adset_id,
-    MIN((SELECT value.string_value FROM UNNEST(event_params)
-          WHERE key='page_location'))                           AS landing,
+    COALESCE(
+      ARRAY_AGG(
+        IF(collected_traffic_source.manual_source IS NOT NULL,
+           STRUCT(collected_traffic_source.manual_source        AS src,
+                  collected_traffic_source.manual_medium        AS med,
+                  collected_traffic_source.manual_campaign_name AS camp,
+                  collected_traffic_source.manual_campaign_id   AS camp_id,
+                  collected_traffic_source.manual_content       AS ad_id,
+                  collected_traffic_source.manual_term          AS adset_id),
+           NULL)
+        IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)],
+      ARRAY_AGG(
+        IF(collected_traffic_source.manual_campaign_name IS NOT NULL
+           OR collected_traffic_source.manual_medium IS NOT NULL
+           OR collected_traffic_source.manual_content IS NOT NULL,
+           STRUCT(collected_traffic_source.manual_source        AS src,
+                  collected_traffic_source.manual_medium        AS med,
+                  collected_traffic_source.manual_campaign_name AS camp,
+                  collected_traffic_source.manual_campaign_id   AS camp_id,
+                  collected_traffic_source.manual_content       AS ad_id,
+                  collected_traffic_source.manual_term          AS adset_id),
+           NULL)
+        IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)]
+    )                                                           AS ts,
+    -- Same bug, same fix: MIN(page_location) picked the page whose URL
+    -- sorted first, and `/` (0x2F) sorts before `?` (0x3F), so the bare
+    -- homepage beat the UTM-carrying landing URL.
+    ARRAY_AGG((SELECT value.string_value FROM UNNEST(event_params)
+                WHERE key='page_location')
+              IGNORE NULLS ORDER BY event_timestamp LIMIT 1)[SAFE_OFFSET(0)]
+                                                                AS landing,
     COUNTIF(event_name = 'purchase')                            AS buys,
     MIN(ecommerce.transaction_id)                               AS txn,
     MAX(ecommerce.purchase_revenue)                             AS revenue
@@ -172,8 +218,14 @@ WITH sess AS (
     AND event_name NOT IN UNNEST(@noise)
   GROUP BY user_pseudo_id, sid
 ),
+sess_flat AS (
+  SELECT user_pseudo_id, sid, started_at,
+         ts.src, ts.med, ts.camp, ts.camp_id, ts.ad_id, ts.adset_id,
+         landing, buys, txn, revenue
+  FROM sess
+),
 orders AS (
-  SELECT * FROM sess
+  SELECT * FROM sess_flat
    WHERE buys > 0 AND txn IS NOT NULL
      AND DATE(started_at) BETWEEN PARSE_DATE('%Y%m%d', @since)
                               AND PARSE_DATE('%Y%m%d', @until)
@@ -190,7 +242,7 @@ pairs AS (
     SUM(CASE WHEN s.src IS NOT NULL THEN 1 ELSE 0 END)
                 OVER (PARTITION BY o.txn)                                         AS sourced_sessions
   FROM orders o
-  JOIN sess s
+  JOIN sess_flat s
     ON  s.user_pseudo_id = o.user_pseudo_id
     AND s.started_at    <= o.started_at
     AND s.started_at    >= TIMESTAMP_SUB(o.started_at, INTERVAL @lookback_days DAY)
@@ -208,12 +260,6 @@ SELECT
   MAX(IF(rn_first = 1, ad_id,      NULL)) AS first_ad_id,
   MAX(IF(rn_first = 1, adset_id,   NULL)) AS first_adset_id,
   MAX(IF(rn_first = 1, landing,    NULL)) AS first_landing,
-  MAX(IF(rn_last  = 1, src,        NULL)) AS last_source,
-  MAX(IF(rn_last  = 1, med,        NULL)) AS last_medium,
-  MAX(IF(rn_last  = 1, camp,       NULL)) AS last_campaign,
-  MAX(IF(rn_last  = 1, camp_id,    NULL)) AS last_campaign_id,
-  MAX(IF(rn_last  = 1, ad_id,      NULL)) AS last_ad_id,
-  MAX(IF(rn_last  = 1, adset_id,   NULL)) AS last_adset_id,
   MAX(IF(rn_last  = 1, landing,    NULL)) AS last_landing,
   ANY_VALUE(total_sessions)   AS total_sessions,
   ANY_VALUE(sourced_sessions) AS sourced_sessions,
@@ -323,16 +369,21 @@ def main() -> int:
             cur.execute("""
                 SELECT COUNT(*),
                        COUNT(*) FILTER (WHERE first_ad_id IS NOT NULL),
-                       COUNT(*) FILTER (WHERE first_source IS DISTINCT FROM last_source),
+                       -- Reachable from a Shopify order, which is the
+                       -- only way a first click is of any use: the
+                       -- order number IS the transaction_id.
+                       COUNT(*) FILTER (WHERE EXISTS (
+                           SELECT 1 FROM public.shopify_orders s
+                            WHERE s.name = ga4_order_attribution.transaction_id)),
                        ROUND(AVG(total_sessions), 1),
                        ROUND(AVG(days_to_convert), 1)
                   FROM public.ga4_order_attribution
                  WHERE order_at::date BETWEEN %s AND %s
             """, (since, until))
-            n, with_ad, differ, avg_s, avg_d = cur.fetchone()
+            n, with_ad, joined, avg_s, avg_d = cur.fetchone()
             print(f"\n[OK] {n:,} orders in range")
             print(f"     first-click ad id present   {with_ad:,}  ({100 * with_ad / n:.1f}%)")
-            print(f"     first source != last source {differ:,}  ({100 * differ / n:.1f}%)")
+            print(f"     matched to a Shopify order  {joined:,}  ({100 * joined / n:.1f}%)")
             print(f"     avg sessions before order   {avg_s}")
             print(f"     avg days to convert         {avg_d}")
     except Exception:

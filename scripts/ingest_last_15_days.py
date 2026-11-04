@@ -886,6 +886,11 @@ def main() -> int:
                              "adset_insights stay empty unless those levels are requested, "
                              "because the silver flatten keys off parent_ids->>'level'.")
     parser.add_argument("--include-roster", action="store_true", help="Also fetch campaigns/adsets/ads (current-state rosters, not time-windowed — off by default, see module docstring).")
+    parser.add_argument("--until", default=None,
+                        help="Last day to fetch (YYYY-MM-DD). Default: "
+                             "yesterday. Pass today to include a PARTIAL "
+                             "day -- what a live tracker wants, and what a "
+                             "reconciliation does not.")
     parser.add_argument("--roster-only", action="store_true",
                         help="Fetch ONLY the campaign/adset/ad rosters and no insights at all. "
                              "Implies --include-roster. This is the nightly entity refresh: "
@@ -923,7 +928,15 @@ def main() -> int:
             return 1
         dsn = _to_psycopg2_dsn(raw_dsn)
 
-    until = date.today() - timedelta(days=1)  # yesterday: today's data is still accumulating
+    # Yesterday by default: today's data is still accumulating, and a
+    # partial day written as if it were whole reads as a collapse in
+    # spend rather than a day in progress.
+    #
+    # --until overrides it for the case where a partial day is exactly
+    # what you want -- a live tracker, or an intraday read of campaigns
+    # running now. The caller then owns knowing the last day is
+    # incomplete. Every existing caller omits the flag.
+    until = date.fromisoformat(args.until) if args.until else date.today() - timedelta(days=1)
     since = until - timedelta(days=args.days - 1)
     base_url = f"https://graph.facebook.com/{api_version}"
 
