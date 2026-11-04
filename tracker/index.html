@@ -60,6 +60,11 @@
           padding: 3px 10px; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
   .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 14px 0 18px; }
+  /* display:inline-flex out-specifies the browser's own [hidden]
+     rule, so without this a hidden control stays on screen. The same
+     trap caught the inventory modal, where the invisible overlay went
+     on swallowing clicks. */
+  label.f[hidden] { display: none; }
   label.f { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2);
             border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--surface); }
   input[type=date], input[type=url] {
@@ -145,6 +150,12 @@
   .views button { border: 0; border-radius: 0; padding: 6px 14px; font-size: 12.5px;
                   background: transparent; color: var(--text-2); }
   .views button[aria-selected="true"] { background: var(--text); color: var(--bg); font-weight: 600; }
+  /* The browser's default ring stayed on the tab after a MOUSE click
+     and sat blue against the theme. :focus-visible shows it only for
+     keyboard users, which is who it is for, and it is drawn inside
+     the segment so it cannot be clipped by the rounded container. */
+  .views button:focus { outline: none; }
+  .views button:focus-visible { outline: 2px solid var(--s1); outline-offset: -3px; }
   .pnl-kpis { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0,1fr)); margin-top: 12px; }
   @media (min-width: 900px) { .pnl-kpis { grid-template-columns: repeat(5, minmax(0,1fr)); } }
   .pnl-kpis .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
@@ -358,6 +369,11 @@
            border-radius: 12px; overflow: hidden; margin-top: 12px;
            grid-template-columns: repeat(2, minmax(0,1fr)); }
   @media (min-width: 880px) { .strip { grid-template-columns: repeat(4, minmax(0,1fr)); } }
+  /* Six cards over three columns fills two rows exactly. On four it
+     left two dead cells, which read as missing data rather than as
+     layout. */
+  @media (min-width: 880px) { .strip.s3 { grid-template-columns: repeat(3, minmax(0,1fr)); } }
+  .strip.s3 { margin-top: 10px; }
   .strip > div { background: var(--surface); padding: 15px 17px; }
   /* The dispatch desk's tab bar: a row of buckets, each with its
      count in a pill, and the active one underlined. A tab bar beats
@@ -365,13 +381,19 @@
      visible at once, with their sizes. */
   .btabs { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 14px;
            border-bottom: 1px solid var(--border); }
+  /* A box around the active tab, not an underline. An underline one
+     pixel tall is easy to lose on a page this dense, and it reads as
+     a focus hint rather than as "you are here". */
+  .btabs { padding-bottom: 6px; }
   .btab { display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
           font: inherit; font-size: 13px; color: var(--text-2); background: none;
-          border: 0; border-bottom: 2px solid transparent; padding: 9px 14px;
-          margin-bottom: -1px; min-height: 44px; }
-  .btab:hover { color: var(--text); }
+          border: 2px solid transparent; border-radius: 9px; padding: 8px 13px;
+          min-height: 44px; }
+  .btab:hover { color: var(--text); background: var(--muted); }
   .btab[aria-selected="true"] { color: var(--text); font-weight: 650;
-                                border-bottom-color: var(--s3); }
+                                border-color: var(--text); background: var(--surface); }
+  .btab:focus { outline: none; }
+  .btab:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
   .btab .pill { font-size: 11.5px; font-variant-numeric: tabular-nums;
                 background: var(--muted); border-radius: 999px; padding: 2px 8px;
                 color: var(--text-2); }
@@ -396,13 +418,79 @@
   /* A reason is a pill, and an order can carry several. */
   .why { display: inline-block; font-size: 11px; background: var(--muted);
          border: 1px solid var(--border-soft); border-radius: 999px;
-         padding: 2px 8px; margin: 1px 3px 1px 0; white-space: nowrap; }
-  .why.bad { background: #5c2f3322; border-color: var(--bad); color: var(--bad); }
+         padding: 2px 8px; margin: 1px 4px 2px 0; white-space: nowrap;
+         color: var(--text-2); }
+  .why.bad  { color: var(--bad);
+              background: color-mix(in srgb, var(--bad) 13%, transparent);
+              border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+  .why.warn { color: var(--s3);
+              background: color-mix(in srgb, var(--s3) 14%, transparent);
+              border-color: color-mix(in srgb, var(--s3) 34%, transparent); }
   .sev { font-size: 11px; font-weight: 650; color: var(--bad);
          border: 1px solid var(--bad); border-radius: 999px; padding: 2px 8px; }
   .wl-grid { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; }
   .wl-grid > div { flex: 1 1 380px; min-width: 0; }
   .wl-grid h5 { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+
+  /* The cost per coin IS the chain's fourth card, not a form field
+     parked underneath it. Showing it twice -- once as a figure in the
+     arithmetic and once as an input below -- invited the reader to
+     wonder which one the total used. One card, editable in place. */
+  .chain .b.inp { border-style: dashed; border-color: var(--border);
+                  cursor: text; }
+  .chain .b.inp:hover { border-color: var(--text-3); }
+  .chain .b.inp:focus-within { border-style: solid; border-color: var(--text);
+                               box-shadow: inset 0 0 0 1px var(--text); }
+  .chain .b.inp .v { display: flex; align-items: baseline; gap: 1px; }
+  .chain .b.inp input { width: 100%; min-width: 0; border: 0; padding: 0;
+                        background: transparent; color: var(--text); font: inherit;
+                        font-size: 17px; font-weight: 700;
+                        font-variant-numeric: tabular-nums; }
+  .chain .b.inp input:focus { outline: none; }
+  /* Chrome's spinners sit on top of a 130px card and clip the digits. */
+  .chain .b.inp input::-webkit-outer-spin-button,
+  .chain .b.inp input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .chain .b.inp input { -moz-appearance: textfield; }
+  .chain-note { margin-top: 8px; }
+
+  /* ---- the order tables ----------------------------------------
+     The page's base table right-aligns every cell, which suits the
+     hourly tracker because it is all numbers. These tables are mostly
+     TEXT -- names, addresses, reasons -- and right-aligned prose with
+     ragged left edges is unreadable, so the default flips here and
+     only the numeric columns are pulled right. */
+  #coin-orders-table th, #coin-orders-table td { text-align: left; }
+  #coin-orders-table th.num, #coin-orders-table td.num { text-align: right; }
+  #coin-orders-table td { padding: 9px 12px; vertical-align: top; }
+  #coin-orders-table th { padding: 8px 12px; }
+  /* Columns that legitimately need to wrap. Everything else stays on
+     one line so a row cannot silently become three. */
+  #coin-orders-table td.wrap { white-space: normal; min-width: 180px; }
+  #coin-orders-table tbody tr:hover td { background: var(--muted); }
+
+  /* ---- colour coding -------------------------------------------
+     Payment, risk and reason each get their own scale, and the scales
+     mean the same thing everywhere: green is cleared, amber needs a
+     human, red is held. Risk is the exception worth naming -- an
+     UNTAGGED COD was never scored, so it is grey rather than green;
+     colouring absence as safety is how an unchecked order gets
+     shipped. */
+  .tag2 { display: inline-block; font-size: 11px; font-weight: 600;
+          border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+          border: 1px solid transparent; }
+  .t-pre  { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent);
+            border-color: color-mix(in srgb, var(--good) 35%, transparent); }
+  .t-part { color: var(--s1);   background: color-mix(in srgb, var(--s1) 14%, transparent);
+            border-color: color-mix(in srgb, var(--s1) 35%, transparent); }
+  .t-cod  { color: var(--s3);   background: color-mix(in srgb, var(--s3) 16%, transparent);
+            border-color: color-mix(in srgb, var(--s3) 38%, transparent); }
+  .t-high { color: var(--bad);  background: color-mix(in srgb, var(--bad) 14%, transparent);
+            border-color: color-mix(in srgb, var(--bad) 38%, transparent); }
+  .t-med  { color: var(--s3);   background: color-mix(in srgb, var(--s3) 14%, transparent);
+            border-color: color-mix(in srgb, var(--s3) 32%, transparent); }
+  .t-low  { color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent);
+            border-color: color-mix(in srgb, var(--good) 30%, transparent); }
+  .t-none { color: var(--text-3); background: var(--muted); border-color: var(--border); }
   .strip .k { font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
               text-transform: uppercase; color: var(--text-3); }
   .strip .v { font-size: 26px; font-weight: 700; letter-spacing: -.025em; margin-top: 6px;
@@ -525,9 +613,9 @@
       <button id="view-coin" role="tab" aria-selected="false">Coin Orders</button>
       <button id="view-qty" role="tab" aria-selected="false">Quantity</button>
     </div>
-    <label class="f">Day <input type="date" id="day"></label>
-    <label class="f">Compare to <input type="date" id="cmp"></label>
-    <label class="f"><input type="checkbox" id="deltas" checked> % change</label>
+    <label class="f" id="f-day">Day <input type="date" id="day"></label>
+    <label class="f" id="f-cmp">Compare to <input type="date" id="cmp"></label>
+    <label class="f" id="f-deltas"><input type="checkbox" id="deltas" checked> % change</label>
     <button id="refresh">Refresh</button>
     <button id="theme">Light / dark</button>
     <label class="f" style="flex:1 1 320px">API
@@ -586,13 +674,11 @@
       <span class="sub" id="coin-span"></span>
     </div>
     <div class="strip" id="coin-kpis"></div>
-    <div class="strip" id="coin-dispatch"></div>
+    <div class="strip s3" id="coin-dispatch"></div>
     <div class="chain" id="coin-chain"></div>
-    <div class="inv-key">
-      <label class="vlab">Cost per coin &nbsp;<input type="number" id="coin-cost" min="0" step="10"
-        value="500" style="width:80px"> &#8377;</label>
-      <span>&mdash; the whole promotion since it started, not one day.</span>
-    </div>
+    <div class="sub chain-note">Cost per coin is editable &mdash; the figures are
+      re-queried on change, so they are always the ones the API computed, for the
+      whole promotion rather than one day.</div>
     <div style="margin-top:12px;overflow:auto">
       <table id="coin-table"><thead id="coin-thead"></thead><tbody id="coin-tbody"></tbody></table>
     </div>
@@ -1327,6 +1413,16 @@ function applyView() {
   // that are not there, which is worse than no note at all. render()
   // rewrites it when the tracker view comes back.
   if (VIEW !== "tracker") $("footnote").textContent = "";
+  // Inventory is a live snapshot and Coin Orders is cumulative over
+  // the whole promotion: neither fetch reads the day or the
+  // comparison, so leaving the controls on screen invites someone to
+  // change a date and watch nothing happen. Hidden rather than
+  // disabled, because a greyed control still claims the section has
+  // a day dimension it does not have.
+  const dayless = VIEW === "inv" || VIEW === "coin";
+  $("f-day").hidden = dayless;
+  $("f-cmp").hidden = dayless;
+  $("f-deltas").hidden = dayless;
   // Inventory does not move hour to hour and is a separate request, so
   // it is fetched once and then redrawn from memory.
   if (VIEW === "inv") { loadInventory(); return; }
@@ -1688,6 +1784,10 @@ function drawQty() {
 // have they cost" is cumulative, which is why this is its own section
 // and not another P&L line.
 let COINS = null, COINS_LOADING = false;
+// The rate the figures on screen were computed at. Held here rather
+// than read off the input, because the input is inside the chain and
+// does not exist until the first draw.
+let COIN_COST = 500;
 
 function loadCoins() {
   $("coincard").hidden = false;
@@ -1695,8 +1795,7 @@ function loadCoins() {
   if (COINS_LOADING) return;
   COINS_LOADING = true;
   $("coin-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
-  const cost = Number($("coin-cost").value) || 500;
-  fetch(apiBase() + "/admin/analytics/coins?coin_cost=" + encodeURIComponent(cost))
+  fetch(apiBase() + "/admin/analytics/coins?coin_cost=" + encodeURIComponent(COIN_COST))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => { COINS = d; COINS_LOADING = false; drawCoins(); })
     .catch(e => {
@@ -1783,7 +1882,10 @@ function drawCoins() {
     '<div class="op">=</div>' +
     box("Coins", num(d.total_coins), "mid") +
     '<div class="op">\u00d7</div>' +
-    box("Cost per coin", inr(d.coin_cost, 0)) +
+    '<div class="b inp"><div class="k"><label for="coin-cost">Cost per coin</label></div>' +
+      '<div class="v">\u20b9<input type="number" id="coin-cost" min="0" step="10" ' +
+      'inputmode="numeric" aria-label="Cost per coin in rupees" value="' +
+      (Number(d.coin_cost) || COIN_COST) + '"></div></div>' +
     '<div class="op">=</div>' +
     box("Cost", '<span class="bad">' + inr(d.total_cost, 0) + "</span>", "end");
 
@@ -1865,6 +1967,19 @@ const COL_HEAD = {
   bundle:"Bundle", channel:"Channel", bucketcol:"Bucket",
 };
 const COL_NUM = new Set(["amount","pincode","items"]);
+//: Columns allowed to wrap onto a second line. Everything else stays
+//: on one, so a long address cannot turn every row into three.
+const COL_WRAP = new Set(["why","issue","address1","address2","bundle","name"]);
+
+const PAY_TONE = { "Prepaid": "t-pre", "Partial COD": "t-part", "COD": "t-cod" };
+const RISK_TONE = { High: "t-high", Medium: "t-med", Low: "t-low" };
+//: Which call reasons are serious enough to read red rather than
+//: amber. A high-RTO customer and a Fake Order tag are the two that
+//: say "this one may never arrive"; the rest say "ring them first".
+const REASON_RED = new Set(["rto", "fake"]);
+
+const tag2 = (text, tone) =>
+  '<span class="tag2 ' + tone + '">' + esc(text) + "</span>";
 
 const CALL_LABEL = {
   new:"New customer COD", untagged:"Untagged gateway COD",
@@ -1879,18 +1994,26 @@ const ISSUE_LABEL = {
 };
 
 const pills = (raw, map, cls) => (raw || "").split(";").filter(Boolean)
-  .map(k => '<span class="why ' + (cls || "") + '">' + esc(map[k] || k) + "</span>").join("");
+  .map(k => '<span class="why ' +
+       (cls || (REASON_RED.has(k) ? "bad" : "warn")) + '">' +
+       esc(map[k] || k) + "</span>").join("");
 
 function coinCell(col, r) {
   switch (col) {
     case "order":       return esc(r.order_name || "\u2014");
     case "created":     return ist(r.created_at);
-    case "payment":     return esc(r.payment || "\u2014");
+    case "payment":     return r.payment
+                          ? tag2(r.payment, PAY_TONE[r.payment] || "t-none")
+                          : '<span class="sub">\u2014</span>';
     // A COD order with no GoKwik tag is UNTAGGED -- never scored --
     // which is not the same as low risk, so it is named rather than
     // left as a dash that reads like reassurance.
-    case "risk":        return r.risk_tag ? esc(r.risk_tag)
-                          : (r.payment === "COD" ? '<span class="why">Untagged</span>'
+    // An UNTAGGED COD was never scored by GoKwik, so it is grey and
+    // not green. Colouring absence as safety is how an unchecked
+    // order gets shipped.
+    case "risk":        return r.risk_tag
+                          ? tag2(r.risk_tag + " Risk", RISK_TONE[r.risk_tag] || "t-none")
+                          : (r.payment === "COD" ? tag2("Untagged", "t-none")
                                                  : '<span class="sub">\u2014</span>');
     case "customer":    return r.is_returning == null ? "\u2014"
                           : r.is_returning ? "Returning \u00b7 " + num(r.customer_orders)
@@ -1900,7 +2023,7 @@ function coinCell(col, r) {
     case "state":       return esc(r.state || "\u2014");
     case "pincode":     return esc(r.pincode || "\u2014");
     case "fulfillment": return esc(r.fulfillment || "\u2014");
-    case "status":      return r.bucket === "coin_only" ? "Held"
+    case "status":      return r.bucket === "coin_only" ? tag2("Held", "t-high")
                           : esc(BUCKET_LABEL[r.bucket] || "\u2014");
     case "flag":        return r.address_flag
                           ? '<span class="why">' + esc(r.address_flag) + "</span>"
@@ -1928,12 +2051,13 @@ function coinCell(col, r) {
 
 function drawCoinOrders() {
   const cols = COIN_COLUMNS[COIN_TAB] || COIN_COLUMNS._all;
+  const cls = c => (COL_NUM.has(c) ? " num" : "") + (COL_WRAP.has(c) ? " wrap" : "");
   $("coin-orders-thead").innerHTML = "<tr>" +
-    cols.map(c => '<th' + (COL_NUM.has(c) ? ' class="num"' : "") + ">" +
-                  esc(COL_HEAD[c]) + "</th>").join("") + "</tr>";
+    cols.map(c => '<th class="' + cls(c).trim() + '">' + esc(COL_HEAD[c]) +
+                  "</th>").join("") + "</tr>";
   $("coin-orders-tbody").innerHTML = COIN_ROWS.map(r => "<tr>" +
-    cols.map(c => '<td' + (COL_NUM.has(c) ? ' class="num"' : "") + ">" +
-                  coinCell(c, r) + "</td>").join("") + "</tr>").join("");
+    cols.map(c => '<td class="' + cls(c).trim() + '">' + coinCell(c, r) +
+                  "</td>").join("") + "</tr>").join("");
   const more = COIN_TOTAL != null && COIN_ROWS.length < COIN_TOTAL;
   $("coin-more").hidden = !more;
   $("coin-more-span").textContent = COIN_TOTAL == null ? "" :
@@ -2115,8 +2239,16 @@ function drawCoinTabs(d) {
 $("coin-more").onclick = loadCoinOrders;
 
 // Re-fetch on a new cost rather than scaling client-side, so the figure
-// shown is always the one the API computed.
-$("coin-cost").addEventListener("change", () => { COINS = null; loadCoins(); });
+// shown is always the one the API computed. Delegated, because the input
+// now lives inside the chain and the chain is rebuilt from scratch on
+// every draw -- a listener bound to the element would die with it.
+$("coin-chain").addEventListener("change", e => {
+  if (e.target.id !== "coin-cost") return;
+  const v = Number(e.target.value);
+  COIN_COST = v > 0 ? v : 500;
+  COINS = null;
+  loadCoins();
+});
 
 // --- inventory -------------------------------------------------------
 // Fetched once per page load rather than on the tracker's hourly
