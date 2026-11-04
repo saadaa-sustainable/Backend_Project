@@ -25,9 +25,22 @@ Dates are DD-MM-YYYY. Amounts carry a rupee sign and Indian digit
 grouping, and the grouped ones are quoted, so "1,00,000" is ONE field
 and not three -- csv.reader handles that, a split on comma does not.
 
+SEVERAL ACCOUNTS, ONE DAY
+-------------------------
+Kwikchat is billed per workspace and the console exports one at a
+time, so a month arrives as several files covering the SAME dates with
+different traffic -- one carrying marketing and SMS, another utility
+messages, another almost nothing. Pass them all: the day's spend is
+their SUM.
+
+This matters because the write REPLACES the day. Importing three files
+one after another would leave only the last one's figure and silently
+drop the rest, which on a real month was most of the money.
+
 Usage:
-    ./.venv/bin/python scripts/import_kwikchat_spend.py path/to/export.csv
-    ./.venv/bin/python scripts/import_kwikchat_spend.py export.csv --dry-run
+    ./.venv/bin/python scripts/import_kwikchat_spend.py export.csv
+    ./.venv/bin/python scripts/import_kwikchat_spend.py a.csv b.csv c.csv
+    ./.venv/bin/python scripts/import_kwikchat_spend.py *.csv --dry-run
 """
 from __future__ import annotations
 
@@ -100,21 +113,47 @@ def read_rows(path: Path) -> list[tuple[date, float]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("csv_path", type=Path)
+    ap.add_argument("csv_path", type=Path, nargs="+",
+                    help="One or more exports. Same-day rows are SUMMED: "
+                         "each file is a separate Kwikchat workspace.")
+    ap.add_argument("--until", type=date.fromisoformat, default=None,
+                    help="Last day to write (YYYY-MM-DD). Use it to leave "
+                         "TODAY out: the console exports the day so far, and "
+                         "writing that marks a part-finished day as measured, "
+                         "where a later re-import would have corrected it.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Show what would be written and exit.")
     args = ap.parse_args()
 
-    if not args.csv_path.exists():
-        raise SystemExit(f"No such file: {args.csv_path}")
+    for path in args.csv_path:
+        if not path.exists():
+            raise SystemExit(f"No such file: {path}")
 
-    rows = read_rows(args.csv_path)
-    if not rows:
-        raise SystemExit("No dated rows in the file.")
+    # Summed per day across the files, never replaced: each file is a
+    # separate workspace and they all billed on the same dates.
+    merged: dict[date, float] = {}
+    for path in args.csv_path:
+        file_rows = read_rows(path)
+        if not file_rows:
+            raise SystemExit(f"No dated rows in {path.name}.")
+        sub = sum(s for _, s in file_rows)
+        print(f"File:    {path.name}  ({len(file_rows)} days, Rs {sub:,.2f})")
+        for d, amount in file_rows:
+            merged[d] = merged.get(d, 0.0) + amount
 
+    rows = sorted(merged.items())
+    if args.until:
+        dropped = [d for d, _ in rows if d > args.until]
+        rows = [(d, v) for d, v in rows if d <= args.until]
+        if dropped:
+            print(f"Skipped: {len(dropped)} day(s) after {args.until} "
+                  f"({', '.join(str(d) for d in dropped)})")
+        if not rows:
+            raise SystemExit(f"Nothing on or before {args.until}.")
     total = sum(s for _, s in rows)
     days = [d for d, _ in rows]
-    print(f"File:    {args.csv_path.name}")
+    if len(args.csv_path) > 1:
+        print(f"\nSummed {len(args.csv_path)} files into {len(rows)} days.")
     print(f"Range:   {min(days)} .. {max(days)}  ({len(rows)} days)")
     print(f"Total:   Rs {total:,.2f}")
     print(f"Per day: min Rs {min(s for _, s in rows):,.2f}  "
