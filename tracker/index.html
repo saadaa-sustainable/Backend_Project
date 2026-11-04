@@ -376,6 +376,33 @@
                 background: var(--muted); border-radius: 999px; padding: 2px 8px;
                 color: var(--text-2); }
   .btab[aria-selected="true"] .pill { background: var(--border); color: var(--text); }
+  /* Controls above each tab's table. Every tab carries its own set,
+     because what you search by on the Call list (a phone number) is
+     not what you search by on Bundle (a bundle name). */
+  .bctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+  .bctl input[type=search], .bctl select {
+      font: inherit; font-size: 12.5px; background: var(--surface); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+      min-height: 38px; }
+  .bctl input[type=search] { flex: 1 1 260px; max-width: 420px; }
+  /* Sub-filters for Address issues. They OVERLAP -- one address can
+     fail several checks -- so the chips do not sum to the tab count. */
+  .chip { font: inherit; font-size: 12px; cursor: pointer; background: var(--surface);
+          color: var(--text-2); border: 1px solid var(--border); border-radius: 999px;
+          padding: 6px 12px; min-height: 34px; }
+  .chip[aria-pressed="true"] { background: var(--text); color: var(--bg);
+                               border-color: var(--text); }
+  .chip .n { font-variant-numeric: tabular-nums; opacity: .75; margin-left: 5px; }
+  /* A reason is a pill, and an order can carry several. */
+  .why { display: inline-block; font-size: 11px; background: var(--muted);
+         border: 1px solid var(--border-soft); border-radius: 999px;
+         padding: 2px 8px; margin: 1px 3px 1px 0; white-space: nowrap; }
+  .why.bad { background: #5c2f3322; border-color: var(--bad); color: var(--bad); }
+  .sev { font-size: 11px; font-weight: 650; color: var(--bad);
+         border: 1px solid var(--bad); border-radius: 999px; padding: 2px 8px; }
+  .wl-grid { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; }
+  .wl-grid > div { flex: 1 1 380px; min-width: 0; }
+  .wl-grid h5 { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
   .strip .k { font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
               text-transform: uppercase; color: var(--text-3); }
   .strip .v { font-size: 26px; font-weight: 700; letter-spacing: -.025em; margin-top: 6px;
@@ -571,7 +598,10 @@
     </div>
     <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft)">
       <div class="btabs" id="coin-tabs"></div>
+      <div class="bctl" id="coin-ctl"></div>
+      <div id="coin-chips" class="bctl"></div>
       <div class="sub" id="coin-orders-span" style="margin-top:8px"></div>
+      <div id="coin-watchlist"></div>
       <div style="margin-top:10px;overflow:auto" id="coin-orders-wrap">
         <table id="coin-orders-table"><thead id="coin-orders-thead"></thead>
           <tbody id="coin-orders-tbody"></tbody></table>
@@ -1731,7 +1761,14 @@ function drawCoins() {
   // The tab bar below is the selector now, so the cards are display
   // only -- two ways to choose the same thing is one too many.
   drawCoinTabs(d);
+  drawCoinControls();
   if (!COIN_ROWS.length) loadCoinOrders();
+  if (!COIN_EXTRAS) {
+    fetch(apiBase() + "/admin/analytics/coins/extras")
+      .then(r => r.ok ? r.json() : null)
+      .then(x => { if (x) { COIN_EXTRAS = x; drawCoinControls(); drawCoinWatchlist(); } })
+      .catch(() => {});
+  }
 
   // The arithmetic, left to right. Coin ORDERS and coin COUNT are
   // different numbers and the chain is where that stops being a
@@ -1783,52 +1820,233 @@ let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false;
 //: null means every coin order. "watchlist" is not a bucket -- it
 //: crosses them -- so it is sent as its own flag.
 let COIN_TAB = "ship_now";
+let COIN_ISSUE = null, COIN_PAY = null, COIN_Q = "", COIN_EXTRAS = null;
+let COIN_SEARCH_T = null;
+//: What each tab's search box actually looks at, so the placeholder
+//: does not promise a field the query never touches.
+const SEARCH_HINT = {
+  call_list: "Search order, name, phone, city\u2026",
+  address_bad: "Search order, name, phone, address\u2026",
+  bundle_no_coin: "Search order, name, phone, bundle, city\u2026",
+};
 const BUCKET_LABEL = {
   ship_now: "Cleared to ship", call_list: "Held for COD call",
   address_bad: "Held for address fix", shipped: "Already shipped",
   coin_only: "Coin only", bundle_no_coin: "Bundle, no coin",
 };
 
-function coinOrderCells(r) {
-  const cust = r.is_returning == null ? "\u2014"
-    : r.is_returning ? "Returning \u00b7 " + num(r.customer_orders) : "New";
-  const place = [r.city, r.state].filter(Boolean).join(", ") || "\u2014";
-  const held = r.bucket === "call_list" || r.bucket === "address_bad" ||
-               r.bucket === "coin_only";
-  return "<td>" + esc(r.order_name || "\u2014") + "</td>" +
-    '<td style="color:' + (r.bucket === "ship_now" ? "var(--good)"
-      : r.bucket === "address_bad" ? "var(--bad)"
-      : held ? "var(--s3)" : "var(--text-2)") + '">' +
-    esc(BUCKET_LABEL[r.bucket] || r.bucket || "\u2014") +
-    (r.bucket_reason ? '<span class="sub2"> ' + esc(r.bucket_reason) + "</span>" : "") +
-    (r.address_flag ? '<span class="sub2"> ' + esc(r.address_flag) + "</span>" : "") +
-    "</td>" +
-    "<td>" + ist(r.created_at) + "</td>" +
-    "<td>" + esc(r.payment || "\u2014") + "</td>" +
-    // A blank risk tag on a COD order means GoKwik never scored it,
-    // which is not the same as low risk -- so it reads as a dash and
-    // never as reassurance.
-    '<td class="sub">' + esc(r.risk_tag || "\u2014") + "</td>" +
-    "<td>" + esc(cust) + "</td>" +
-    '<td class="num">' + inr(r.amount, 0) + "</td>" +
-    '<td class="num">' + num(r.coins) + "</td>" +
-    "<td>" + esc(place) + "</td>" +
-    '<td class="num">' + esc(r.pincode || "\u2014") + "</td>" +
-    "<td>" + esc(r.fulfillment || "\u2014") + "</td>";
+// Each tab shows the columns its job needs and no others: a caller
+// wants a name and a phone number, an address fixer wants the address
+// lines and what is wrong with them, and neither wants the other's.
+const COIN_COLUMNS = {
+  ship_now:   ["order","created","payment","risk","customer","amount","city","state",
+               "pincode","fulfillment","flag"],
+  call_list:  ["order","created","risk","customer","amount","name","phone","city",
+               "pincode","why"],
+  address_bad:["order","created","payment","risk","customer","amount","name",
+               "address1","address2","city","state","pincode","phone","issue","sev"],
+  coin_only:  ["order","created","status","fulfillment","payment","customer","amount",
+               "name","phone","city","pincode"],
+  bundle_no_coin:["order","created","items","bundle","fulfillment","payment","channel",
+               "customer","amount","name","phone","city"],
+  shipped:    ["order","created","payment","risk","customer","amount","city","state",
+               "pincode","fulfillment","flag"],
+  watchlist:  ["order","created","bucketcol","payment","risk","customer","amount",
+               "name","phone","city","why"],
+  _all:       ["order","created","bucketcol","payment","risk","customer","amount",
+               "city","pincode","fulfillment"],
+};
+const COL_HEAD = {
+  order:"Order", created:"Created (IST)", payment:"Payment", risk:"Risk tag",
+  customer:"Customer", amount:"Amount", city:"City", state:"State",
+  pincode:"Pincode", fulfillment:"Fulfillment", flag:"Flag", name:"Name",
+  phone:"Phone", why:"Why", address1:"Address 1", address2:"Address 2",
+  issue:"Issue", sev:"Severity", status:"Status", items:"Items",
+  bundle:"Bundle", channel:"Channel", bucketcol:"Bucket",
+};
+const COL_NUM = new Set(["amount","pincode","items"]);
+
+const CALL_LABEL = {
+  new:"New customer COD", untagged:"Untagged gateway COD",
+  dup:"Duplicate same-day COD", rto:"High RTO",
+  nodelivery:"No prior delivery", fake:"Fake Order tag",
+};
+const ISSUE_LABEL = {
+  landmark:"Landmark/area only, no house no.", short:"Too short (<20 chars), no house no.",
+  fewwords:"Fewer than 3 distinct words", repeated:"One phrase repeated, no house no.",
+  gibberish:"Gibberish word", hostel:"Hostel/PG, no room no.",
+  junk:"Junk word", empty:"No address",
+};
+
+const pills = (raw, map, cls) => (raw || "").split(";").filter(Boolean)
+  .map(k => '<span class="why ' + (cls || "") + '">' + esc(map[k] || k) + "</span>").join("");
+
+function coinCell(col, r) {
+  switch (col) {
+    case "order":       return esc(r.order_name || "\u2014");
+    case "created":     return ist(r.created_at);
+    case "payment":     return esc(r.payment || "\u2014");
+    // A COD order with no GoKwik tag is UNTAGGED -- never scored --
+    // which is not the same as low risk, so it is named rather than
+    // left as a dash that reads like reassurance.
+    case "risk":        return r.risk_tag ? esc(r.risk_tag)
+                          : (r.payment === "COD" ? '<span class="why">Untagged</span>'
+                                                 : '<span class="sub">\u2014</span>');
+    case "customer":    return r.is_returning == null ? "\u2014"
+                          : r.is_returning ? "Returning \u00b7 " + num(r.customer_orders)
+                                           : "New";
+    case "amount":      return inr(r.amount, 0);
+    case "city":        return esc(r.city || "\u2014");
+    case "state":       return esc(r.state || "\u2014");
+    case "pincode":     return esc(r.pincode || "\u2014");
+    case "fulfillment": return esc(r.fulfillment || "\u2014");
+    case "status":      return r.bucket === "coin_only" ? "Held"
+                          : esc(BUCKET_LABEL[r.bucket] || "\u2014");
+    case "flag":        return r.address_flag
+                          ? '<span class="why">' + esc(r.address_flag) + "</span>"
+                          : (r.watchlist ? '<span class="why">' + esc(r.watchlist) +
+                             "</span>" : "");
+    case "name":        return esc(r.customer_name || "\u2014");
+    case "phone":       return esc(r.phone || "\u2014");
+    case "address1":    return esc(r.address1 || "\u2014");
+    case "address2":    return esc(r.address2 || "\u2014");
+    case "issue":       return pills(r.address_issues, ISSUE_LABEL, "bad");
+    case "sev":         return '<span class="sev">Bad</span>';
+    case "items":       return num(r.item_count);
+    case "bundle":      return (r.bundles || "").split("; ").filter(Boolean)
+                          .map(b => '<span class="why">' + esc(b) + "</span>").join("")
+                          || '<span class="sub">\u2014</span>';
+    case "channel":     return esc(r.channel || "\u2014");
+    case "bucketcol":   return esc(BUCKET_LABEL[r.bucket] || r.bucket || "\u2014");
+    case "why":         return pills(r.call_reasons, CALL_LABEL) ||
+                               pills(r.address_issues, ISSUE_LABEL, "bad") ||
+                               (r.watchlist ? '<span class="why">' + esc(r.watchlist) +
+                                "</span>" : '<span class="sub">\u2014</span>');
+    default:            return "";
+  }
 }
 
 function drawCoinOrders() {
-  $("coin-orders-thead").innerHTML =
-    "<tr><th>Order</th><th>Bucket</th><th>Created (IST)</th><th>Payment</th><th>Risk</th>" +
-    "<th>Customer</th><th>Amount</th><th>Coins</th><th>City</th>" +
-    "<th>Pincode</th><th>Fulfillment</th></tr>";
-  $("coin-orders-tbody").innerHTML =
-    COIN_ROWS.map(r => "<tr>" + coinOrderCells(r) + "</tr>").join("");
+  const cols = COIN_COLUMNS[COIN_TAB] || COIN_COLUMNS._all;
+  $("coin-orders-thead").innerHTML = "<tr>" +
+    cols.map(c => '<th' + (COL_NUM.has(c) ? ' class="num"' : "") + ">" +
+                  esc(COL_HEAD[c]) + "</th>").join("") + "</tr>";
+  $("coin-orders-tbody").innerHTML = COIN_ROWS.map(r => "<tr>" +
+    cols.map(c => '<td' + (COL_NUM.has(c) ? ' class="num"' : "") + ">" +
+                  coinCell(c, r) + "</td>").join("") + "</tr>").join("");
   const more = COIN_TOTAL != null && COIN_ROWS.length < COIN_TOTAL;
   $("coin-more").hidden = !more;
   $("coin-more-span").textContent = COIN_TOTAL == null ? "" :
     num(COIN_ROWS.length) + " of " + num(COIN_TOTAL) +
     (more ? "" : "  \u00b7  all loaded");
+}
+
+/** The controls above the table, rebuilt per tab. */
+function drawCoinControls() {
+  const hint = SEARCH_HINT[COIN_TAB] || "Search order, name, city, pincode\u2026";
+  const pays = ["Prepaid", "Partial COD", "COD"];
+  $("coin-ctl").innerHTML =
+    '<input type="search" id="coin-q" placeholder="' + esc(hint) +
+    '" value="' + esc(COIN_Q) + '">' +
+    '<select id="coin-pay"><option value="">All payments</option>' +
+    pays.map(x => '<option' + (COIN_PAY === x ? " selected" : "") + ">" +
+                  esc(x) + "</option>").join("") + "</select>" +
+    '<button type="button" id="coin-copy">Copy order numbers</button>' +
+    '<span class="sub" id="coin-copy-note">Copies every order matching the ' +
+    "filters, not just the rows on screen.</span>";
+  const q = $("coin-q");
+  q.oninput = e => {
+    // Debounced: a request per keystroke against a table of thousands
+    // is a request per keystroke too many.
+    COIN_Q = e.target.value;
+    clearTimeout(COIN_SEARCH_T);
+    COIN_SEARCH_T = setTimeout(reloadCoinList, 350);
+  };
+  $("coin-pay").onchange = e => { COIN_PAY = e.target.value || null; reloadCoinList(); };
+  $("coin-copy").onclick = copyCoinOrders;
+
+  // Sub-filters belong to Address issues only.
+  const groups = (COIN_EXTRAS && COIN_EXTRAS.issue_groups) || [];
+  $("coin-chips").innerHTML = (COIN_TAB === "address_bad" && groups.length)
+    ? '<button type="button" class="chip" data-issue="" aria-pressed="' +
+      (COIN_ISSUE ? "false" : "true") + '">All</button>' +
+      groups.map(g => '<button type="button" class="chip" data-issue="' + esc(g.key) +
+        '" aria-pressed="' + (COIN_ISSUE === g.key ? "true" : "false") + '">' +
+        esc(g.label) + '<span class="n">' + num(g.count) + "</span></button>").join("") +
+      '<span class="sub">An address can fail several checks, so these overlap and ' +
+      "do not sum to the tab total.</span>"
+    : "";
+  $("coin-chips").onclick = e => {
+    const c = e.target.closest("[data-issue]");
+    if (!c) return;
+    COIN_ISSUE = c.getAttribute("data-issue") || null;
+    reloadCoinList();
+  };
+}
+
+/** Every order matching the filters, not just the page on screen. */
+function copyCoinOrders() {
+  const btn = $("coin-copy");
+  btn.textContent = "Copying\u2026";
+  const reset = () => { btn.textContent = "Copy order numbers"; };
+  fetch(apiBase() + "/admin/analytics/coins/orders?limit=2000&offset=0" +
+        (COIN_TAB === "watchlist" ? "&watchlist=true"
+          : COIN_TAB ? "&bucket=" + encodeURIComponent(COIN_TAB) : "") +
+        (COIN_ISSUE ? "&issue=" + encodeURIComponent(COIN_ISSUE) : "") +
+        (COIN_PAY ? "&pay=" + encodeURIComponent(COIN_PAY) : "") +
+        (COIN_Q ? "&q=" + encodeURIComponent(COIN_Q) : ""))
+    .then(r => r.json())
+    .then(d => {
+      const text = d.rows.map(r => r.order_name || "").filter(Boolean).join("\n");
+      // Clipboard access is refused in some browsers and on a
+      // non-secure origin, so a failure says so rather than looking
+      // like a copy that worked.
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = "Copied " + num(d.rows.length);
+          setTimeout(reset, 2000);
+        }).catch(() => {
+          $("coin-copy-note").textContent = "Copying was blocked in this browser.";
+          reset();
+        });
+      } else {
+        $("coin-copy-note").textContent = "Copying was blocked in this browser.";
+        reset();
+      }
+    })
+    .catch(reset);
+}
+
+/** Watchlist is three panels, not a plain list. */
+function drawCoinWatchlist() {
+  const x = COIN_EXTRAS;
+  if (COIN_TAB !== "watchlist" || !x) { $("coin-watchlist").innerHTML = ""; return; }
+  const sum = f => x.risk_rows.reduce((a, r) => a + r[f], 0);
+  const risk = "<div><h5>Orders by risk tag</h5><table><thead><tr><th>Risk tag</th>" +
+    '<th class="num">New</th><th class="num">Returning</th><th class="num">Total</th>' +
+    "</tr></thead><tbody>" +
+    x.risk_rows.map(r => "<tr><td>" + esc(r.label) + '</td><td class="num">' +
+      num(r.new) + '</td><td class="num">' + num(r.returning) + '</td><td class="num">' +
+      num(r.total) + "</td></tr>").join("") +
+    '<tr class="tot"><td>All</td><td class="num">' + num(sum("new")) +
+    '</td><td class="num">' + num(sum("returning")) + '</td><td class="num">' +
+    num(sum("total")) + "</td></tr></tbody></table>" +
+    '<p class="note">All active silver-coin orders. GoKwik risk tags only appear ' +
+    "on COD checkouts.</p></div>";
+  const rows = x.repeat_buyers.slice(0, 50);
+  const rep = "<div><h5>Repeat silver-coin buyers (same phone)</h5>" +
+    '<div style="overflow:auto"><table><thead><tr><th class="num">Orders</th>' +
+    "<th>Name</th><th>Phone</th><th>City</th><th>Order list</th>" +
+    '<th class="num">Total</th></tr></thead><tbody>' +
+    (rows.length
+      ? rows.map(b => '<tr><td class="num">' + num(b.orders) + "</td><td>" +
+          esc(b.name || "\u2014") + "</td><td>" + esc(b.phone || "\u2014") +
+          "</td><td>" + esc(b.city || "\u2014") + '</td><td class="sub">' +
+          esc(b.order_names) + '</td><td class="num">' + inr(b.total, 0) +
+          "</td></tr>").join("")
+      : '<tr><td colspan="6" class="sub">Nothing here right now.</td></tr>') +
+    "</tbody></table></div></div>";
+  $("coin-watchlist").innerHTML = '<div class="wl-grid">' + risk + rep + "</div>";
 }
 
 function loadCoinOrders() {
@@ -1838,7 +2056,10 @@ function loadCoinOrders() {
   fetch(apiBase() + "/admin/analytics/coins/orders?limit=" + COIN_PAGE +
         "&offset=" + COIN_ROWS.length +
         (COIN_TAB === "watchlist" ? "&watchlist=true"
-          : COIN_TAB ? "&bucket=" + encodeURIComponent(COIN_TAB) : ""))
+          : COIN_TAB ? "&bucket=" + encodeURIComponent(COIN_TAB) : "") +
+        (COIN_ISSUE ? "&issue=" + encodeURIComponent(COIN_ISSUE) : "") +
+        (COIN_PAY ? "&pay=" + encodeURIComponent(COIN_PAY) : "") +
+        (COIN_Q ? "&q=" + encodeURIComponent(COIN_Q) : ""))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => {
       COIN_ROWS = COIN_ROWS.concat(d.rows);
@@ -1846,12 +2067,18 @@ function loadCoinOrders() {
       COIN_BUSY = false;
       $("coin-more").textContent = "Load more";
       drawCoinOrders();
+      drawCoinControls();
     })
     .catch(e => {
       COIN_BUSY = false;
       $("coin-more").textContent = "Load more";
       $("coin-more-span").textContent = "Could not load: " + String(e.message || e);
     });
+}
+
+function reloadCoinList() {
+  COIN_ROWS = []; COIN_TOTAL = null;
+  loadCoinOrders();
 }
 
 function drawCoinTabs(d) {
@@ -1875,10 +2102,13 @@ function drawCoinTabs(d) {
     if (!b) return;
     const k = b.getAttribute("data-tab") || null;
     if (k === COIN_TAB) return;
-    COIN_TAB = k;
-    COIN_ROWS = []; COIN_TOTAL = null;
+    // Filters belong to the tab that set them: carrying a bundle
+    // search onto the Call list would silently hide most of it.
+    COIN_TAB = k; COIN_ISSUE = null; COIN_PAY = null; COIN_Q = "";
     drawCoinTabs(d);
-    loadCoinOrders();
+    drawCoinControls();
+    drawCoinWatchlist();
+    reloadCoinList();
   };
 }
 

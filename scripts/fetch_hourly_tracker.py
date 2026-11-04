@@ -538,12 +538,29 @@ CREATE TABLE IF NOT EXISTS {COIN_TABLE} (
     city            text,
     state           text,
     pincode         text,
+    -- The desk's tables are worked from, not just read: a caller
+    -- needs the name and number in front of them, and an address
+    -- cannot be fixed without seeing what is wrong with it.
+    customer_name   text,
+    phone           text,
+    address1        text,
+    address2        text,
+    channel         text,
+    item_count      integer,
+    -- "Pick Any 3 Men Airy Linen Short Kurtas" and the like, so the
+    -- Bundle tab can say WHICH bundle went out without a coin.
+    bundles         text,
     coin_only       boolean,
     -- Exactly one of: shipped, coin_only, address_bad, call_list,
     -- ship_now. The reason is stored beside it so a held order can be
     -- explained to the person who has to act on it.
     bucket          text,
     bucket_reason   text,
+    -- Semicolon-joined keys, because an order can trip SEVERAL rules
+    -- and the desk shows them all as separate pills. Storing only the
+    -- first would make "why is this on the call list" unanswerable.
+    call_reasons    text,
+    address_issues  text,
     -- An OVERLAY, not a bucket: a watchlisted order still sits in
     -- Ship now or the Call list and still has to be dispatched or
     -- called. This only says it is worth a second look.
@@ -562,13 +579,24 @@ ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bucket text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bucket_reason text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address_flag text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS watchlist text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address_issues text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS call_reasons text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS bundles text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS item_count integer;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS channel text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address2 text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address1 text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS phone text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS customer_name text;
 CREATE INDEX IF NOT EXISTS ix_coin_order_bucket ON {COIN_TABLE} (bucket);
 """
 
 COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "units",
                 "amount", "payment", "fulfillment", "risk_tag", "customer_orders",
                 "is_returning", "city", "state", "pincode", "coin_only",
-                "bucket", "bucket_reason", "address_flag", "watchlist"]
+                "bucket", "bucket_reason", "address_flag", "watchlist",
+                "customer_name", "phone", "address1", "address2", "channel",
+                "item_count", "bundles", "call_reasons", "address_issues"]
 
 COIN_UPSERT = f"""
 INSERT INTO {COIN_TABLE} ({", ".join(COIN_COLUMNS)}) VALUES %s
@@ -643,6 +671,37 @@ def risk_of(tags: list[str] | None) -> str | None:
 
 
 PAYMENT_LABEL = {"PAID": "Prepaid", "PARTIALLY_PAID": "Partial COD", "PENDING": "COD"}
+
+#: Shopify names a multi-buy bundle in the line-item title. There is
+#: no bundle FIELD to read, so the title is matched -- which is why
+#: this is a list to extend rather than a regex to be clever with.
+BUNDLE_WORDS = ("pick any", "combo", "bundle", "set of")
+
+
+def bundle_titles(line_items: dict | None) -> list[str]:
+    out = []
+    for edge in ((line_items or {}).get("edges") or []):
+        title = ((edge.get("node") or {}).get("title") or "").strip()
+        if title and any(w in title.lower() for w in BUNDLE_WORDS):
+            if title not in out:
+                out.append(title)
+    return out
+
+
+def order_channel(order: dict) -> str | None:
+    """Where the order came from.
+
+    `channelInformation` is empty on most orders here -- it was set on
+    about 3% of a day's coin orders -- so the APP that created the
+    order is the usable answer: GoKwik's checkout, Draft Orders, the
+    Online Store. Falls back to the channel definition where it does
+    exist.
+    """
+    app = (order.get("app") or {}).get("name")
+    if app:
+        return app
+    cd = (order.get("channelInformation") or {}).get("channelDefinition") or {}
+    return cd.get("channelName") or cd.get("handle") or None
 
 
 def count_units(line_items: dict | None) -> tuple[int, int]:
@@ -829,13 +888,15 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         cancelledAt
         tags
         lineItems(first: 100) {
-          edges { node { sku quantity } }
+          edges { node { sku quantity title } }
         }
+        app { name }
+        channelInformation { channelDefinition { handle channelName } }
         name
         email
         displayFinancialStatus
         displayFulfillmentStatus
-        shippingAddress { address1 address2 city province zip phone }
+        shippingAddress { name address1 address2 city province zip phone }
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -845,6 +906,45 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
   }
 }
 """
+
+
+def coin_order_row(n: dict, cust: dict, created: datetime,
+                   coins: int, units: int, price: float) -> dict:
+    """One row for the order list, coin or bundle.
+
+    Built in one place so the two branches cannot drift: a bundle row
+    with a missing column would show as a blank cell rather than an
+    error, which is the kind of gap nobody reports.
+    """
+    addr = n.get("shippingAddress") or {}
+    nord = cust.get("numberOfOrders")
+    nord = int(nord) if str(nord or "").isdigit() else None
+    items = sum(int((e.get("node") or {}).get("quantity") or 0)
+                for e in ((n.get("lineItems") or {}).get("edges") or []))
+    bundles = bundle_titles(n.get("lineItems"))
+    return {
+        "order_id": n["id"], "order_name": n.get("name"), "created_at": created,
+        "day_ist": created.astimezone(IST).date(),
+        "coins": coins, "units": units, "amount": price,
+        "payment": PAYMENT_LABEL.get((n.get("displayFinancialStatus") or "").upper()),
+        "fulfillment": (n.get("displayFulfillmentStatus") or "").title() or None,
+        "risk_tag": risk_of(n.get("tags")),
+        "customer_orders": nord,
+        "is_returning": (nord > 1) if nord is not None else None,
+        "city": addr.get("city"), "state": addr.get("province"),
+        "pincode": addr.get("zip"), "coin_only": coins > 0 and units == 0,
+        "customer_name": (addr.get("name") or "").strip() or None,
+        "phone": (addr.get("phone") or "").strip() or None,
+        "address1": addr.get("address1"), "address2": addr.get("address2"),
+        "channel": order_channel(n), "item_count": items,
+        "bundles": "; ".join(bundles) or None,
+        # Classified after the day is gathered: the duplicate-COD test
+        # needs the other orders of the same day, which do not exist
+        # yet when this row is built.
+        "_customer_id": (cust.get("id") or None),
+        "_fake_order": "fake order" in {
+            str(t).strip().lower() for t in (n.get("tags") or [])},
+    }
 
 
 async def fetch_orders(client, store, day: date,
@@ -916,38 +1016,8 @@ async def fetch_orders(client, store, day: date,
                     if units == 0:
                         b["coin_only_orders"] += 1
                     if coin_rows is not None:
-                        addr = n.get("shippingAddress") or {}
-                        nord = cust.get("numberOfOrders")
-                        nord = int(nord) if str(nord or "").isdigit() else None
-                        coin_rows.append({
-                            "order_id": n["id"],
-                            "order_name": n.get("name"),
-                            "created_at": created,
-                            "day_ist": created.astimezone(IST).date(),
-                            "coins": coins,
-                            "units": units,
-                            "amount": price,
-                            "payment": PAYMENT_LABEL.get(
-                                (n.get("displayFinancialStatus") or "").upper()),
-                            "fulfillment": (n.get("displayFulfillmentStatus")
-                                            or "").title() or None,
-                            "risk_tag": risk_of(n.get("tags")),
-                            "customer_orders": nord,
-                            "is_returning": (nord > 1) if nord is not None else None,
-                            "city": addr.get("city"),
-                            "state": addr.get("province"),
-                            "pincode": addr.get("zip"),
-                            "coin_only": units == 0,
-                            # Classified after the day is gathered: the
-                            # duplicate-COD test needs the other orders
-                            # of the same day, which do not exist yet.
-                            "_customer_id": (cust.get("id") or None),
-                            "_address1": addr.get("address1"),
-                            "_address2": addr.get("address2"),
-                            "_phone": (addr.get("phone") or "").strip(),
-                            "_fake_order": "fake order" in {
-                                str(t).strip().lower() for t in (n.get("tags") or [])},
-                        })
+                        coin_rows.append(coin_order_row(n, cust, created, coins, units,
+                                                        price))
                     if (n.get("displayFulfillmentStatus") or "").upper() == "FULFILLED":
                         b["coin_shipped_orders"] += 1
                     fin = (n.get("displayFinancialStatus") or "").upper()
@@ -965,30 +1035,8 @@ async def fetch_orders(client, store, day: date,
                 elif not coins and units >= 2 and coin_ok:
                     b["bundle_no_coin_orders"] += 1
                     if coin_rows is not None:
-                        addr = n.get("shippingAddress") or {}
-                        nord = cust.get("numberOfOrders")
-                        nord = int(nord) if str(nord or "").isdigit() else None
-                        coin_rows.append({
-                            "order_id": n["id"], "order_name": n.get("name"),
-                            "created_at": created,
-                            "day_ist": created.astimezone(IST).date(),
-                            "coins": 0, "units": units, "amount": price,
-                            "payment": PAYMENT_LABEL.get(
-                                (n.get("displayFinancialStatus") or "").upper()),
-                            "fulfillment": (n.get("displayFulfillmentStatus")
-                                            or "").title() or None,
-                            "risk_tag": risk_of(n.get("tags")),
-                            "customer_orders": nord,
-                            "is_returning": (nord > 1) if nord is not None else None,
-                            "city": addr.get("city"), "state": addr.get("province"),
-                            "pincode": addr.get("zip"), "coin_only": False,
-                            "_customer_id": (cust.get("id") or None),
-                            "_address1": addr.get("address1"),
-                            "_address2": addr.get("address2"),
-                            "_phone": (addr.get("phone") or "").strip(),
-                            "_fake_order": "fake order" in {
-                                str(t).strip().lower() for t in (n.get("tags") or [])},
-                        })
+                        coin_rows.append(coin_order_row(n, cust, created, 0, units,
+                                                        price))
                 refunded = float((n.get("totalRefundedSet") or {})
                                  .get("shopMoney", {}).get("amount") or 0)
                 if n.get("cancelledAt"):
@@ -1296,7 +1344,7 @@ def classify_coin_rows(coin_rows: list[dict]) -> None:
     Runs AFTER the day is gathered, because the duplicate-same-day-COD
     test needs to see the day's other orders.
     """
-    from coin_dispatch import (address_verdict, classify,  # noqa: PLC0415
+    from coin_dispatch import (address_issues, classify,  # noqa: PLC0415
                                is_watchlisted)
 
     hist = fetch_customer_history(
@@ -1307,7 +1355,7 @@ def classify_coin_rows(coin_rows: list[dict]) -> None:
     for r in coin_rows:
         if r.get("payment") != "COD":
             continue
-        key = (r["day_ist"], r.get("_phone") or (r.get("_address1") or "").lower())
+        key = (r["day_ist"], r.get("phone") or (r.get("address1") or "").lower())
         if key[1]:
             seen[key] = seen.get(key, 0) + 1
 
@@ -1319,26 +1367,32 @@ def classify_coin_rows(coin_rows: list[dict]) -> None:
     for r in coin_rows:
         if not r.get("coins"):
             continue
-        who = r.get("_phone") or (r.get("_address1") or "").lower()
+        who = r.get("phone") or (r.get("address1") or "").lower()
         if who:
             repeat[who] = repeat.get(who, 0) + 1
 
     for r in coin_rows:
-        verdict, reason = address_verdict(r.pop("_address1", None),
-                                          r.pop("_address2", None))
-        r["address_flag"] = reason if verdict == "flag" else None
-        key = (r["day_ist"], r.get("_phone") or "")
-        dup = r.get("payment") == "COD" and key[1] and seen.get(key, 0) > 1
-        bucket, why = classify(
-            {**r, "address_verdict": verdict, "address_reason": reason,
-             "fake_order": r.get("_fake_order")},
+        issues, flag = address_issues(r.get("address1"), r.get("address2"))
+        r["address_flag"] = flag
+        r["address_issues"] = ";".join(issues) or None
+        who = r.get("phone") or (r.get("address1") or "").lower()
+        key = (r["day_ist"], who)
+        dup = r.get("payment") == "COD" and who and seen.get(key, 0) > 1
+        bucket, reasons = classify(
+            {**r, "address_issues": issues, "fake_order": r.get("_fake_order")},
             hist.get(r.get("_customer_id") or ""), bool(dup))
-        r["bucket"], r["bucket_reason"] = bucket, why
-        who = r.get("_phone") or ""
+        r["bucket"] = bucket
+        # The call reasons are the ONLY thing stored for a call-list
+        # row; bucket_reason keeps the single headline for the other
+        # buckets so every row can still say one thing about itself.
+        r["call_reasons"] = ";".join(reasons) if bucket == "call_list" else None
+        r["bucket_reason"] = (
+            "coin and nothing else" if bucket == "coin_only"
+            else "2+ units, no coin" if bucket == "bundle_no_coin" else None)
         r["watchlist"] = is_watchlisted(
             {**r, "fake_order": r.get("_fake_order")},
             bool(who and repeat.get(who, 0) > 1))
-        for k in ("_customer_id", "_phone", "_fake_order"):
+        for k in ("_customer_id", "_fake_order"):
             r.pop(k, None)
 
 

@@ -71,63 +71,99 @@ def _clean(address: str) -> str:
     return " ".join(words)
 
 
-def address_verdict(address1: str | None, address2: str | None) -> tuple[str, str | None]:
-    """(verdict, reason). Verdict is "ok", "flag" or "bad".
+#: Each address check, in the order the desk lists them. An address can
+#: fail SEVERAL, and the desk shows them all -- "Too short (<20 chars),
+#: no house no.; Fewer than 3 distinct words" -- so this returns every
+#: issue rather than stopping at the first.
+ISSUE_LABEL = {
+    "landmark": "Landmark/area only, no house no.",
+    "short": "Too short (<20 chars), no house no.",
+    "fewwords": "Fewer than 3 distinct words",
+    "repeated": "One phrase repeated, no house no.",
+    "gibberish": "Gibberish word",
+    "hostel": "Hostel/PG, no room no.",
+    "junk": "Junk word",
+    "empty": "No address",
+}
 
-    "flag" means deliverable but worth knowing about -- a shop or a
-    hostel room -- and does NOT hold the order. Only "bad" holds it.
+#: The sub-filters the desk offers above the Address issues table, and
+#: which raw issues roll into each.
+ISSUE_GROUP = {
+    "landmark": "landmark", "short": "short", "fewwords": "repeated",
+    "repeated": "repeated", "gibberish": "junk", "hostel": "hostel",
+    "junk": "junk", "empty": "short",
+}
+GROUP_LABEL = {
+    "landmark": "Landmark only", "hostel": "Hostel / PG, no room no.",
+    "junk": "Junk word", "short": "Too short",
+    "repeated": "Repeated / too few words",
+}
 
-    Lines 1 and 2 are read together, because people split a single
-    address across them arbitrarily. City and pincode are separate
-    fields and are not judged here.
+
+def address_issues(address1: str | None, address2: str | None) -> tuple[list[str], str | None]:
+    """(issue keys, flag). Issues non-empty means the address is Bad.
+
+    A flag is deliverable but worth knowing -- a shop or a hostel room
+    -- and never holds the order.
+
+    Lines 1 and 2 are read together, because people split one address
+    across them arbitrarily. City and pincode are separate fields and
+    are not judged here.
     """
     raw = _clean(" ".join(filter(None, (address1, address2))))
     if not raw:
-        return "bad", "no address"
+        return ["empty"], None
     low = raw.lower()
     words = raw.split()
     numbered = bool(_HAS_NUMBER.search(raw))
     rural = any(k in low for k in _RURAL)
     shoppy = any(k in low for k in _SHOP)
+    hostel = any(k in low for k in _HOSTEL)
 
-    # Junk and gibberish are decided first: they are wrong whatever
-    # else the address contains.
-    if any(re.search(rf"\b{re.escape(j)}\b", low) for j in _JUNK):
-        return "bad", "junk word"
+    issues: list[str] = []
+    # Junk only counts on an address with NO house number. A full
+    # street address was being held because a nearby landmark's name
+    # happens to contain one of these words -- a real place, a real
+    # parcel, held for nothing. A genuine test entry carries no house
+    # number, so requiring that loses none of them.
+    if not numbered and any(re.search(rf"\b{re.escape(j)}\b", low) for j in _JUNK):
+        issues.append("junk")
     if _GIBBERISH.search(raw):
-        return "bad", "gibberish"
-
-    if any(k in low for k in _HOSTEL) and not numbered:
-        return "bad", "hostel/PG, no room number"
-
+        issues.append("gibberish")
+    if hostel and not numbered:
+        issues.append("hostel")
     if len({w.lower() for w in words}) < 3:
-        return "bad", "fewer than 3 different words"
+        issues.append("fewwords")
 
-    # The same phrase typed twice with nothing else. Retyping a
-    # locality INSIDE a fuller address is normal and is not caught,
-    # because the halves must be the whole string.
+    # The same phrase typed twice and nothing else. Retyping a locality
+    # INSIDE a fuller address is normal and is not caught, because the
+    # halves have to be the whole string.
     half = len(words) // 2
     if half and not numbered and [w.lower() for w in words[:half]] == \
             [w.lower() for w in words[half:half * 2]] and len(words) <= half * 2 + 1:
-        return "bad", "one phrase repeated"
+        issues.append("repeated")
 
-    # A workplace with no house number is still deliverable -- people
-    # order to their office. Flag, never hold.
-    if shoppy and not numbered:
-        return "flag", "shop/office address"
-
-    if not numbered and not rural:
-        if len(words) < 5:
-            return "bad", "landmark or area only"
+    if not numbered and not rural and not shoppy:
+        # "Too short" and "landmark only" are mutually exclusive, and
+        # the desk treats them so: its own rows file "Near Jama Masjid"
+        # and "Bamhori Udaipura" under Too short alone, never also
+        # under Landmark. Below 20 characters the address is simply too
+        # short to judge as a landmark, so only the stronger of the two
+        # fires and the sub-filter counts stay meaningful.
         if len(raw) < 20:
-            return "bad", "too short, no house number"
+            issues.append("short")
+        elif len(words) < 5:
+            issues.append("landmark")
 
-    if any(k in low for k in _HOSTEL):
-        return "flag", "hostel/PG address"
-    return "ok", None
+    if issues:
+        return issues, None
+    # Deliverable, but the team should know where the parcel is going.
+    if shoppy and not numbered:
+        return [], "Shop/office address"
+    if hostel:
+        return [], "Hostel/PG address"
+    return [], None
 
-
-# --- customers --------------------------------------------------------
 
 def is_high_rto(prior_shipped: int, prior_rto: int) -> bool:
     """Return-to-origin is half or more of what shipped, or 3+ outright.
@@ -141,66 +177,75 @@ def is_high_rto(prior_shipped: int, prior_rto: int) -> bool:
     return prior_shipped > 0 and prior_rto * 2 >= prior_shipped
 
 
-# --- the decision -----------------------------------------------------
+#: Every reason a COD order can need a call. An order can trip several
+#: and the desk shows them all as separate pills, so these accumulate.
+CALL_LABEL = {
+    "new": "New customer COD",
+    "untagged": "Untagged gateway COD",
+    "dup": "Duplicate same-day COD",
+    "rto": "High RTO",
+    "nodelivery": "No prior delivery",
+    "fake": "Fake Order tag",
+}
+
+
+def call_reasons(order: dict, hist: dict | None, dup_cod: bool) -> list[str]:
+    """Every reason this COD order needs a confirmation call."""
+    out: list[str] = []
+    returning = bool(order.get("is_returning"))
+    if order.get("risk_tag") is None:
+        out.append("untagged")
+    if not returning:
+        out.append("new")
+        # The tag holds an order ONLY when it is COD from a new
+        # customer. Already paid, or known to us, and it is ignored.
+        if order.get("fake_order"):
+            out.append("fake")
+    else:
+        if hist is None or hist.get("delivered", 0) == 0:
+            out.append("nodelivery")
+        if is_high_rto((hist or {}).get("shipped", 0), (hist or {}).get("rto", 0)):
+            out.append("rto")
+    if dup_cod:
+        out.append("dup")
+    return out
+
 
 def is_watchlisted(order: dict, repeat_buyer: bool) -> str | None:
     """Why this order is on the watchlist, or None.
 
     An OVERLAY, not a bucket: a watchlisted order still sits in Ship
     now or the Call list and still has to be dispatched or called.
-    This only says it is worth a second look, so it must never remove
-    an order from the queue it belongs in.
     """
     if order.get("fake_order") and order.get("payment") == "COD" \
             and not order.get("is_returning"):
         return "Fake Order tag, new customer COD"
     if repeat_buyer:
-        return "repeat buyer, same phone or address"
+        return "Repeat buyer"
     return None
 
 
-def classify(order: dict, hist: dict | None, dup_cod: bool) -> tuple[str, str | None]:
-    """(bucket, reason). See the module docstring for the order.
-
-    `order` carries payment, fulfillment, units, risk_tag, is_returning
-    and the address verdict. `hist` is the customer's record before
-    this campaign, or None when they have none.
-    """
+def classify(order: dict, hist: dict | None, dup_cod: bool) -> tuple[str, list[str]]:
+    """(bucket, reason keys). See the module docstring for the order."""
     # Not a coin order at all -- it is here because it LOOKS eligible
     # and went out without one. Outside the five-way partition.
     if order.get("coins", 1) == 0:
-        return "bundle_no_coin", "2+ units, no coin"
+        return "bundle_no_coin", []
 
     if (order.get("fulfillment") or "").lower() == "fulfilled":
-        return "shipped", None
+        return "shipped", []
 
     # Held whatever the payment type, and listed nowhere else.
     if order.get("units", 0) == 0:
-        return "coin_only", "coin and nothing else"
+        return "coin_only", []
 
-    if order.get("address_verdict") == "bad":
-        return "address_bad", order.get("address_reason")
+    if order.get("address_issues"):
+        return "address_bad", list(order["address_issues"])
 
-    payment = order.get("payment") or ""
-    if payment != "COD":
+    if (order.get("payment") or "") != "COD":
         # Paid something, so refusal risk is low. The Fake Order tag is
         # deliberately ignored here: the money is already in.
-        return "ship_now", None
+        return "ship_now", []
 
-    # --- COD from here down ---
-    returning = bool(order.get("is_returning"))
-    if not returning:
-        if order.get("fake_order"):
-            return "call_list", "Fake Order tag, new customer COD"
-        return "call_list", "new customer COD"
-    if order.get("risk_tag") is None:
-        # GoKwik scores COD checkouts; no tag means it never saw this
-        # one, so there is no score to trust.
-        return "call_list", "untagged gateway COD"
-    if dup_cod:
-        return "call_list", "duplicate same-day COD"
-    if hist is None or hist.get("delivered", 0) == 0:
-        return "call_list", "no prior delivery"
-    if is_high_rto(hist.get("shipped", 0), hist.get("rto", 0)):
-        return "call_list", "high RTO history"
-    return "ship_now", None
+    reasons = call_reasons(order, hist, dup_cod)
+    return ("call_list", reasons) if reasons else ("ship_now", [])
