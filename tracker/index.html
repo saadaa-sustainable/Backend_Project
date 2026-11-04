@@ -453,6 +453,34 @@
   .chain .b.inp input { -moz-appearance: textfield; }
   .chain-note { margin-top: 8px; }
 
+  /* ---- export ---------------------------------------------------
+     A quiet button in the card header: it is a convenience beside the
+     figures, not a thing to reach for before reading them. */
+  .xbtn { font: inherit; font-size: 11.5px; font-weight: 600; line-height: 1;
+          color: var(--text-2); background: var(--surface);
+          border: 1px solid var(--border); border-radius: 7px;
+          padding: 6px 10px; cursor: pointer; white-space: nowrap; }
+  .xbtn:hover { color: var(--text); border-color: var(--text-3); }
+  .xbtn:focus { outline: none; }
+  .xbtn:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+  .xbtn[disabled] { opacity: .45; cursor: default; }
+  .xbtn[disabled]:hover { color: var(--text-2); border-color: var(--border); }
+  .card-x { display: flex; align-items: center; gap: 8px; }
+
+  /* The row picker. Narrow, centred, and never wrapped: it is the one
+     column that must not grow when an address beside it does. */
+  th.pick, td.pick { width: 30px; text-align: center !important;
+                     padding-left: 10px !important; padding-right: 4px !important; }
+  td.pick { vertical-align: middle !important; }
+  .pick input { width: 15px; height: 15px; margin: 0; cursor: pointer;
+                accent-color: var(--s1); }
+  /* A picked row is tinted so a selection spread over a long scroll is
+     still findable, and the tint follows the theme's own token. */
+  #coin-orders-table tbody tr.picked td {
+    background: color-mix(in srgb, var(--s1) 13%, transparent); }
+  #coin-orders-table tbody tr.picked:hover td {
+    background: color-mix(in srgb, var(--s1) 19%, transparent); }
+
   /* ---- the order tables ----------------------------------------
      The page's base table right-aligns every cell, which suits the
      hourly tracker because it is all numbers. These tables are mostly
@@ -636,7 +664,8 @@
   <div class="card" id="qtycard" hidden>
     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
       <strong style="font-size:13px">Quantity &middot; units ordered by the hour</strong>
-      <span class="sub" id="qty-span"></span>
+      <span class="card-x"><span class="sub" id="qty-span"></span>
+        <button type="button" class="xbtn" id="x-qty">Export CSV</button></span>
     </div>
     <div class="deck" id="qty-kpis"></div>
     <div class="ddraw" id="qty-draw"></div>
@@ -671,7 +700,8 @@
   <div class="card" id="coincard" hidden>
     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
       <strong style="font-size:13px">Coin Orders &middot; Saadaa Silver Coin</strong>
-      <span class="sub" id="coin-span"></span>
+      <span class="card-x"><span class="sub" id="coin-span"></span>
+        <button type="button" class="xbtn" id="x-coin-daily">Export days</button></span>
     </div>
     <div class="strip" id="coin-kpis"></div>
     <div class="strip s3" id="coin-dispatch"></div>
@@ -732,7 +762,8 @@
   <div class="card" id="invcard" hidden>
     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
       <strong style="font-size:13px">Inventory &middot; master &rarr; colour &rarr; variant</strong>
-      <span class="sub" id="inv-asof"></span>
+      <span class="card-x"><span class="sub" id="inv-asof"></span>
+        <button type="button" class="xbtn" id="x-inv">Export CSV</button></span>
     </div>
     <div class="deck" id="inv-kpis"></div>
     <div class="ddraw" id="inv-draw"></div>
@@ -784,7 +815,8 @@
   <div class="card" id="pnlcard" hidden>
     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;align-items:baseline">
       <strong style="font-size:13px">Live P&amp;L · day to date</strong>
-      <span class="sub" id="pnl-span"></span>
+      <span class="card-x"><span class="sub" id="pnl-span"></span>
+        <button type="button" class="xbtn" id="x-pnl">Export CSV</button></span>
     </div>
     <div class="led">
       <div class="led-spine" id="pnl-lines"></div>
@@ -851,7 +883,10 @@
   </div>
 
   <div style="margin-top:16px" class="tablewrap" id="tablewrap" hidden>
-    <table><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+    <div class="card-x" style="justify-content:flex-end;margin-bottom:8px">
+      <button type="button" class="xbtn" id="x-hourly">Export CSV</button>
+    </div>
+    <table id="hourly-table"><thead id="thead"></thead><tbody id="tbody"></tbody></table>
   </div>
 
   <p class="note" id="footnote"></p>
@@ -915,6 +950,175 @@ const ist = v => {
 
 const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
   ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+
+// ---- CSV export ------------------------------------------------------
+// RFC 4180, because that is what spreadsheets actually read: a field is
+// quoted only when it holds a comma, a quote or a newline, and an
+// embedded quote is doubled.
+//
+// The leading apostrophe on =, +, - and @ is not cosmetic. Excel and
+// Sheets treat a field starting with one of those as a FORMULA, so an
+// address beginning "-12, Gandhi Road" becomes an error cell, and a
+// crafted one becomes a command. Prefixing is the standard defence.
+function csvField(v) {
+  if (v == null) return "";
+  let t = String(v).replace(/\s+/g, " ").trim();
+  // A plain negative number is a number, not a formula, and so is a
+  // negative percentage -- a spreadsheet reads both. Prefixing them
+  // would make every deduction in the P&L and every fall in the hourly
+  // change columns arrive as text, which is the opposite of the point.
+  // "-2.5 pt" still gets the quote: that one really would be #NAME?.
+  if (/^[=+\-@\t\r]/.test(t) && !/^[-+]?\d+(\.\d+)?%?$/.test(t)) t = "'" + t;
+  return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+
+const csvText = (head, rows) =>
+  [head.map(csvField).join(",")]
+    .concat(rows.map(r => r.map(csvField).join(",")))
+    .join("\r\n");
+
+// The BOM is what makes Excel on Windows read the file as UTF-8. Without
+// it the rupee sign and every accented name arrive as mojibake.
+function downloadCsv(name, text) {
+  const url = URL.createObjectURL(
+    new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Files land in one folder and get opened days later, so the name has
+// to say what it is and when it was taken. IST, like every other
+// timestamp on this page.
+const fileStamp = () => new Date().toLocaleString("sv-SE",
+  { timeZone: "Asia/Kolkata" }).replace(" ", "_").replace(/:/g, "").slice(0, 15);
+const csvName = (...parts) =>
+  parts.filter(Boolean).join("_").replace(/[^A-Za-z0-9_.-]+/g, "-")
+  + "_" + fileStamp() + ".csv";
+
+// textContent runs inline elements together -- a label and its note
+// come out as "Cancelled, not refunded40 orders" -- and innerText on a
+// DETACHED clone has no layout to work from and returns nothing. So the
+// text is gathered by walking the node and spacing the parts here,
+// which also lets a decoration be skipped by selector.
+function partsText(el, skip) {
+  if (!el) return "";
+  const out = [];
+  (function walk(n) {
+    if (n.nodeType === 3) return void out.push(n.nodeValue);
+    if (n.nodeType !== 1) return;
+    if (skip && n.matches(skip)) return;
+    out.push(" ");
+    n.childNodes.forEach(walk);
+    out.push(" ");
+  })(el);
+  // The expander arrow is drawn as a bare glyph in some tables rather
+  // than in an element that could be skipped by selector.
+  return out.join("").replace(/[\u25B6\u25BC\u25B8\u25BE]/g, " ")
+            .replace(/\s+/g, " ").trim();
+}
+
+// A figure formatted for reading is useless in a spreadsheet: a
+// grouped amount with a rupee sign is TEXT, and a column of text
+// does not sum. Only the rupee sign and the
+// digit grouping come off -- a trailing % stays, because dropping it would
+// turn a rate into a number that reads like a count. Anything carrying a
+// letter, a slash or a dash ("2.07x", a date, an order number) does not
+// match at all, so pincodes and ids survive exactly as shown.
+const NUMISH = /^-?\s*[₹]?\s*-?([\d,]+(?:\.\d+)?)\s*(%?)$/;
+function unformat(t) {
+  let v = String(t == null ? "" : t).replace(/−/g, "-").trim();
+  // An em-dash is how the page draws "no value". In a file it has to be
+  // an empty cell: a column of dashes neither sorts nor averages.
+  if (v === "—" || v === "–") return "";
+  // The change columns carry their sign as an arrow -- "down 34%" reads
+  // as a positive 34 once the glyph is gone, which is the wrong number
+  // by a factor of two. The arrow becomes the minus it stands for.
+  let down = false;
+  if (/^[↗↘]/.test(v)) {
+    down = v[0] === "↘";
+    v = v.slice(1).trim();
+    if (down && !/^[-+]/.test(v)) v = "-" + v;
+  }
+  const m = NUMISH.exec(v);
+  if (!m) return v;
+  return (/^-|[₹]\s*-/.test(v) ? "-" : "") + m[1].replace(/,/g, "") + m[2];
+}
+
+// The hourly table stacks three lines in every cell -- the day on .l1,
+// the baseline under it on .l2, the change on .l3 -- so a cell read
+// whole comes out as "today yesterday down-some-percent", which is
+// neither readable nor summable. Each layer becomes its own column instead.
+const LAYERS = [".l1", ".l2", ".l3"];
+const LAYER_SUFFIX = ["", " (compare)", " change"];
+
+/** A rendered table, as it reads on screen. Two-row headers are
+    flattened onto their leaf column, stacked cells are split, and the
+    row pickers are skipped -- a checkbox is not data. */
+function exportDomTable(table, name) {
+  const t = typeof table === "string" ? $(table) : table;
+  if (!t || !t.tHead || !t.tHead.rows.length ||
+      !t.tBodies[0] || !t.tBodies[0].rows.length) {
+    return alert("Nothing to export yet — this table has not loaded.");
+  }
+  const hrows = [...t.tHead.rows];
+  const leaves = [...hrows[hrows.length - 1].cells];
+
+  // Inventory banks its columns under Shopify / Virtual / Production
+  // sheet, and three of them are called "Units". Without the band the
+  // file has three identical headers and no way to tell them apart.
+  const band = [];
+  if (hrows.length > 1) {
+    let i = 0;
+    [...hrows[0].cells].forEach(c => {
+      const label = partsText(c);
+      for (let k = 0; k < (c.colSpan || 1); k++) band[i++] = label;
+    });
+  }
+  const cols = leaves.map((c, i) => ({
+    keep: !c.classList.contains("pick"),
+    head: [band[i], partsText(c)].filter(Boolean).join(" · "),
+  }));
+
+  // Only the rows that line up with the header: an expanded hour adds a
+  // detail row of its own shape, which is not part of this table.
+  const body = [...t.tBodies[0].rows].filter(tr => tr.cells.length === cols.length);
+  if (!body.length) return alert("Nothing to export yet — this table has not loaded.");
+
+  let depth = 1;
+  body.forEach(tr => [...tr.cells].forEach(c => {
+    for (let k = 3; k > depth; k--) if (c.querySelector(LAYERS[k - 1])) depth = k;
+  }));
+
+  const head = [];
+  cols.forEach(col => {
+    if (!col.keep) return;
+    for (let k = 0; k < depth; k++) head.push(col.head + LAYER_SUFFIX[k]);
+  });
+
+  const rows = body.map(tr => {
+    const out = [];
+    [...tr.cells].forEach((c, i) => {
+      if (!cols[i].keep) return;
+      if (depth === 1) return void out.push(unformat(partsText(c, ".caret")));
+      for (let k = 0; k < depth; k++) {
+        const sub = c.querySelector(LAYERS[k]);
+        out.push(sub ? unformat(partsText(sub, ".caret"))
+                     : (k === 0 ? unformat(partsText(c, ".caret")) : ""));
+      }
+    });
+    return out;
+  });
+  downloadCsv(name, csvText(head, rows));
+}
+
+const xbtn = (id, label) =>
+  '<button type="button" class="xbtn" id="' + id + '">' + esc(label || "Export CSV") +
+  "</button>";
 
 // Up is good, except where it is not. Getting this backwards would
 // paint a saving red, which is worse than showing no colour at all.
@@ -1919,6 +2123,15 @@ function drawCoins() {
 // thousand at a time.
 const COIN_PAGE = 1000;
 let COIN_ROWS = [], COIN_TOTAL = null, COIN_BUSY = false;
+// Which rows are ticked, by order name -- the one field that is unique
+// per order and survives a redraw. A Set rather than a flag on the row
+// object because "Load more" replaces nothing and re-renders
+// everything: state kept on the element would be lost on every draw.
+let COIN_SEL = new Set();
+// The last row clicked, so shift-click can take the span between. A
+// dispatch run is a contiguous block far more often than it is eleven
+// separate ticks.
+let COIN_ANCHOR = null;
 //: null means every coin order. "watchlist" is not a bucket -- it
 //: crosses them -- so it is sent as its own flag.
 let COIN_TAB = "ship_now";
@@ -2049,21 +2262,163 @@ function coinCell(col, r) {
   }
 }
 
+/** The same column, as a value rather than as markup.
+    Deriving the CSV from the DOM instead would export the PILLS -- the
+    rendered labels with their colours stripped -- and would lose the
+    raw amount, which is the one column a spreadsheet needs to add up. */
+function coinText(col, r) {
+  const labels = (raw, map) => (raw || "").split(";").filter(Boolean)
+    .map(k => map[k] || k).join("; ");
+  switch (col) {
+    case "order":       return r.order_name;
+    case "created":     return ist(r.created_at);
+    case "payment":     return r.payment;
+    case "risk":        return r.risk_tag ? r.risk_tag + " Risk"
+                          : (r.payment === "COD" ? "Untagged" : "");
+    case "customer":    return r.is_returning == null ? ""
+                          : r.is_returning ? "Returning (" + r.customer_orders + ")"
+                                           : "New";
+    case "amount":      return r.amount;
+    case "items":       return r.item_count;
+    case "status":      return r.bucket === "coin_only" ? "Held"
+                          : BUCKET_LABEL[r.bucket] || "";
+    case "bucketcol":   return BUCKET_LABEL[r.bucket] || r.bucket || "";
+    case "flag":        return r.address_flag || r.watchlist || "";
+    case "issue":       return labels(r.address_issues, ISSUE_LABEL);
+    case "sev":         return "Bad";
+    case "why":         return labels(r.call_reasons, CALL_LABEL) ||
+                               labels(r.address_issues, ISSUE_LABEL) ||
+                               r.watchlist || "";
+    case "city":        return r.city;
+    case "state":       return r.state;
+    case "pincode":     return r.pincode;
+    case "fulfillment": return r.fulfillment;
+    case "name":        return r.customer_name;
+    case "phone":       return r.phone;
+    case "address1":    return r.address1;
+    case "address2":    return r.address2;
+    case "bundle":      return r.bundles;
+    case "channel":     return r.channel;
+    default:            return "";
+  }
+}
+
+/** The filters as a query string, shared by the list, the copy and the
+    two exports -- so an export can never disagree with what is on
+    screen about which rows it covers. */
+const coinListQuery = () =>
+  (COIN_TAB === "watchlist" ? "&watchlist=true"
+    : COIN_TAB ? "&bucket=" + encodeURIComponent(COIN_TAB) : "") +
+  (COIN_ISSUE ? "&issue=" + encodeURIComponent(COIN_ISSUE) : "") +
+  (COIN_PAY ? "&pay=" + encodeURIComponent(COIN_PAY) : "") +
+  (COIN_Q ? "&q=" + encodeURIComponent(COIN_Q) : "");
+
+/** Every row matching the filters, not the first page of them.
+    The endpoint caps a page at 2000 and a bucket runs to several
+    thousand, so this keeps asking until the server stops sending.
+    Taking one page would hand someone a short file that looks whole,
+    which is the worst way for an export to fail. */
+async function fetchAllCoinRows(onProgress) {
+  const PAGE = 2000;
+  const out = [];
+  for (let off = 0; ; off += PAGE) {
+    const res = await fetch(apiBase() + "/admin/analytics/coins/orders?limit=" +
+                            PAGE + "&offset=" + off + coinListQuery());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    out.push(...d.rows);
+    if (onProgress) onProgress(out.length, d.total);
+    if (d.rows.length < PAGE || (d.total != null && out.length >= d.total)) break;
+  }
+  return out;
+}
+
+/** Rows to CSV under the current tab's columns, so the file matches the
+    table that was on screen when it was asked for. */
+function coinRowsToCsv(rows) {
+  const cols = COIN_COLUMNS[COIN_TAB] || COIN_COLUMNS._all;
+  return csvText(cols.map(c => COL_HEAD[c]),
+                 rows.map(r => cols.map(c => coinText(c, r))));
+}
+
+const coinFileTag = () =>
+  csvName("coin-orders", COIN_TAB || "all", COIN_ISSUE, COIN_PAY, COIN_Q && "filtered");
+
 function drawCoinOrders() {
   const cols = COIN_COLUMNS[COIN_TAB] || COIN_COLUMNS._all;
   const cls = c => (COL_NUM.has(c) ? " num" : "") + (COL_WRAP.has(c) ? " wrap" : "");
-  $("coin-orders-thead").innerHTML = "<tr>" +
+  // The header tick covers the rows that are LOADED, which is why the
+  // note beside it says so: with one page of a bucket on screen, a
+  // "select all" that meant the whole bucket would be a promise the
+  // table cannot show you.
+  const loaded = COIN_ROWS.map(r => r.order_name).filter(Boolean);
+  const allPicked = loaded.length > 0 && loaded.every(n => COIN_SEL.has(n));
+  $("coin-orders-thead").innerHTML =
+    '<tr><th class="pick"><input type="checkbox" id="coin-pick-all"' +
+    (allPicked ? " checked" : "") + ' aria-label="Select every row loaded"></th>' +
     cols.map(c => '<th class="' + cls(c).trim() + '">' + esc(COL_HEAD[c]) +
                   "</th>").join("") + "</tr>";
-  $("coin-orders-tbody").innerHTML = COIN_ROWS.map(r => "<tr>" +
-    cols.map(c => '<td class="' + cls(c).trim() + '">' + coinCell(c, r) +
-                  "</td>").join("") + "</tr>").join("");
+  $("coin-orders-tbody").innerHTML = COIN_ROWS.map((r, i) => {
+    const n = r.order_name || "";
+    const on = n !== "" && COIN_SEL.has(n);
+    return "<tr" + (on ? ' class="picked"' : "") + ">" +
+      '<td class="pick"><input type="checkbox" data-pick="' + esc(n) +
+      '" data-i="' + i + '"' + (on ? " checked" : "") + (n ? "" : " disabled") +
+      ' aria-label="Select ' + esc(n || "row") + '"></td>' +
+      cols.map(c => '<td class="' + cls(c).trim() + '">' + coinCell(c, r) +
+                    "</td>").join("") + "</tr>";
+  }).join("");
   const more = COIN_TOTAL != null && COIN_ROWS.length < COIN_TOTAL;
   $("coin-more").hidden = !more;
   $("coin-more-span").textContent = COIN_TOTAL == null ? "" :
     num(COIN_ROWS.length) + " of " + num(COIN_TOTAL) +
-    (more ? "" : "  \u00b7  all loaded");
+    (more ? "" : "  ·  all loaded");
+  drawCoinSelCount();
 }
+
+/** Everything on the page that has to agree with how many rows are ticked. */
+function drawCoinSelCount() {
+  const b = $("coin-x-sel");
+  if (!b) return;
+  const n = COIN_SEL.size;
+  b.textContent = n ? "Export " + num(n) + " selected" : "Export selected";
+  b.disabled = n === 0;
+  const clr = $("coin-clear-sel");
+  if (clr) clr.hidden = n === 0;
+}
+
+// Row picking, delegated: the tbody outlives a redraw and the rows do
+// not. Shift-click takes the span from the last row clicked, because a
+// dispatch run is chosen as a block far more often than as eleven ticks.
+$("coin-orders-tbody").addEventListener("click", e => {
+  const cb = e.target.closest("input[data-pick]");
+  if (!cb) return;
+  const i = Number(cb.getAttribute("data-i"));
+  const on = cb.checked;
+  let from = i, to = i;
+  if (e.shiftKey && COIN_ANCHOR != null) {
+    from = Math.min(COIN_ANCHOR, i);
+    to = Math.max(COIN_ANCHOR, i);
+  }
+  for (let k = from; k <= to; k++) {
+    const n = COIN_ROWS[k] && COIN_ROWS[k].order_name;
+    if (!n) continue;
+    if (on) COIN_SEL.add(n); else COIN_SEL.delete(n);
+  }
+  COIN_ANCHOR = i;
+  drawCoinOrders();
+});
+
+$("coin-orders-thead").addEventListener("click", e => {
+  if (e.target.id !== "coin-pick-all") return;
+  const on = e.target.checked;
+  COIN_ROWS.forEach(r => {
+    if (!r.order_name) return;
+    if (on) COIN_SEL.add(r.order_name); else COIN_SEL.delete(r.order_name);
+  });
+  COIN_ANCHOR = null;
+  drawCoinOrders();
+});
 
 /** The controls above the table, rebuilt per tab. */
 function drawCoinControls() {
@@ -2076,8 +2431,12 @@ function drawCoinControls() {
     pays.map(x => '<option' + (COIN_PAY === x ? " selected" : "") + ">" +
                   esc(x) + "</option>").join("") + "</select>" +
     '<button type="button" id="coin-copy">Copy order numbers</button>' +
-    '<span class="sub" id="coin-copy-note">Copies every order matching the ' +
-    "filters, not just the rows on screen.</span>";
+    '<button type="button" class="xbtn" id="coin-x-all">Export all</button>' +
+    '<button type="button" class="xbtn" id="coin-x-sel" disabled>Export selected</button>' +
+    '<button type="button" class="xbtn" id="coin-clear-sel" hidden>Clear</button>' +
+    '<span class="sub" id="coin-copy-note">Copy and Export all cover every order ' +
+    "matching the filters, not just the rows on screen. Tick rows to export those " +
+    "instead \u2014 shift-click takes a run.</span>";
   const q = $("coin-q");
   q.oninput = e => {
     // Debounced: a request per keystroke against a table of thousands
@@ -2088,6 +2447,12 @@ function drawCoinControls() {
   };
   $("coin-pay").onchange = e => { COIN_PAY = e.target.value || null; reloadCoinList(); };
   $("coin-copy").onclick = copyCoinOrders;
+  $("coin-x-all").onclick = exportCoinAll;
+  $("coin-x-sel").onclick = exportCoinSelected;
+  $("coin-clear-sel").onclick = () => {
+    COIN_SEL.clear(); COIN_ANCHOR = null; drawCoinOrders();
+  };
+  drawCoinSelCount();
 
   // Sub-filters belong to Address issues only.
   const groups = (COIN_EXTRAS && COIN_EXTRAS.issue_groups) || [];
@@ -2108,37 +2473,57 @@ function drawCoinControls() {
   };
 }
 
-/** Every order matching the filters, not just the page on screen. */
+/** Every order matching the filters, not just the page on screen.
+    Paged, because the endpoint caps a request at 2000 rows and the
+    larger buckets run past that: the old single request copied the
+    first 2000 and reported that count as the whole list. */
 function copyCoinOrders() {
   const btn = $("coin-copy");
-  btn.textContent = "Copying\u2026";
   const reset = () => { btn.textContent = "Copy order numbers"; };
-  fetch(apiBase() + "/admin/analytics/coins/orders?limit=2000&offset=0" +
-        (COIN_TAB === "watchlist" ? "&watchlist=true"
-          : COIN_TAB ? "&bucket=" + encodeURIComponent(COIN_TAB) : "") +
-        (COIN_ISSUE ? "&issue=" + encodeURIComponent(COIN_ISSUE) : "") +
-        (COIN_PAY ? "&pay=" + encodeURIComponent(COIN_PAY) : "") +
-        (COIN_Q ? "&q=" + encodeURIComponent(COIN_Q) : ""))
-    .then(r => r.json())
-    .then(d => {
-      const text = d.rows.map(r => r.order_name || "").filter(Boolean).join("\n");
+  btn.textContent = "Copying…";
+  const fail = msg => { $("coin-copy-note").textContent = msg; reset(); };
+  fetchAllCoinRows(n => { btn.textContent = "Copying " + num(n) + "…"; })
+    .then(rows => {
+      const text = rows.map(r => r.order_name || "").filter(Boolean).join("\n");
       // Clipboard access is refused in some browsers and on a
       // non-secure origin, so a failure says so rather than looking
       // like a copy that worked.
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-          btn.textContent = "Copied " + num(d.rows.length);
-          setTimeout(reset, 2000);
-        }).catch(() => {
-          $("coin-copy-note").textContent = "Copying was blocked in this browser.";
-          reset();
-        });
-      } else {
-        $("coin-copy-note").textContent = "Copying was blocked in this browser.";
-        reset();
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        return fail("Copying was blocked in this browser.");
       }
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = "Copied " + num(rows.length);
+        setTimeout(reset, 2000);
+      }).catch(() => fail("Copying was blocked in this browser."));
     })
-    .catch(reset);
+    .catch(e => fail("Could not copy: " + String(e.message || e)));
+}
+
+/** Every order matching the filters, as a file. */
+function exportCoinAll() {
+  const btn = $("coin-x-all");
+  const reset = () => { btn.textContent = "Export all"; btn.disabled = false; };
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  fetchAllCoinRows(n => { btn.textContent = "Exporting " + num(n) + "…"; })
+    .then(rows => {
+      downloadCsv(coinFileTag(), coinRowsToCsv(rows));
+      btn.textContent = "Exported " + num(rows.length);
+      setTimeout(reset, 2000);
+    })
+    .catch(e => {
+      $("coin-copy-note").textContent = "Could not export: " + String(e.message || e);
+      reset();
+    });
+}
+
+/** Only the ticked rows, in the order they appear on screen.
+    No request: every ticked row is already loaded, by definition. */
+function exportCoinSelected() {
+  const rows = COIN_ROWS.filter(r => r.order_name && COIN_SEL.has(r.order_name));
+  if (!rows.length) return;
+  downloadCsv(csvName("coin-orders", COIN_TAB || "all", "selected"),
+              coinRowsToCsv(rows));
 }
 
 /** Watchlist is three panels, not a plain list. */
@@ -2202,6 +2587,10 @@ function loadCoinOrders() {
 
 function reloadCoinList() {
   COIN_ROWS = []; COIN_TOTAL = null;
+  // The ticks belonged to the rows that were on screen. Carrying them
+  // across a filter change would export orders the person can no
+  // longer see, which is the one thing an export must never do.
+  COIN_SEL.clear(); COIN_ANCHOR = null;
   loadCoinOrders();
 }
 
@@ -2237,6 +2626,47 @@ function drawCoinTabs(d) {
 }
 
 $("coin-more").onclick = loadCoinOrders;
+
+// ---- the per-section exports -----------------------------------------
+// Each one takes the table as it is rendered, so the file and the screen
+// cannot disagree. The day is in the filename because these are all
+// day-scoped and a folder of "hourly-tracker.csv" tells you nothing.
+const selDay = () => $("day").value || istToday();
+
+$("x-hourly").onclick = () =>
+  exportDomTable("hourly-table", csvName("hourly-tracker", selDay()));
+$("x-qty").onclick = () =>
+  exportDomTable("qty-table", csvName("quantity", selDay()));
+$("x-inv").onclick = () =>
+  exportDomTable("inv-table", csvName("inventory"));
+$("x-coin-daily").onclick = () =>
+  exportDomTable("coin-table", csvName("coin-orders-by-day"));
+
+// The P&L is a LEDGER, not a table: each line is a label and a value,
+// and the deductions are indented under the total they roll into. A
+// two-column file keeps that reading order, which is the whole point of
+// the section.
+$("x-pnl").onclick = () => {
+  // The P&L is a LEDGER, not a table: a label, an optional note that
+  // says where the figure came from, the value, and -- in compare mode
+  // -- the same line on the baseline day. Four columns keep that
+  // reading order, which is the whole point of the section. Read whole,
+  // a row would come out as "Cancelled, not refunded40 orders - 4.2%".
+  const sel = "#pnl-lines .led-row, #pnl-lines .led-bar, #pnl-lines .led-head";
+  const rows = [...document.querySelectorAll(sel)].map(r => {
+    const l = r.querySelector(".l") || r.querySelector(".lbl");
+    const v = r.querySelector(".v") || r.querySelector(".led-big");
+    const note = l && l.querySelector("em");
+    const was = v && v.querySelector(".was");
+    return [partsText(l, "em"),
+            note ? partsText(note) : "",
+            unformat(partsText(v, ".was")),
+            was ? unformat(partsText(was)) : ""];
+  }).filter(r => r[0] || r[2]);
+  if (!rows.length) return alert("Nothing to export yet — the P&L has not loaded.");
+  downloadCsv(csvName("live-pnl", selDay()),
+              csvText(["Line", "Note", "Value", "Compare"], rows));
+};
 
 // Re-fetch on a new cost rather than scaling client-side, so the figure
 // shown is always the one the API computed. Delegated, because the input
