@@ -239,6 +239,21 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- cost should be taken on.
     silver_coin_orders      integer,
     silver_coin_qty         integer,
+    -- The dispatch desk's breakdown of the SAME coin population.
+    -- Payment and fulfilment are read at INGEST time and both move
+    -- afterwards -- a COD order becomes paid on delivery, an
+    -- unfulfilled one ships -- so a past day holds the state as it was
+    -- when that day was last ingested, not as it is now. Re-ingest the
+    -- window to refresh them.
+    coin_only_orders        integer,
+    coin_shipped_orders     integer,
+    coin_prepaid_orders     integer,
+    coin_partial_orders     integer,
+    coin_cod_orders         integer,
+    -- Orders that look eligible for the offer but went out WITHOUT a
+    -- coin: two or more product units and no coin line. Outside the
+    -- coin counts entirely, which is why it is not a split of them.
+    bundle_no_coin_orders   integer,
     new_customers           integer,
     new_customer_revenue    numeric,
 
@@ -278,6 +293,12 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_qty integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS bundle_no_coin_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_cod_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_partial_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_prepaid_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_shipped_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS coin_only_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_cancelled_qty integer",
@@ -308,6 +329,8 @@ COLUMNS = [
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
     "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders", "silver_coin_qty",
+    "coin_only_orders", "coin_shipped_orders", "coin_prepaid_orders",
+    "coin_partial_orders", "coin_cod_orders", "bundle_no_coin_orders",
     "pnl_cancelled_orders", "pnl_cancelled_sales", "pnl_cancelled_qty",
     "pnl_refunds", "pnl_cancelled_refunded",
     "new_customers", "new_customer_revenue",
@@ -666,6 +689,8 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
           edges { node { sku quantity } }
         }
         email
+        displayFinancialStatus
+        displayFulfillmentStatus
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -715,6 +740,9 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                                           new_customers=0, new_customer_revenue=0.0,
                                           pnl_sales=0.0, pnl_orders=0, pnl_qty=0,
                                           silver_coin_orders=0, silver_coin_qty=0,
+                                          coin_only_orders=0, coin_shipped_orders=0,
+                                          coin_prepaid_orders=0, coin_partial_orders=0,
+                                          coin_cod_orders=0, bundle_no_coin_orders=0,
                                           pnl_cancelled_orders=0,
                                           pnl_cancelled_sales=0.0,
                                           pnl_cancelled_qty=0, pnl_refunds=0.0,
@@ -731,9 +759,32 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                 # The coin count runs its own exclusions; see
                 # is_coin_excluded for why they are stricter than the
                 # P&L's. Units and sales above are unaffected.
-                if coins and is_coin_excluded(n, created) is None:
+                coin_ok = is_coin_excluded(n, created) is None
+                if coins and coin_ok:
                     b["silver_coin_orders"] += 1
                     b["silver_coin_qty"] += coins
+                    # Coin only: the coin is the whole order. `units`
+                    # already excludes the coin, so zero units with a
+                    # coin present IS the definition -- no second pass
+                    # over the line items, which could disagree.
+                    if units == 0:
+                        b["coin_only_orders"] += 1
+                    if (n.get("displayFulfillmentStatus") or "").upper() == "FULFILLED":
+                        b["coin_shipped_orders"] += 1
+                    fin = (n.get("displayFinancialStatus") or "").upper()
+                    if fin == "PAID":
+                        b["coin_prepaid_orders"] += 1
+                    elif fin == "PARTIALLY_PAID":
+                        b["coin_partial_orders"] += 1
+                    elif fin == "PENDING":
+                        b["coin_cod_orders"] += 1
+                # Eligible-looking but no coin. Deliberately NOT a
+                # split of the coin counts: these orders have no coin
+                # at all, so they sit outside them. Same exclusions,
+                # because the question is the same one -- who should
+                # have had a coin.
+                elif not coins and units >= 2 and coin_ok:
+                    b["bundle_no_coin_orders"] += 1
                 refunded = float((n.get("totalRefundedSet") or {})
                                  .get("shopMoney", {}).get("amount") or 0)
                 if n.get("cancelledAt"):

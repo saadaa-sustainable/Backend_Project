@@ -14545,6 +14545,12 @@ class CoinDay(BaseModel):
     coins: int
     attach_rate: float | None
     cost: float
+    coin_only: int
+    shipped: int
+    prepaid: int
+    partial: int
+    cod: int
+    bundle_no_coin: int
 
 
 class CoinsResponse(BaseModel):
@@ -14566,13 +14572,31 @@ class CoinsResponse(BaseModel):
     total_cost: float
     #: Coin orders over all orders, across the whole run.
     attach_rate: float | None
+    #: The dispatch desk's breakdown of the same coin population.
+    #: Payment and fulfilment are read when the hour is ingested and
+    #: both move afterwards, so a past day holds the state as it was
+    #: then. The page says so rather than implying these are live.
+    total_coin_only: int
+    total_shipped: int
+    total_prepaid: int
+    total_partial: int
+    total_cod: int
+    #: NOT part of the coin counts -- these orders carry no coin at
+    #: all. Orders that looked eligible and went out without one.
+    total_bundle_no_coin: int
 
 
 _COINS_SQL = """
 SELECT day_ist AS day,
        COALESCE(sum(pnl_orders), 0)::int         AS orders,
        COALESCE(sum(silver_coin_orders), 0)::int AS coin_orders,
-       COALESCE(sum(silver_coin_qty), 0)::int    AS coins
+       COALESCE(sum(silver_coin_qty), 0)::int    AS coins,
+       COALESCE(sum(coin_only_orders), 0)::int    AS coin_only,
+       COALESCE(sum(coin_shipped_orders), 0)::int AS shipped,
+       COALESCE(sum(coin_prepaid_orders), 0)::int AS prepaid,
+       COALESCE(sum(coin_partial_orders), 0)::int AS partial,
+       COALESCE(sum(coin_cod_orders), 0)::int     AS cod,
+       COALESCE(sum(bundle_no_coin_orders), 0)::int AS bundle_no_coin
   FROM public.hourly_campaign_tracker
  GROUP BY day_ist
 HAVING COALESCE(sum(silver_coin_orders), 0) > 0
@@ -14599,7 +14623,10 @@ async def get_coins(
                 # than one. Mixing the two would make the cost disagree
                 # with the rate beside it.
                 attach_rate=(r["coin_orders"] / r["orders"]) if r["orders"] else None,
-                cost=r["coins"] * coin_cost)
+                cost=r["coins"] * coin_cost,
+                coin_only=r["coin_only"], shipped=r["shipped"],
+                prepaid=r["prepaid"], partial=r["partial"], cod=r["cod"],
+                bundle_no_coin=r["bundle_no_coin"])
         for r in rows
     ]
     t_orders = sum(d.orders for d in days)
@@ -14613,6 +14640,12 @@ async def get_coins(
         total_orders=t_orders, total_coin_orders=t_coin_orders, total_coins=t_coins,
         total_cost=t_coins * coin_cost,
         attach_rate=(t_coin_orders / t_orders) if t_orders else None,
+        total_coin_only=sum(d.coin_only for d in days),
+        total_shipped=sum(d.shipped for d in days),
+        total_prepaid=sum(d.prepaid for d in days),
+        total_partial=sum(d.partial for d in days),
+        total_cod=sum(d.cod for d in days),
+        total_bundle_no_coin=sum(d.bundle_no_coin for d in days),
     )
 
 

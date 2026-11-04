@@ -542,6 +542,7 @@
       <span class="sub" id="coin-span"></span>
     </div>
     <div class="strip" id="coin-kpis"></div>
+    <div class="strip" id="coin-dispatch"></div>
     <div class="chain" id="coin-chain"></div>
     <div class="inv-key">
       <label class="vlab">Cost per coin &nbsp;<input type="number" id="coin-cost" min="0" step="10"
@@ -565,6 +566,15 @@
       anything tagged <code>Test Order</code> and orders from internal accounts
       (<code>@saadaa.in</code>, <code>@robylon.ai</code>), plus the <code>inf</code> and
       <code>Return_Prime</code> tags the P&amp;L also drops.
+    </p>
+    <p class="note">
+      <strong>Already shipped</strong> and the payment split are read when each hour is
+      <em>ingested</em>, and both move afterwards &mdash; a COD order becomes paid on delivery,
+      an unfulfilled one ships. So a past day holds the state as it was then, not as it is now;
+      re-ingest the campaign window to refresh them. <strong>Bundle, no coin</strong> is not a
+      slice of the figures beside it: those orders carry no coin at all. The dispatch desk&rsquo;s
+      own Ship&nbsp;now, Call&nbsp;list and Address&nbsp;issues buckets stay there, because they
+      depend on customer RTO history and full addresses this pipeline does not hold.
     </p>
     <p class="note">
       This is deliberately <strong>stricter than the P&amp;L basis</strong> and the two should not
@@ -1662,6 +1672,26 @@ function drawCoins() {
     '<div class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" + v + "</div>" +
     '<div class="s">' + esc(sub) + "</div></div>").join("");
 
+  // The dispatch desk's breakdown of the SAME coin orders, plus the
+  // one figure that is not a coin order at all. Kept in its own strip
+  // so it reads as a breakdown rather than as more headline numbers.
+  const unful = d.total_coin_orders - d.total_shipped;
+  $("coin-dispatch").innerHTML = [
+    ["Already shipped", num(d.total_shipped),
+     pc(d.total_coin_orders ? d.total_shipped / d.total_coin_orders : null, 0) +
+     " of coin orders", ""],
+    ["Not yet shipped", num(unful), "still to dispatch", ""],
+    ["Coin only", num(d.total_coin_only),
+     d.total_coin_only ? "coin and nothing else" : "every order had a product", ""],
+    // Deliberately last and marked: these orders carry NO coin, so
+    // they are not a slice of the figures beside them.
+    ["Bundle, no coin", num(d.total_bundle_no_coin),
+     "2+ units, coin missing", "var(--s3)"],
+  ].map(([k, v, sub, colour]) =>
+    '<div><div class="k">' + esc(k) + "</div>" +
+    '<div class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" + v + "</div>" +
+    '<div class="s">' + esc(sub) + "</div></div>").join("");
+
   // The arithmetic, left to right. Coin ORDERS and coin COUNT are
   // different numbers and the chain is where that stops being a
   // footnote: the cost is taken on the right-hand one.
@@ -1678,6 +1708,12 @@ function drawCoins() {
     box("Cost per coin", inr(d.coin_cost, 0)) +
     '<div class="op">=</div>' +
     box("Cost", '<span class="bad">' + inr(d.total_cost, 0) + "</span>", "end");
+
+  $("coin-span").textContent = ($("coin-span").textContent || "") +
+    (d.total_coin_orders
+      ? "  \u00b7  " + num(d.total_prepaid) + " prepaid \u00b7 " +
+        num(d.total_partial) + " partial COD \u00b7 " + num(d.total_cod) + " COD"
+      : "");
 
   $("coin-thead").innerHTML =
     "<tr><th>Day</th><th>Orders</th><th>Coin orders</th><th>Attach %</th>" +
