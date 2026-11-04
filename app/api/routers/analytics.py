@@ -14545,6 +14545,15 @@ class CoinDay(BaseModel):
     coins: int
     attach_rate: float | None
     cost: float
+    coin_only: int
+    shipped: int
+    prepaid: int
+    partial: int
+    cod: int
+    bundle_no_coin: int
+    ship_now: int
+    call_list: int
+    address_bad: int
 
 
 class CoinsResponse(BaseModel):
@@ -14566,13 +14575,42 @@ class CoinsResponse(BaseModel):
     total_cost: float
     #: Coin orders over all orders, across the whole run.
     attach_rate: float | None
+    #: The dispatch desk's breakdown of the same coin population.
+    #: Payment and fulfilment are read when the hour is ingested and
+    #: both move afterwards, so a past day holds the state as it was
+    #: then. The page says so rather than implying these are live.
+    total_coin_only: int
+    total_shipped: int
+    total_prepaid: int
+    total_partial: int
+    total_cod: int
+    #: The dispatch buckets. Every counted coin order is in exactly
+    #: one of shipped / coin_only / address_bad / call_list / ship_now,
+    #: so these five sum to total_coin_orders.
+    total_ship_now: int
+    total_call_list: int
+    total_address_bad: int
+    #: Crosses the buckets rather than partitioning them.
+    total_watchlist: int
+    #: NOT part of the coin counts -- these orders carry no coin at
+    #: all. Orders that looked eligible and went out without one.
+    total_bundle_no_coin: int
 
 
 _COINS_SQL = """
 SELECT day_ist AS day,
        COALESCE(sum(pnl_orders), 0)::int         AS orders,
        COALESCE(sum(silver_coin_orders), 0)::int AS coin_orders,
-       COALESCE(sum(silver_coin_qty), 0)::int    AS coins
+       COALESCE(sum(silver_coin_qty), 0)::int    AS coins,
+       COALESCE(sum(coin_only_orders), 0)::int    AS coin_only,
+       COALESCE(sum(coin_shipped_orders), 0)::int AS shipped,
+       COALESCE(sum(coin_prepaid_orders), 0)::int AS prepaid,
+       COALESCE(sum(coin_partial_orders), 0)::int AS partial,
+       COALESCE(sum(coin_cod_orders), 0)::int     AS cod,
+       COALESCE(sum(bundle_no_coin_orders), 0)::int AS bundle_no_coin,
+       COALESCE(sum(coin_ship_now_orders), 0)::int    AS ship_now,
+       COALESCE(sum(coin_call_list_orders), 0)::int   AS call_list,
+       COALESCE(sum(coin_address_bad_orders), 0)::int AS address_bad
   FROM public.hourly_campaign_tracker
  GROUP BY day_ist
 HAVING COALESCE(sum(silver_coin_orders), 0) > 0
@@ -14599,9 +14637,21 @@ async def get_coins(
                 # than one. Mixing the two would make the cost disagree
                 # with the rate beside it.
                 attach_rate=(r["coin_orders"] / r["orders"]) if r["orders"] else None,
-                cost=r["coins"] * coin_cost)
+                cost=r["coins"] * coin_cost,
+                coin_only=r["coin_only"], shipped=r["shipped"],
+                prepaid=r["prepaid"], partial=r["partial"], cod=r["cod"],
+                bundle_no_coin=r["bundle_no_coin"],
+                ship_now=r["ship_now"], call_list=r["call_list"],
+                address_bad=r["address_bad"])
         for r in rows
     ]
+    # Counted from the order rows, not the hourly table: the
+    # watchlist crosses buckets, so there is no per-hour column that
+    # could be summed without double counting.
+    watch_q = await session.execute(text(
+        "SELECT count(*) AS n FROM public.silver_coin_order "
+        " WHERE watchlist IS NOT NULL AND bucket <> 'bundle_no_coin'"))
+    watch = watch_q.mappings().first()["n"]
     t_orders = sum(d.orders for d in days)
     t_coin_orders = sum(d.coin_orders for d in days)
     t_coins = sum(d.coins for d in days)
@@ -14613,7 +14663,254 @@ async def get_coins(
         total_orders=t_orders, total_coin_orders=t_coin_orders, total_coins=t_coins,
         total_cost=t_coins * coin_cost,
         attach_rate=(t_coin_orders / t_orders) if t_orders else None,
+        total_coin_only=sum(d.coin_only for d in days),
+        total_shipped=sum(d.shipped for d in days),
+        total_prepaid=sum(d.prepaid for d in days),
+        total_partial=sum(d.partial for d in days),
+        total_cod=sum(d.cod for d in days),
+        total_bundle_no_coin=sum(d.bundle_no_coin for d in days),
+        total_ship_now=sum(d.ship_now for d in days),
+        total_call_list=sum(d.call_list for d in days),
+        total_address_bad=sum(d.address_bad for d in days),
+        total_watchlist=watch,
     )
+
+
+class CoinOrderRow(BaseModel):
+    order_name: str | None
+    #: shipped | coin_only | address_bad | call_list | ship_now
+    bucket: str | None
+    #: Why it is held, in the words the person acting on it needs.
+    bucket_reason: str | None
+    #: Deliverable but worth knowing -- a shop or a hostel room. Never
+    #: a reason to hold.
+    address_flag: str | None
+    #: An OVERLAY, not a bucket: a watchlisted order still sits in the
+    #: queue it belongs to. Says only that it is worth a second look.
+    watchlist: str | None
+    #: Semicolon-joined keys. An order can trip SEVERAL rules and the
+    #: desk shows them all, so the page gets the list, not a headline.
+    call_reasons: str | None
+    address_issues: str | None
+    customer_name: str | None
+    phone: str | None
+    address1: str | None
+    address2: str | None
+    channel: str | None
+    item_count: int | None
+    bundles: str | None
+    created_at: datetime
+    coins: int
+    amount: float | None
+    payment: str | None
+    fulfillment: str | None
+    #: GoKwik scores COD checkouts only, so null on a COD order means
+    #: NEVER SCORED -- which is not the same as low risk.
+    risk_tag: str | None
+    customer_orders: int | None
+    is_returning: bool | None
+    city: str | None
+    state: str | None
+    pincode: str | None
+    coin_only: bool | None
+
+
+class CoinOrdersResponse(BaseModel):
+    rows: list[CoinOrderRow]
+    #: Every coin order, not just this page -- the page needs it to
+    #: know whether a "Load more" is worth offering.
+    total: int
+    offset: int
+    limit: int
+
+
+_COIN_ORDERS_SQL = """
+SELECT order_name, bucket, bucket_reason, address_flag, watchlist,
+       call_reasons, address_issues, customer_name, phone, address1, address2,
+       channel, item_count, bundles, created_at, coins,
+       amount, payment, fulfillment, risk_tag, customer_orders, is_returning,
+       city, state, pincode, coin_only
+  FROM public.silver_coin_order
+ -- CAST because asyncpg cannot infer the type of a bare parameter
+ -- used only in an IS NULL test, and fails the statement outright.
+ --
+ -- With no bucket asked for, bundle-no-coin rows are LEFT OUT: they
+ -- carry no coin, so including them in "all" would quietly inflate
+ -- every coin figure the list is read against.
+ WHERE (CASE WHEN CAST(:bucket AS text) IS NOT NULL THEN bucket = CAST(:bucket AS text)
+             ELSE bucket <> 'bundle_no_coin' END)
+   AND (NOT CAST(:watchlist AS boolean) OR watchlist IS NOT NULL)
+   AND (CAST(:issue AS text) IS NULL
+        OR string_to_array(COALESCE(address_issues, ''), ';') && CAST(:issue_keys AS text[]))
+   AND (CAST(:pay AS text) IS NULL OR payment = CAST(:pay AS text))
+   AND (CAST(:q AS text) IS NULL OR (
+        COALESCE(order_name, '')    ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(customer_name, '') ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(phone, '')         ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(city, '')          ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(pincode, '')       ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(address1, '')      ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(bundles, '')       ILIKE '%%' || CAST(:q AS text) || '%%'))
+ -- The Call list is a QUEUE and is worked oldest first; every other
+ -- tab is read newest first.
+ ORDER BY CASE WHEN CAST(:bucket AS text) = 'call_list' THEN created_at END ASC,
+          created_at DESC
+ LIMIT :limit OFFSET :offset
+"""
+
+_COIN_ORDERS_COUNT_SQL = """
+SELECT count(*) AS n FROM public.silver_coin_order
+ WHERE (CASE WHEN CAST(:bucket AS text) IS NOT NULL THEN bucket = CAST(:bucket AS text)
+             ELSE bucket <> 'bundle_no_coin' END)
+   AND (NOT CAST(:watchlist AS boolean) OR watchlist IS NOT NULL)
+   AND (CAST(:issue AS text) IS NULL
+        OR string_to_array(COALESCE(address_issues, ''), ';') && CAST(:issue_keys AS text[]))
+   AND (CAST(:pay AS text) IS NULL OR payment = CAST(:pay AS text))
+   AND (CAST(:q AS text) IS NULL OR (
+        COALESCE(order_name, '')    ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(customer_name, '') ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(phone, '')         ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(city, '')          ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(pincode, '')       ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(address1, '')      ILIKE '%%' || CAST(:q AS text) || '%%'
+     OR COALESCE(bundles, '')       ILIKE '%%' || CAST(:q AS text) || '%%'))
+"""
+
+
+@router.get("/coins/orders", response_model=CoinOrdersResponse)
+@cached_analytics(ttl=120.0)
+async def get_coin_orders(
+    session: SessionDep,
+    # 1000 by default and capped at 2000: the whole promotion is
+    # several thousand rows, and sending them all would be a megabyte
+    # of JSON for a table nobody scrolls to the end of.
+    limit: int = Query(default=1000, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+    bucket: str | None = Query(
+        default=None,
+        pattern="^(shipped|coin_only|address_bad|call_list|ship_now|bundle_no_coin)$"),
+    watchlist: bool = Query(default=False),
+    issue: str | None = Query(default=None, max_length=40),
+    pay: str | None = Query(default=None,
+                            pattern="^(Prepaid|Partial COD|COD)$"),
+    q: str | None = Query(default=None, max_length=80),
+) -> CoinOrdersResponse:
+    """Silver-coin orders, paged, optionally filtered."""
+    from scripts.coin_dispatch import ISSUE_GROUP  # noqa: PLC0415
+
+    # A sub-filter is a GROUP of raw issue keys, and an address can
+    # trip several, so the match is an array overlap rather than
+    # equality -- a row showing two issues belongs under both.
+    keys = [k for k, g in ISSUE_GROUP.items() if g == issue] if issue else []
+    args = {"limit": limit, "offset": offset, "bucket": bucket,
+            "watchlist": watchlist, "issue": issue if keys else None,
+            "issue_keys": keys, "pay": pay, "q": (q or "").strip() or None}
+    result = await session.execute(text(_COIN_ORDERS_SQL), args)
+    rows = [CoinOrderRow(**dict(r)) for r in result.mappings()]
+    count_args = {k: v for k, v in args.items() if k not in ("limit", "offset")}
+    total = await session.execute(text(_COIN_ORDERS_COUNT_SQL), count_args)
+    return CoinOrdersResponse(rows=rows, total=total.mappings().first()["n"],
+                              offset=offset, limit=limit)
+
+
+class CoinIssueGroup(BaseModel):
+    key: str
+    label: str
+    count: int
+
+
+class CoinRiskRow(BaseModel):
+    label: str
+    new: int
+    returning: int
+    total: int
+
+
+class CoinRepeatBuyer(BaseModel):
+    orders: int
+    name: str | None
+    phone: str | None
+    city: str | None
+    total: float
+    order_names: str
+
+
+class CoinExtrasResponse(BaseModel):
+    """The panels the plain order list cannot carry.
+
+    Address-issue sub-filters, the risk-tag matrix and repeat buyers
+    are aggregates, not rows, so they are computed in the database
+    rather than by paging thousands of orders into the browser.
+    """
+    issue_groups: list[CoinIssueGroup]
+    risk_rows: list[CoinRiskRow]
+    repeat_buyers: list[CoinRepeatBuyer]
+
+
+_RISK_SQL = """
+SELECT CASE
+         WHEN payment <> 'COD' THEN 'No tag (prepaid / partial COD)'
+         WHEN risk_tag IS NULL THEN 'Untagged COD'
+         ELSE risk_tag || ' Risk' END                        AS label,
+       count(*) FILTER (WHERE NOT COALESCE(is_returning, false))::int AS new,
+       count(*) FILTER (WHERE COALESCE(is_returning, false))::int     AS returning,
+       count(*)::int                                                  AS total
+  FROM public.silver_coin_order
+ WHERE bucket <> 'bundle_no_coin'
+ GROUP BY 1
+"""
+
+_REPEAT_SQL = """
+SELECT count(*)::int AS orders,
+       max(customer_name) AS name,
+       phone,
+       max(city) AS city,
+       COALESCE(sum(amount), 0)::float AS total,
+       string_agg(order_name, ', ' ORDER BY created_at) AS order_names
+  FROM public.silver_coin_order
+ WHERE bucket <> 'bundle_no_coin' AND phone IS NOT NULL AND phone <> ''
+ GROUP BY phone
+HAVING count(*) > 1
+ ORDER BY count(*) DESC, sum(amount) DESC
+ LIMIT 200
+"""
+
+
+@router.get("/coins/extras", response_model=CoinExtrasResponse)
+@cached_analytics(ttl=300.0)
+async def get_coin_extras(session: SessionDep) -> CoinExtrasResponse:
+    """Sub-filter counts, the risk matrix and repeat buyers."""
+    from scripts.coin_dispatch import GROUP_LABEL, ISSUE_GROUP  # noqa: PLC0415
+
+    rows = await session.execute(text(
+        "SELECT address_issues FROM public.silver_coin_order "
+        " WHERE bucket = 'address_bad' AND address_issues IS NOT NULL"))
+    # An address can fail several checks, so a row counts toward every
+    # group it trips -- the groups overlap and do NOT sum to the tab's
+    # total, exactly as on the desk.
+    tally: dict[str, int] = {}
+    for (raw,) in rows:
+        for key in {ISSUE_GROUP.get(i) for i in (raw or "").split(";") if i}:
+            if key:
+                tally[key] = tally.get(key, 0) + 1
+    groups = [CoinIssueGroup(key=k, label=GROUP_LABEL[k], count=tally.get(k, 0))
+              for k in GROUP_LABEL if tally.get(k)]
+    groups.sort(key=lambda g: -g.count)
+
+    risk = await session.execute(text(_RISK_SQL))
+    order = ["High Risk", "Medium Risk", "Low Risk", "Untagged COD",
+             "No tag (prepaid / partial COD)"]
+    by_label = {r["label"]: dict(r) for r in risk.mappings()}
+    # Every band is listed even at zero. "High Risk 0" says the check
+    # ran and found none; omitting the row leaves a reader unable to
+    # tell that from the band not being evaluated at all.
+    risk_rows = [CoinRiskRow(**by_label.get(
+        k, {"label": k, "new": 0, "returning": 0, "total": 0})) for k in order]
+
+    rep = await session.execute(text(_REPEAT_SQL))
+    return CoinExtrasResponse(
+        issue_groups=groups, risk_rows=risk_rows,
+        repeat_buyers=[CoinRepeatBuyer(**dict(r)) for r in rep.mappings()])
 
 
 # ----------------------------------------------------------------------
