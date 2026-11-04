@@ -555,9 +555,22 @@
       <strong>Coins</strong> and <strong>coin orders</strong> are different numbers: an order can
       ship more than one, so cost is taken on COINS while the attach rate is taken on ORDERS.
       Matched by SKU <code>SDSILVER</code>, not by title &mdash; the title carries an emoji that has
-      moved three times. Orders tagged <code>inf</code> or <code>Return_Prime</code> are excluded,
-      on the same basis as the P&amp;L. A coin is counted on the order that shipped it, even if that
-      order later cancelled: the coin still went out.
+      moved three times.
+    </p>
+    <p class="note">
+      Counted on the <strong>dispatch desk&rsquo;s rules</strong>, so this section and the desk
+      agree on what a coin order is. From <strong>30 Oct 02:37 IST</strong>, when the free coin
+      went live: earlier orders carry the same SKU but belong to the previous Saadaa&nbsp;Sagun
+      offer. <strong>Cancelled, refunded and voided</strong> orders are left out, along with
+      anything tagged <code>Test Order</code> and orders from internal accounts
+      (<code>@saadaa.in</code>, <code>@robylon.ai</code>), plus the <code>inf</code> and
+      <code>Return_Prime</code> tags the P&amp;L also drops.
+    </p>
+    <p class="note">
+      This is deliberately <strong>stricter than the P&amp;L basis</strong> and the two should not
+      be reconciled. The P&amp;L keeps cancelled orders in and models cancellation as a rate,
+      because it asks what the day earned. This asks how many coins we are liable for, and a
+      cancelled order never shipped one.
     </p>
   </div>
 

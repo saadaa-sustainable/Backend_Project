@@ -439,6 +439,46 @@ def is_pnl_excluded(tags: list[str] | None) -> bool:
     return bool(PNL_EXCLUDED_TAGS & {str(t).strip().lower() for t in (tags or [])})
 
 
+#: The silver coin went live on Shopify at this instant. Orders before
+#: it carry the SAME SKU but belong to the earlier "Saadaa Sagun"
+#: offer, so counting them would merge two promotions into one figure.
+COIN_CAMPAIGN_START = datetime(2026, 10, 30, 2, 37, tzinfo=IST)
+
+#: Internal accounts. Orders from these are staff and supplier tests,
+#: not customers who were given a coin.
+COIN_INTERNAL_DOMAINS = ("@saadaa.in", "@robylon.ai")
+
+
+def is_coin_excluded(order: dict, created: datetime) -> str | None:
+    """Why this order is NOT a silver-coin order, or None if it counts.
+
+    DELIBERATELY STRICTER THAN THE P&L BASIS, and the two must not be
+    merged. The P&L keeps cancelled orders in and models cancellation
+    as a rate, because it is asking what the day earned. This is asking
+    HOW MANY COINS WE ARE LIABLE FOR, and a cancelled or refunded order
+    never shipped one.
+
+    The rules are the dispatch desk's, so the dashboard and the desk
+    agree on what a coin order is. Returns a reason rather than a bool
+    so a surprising total can be explained without re-running anything.
+    """
+    if created < COIN_CAMPAIGN_START:
+        return "before the campaign"
+    if order.get("cancelledAt"):
+        return "cancelled"
+    refunded = float((order.get("totalRefundedSet") or {})
+                     .get("shopMoney", {}).get("amount") or 0)
+    if refunded > 0:
+        return "refunded"
+    tags = {str(t).strip().lower() for t in (order.get("tags") or [])}
+    if "test order" in tags:
+        return "test order"
+    email = (order.get("email") or "").strip().lower()
+    if email.endswith(COIN_INTERNAL_DOMAINS):
+        return "internal account"
+    return None
+
+
 def count_units(line_items: dict | None) -> tuple[int, int]:
     """(units sold excluding the gift coin, HOW MANY coins it carried).
 
@@ -625,6 +665,7 @@ query HourlyOrders($first: Int!, $after: String, $query: String) {
         lineItems(first: 100) {
           edges { node { sku quantity } }
         }
+        email
         customer { id numberOfOrders }
         customAttributes { key value }
       }
@@ -687,7 +728,10 @@ async def fetch_orders(client, store, day: date) -> dict[datetime, dict]:
                 b["pnl_sales"] += price
                 b["pnl_orders"] += 1
                 b["pnl_qty"] += units
-                if coins:
+                # The coin count runs its own exclusions; see
+                # is_coin_excluded for why they are stricter than the
+                # P&L's. Units and sales above are unaffected.
+                if coins and is_coin_excluded(n, created) is None:
                     b["silver_coin_orders"] += 1
                     b["silver_coin_qty"] += coins
                 refunded = float((n.get("totalRefundedSet") or {})
