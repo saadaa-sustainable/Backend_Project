@@ -23,8 +23,11 @@ from types import SimpleNamespace
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
+
+from app.services import kwikchat_csv
+from app.services.kwikchat_csv import ACCOUNTS as KWIKCHAT_ACCOUNTS
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -15328,3 +15331,309 @@ async def get_quantity(
     return QuantityResponse(
         hours=hours, compare=cmp_totals,
         **tot.model_dump(exclude={"hours"}))
+
+
+# ----------------------------------------------------------------------
+# Kwikchat spend: per-account upload
+#
+# Kwikchat is the third channel in the spend block and the only one with
+# no feed into this warehouse. Meta comes from the Insights API, Google
+# from the MapleMonk export; Kwikchat exists as a CSV somebody downloads
+# from a console, one file per workspace. Until now that meant a flat
+# daily placeholder against a real figure that swings by more than two
+# orders of magnitude day to day -- an error every ratio with spend in
+# it inherited.
+#
+# THIS ENDPOINT TAKES NO CREDENTIAL. That is a deliberate choice by the
+# owner, made with the exposure stated: the API is public and anyone who
+# finds this path can write spend. The mitigations that do not need auth
+# are all here -- a size cap, a known-accounts allowlist, a parse that
+# refuses anything that is not a daily-spend export, and an audit row
+# per (account, day) recording when it was written and from which file.
+#: One statement per entry. asyncpg prepares every statement it is
+#: given, and a prepared statement cannot carry two commands -- the
+#: table and its index in one string raise PostgresSyntaxError.
+_KWIKCHAT_ACCOUNT_DDL = (
+    """CREATE TABLE IF NOT EXISTS public.kwikchat_account_spend (
+           account     text    NOT NULL,
+           day         date    NOT NULL,
+           spend       numeric NOT NULL,
+           source      text    NOT NULL,
+           uploaded_at timestamptz NOT NULL DEFAULT now(),
+           PRIMARY KEY (account, day)
+       )""",
+    """CREATE INDEX IF NOT EXISTS ix_kwikchat_account_spend_day
+         ON public.kwikchat_account_spend(day)""",
+)
+
+
+async def _kwikchat_ensure(session: SessionDep) -> None:
+    for stmt in _KWIKCHAT_ACCOUNT_DDL:
+        await session.execute(text(stmt))
+
+#: One upload is a month of daily rows -- a few kilobytes. The cap is
+#: three orders of magnitude above that and exists so a public endpoint
+#: cannot be made to buffer something large.
+_KWIKCHAT_MAX_BYTES = 2_000_000
+
+
+class KwikchatAccount(BaseModel):
+    """One workspace, and how far its real spend reaches."""
+    account: str
+    #: The newest day this account has measured spend for. None means
+    #: nothing has ever been uploaded for it.
+    updated_to: date | None = None
+    first_day: date | None = None
+    days: int = 0
+    total: float = 0.0
+    last_upload: datetime | None = None
+
+
+class KwikchatStatus(BaseModel):
+    accounts: list[KwikchatAccount]
+    #: The newest day EVERY account has reached. The spend total is only
+    #: wholly measured up to here -- past it some accounts are still on
+    #: the placeholder, so the day reads low.
+    covered_to: date | None = None
+    #: Days that have at least one account but not all of them.
+    partial_days: list[date] = []
+
+
+class KwikchatDayResult(BaseModel):
+    day: date
+    spend: float
+    #: written | skipped. A day at or before the account's current
+    #: reach is skipped rather than replaced, unless overwrite is set.
+    status: str
+    was: float | None = None
+
+
+class KwikchatUploadResult(BaseModel):
+    account: str
+    files: list[str]
+    written: int
+    skipped: int
+    days: list[KwikchatDayResult]
+    updated_to: date | None = None
+    #: Days whose tracker rows were recomputed from the new totals.
+    rebuilt_days: int = 0
+    #: Days written for this ACCOUNT but left alone in the day total,
+    #: because the figure already there is larger and came from more
+    #: workspaces than this upload carries.
+    held_days: list[date] = []
+    message: str
+
+
+async def _kwikchat_status(session: SessionDep) -> KwikchatStatus:
+    rows = (await session.execute(text("""
+        SELECT account,
+               MAX(day)          AS updated_to,
+               MIN(day)          AS first_day,
+               COUNT(*)          AS days,
+               SUM(spend)        AS total,
+               MAX(uploaded_at)  AS last_upload
+          FROM public.kwikchat_account_spend
+         GROUP BY account
+    """))).mappings().all()
+    by_account = {r["account"]: r for r in rows}
+
+    accounts = [
+        KwikchatAccount(
+            account=name,
+            updated_to=(by_account.get(name) or {}).get("updated_to"),
+            first_day=(by_account.get(name) or {}).get("first_day"),
+            days=int((by_account.get(name) or {}).get("days") or 0),
+            total=float((by_account.get(name) or {}).get("total") or 0),
+            last_upload=(by_account.get(name) or {}).get("last_upload"),
+        )
+        for name in KWIKCHAT_ACCOUNTS
+    ]
+    # The weakest account bounds the total. A day where seven of eight
+    # have reported is not a measured day -- it is a day missing one
+    # workspace's spend, and it reads low by exactly that much.
+    reaches = [a.updated_to for a in accounts if a.updated_to is not None]
+    covered = min(reaches) if len(reaches) == len(accounts) and reaches else None
+
+    partial = (await session.execute(text("""
+        SELECT day FROM public.kwikchat_account_spend
+         GROUP BY day HAVING COUNT(DISTINCT account) < :n
+         ORDER BY day DESC LIMIT 60
+    """), {"n": len(KWIKCHAT_ACCOUNTS)})).scalars().all()
+    return KwikchatStatus(accounts=accounts, covered_to=covered,
+                          partial_days=list(partial))
+
+
+@router.get("/kwikchat/status", response_model=KwikchatStatus)
+async def get_kwikchat_status(session: SessionDep) -> KwikchatStatus:
+    """Which workspaces have uploaded, and how far each one reaches."""
+    await _kwikchat_ensure(session)
+    await session.commit()
+    return await _kwikchat_status(session)
+
+
+@router.post("/kwikchat/upload", response_model=KwikchatUploadResult)
+async def post_kwikchat_upload(
+    session: SessionDep,
+    account: str = Form(..., description="Which workspace these files belong to."),
+    overwrite: bool = Form(
+        default=False,
+        description="Replace days this account has already measured. Off by "
+                    "default: an upload that re-covers old ground reports "
+                    "them instead of silently rewriting them."),
+    files: list[UploadFile] = File(..., description="Daily-spend CSV exports."),
+) -> KwikchatUploadResult:
+    """Load one workspace's daily-spend export.
+
+    SEVERAL FILES FOR ONE ACCOUNT ARE SUMMED, not applied in turn. The
+    console exports per channel as well as per workspace, so a month can
+    arrive as three files covering the same dates; writing them one
+    after another would leave only the last and silently drop the rest.
+
+    A DAY THIS ACCOUNT HAS ALREADY MEASURED IS SKIPPED. The normal use
+    is filling forward, and an upload that happens to re-cover old
+    ground should not quietly change figures somebody has already read.
+    Backfilling and correcting are real needs, so `overwrite` does it
+    explicitly and the response says which days moved and from what.
+    """
+    if account not in KWIKCHAT_ACCOUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown account {account!r}. Known: {', '.join(KWIKCHAT_ACCOUNTS)}")
+    if not files:
+        raise HTTPException(status_code=422, detail="No file uploaded.")
+
+    await _kwikchat_ensure(session)
+
+    # Summed across the files, by day.
+    totals: dict[date, float] = {}
+    names: list[str] = []
+    for f in files:
+        raw = await f.read()
+        if len(raw) > _KWIKCHAT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{f.filename} is {len(raw):,} bytes; the limit is "
+                       f"{_KWIKCHAT_MAX_BYTES:,}. A daily-spend export is a few KB.")
+        try:
+            # utf-8-sig: the console writes a BOM, and without stripping
+            # it the first column is named "﻿Date" and never found.
+            body = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"{f.filename} is not UTF-8 text.") from exc
+        try:
+            rows = kwikchat_csv.read_rows(body, f.filename or "upload")
+        except kwikchat_csv.KwikchatCsvError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        names.append(f.filename or "upload")
+        for day, spend in rows:
+            totals[day] = totals.get(day, 0.0) + spend
+
+    reach = (await session.execute(text(
+        "SELECT MAX(day) FROM public.kwikchat_account_spend WHERE account = :a"),
+        {"a": account})).scalar()
+
+    existing = {
+        r["day"]: float(r["spend"]) for r in (await session.execute(text(
+            "SELECT day, spend FROM public.kwikchat_account_spend "
+            " WHERE account = :a AND day = ANY(:days)"),
+            {"a": account, "days": list(totals)})).mappings().all()
+    }
+
+    source = "kwikchat upload: " + ", ".join(names)
+    held: list[date] = []
+    results: list[KwikchatDayResult] = []
+    to_write: list[tuple[str, date, float, str]] = []
+    for day in sorted(totals):
+        spend = round(totals[day], 2)
+        known = existing.get(day)
+        # Already measured and not asked to replace it.
+        if known is not None and not overwrite:
+            results.append(KwikchatDayResult(day=day, spend=known, status="skipped",
+                                             was=known))
+            continue
+        results.append(KwikchatDayResult(day=day, spend=spend, status="written",
+                                         was=known))
+        to_write.append((account, day, spend, source))
+
+    if to_write:
+        await session.execute(text("""
+            INSERT INTO public.kwikchat_account_spend (account, day, spend, source,
+                                                       uploaded_at)
+            SELECT t.acct, t.day, t.spend, t.src, now()
+              FROM UNNEST(CAST(:accounts AS text[]), CAST(:days AS date[]),
+                          CAST(:spends AS numeric[]), CAST(:sources AS text[]))
+                     AS t(acct, day, spend, src)
+            ON CONFLICT (account, day) DO UPDATE SET
+              spend = EXCLUDED.spend,
+              source = EXCLUDED.source,
+              uploaded_at = EXCLUDED.uploaded_at
+        """), {"accounts": [r[0] for r in to_write],
+               "days": [r[1] for r in to_write],
+               "spends": [r[2] for r in to_write],
+               "sources": [r[3] for r in to_write]})
+
+        # The day total the rest of the warehouse reads is the SUM over
+        # accounts, rebuilt here rather than left to drift.
+        #
+        # A PARTIAL UPLOAD MUST NEVER REDUCE A MEASURED DAY. One
+        # workspace's figure is a lower bound on the day, not the day:
+        # rebuilding unconditionally replaced a correct multi-workspace
+        # total with one workspace's share AND marked it measured, so
+        # the number got worse while looking more trustworthy. A day is
+        # only written when it has nothing yet, when what it has is a
+        # placeholder, when the new sum is at least as large, or when
+        # every workspace has finally reported -- which is the one case
+        # where a LOWER figure is the right one.
+        #
+        # is_estimate stays TRUE until all of them are in, because
+        # until then the total is still short by whoever is missing.
+        rebuilt = (await session.execute(text("""
+            INSERT INTO public.kwikchat_spend_daily (day, spend, is_estimate,
+                                                     source, fetched_at)
+            SELECT a.day, a.total, a.n < :n_all,
+                   -- CAST(), not :n_all::text. SQLAlchemy's bind parser
+                   -- reads the parameter and the cast colons together and
+                   -- splits out a phantom bind, leaving a stray token the
+                   -- server rejects with `syntax error at or near ":"`.
+                   'kwikchat upload: ' || CAST(a.n AS text) || ' of '
+                     || CAST(:n_all AS text) || ' accounts', now()
+              FROM (SELECT day, SUM(spend) AS total,
+                           COUNT(DISTINCT account) AS n
+                      FROM public.kwikchat_account_spend
+                     WHERE day = ANY(:days)
+                     GROUP BY day) a
+              LEFT JOIN public.kwikchat_spend_daily d ON d.day = a.day
+             WHERE d.day IS NULL
+                OR d.is_estimate
+                OR a.total >= d.spend
+                OR a.n = :n_all
+            ON CONFLICT (day) DO UPDATE SET
+              spend = EXCLUDED.spend,
+              is_estimate = EXCLUDED.is_estimate,
+              source = EXCLUDED.source,
+              fetched_at = EXCLUDED.fetched_at
+            RETURNING day
+        """), {"days": [r[1] for r in to_write],
+               "n_all": len(KWIKCHAT_ACCOUNTS)})).scalars().all()
+        held = sorted(set(r[1] for r in to_write) - set(rebuilt))
+    await session.commit()
+
+    status = await _kwikchat_status(session)
+    mine = next((a for a in status.accounts if a.account == account), None)
+    written = sum(1 for r in results if r.status == "written")
+    skipped = len(results) - written
+    msg = (f"{account}: {written} day(s) written"
+           + (f", {skipped} already measured and left alone" if skipped else "")
+           + (f". Now updated to {mine.updated_to}" if mine and mine.updated_to else "."))
+    if skipped and not overwrite:
+        msg += (f" This account already had data to {reach}; re-upload with "
+                "overwrite to replace those days.")
+    if held:
+        msg += (f" {len(held)} day(s) kept their existing, larger measured total "
+                "\u2014 one workspace's figure cannot lower a day the others "
+                "have already reported on.")
+    return KwikchatUploadResult(
+        account=account, files=names, written=written, skipped=skipped,
+        days=results, updated_to=mine.updated_to if mine else None,
+        rebuilt_days=len(to_write) - len(held), held_days=held, message=msg)
