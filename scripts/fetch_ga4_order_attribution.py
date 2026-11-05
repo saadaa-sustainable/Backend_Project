@@ -369,12 +369,15 @@ def main() -> int:
             cur.execute("""
                 SELECT COUNT(*),
                        COUNT(*) FILTER (WHERE first_ad_id IS NOT NULL),
-                       -- Reachable from a Shopify order, which is the
-                       -- only way a first click is of any use: the
-                       -- order number IS the transaction_id.
-                       COUNT(*) FILTER (WHERE EXISTS (
-                           SELECT 1 FROM public.shopify_orders s
-                            WHERE s.name = ga4_order_attribution.transaction_id)),
+                       -- Was a correlated EXISTS against shopify_orders,
+                       -- to report how many rows a Shopify order could
+                       -- reach. One subquery per row is far too much
+                       -- work for a status line: it passed the two
+                       -- minute statement timeout and ended an
+                       -- otherwise successful fetch in a traceback.
+                       -- Nothing downstream reads it; the join itself
+                       -- lives in shopify_order_clicks.
+                       COUNT(*) FILTER (WHERE first_seen_at IS NOT NULL),
                        ROUND(AVG(total_sessions), 1),
                        ROUND(AVG(days_to_convert), 1)
                   FROM public.ga4_order_attribution
@@ -383,7 +386,7 @@ def main() -> int:
             n, with_ad, joined, avg_s, avg_d = cur.fetchone()
             print(f"\n[OK] {n:,} orders in range")
             print(f"     first-click ad id present   {with_ad:,}  ({100 * with_ad / n:.1f}%)")
-            print(f"     matched to a Shopify order  {joined:,}  ({100 * joined / n:.1f}%)")
+            print(f"     first touch recorded        {joined:,}  ({100 * joined / n:.1f}%)")
             print(f"     avg sessions before order   {avg_s}")
             print(f"     avg days to convert         {avg_d}")
     except Exception:
