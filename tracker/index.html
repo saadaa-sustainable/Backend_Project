@@ -497,6 +497,31 @@
   .chain .b.inp input { -moz-appearance: textfield; }
   .chain-note { margin-top: 8px; }
 
+  /* ---- loading ---------------------------------------------------
+     A skeleton of the page that is coming, not a spinner on a blank
+     screen. The first load has nothing to show -- every card starts
+     hidden -- and this API regularly takes tens of seconds to wake,
+     so the reader was left looking at a header and white space with
+     no way to tell "slow" from "broken". */
+  .skel { animation: skel-pulse 1.5s ease-in-out infinite; }
+  @keyframes skel-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
+  @media (prefers-reduced-motion: reduce) { .skel { animation: none; opacity: .7 } }
+  .skel-b { background: var(--muted); border-radius: 6px; height: 11px; }
+  .skel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+               gap: 1px; background: var(--border-soft); border: 1px solid var(--border-soft);
+               border-radius: 12px; overflow: hidden; }
+  .skel-card { background: var(--surface); padding: 17px 19px; }
+  .skel-rows { margin-top: 14px; display: flex; flex-direction: column; gap: 9px; }
+  .skel-note { display: flex; align-items: center; gap: 9px; margin-top: 16px;
+               font-size: 12px; color: var(--text-3); }
+  /* A ring, not a GIF: one element, no request, and it keeps spinning
+     while the main thread waits on the fetch. */
+  .spin { width: 13px; height: 13px; flex-shrink: 0; border-radius: 50%;
+          border: 2px solid var(--border); border-top-color: var(--text-3);
+          animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration: 3s } }
+
   /* ---- period picker ---------------------------------------------
      Shaped after the Shopify analytics control: a Period button and a
      Compare button, the first opening a calendar and the second a
@@ -823,6 +848,15 @@
   </div>
 
   <div id="error"></div>
+
+  <!-- Shown until the first response lands, then never again: a
+       refresh has figures on screen already, and replacing them with
+       a skeleton would read as losing them. -->
+  <div class="card" id="boot">
+    <div class="skel-grid skel" id="boot-grid"></div>
+    <div class="skel-rows skel" id="boot-rows"></div>
+    <div class="skel-note"><span class="spin"></span><span id="boot-msg">Loading the tracker&hellip;</span></div>
+  </div>
 
   <div class="card" id="totals" hidden>
     <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:baseline">
@@ -1462,6 +1496,7 @@ async function load() {
   // at a relative path and reporting whatever 404 the static host gives
   // back, which tells the reader nothing about what to do next.
   if (!base) {
+    bootDone();
     $("status").textContent = "no API set";
     $("error").innerHTML = '<div class="err"><strong>No backend configured.</strong> ' +
       'Put the backend URL in the API box above, or open this page with ' +
@@ -1480,12 +1515,17 @@ async function load() {
               (cmp ? "&compare_to=" + cmp : "") +
               (cfrom && cfrom !== cmp ? "&compare_from=" + cfrom : "");
   $("status").textContent = "loading…";
+  bootShow();
   try {
     const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
     if (!res.ok) throw new Error("HTTP " + res.status + " from " + base);
     render(await res.json(), day);
     $("error").innerHTML = "";
   } catch (e) {
+    // The error replaces the skeleton. Leaving both up says "still
+    // loading" beside "could not load", and the reader believes the
+    // more hopeful one.
+    bootDone();
     $("status").textContent = "failed";
     $("error").innerHTML = '<div class="err"><strong>Could not load.</strong> ' +
       String(e.message || e) +
@@ -1498,6 +1538,7 @@ let LAST = null;
 
 function render(d, day) {
   LAST = { d, day };
+  bootDone();
   // The first day the tracker holds, learned from the response rather
   // than hardcoded: the picker greys out everything before it, and a
   // comparison that would reach past it is offered dead with the
@@ -1840,7 +1881,9 @@ function pnlAssumptions() {
 let VIEW = "tracker";
 
 //: Everything the tracker view owns. The P&L card is the other view.
-const TRACKER_CARDS = ["totals", "chartcard", "donutcard", "cmpcard", "tablewrap"];
+// `boot` is in the list so the skeleton does not sit above another
+// section when the reader switches tabs before the first response.
+const TRACKER_CARDS = ["boot", "totals", "chartcard", "donutcard", "cmpcard", "tablewrap"];
 
 function applyView() {
   $("view-tracker").setAttribute("aria-selected", String(VIEW === "tracker"));
@@ -2104,7 +2147,7 @@ function loadQty() {
   if (QTY && QTY_DAY === key) { drawQty(); return; }
   if (QTY_LOADING) return;
   QTY_LOADING = true; QTY_DAY = key;
-  $("qty-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
+  $("qty-kpis").innerHTML = skeleton(4, 5);
   fetch(apiBase() + "/admin/analytics/quantity?day=" + encodeURIComponent(day) +
         (from && from !== day ? "&from_day=" + encodeURIComponent(from) : "") +
         (CMP_MODE === "none" ? "&compare=false" : "") +
@@ -2313,7 +2356,7 @@ function loadCoins() {
   if (COINS) { drawCoins(); return; }
   if (COINS_LOADING) return;
   COINS_LOADING = true;
-  $("coin-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
+  $("coin-kpis").innerHTML = skeleton(4, 5);
   fetch(apiBase() + "/admin/analytics/coins?coin_cost=" + encodeURIComponent(COIN_COST))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => { COINS = d; COINS_LOADING = false; drawCoins(); })
@@ -3091,7 +3134,7 @@ function loadInventory() {
   if (INV) { drawInventory(); return; }
   if (INV_LOADING) return;
   INV_LOADING = true;
-  $("inv-kpis").innerHTML = '<div class="sub">Loading inventory\u2026</div>';
+  $("inv-kpis").innerHTML = skeleton(4, 6);
   fetch(apiBase() + "/admin/analytics/inventory")
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => { INV = d; INV_LOADING = false; drawInventory(); })
@@ -4299,6 +4342,55 @@ function dpApply() {
   dpClose();
   dpLabels();
   reloadWindow();
+}
+
+// --- the loading state ------------------------------------------------
+// Only ever for the FIRST load. Once figures are on screen a refetch
+// leaves them there: swapping real numbers for a skeleton reads as
+// losing them, and the status pill already says a request is out.
+let BOOT_T = null, BOOT_AT = 0;
+
+const skelCard = () =>
+  '<div class="skel-card"><div class="skel-b" style="width:52%"></div>' +
+  '<div class="skel-b" style="width:74%;height:22px;margin-top:10px"></div>' +
+  '<div class="skel-b" style="width:40%;margin-top:9px"></div></div>';
+
+/** The skeleton, sized like the thing it stands in for. */
+function skeleton(cards, rows) {
+  return '<div class="skel-grid skel">' +
+         Array.from({ length: cards }, skelCard).join("") + "</div>" +
+         '<div class="skel-rows skel">' +
+         Array.from({ length: rows }, (_, i) =>
+           '<div class="skel-b" style="width:' + (97 - i * 4) + '%"></div>').join("") +
+         "</div>";
+}
+
+function bootShow() {
+  const el = $("boot");
+  if (!el || el.hidden) return;
+  $("boot-grid").innerHTML = Array.from({ length: 6 }, skelCard).join("");
+  $("boot-rows").innerHTML = Array.from({ length: 7 }, (_, i) =>
+    '<div class="skel-b" style="width:' + (97 - i * 5) + '%"></div>').join("");
+  BOOT_AT = Date.now();
+  clearInterval(BOOT_T);
+  // The elapsed count is the point. This API wakes cold and has taken
+  // minutes; without it a long wait is indistinguishable from a page
+  // that has quietly failed, and the reader reloads into another one.
+  BOOT_T = setInterval(() => {
+    const s = Math.round((Date.now() - BOOT_AT) / 1000);
+    if (s < 4) return;
+    $("boot-msg").textContent = s < 20
+      ? "Loading the tracker\u2026 " + s + "s"
+      : "Still waiting on the API \u2014 " + s + "s. It sleeps when idle and can "
+        + "take a minute to wake.";
+  }, 1000);
+}
+
+function bootDone() {
+  clearInterval(BOOT_T);
+  BOOT_T = null;
+  const el = $("boot");
+  if (el) el.hidden = true;
 }
 
 /** Re-fetch whatever the window feeds.
