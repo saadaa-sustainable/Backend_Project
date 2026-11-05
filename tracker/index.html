@@ -497,6 +497,85 @@
   .chain .b.inp input { -moz-appearance: textfield; }
   .chain-note { margin-top: 8px; }
 
+  /* ---- date-window picker ---------------------------------------
+     A range, not a day. The two <input type=date> boxes it replaces
+     fired a fetch on every keystroke, so typing a year walked through
+     0002-, 0020-, 0202- and issued a request for each. Nothing here
+     reaches the caller until Apply. */
+  .dpf { gap: 8px; }
+  .dpf .k { color: var(--text-3); }
+  .dpb { font: inherit; font-size: 12.5px; color: var(--text);
+         background: transparent; border: 0; padding: 2px 0; cursor: pointer;
+         font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .dpb:focus { outline: none; }
+  .dpb:focus-visible { outline: 2px solid var(--s1); outline-offset: 3px;
+                       border-radius: 4px; }
+  .dpb::after { content: " \25BE"; color: var(--text-3); font-size: 10px; }
+
+  .dp { position: absolute; z-index: 60; display: flex; background: var(--surface);
+        border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+        box-shadow: 0 16px 48px rgba(0,0,0,.24); }
+  .dp[hidden] { display: none; }
+  .dp-presets { display: flex; flex-direction: column; gap: 2px; padding: 10px;
+                border-right: 1px solid var(--border-soft); background: var(--muted);
+                min-width: 150px; }
+  .dp-presets button { font: inherit; font-size: 12px; text-align: left; color: var(--text-2);
+                       background: transparent; border: 0; border-radius: 7px;
+                       padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+  .dp-presets button:hover { background: var(--surface); color: var(--text); }
+  .dp-presets button[aria-pressed="true"] { background: var(--surface); color: var(--text);
+                                            font-weight: 650; }
+  .dp-main { padding: 12px 14px 10px; }
+  .dp-months { display: flex; gap: 20px; }
+  .dp-mon { width: 218px; }
+  .dp-mhead { display: flex; align-items: center; justify-content: space-between;
+              font-size: 12px; font-weight: 650; margin-bottom: 8px; min-height: 24px; }
+  .dp-nav { font: inherit; font-size: 13px; line-height: 1; color: var(--text-2);
+            background: transparent; border: 1px solid var(--border-soft);
+            border-radius: 6px; width: 24px; height: 24px; cursor: pointer; }
+  .dp-nav:hover { color: var(--text); border-color: var(--text-3); }
+  .dp-nav[disabled] { opacity: .3; cursor: default; }
+  .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px 0; }
+  .dp-dow { font-size: 10px; color: var(--text-3); text-align: center; padding-bottom: 4px; }
+  /* The cell is the hit target AND the range band, so the highlight is
+     continuous across a week instead of seven detached pills. */
+  .dp-d { font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
+          color: var(--text); background: transparent; border: 0; cursor: pointer;
+          height: 28px; padding: 0; position: relative; }
+  .dp-d.pad { visibility: hidden; }
+  .dp-d[disabled] { color: var(--text-3); opacity: .4; cursor: default; }
+  .dp-d:not([disabled]):hover { background: var(--muted); }
+  .dp-d.in { background: color-mix(in srgb, var(--s1) 16%, transparent); }
+  .dp-d.end { background: var(--s1); color: #fff; font-weight: 650; }
+  .dp-d.end.lo { border-radius: 7px 0 0 7px; }
+  .dp-d.end.hi { border-radius: 0 7px 7px 0; }
+  .dp-d.end.lo.hi { border-radius: 7px; }
+  .dp-d.today::after { content: ""; position: absolute; left: 50%; bottom: 3px;
+                       width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%;
+                       background: currentColor; opacity: .7; }
+  .dp-foot { display: flex; align-items: center; justify-content: space-between;
+             gap: 14px; margin-top: 10px; padding-top: 10px;
+             border-top: 1px solid var(--border-soft); }
+  .dp-sum { font-size: 11.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .dp-acts { display: flex; gap: 8px; }
+  .dp-acts button { font: inherit; font-size: 12px; font-weight: 600; border-radius: 7px;
+                    padding: 7px 14px; cursor: pointer; border: 1px solid var(--border);
+                    background: var(--surface); color: var(--text-2); }
+  .dp-acts button:hover { color: var(--text); border-color: var(--text-3); }
+  .dp-acts .go { background: var(--s1); border-color: var(--s1); color: #fff; }
+  .dp-acts .go:hover { background: var(--s1); border-color: var(--s1); color: #fff;
+                       filter: brightness(1.08); }
+  /* Two months do not fit a phone; one does, and the range still works
+     across the month boundary by paging. */
+  @media (max-width: 640px) {
+    .dp { flex-direction: column; left: 8px !important; right: 8px; width: auto; }
+    .dp-presets { flex-direction: row; flex-wrap: wrap; border-right: 0;
+                  border-bottom: 1px solid var(--border-soft); min-width: 0; }
+    .dp-mon:last-child { display: none; }
+    .dp-months { gap: 0; }
+    .dp-mon { width: 100%; }
+  }
+
   /* ---- export ---------------------------------------------------
      A quiet button in the card header: it is a convenience beside the
      figures, not a thing to reach for before reading them. */
@@ -685,14 +764,37 @@
       <button id="view-coin" role="tab" aria-selected="false">Coin Orders</button>
       <button id="view-qty" role="tab" aria-selected="false">Quantity</button>
     </div>
-    <label class="f" id="f-day">Day <input type="date" id="day"></label>
-    <label class="f" id="f-cmp">Compare to <input type="date" id="cmp"></label>
+    <div class="f dpf" id="f-day"><span class="k">Day</span>
+      <button type="button" class="dpb" id="day-btn" aria-haspopup="dialog"
+              aria-expanded="false"><span id="day-lbl">—</span></button></div>
+    <div class="f dpf" id="f-cmp"><span class="k">Compare to</span>
+      <button type="button" class="dpb" id="cmp-btn" aria-haspopup="dialog"
+              aria-expanded="false"><span id="cmp-lbl">—</span></button></div>
+    <!-- The date inputs the rest of the page still reads. Hidden, not
+         removed: every caller asks them for the window, so they stay
+         the single place it lives and the picker just writes to them. -->
+    <input type="date" id="day" hidden><input type="date" id="cmp" hidden>
+    <input type="date" id="day-from" hidden><input type="date" id="cmp-from" hidden>
     <label class="f" id="f-deltas"><input type="checkbox" id="deltas" checked> % change</label>
     <button id="refresh">Refresh</button>
     <button id="theme">Light / dark</button>
     <label class="f" style="flex:1 1 320px">API
       <input type="url" id="api" style="flex:1" placeholder="https://your-backend.onrender.com">
     </label>
+  </div>
+
+  <div class="dp" id="dp" role="dialog" aria-label="Choose a date window" hidden>
+    <div class="dp-presets" id="dp-presets"></div>
+    <div class="dp-main">
+      <div class="dp-months" id="dp-months"></div>
+      <div class="dp-foot">
+        <span class="dp-sum" id="dp-sum"></span>
+        <span class="dp-acts">
+          <button type="button" id="dp-cancel">Cancel</button>
+          <button type="button" class="go" id="dp-apply">Apply</button>
+        </span>
+      </div>
+    </div>
   </div>
 
   <div id="error"></div>
@@ -991,6 +1093,39 @@ const ist = v => {
     day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
   }).replace(",", "");
 };
+
+/** The label on an hour row.
+ *
+ *  On a single day the row IS that hour of that day, and saying so is
+ *  what makes a stacked comparison readable -- two bare "12:00" lines
+ *  do not say which day each belongs to. On a WINDOW the row is the
+ *  same hour summed over every day in it, so naming one date would be
+ *  a lie about which day the figure came from: it reverts to the bare
+ *  hour, and the span is named once on the total row above.
+ */
+function rowHourLabel(tot, day, hour) {
+  if (tot && (tot.day_count || 1) > 1) {
+    return String(hour).padStart(2, "0") + ":00";
+  }
+  return hourLabel(day, hour);
+}
+
+/** How a totals block names the span it covers.
+ *
+ *  One day reads as a day to date; several read as the range. `hours`
+ *  is hours-of-DAY covered, so on a window it is 24 whatever the
+ *  length -- printing it there would invite "24 hours" to be read as
+ *  the elapsed time of a seven-day window.
+ */
+function spanLabel(t, lead) {
+  if (!t) return "";
+  if ((t.day_count || 1) <= 1) {
+    return (lead ? "Day to date \u00b7 " : "the same ") + t.hours + " hours" +
+           (lead ? "" : " of " + t.day);
+  }
+  const span = (t.first_day || t.day) + " \u2192 " + t.day;
+  return (lead ? "" : "") + t.day_count + " days \u00b7 " + span;
+}
 
 const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
   ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
@@ -1291,8 +1426,11 @@ let DAY_PINNED = false;
 
 async function load() {
   if (!DAY_PINNED) $("day").value = istToday();
-  const day = $("day").value || istToday();
-  const cmp = $("cmp").value;
+  const day = winTo();
+  const from = $("day-from").value;
+  const cmp = cmpTo();
+  const cfrom = $("cmp-from").value;
+  dpLabels();
   const base = apiBase();
   $("api").value = base;
   // Nothing configured yet. Say so plainly instead of firing a request
@@ -1307,8 +1445,12 @@ async function load() {
       '<code>EXTRA_APP_ORIGINS</code>.</div>';
     return;
   }
+  // from_day is sent only when the window is wider than a day, so a
+  // single-day request is byte-for-byte what it always was.
   const url = base + "/admin/analytics/hourly-tracker?day=" + day +
-              (cmp ? "&compare_to=" + cmp : "");
+              (from && from !== day ? "&from_day=" + from : "") +
+              (cmp ? "&compare_to=" + cmp : "") +
+              (cfrom && cfrom !== cmp ? "&compare_from=" + cfrom : "");
   $("status").textContent = "loading…";
   try {
     const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
@@ -1373,9 +1515,13 @@ function render(d, day) {
     const base = c || {};                  // no baseline: every read is undefined
 
     $("totals").hidden = false;
-    $("ttl-title").textContent = "Day to date · " + t.hours + " hours";
+    // A window of several days is not a day to date, and saying "24
+    // hours" of a seven-day window invites it to be read as elapsed
+    // time rather than as hours-of-day covered.
+    $("ttl-title").textContent = spanLabel(t, true);
     $("ttl-vs").textContent = c
-      ? "against the same " + c.hours + " hours of " + c.day
+      ? "against " + spanLabel(c, false) +
+        (c.day_count === 1 && c.hours < 24 ? "" : "")
       : baselineDay + " is not in the tracker, so there is nothing to compare against";
     // Spend adds three numbers that are not the same KIND of number --
     // Meta is measured hourly, Google is a daily total shared across
@@ -1424,9 +1570,15 @@ function render(d, day) {
   // recomputed from the summed counts -- NOT averaged down the column,
   // which would weight a dead 04:00 the same as a 21:00 peak.
   const totalRow = !t ? "" :
-    '<tr class="total"><td><span class="l1">' + dayLabel(t.day) +
-    '<span class="tag">' + t.hours + 'h</span></span>' +
-    '<span class="l2">' + dayLabel(baseDay) + '</span>' +
+    '<tr class="total"><td><span class="l1">' +
+    ((t.day_count || 1) > 1
+      ? esc((t.first_day || t.day) + " \u2192 " + t.day) +
+        '<span class="tag">' + t.day_count + 'd</span>'
+      : dayLabel(t.day) + '<span class="tag">' + t.hours + 'h</span>') + '</span>' +
+    '<span class="l2">' +
+    (c && (c.day_count || 1) > 1
+      ? esc((c.first_day || c.day) + " \u2192 " + c.day)
+      : dayLabel(baseDay)) + '</span>' +
     (showPct ? '<span class="l3">% change</span>' : '') + '</td>' +
     METRICS.map(([k, , fmt, dir, points]) =>
       cell(t[k], c ? c[k] : null, fmt, dir, points, false)).join("") + '</tr>';
@@ -1445,10 +1597,10 @@ function render(d, day) {
     const p = prev.get(r.hour_of_day);
     const open = OPEN_HOURS.has(r.hour_of_day);
     return '<tr class="hrow ' + (live ? "live" : "") + '" data-hr="' + r.hour_of_day + '">' +
-      '<td><span class="l1">' + hourLabel(r.day_ist, r.hour_of_day) +
+      '<td><span class="l1">' + rowHourLabel(t, r.day_ist, r.hour_of_day) +
       (live ? '<span class="tag">live</span>' : "") +
       '<span class="caret">' + (open ? "\u25BC" : "\u25B6") + '</span></span>' +
-      '<span class="l2">' + hourLabel(baseDay, r.hour_of_day) + '</span>' +
+      '<span class="l2">' + rowHourLabel(c, baseDay, r.hour_of_day) + '</span>' +
       (showPct && !live ? '<span class="l3">&nbsp;</span>' : '') + '</td>' +
       METRICS.map(([k, , fmt, dir, points]) =>
         cell(r[k], p ? p[k] : null, fmt, dir, points, live)).join("") + '</tr>' +
@@ -1889,12 +2041,18 @@ function drawDeck(deckEl, drawEl, cards, selId, onPick) {
 
 function loadQty() {
   $("qtycard").hidden = false;
-  const day = $("day").value || istToday();
-  if (QTY && QTY_DAY === day) { drawQty(); return; }
+  const day = winTo();
+  const from = $("day-from").value;
+  // Keyed on the WINDOW, not the end day: widening 3 Nov to 1-3 Nov
+  // leaves the end day unchanged, and a cache keyed on it alone would
+  // serve the single day back for the window.
+  const key = (from || day) + ".." + day;
+  if (QTY && QTY_DAY === key) { drawQty(); return; }
   if (QTY_LOADING) return;
-  QTY_LOADING = true; QTY_DAY = day;
+  QTY_LOADING = true; QTY_DAY = key;
   $("qty-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
-  fetch(apiBase() + "/admin/analytics/quantity?day=" + encodeURIComponent(day))
+  fetch(apiBase() + "/admin/analytics/quantity?day=" + encodeURIComponent(day) +
+        (from && from !== day ? "&from_day=" + encodeURIComponent(from) : ""))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => { QTY = d; QTY_LOADING = false; drawQty(); })
     .catch(e => {
@@ -1907,7 +2065,9 @@ function loadQty() {
 function drawQty() {
   if (!QTY || VIEW !== "qty") return;
   const d = QTY;
-  $("qty-span").textContent = d.day + "  \u00b7  " + d.hours.length + " hours";
+  $("qty-span").textContent = (d.day_count || 1) > 1
+    ? d.day_count + " days  \u00b7  " + (d.first_day || d.day) + " \u2192 " + d.day
+    : d.day + "  \u00b7  " + d.hours.length + " hours";
 
   const coinGap = d.qty - d.pnl_qty;
   const E = "";
@@ -2683,7 +2843,13 @@ $("coin-more").onclick = loadCoinOrders;
 // Each one takes the table as it is rendered, so the file and the screen
 // cannot disagree. The day is in the filename because these are all
 // day-scoped and a folder of "hourly-tracker.csv" tells you nothing.
-const selDay = () => $("day").value || istToday();
+// The window, for a filename. A folder of "quantity_2026-11-05.csv"
+// cannot tell a single day from the week that ended on it.
+const selDay = () => {
+  const to = $("day").value || istToday();
+  const from = $("day-from").value;
+  return from && from !== to ? from + "_to_" + to : to;
+};
 
 $("x-hourly").onclick = () =>
   exportDomTable("hourly-table", csvName("hourly-tracker", selDay()));
@@ -3160,9 +3326,17 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     const pct = v => (v / d.adSpend * 100);
     const segs = known.map(([, cls, v]) =>
       '<i class="' + cls + '" style="width:' + pct(v).toFixed(1) + '%"></i>').join("");
+    // The OLDEST export in the window, which is what bounds how much of
+    // it Google spend can honestly describe. A bare time is only
+    // meaningful on a single day: across a window the date is the
+    // whole point, or "to 22:54" reads as tonight.
+    const multi = (t.day_count || 1) > 1;
     const asOf = t.google_spend_as_of
-      ? new Date(t.google_spend_as_of).toLocaleTimeString("en-GB",
-          { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })
+      ? new Date(t.google_spend_as_of).toLocaleString("en-GB",
+          Object.assign({ timeZone: "Asia/Kolkata", hour: "2-digit",
+                          minute: "2-digit", hour12: false },
+                        multi ? { day: "2-digit", month: "short" } : {}))
+          .replace(",", "")
       : null;
     const split = '<div class="led-split">' + known.map(([label, cls, v]) =>
       '<span><i class="' + cls + '"></i>' + esc(label) +
@@ -3755,20 +3929,248 @@ function hideTip() {
   $("tip").classList.remove("on");
 }
 
+
+// --- the date-window picker -------------------------------------------
+// A RANGE, replacing the two bare <input type=date> boxes. Everything
+// on the page that used to read one day now reads a window, and a
+// window of one day behaves exactly as the single day did.
+//
+// Nothing reaches the caller until Apply. The old inputs fired a fetch
+// on every keystroke, so typing a year walked through 0002-, 0020-,
+// 0202- and issued a request for each -- against an endpoint whose
+// cold path is measured in seconds.
+const DP = {
+  which: null,        // "day" | "cmp"
+  from: "", to: "",   // the edit in progress, committed only on Apply
+  anchor: null,       // first click of a new range
+  month: null,        // Date, first of the LEFT month on show
+};
+
+const dIso = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+                  "-" + String(d.getDate()).padStart(2, "0");
+const dParse = s => { const [y, m, d] = String(s).split("-").map(Number);
+                      return new Date(y, m - 1, d); };
+const dAdd = (s, n) => { const d = dParse(s); d.setDate(d.getDate() + n); return dIso(d); };
+const dDays = (a, b) => Math.round((dParse(b) - dParse(a)) / 86400000) + 1;
+
+// The window the page is actually showing. An empty `from` means it
+// equals `to`: a single day, the exact shape every caller had before.
+const winFrom = () => $("day-from").value || $("day").value || istToday();
+const winTo = () => $("day").value || istToday();
+const cmpTo = () => $("cmp").value;
+const cmpFrom = () => $("cmp-from").value || $("cmp").value;
+
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+
+// Named windows, resolved against TODAY at the moment they are picked
+// rather than when the page loaded -- a tab left open overnight would
+// otherwise apply yesterday's "today".
+function dpPresets() {
+  const t = istToday(), d = dParse(t);
+  const mStart = dIso(new Date(d.getFullYear(), d.getMonth(), 1));
+  const lmEnd = dIso(new Date(d.getFullYear(), d.getMonth(), 0));
+  const lmStart = dIso(new Date(d.getFullYear(), d.getMonth() - 1, 1));
+  return [
+    ["Today", t, t],
+    ["Yesterday", dAdd(t, -1), dAdd(t, -1)],
+    ["Last 7 Days", dAdd(t, -6), t],
+    ["Last 14 Days", dAdd(t, -13), t],
+    ["Last 30 Days", dAdd(t, -29), t],
+    ["This Month", mStart, t],
+    ["Last Month", lmStart, lmEnd],
+    ["Last 90 Days", dAdd(t, -89), t],
+  ];
+}
+
+/** What the button says. A single day reads as a day, not as a range
+    from itself to itself. */
+function winLabel(from, to) {
+  if (!to) return "—";
+  if (!from || from === to) return to;
+  return from + " → " + to + "  (" + dDays(from, to) + "d)";
+}
+
+function dpOpen(which, btn) {
+  DP.which = which;
+  DP.from = which === "day" ? winFrom() : (cmpFrom() || "");
+  DP.to = which === "day" ? winTo() : (cmpTo() || "");
+  DP.anchor = null;
+  const seed = DP.to || istToday();
+  const sd = dParse(seed);
+  // The seed month on the RIGHT, so the window being edited is visible
+  // without paging back.
+  DP.month = new Date(sd.getFullYear(), sd.getMonth() - 1, 1);
+  const dp = $("dp");
+  dp.hidden = false;
+  btn.setAttribute("aria-expanded", "true");
+  const r = btn.getBoundingClientRect();
+  dp.style.top = (r.bottom + window.scrollY + 6) + "px";
+  dp.style.left = Math.max(8, Math.min(r.left + window.scrollX,
+                           window.innerWidth - dp.offsetWidth - 12)) + "px";
+  dpDraw();
+}
+
+function dpClose() {
+  $("dp").hidden = true;
+  $("day-btn").setAttribute("aria-expanded", "false");
+  $("cmp-btn").setAttribute("aria-expanded", "false");
+  DP.which = null;
+}
+
+function dpMonth(first, nav) {
+  const y = first.getFullYear(), m = first.getMonth();
+  const lead = new Date(y, m, 1).getDay();
+  const len = new Date(y, m + 1, 0).getDate();
+  const today = istToday();
+  const lo = DP.from && DP.to ? (DP.from < DP.to ? DP.from : DP.to) : DP.from;
+  const hi = DP.from && DP.to ? (DP.from < DP.to ? DP.to : DP.from) : DP.from;
+
+  let cells = DOW.map(d => '<div class="dp-dow">' + d + "</div>").join("");
+  for (let i = 0; i < lead; i++) cells += '<button class="dp-d pad" disabled></button>';
+  for (let n = 1; n <= len; n++) {
+    const iso = dIso(new Date(y, m, n));
+    // Future days hold nothing. Offering them invites a window that
+    // comes back empty and reads as a broken page rather than as a
+    // day nobody has ingested.
+    const off = iso > today;
+    const inRange = lo && hi && iso >= lo && iso <= hi;
+    const isEnd = iso === lo || iso === hi;
+    cells += '<button type="button" class="dp-d' +
+      (inRange ? (isEnd ? " end" : " in") : "") +
+      (isEnd && iso === lo ? " lo" : "") + (isEnd && iso === hi ? " hi" : "") +
+      (iso === today ? " today" : "") + '" data-d="' + iso + '"' +
+      (off ? " disabled" : "") + ">" + n + "</button>";
+  }
+  // One arrow per side, so the pair of months always moves together.
+  const slot = dir => dir
+    ? '<button type="button" class="dp-nav" data-nav="' + dir + '" aria-label="' +
+      (dir < 0 ? "Previous" : "Next") + ' month"' +
+      (nav && nav.off === dir ? " disabled" : "") + ">" +
+      (dir < 0 ? "\u2039" : "\u203a") + "</button>"
+    : '<span style="width:24px"></span>';
+  return '<div class="dp-mon"><div class="dp-mhead">' +
+    slot(nav && nav.left ? -1 : 0) + "<span>" + MON[m] + " " + y + "</span>" +
+    slot(nav && nav.right ? 1 : 0) +
+    '</div><div class="dp-grid">' + cells + "</div></div>";
+}
+
+function dpDraw() {
+  const left = DP.month;
+  const right = new Date(left.getFullYear(), left.getMonth() + 1, 1);
+  const t = istToday();
+  const atEnd = right.getFullYear() === dParse(t).getFullYear() &&
+                right.getMonth() === dParse(t).getMonth();
+  const cur = dpPresets().find(([, f, to]) => f === DP.from && to === DP.to);
+
+  $("dp-presets").innerHTML = dpPresets().map(([label, f, to]) =>
+    '<button type="button" data-f="' + f + '" data-t="' + to + '" aria-pressed="' +
+    (cur && cur[0] === label ? "true" : "false") + '">' + esc(label) + "</button>").join("") +
+    (DP.which === "cmp"
+      ? '<button type="button" data-clear="1">No comparison</button>' : "");
+
+  $("dp-months").innerHTML =
+    dpMonth(left, { left: true }) +
+    dpMonth(right, { right: true, off: atEnd ? 1 : 0 });
+
+  const lo = DP.from && DP.to ? (DP.from < DP.to ? DP.from : DP.to) : DP.from;
+  const hi = DP.from && DP.to ? (DP.from < DP.to ? DP.to : DP.from) : DP.from;
+  $("dp-sum").textContent = !lo
+    ? (DP.which === "cmp" ? "No comparison" : "Pick a day")
+    : (lo === hi ? lo : lo + "  →  " + hi + "   ·   " + dDays(lo, hi) + " days");
+}
+
+function dpPick(iso) {
+  // First click starts a range, second closes it. Clicking a third
+  // time starts over -- the alternative, extending whichever end is
+  // nearer, guesses at an intent the click does not carry.
+  if (!DP.anchor) { DP.anchor = iso; DP.from = iso; DP.to = iso; }
+  else { DP.from = DP.anchor; DP.to = iso; DP.anchor = null; }
+  dpDraw();
+}
+
+function dpApply() {
+  const lo = DP.from && DP.to ? (DP.from < DP.to ? DP.from : DP.to) : DP.from;
+  const hi = DP.from && DP.to ? (DP.from < DP.to ? DP.to : DP.from) : DP.from;
+  if (DP.which === "day") {
+    if (!lo) return dpClose();
+    $("day").value = hi;
+    $("day-from").value = lo === hi ? "" : lo;
+    DAY_PINNED = true;
+    QTY = null;
+  } else {
+    $("cmp").value = hi || "";
+    $("cmp-from").value = (lo && hi && lo !== hi) ? lo : "";
+  }
+  dpClose();
+  dpLabels();
+  load();
+}
+
+/** The buttons, after any change to the window. */
+function dpLabels() {
+  $("day-lbl").textContent = winLabel($("day-from").value, $("day").value || istToday());
+  $("cmp-lbl").textContent = $("cmp").value
+    ? winLabel($("cmp-from").value, $("cmp").value)
+    : "the window before";
+}
+
 // --- wiring -----------------------------------------------------------
 // ?day= is a deliberate choice and must survive midnight.
-DAY_PINNED = !!qs.get("day");
+DAY_PINNED = !!(qs.get("day") || qs.get("from"));
 $("day").value = qs.get("day") || istToday();
+$("day-from").value = qs.get("from") || "";
 $("cmp").value = qs.get("compare_to") || "";
+$("cmp-from").value = qs.get("compare_from") || "";
 $("api").value = apiBase();
-$("day").max = $("cmp").max = istToday();
+dpLabels();
+
+$("day-btn").onclick = () => DP.which === "day" ? dpClose() : dpOpen("day", $("day-btn"));
+$("cmp-btn").onclick = () => DP.which === "cmp" ? dpClose() : dpOpen("cmp", $("cmp-btn"));
+$("dp-cancel").onclick = dpClose;
+$("dp-apply").onclick = dpApply;
+
+// Delegated, because the panel is rebuilt on every click inside it.
+$("dp").addEventListener("click", e => {
+  const nav = e.target.closest("[data-nav]");
+  if (nav) {
+    DP.month = new Date(DP.month.getFullYear(),
+                        DP.month.getMonth() + Number(nav.getAttribute("data-nav")), 1);
+    return dpDraw();
+  }
+  const pre = e.target.closest("[data-f]");
+  if (pre) {
+    DP.from = pre.getAttribute("data-f");
+    DP.to = pre.getAttribute("data-t");
+    DP.anchor = null;
+    // Jump the calendar to the window the preset just chose, or a
+    // "Last Month" pick would be applied out of sight.
+    const sd = dParse(DP.to);
+    DP.month = new Date(sd.getFullYear(), sd.getMonth() - 1, 1);
+    return dpDraw();
+  }
+  if (e.target.closest("[data-clear]")) {
+    DP.from = DP.to = ""; DP.anchor = null;
+    return dpDraw();
+  }
+  const d = e.target.closest("[data-d]");
+  if (d && !d.disabled) dpPick(d.getAttribute("data-d"));
+});
+
+// Click-away and Escape close WITHOUT applying: the panel is a draft
+// until Apply, and dismissing a draft must not commit it.
+document.addEventListener("pointerdown", e => {
+  if (DP.which && !e.target.closest("#dp") && !e.target.closest(".dpb")) dpClose();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && DP.which) dpClose();
+});
 
 $("chart").addEventListener("pointermove", hoverAt);
 $("chart").addEventListener("pointerleave", hideTip);
 
 $("refresh").onclick = load;
-$("day").onchange = () => { DAY_PINNED = true; QTY = null; load(); };
-$("cmp").onchange = load;
 // A re-render, not a re-fetch: the figures are already in hand and the
 // toggle only decides whether the third line is drawn.
 $("deltas").onchange = () => { if (LAST) render(LAST.d, LAST.day); };

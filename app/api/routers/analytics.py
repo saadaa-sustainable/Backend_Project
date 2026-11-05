@@ -13985,8 +13985,18 @@ class HourlyTotals(BaseModel):
     """A day, or a day up to an hour. Ratios are recomputed from the
     summed counts -- never averaged from the hourly ratios, which would
     weight a quiet 4am hour the same as a 9pm peak."""
+    #: The LAST day of the window. For a single day, that day.
     day: date
+    #: Distinct hours-of-day covered: 24 for any complete window,
+    #: whether it is one day or ninety.
     hours: int
+    #: How many days were folded in. 1 for a single day. The page needs
+    #: it to label the window and to stop reading `hours` as elapsed
+    #: time -- seven days is 24 hours-of-day but 168 hours of trading.
+    day_count: int = 1
+    #: The first day of the window, so the page can name the span
+    #: without re-deriving it from the rows.
+    first_day: date | None = None
     sessions: int
     sessions_paid: int
     sessions_direct: int
@@ -14073,9 +14083,96 @@ class HourlyTrackerResponse(BaseModel):
     last_day: date | None = None
 
 
-def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
+#: Columns that are not quantities and must not be summed when several
+#: days are folded onto one hour-of-day.
+_HOUR_KEYS = {"hour", "day_ist", "hour_of_day", "sessions_by_source",
+              "google_spend_as_of"}
+
+
+def _day_span(start: date, end: date, cap: int = 120) -> list[date]:
+    """Every IST day from start to end inclusive, oldest first.
+
+    Capped because the window comes from a query string: a hand-typed
+    `from=2020-01-01` would otherwise build a list thousands long and
+    hand it to `= ANY()`. The cap is well past the table's own span, so
+    no honest request is ever shortened by it.
+    """
+    if end < start:
+        start, end = end, start
+    n = min((end - start).days, cap - 1)
+    return [start + timedelta(days=i) for i in range(n + 1)]
+
+
+def _add(a, b):
+    """a + b, through nested dicts, treating None as absent.
+
+    The hourly columns are not all scalars: `sessions_by_source` is
+    source -> sessions and `basket_mix` is bucket -> {"qty": n}, so a
+    plain `+` raises on the dicts and silently drops a key present in
+    only one of two days. Recursing covers both, and returning None for
+    two Nones keeps absent distinguishable from zero.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if isinstance(a, dict) and isinstance(b, dict):
+        return {k: _add(a.get(k), b.get(k)) for k in {*a, *b}}
+    return a + b
+
+
+def _merge_hours(rows: list[dict]) -> list[dict]:
+    """Several days folded onto one row per hour-of-day.
+
+    Done HERE rather than in the page because the window can be ninety
+    days -- two thousand rows and a megabyte of JSON for a table that
+    is twenty-four lines long either way. The merge is of the RAW
+    columns, so every ratio is re-derived afterwards from the summed
+    counts by the same `_derive_hourly` a single day goes through.
+    Averaging the days' own ratios would weight a dead Tuesday the
+    same as a sale weekend.
+
+    NULL is preserved where every contributing day was NULL. A column
+    added after a day was ingested reads NULL for it, and summing that
+    to 0 would let a ratio render a confident "0.00%" for a figure
+    nobody ever measured -- the distinction `_totals.have()` relies on.
+    """
+    if not rows:
+        return []
+    by_hour: dict[int, dict] = {}
+    for r in sorted(rows, key=lambda x: (x["hour_of_day"], x.get("day_ist") or date.min)):
+        h = r["hour_of_day"]
+        acc = by_hour.get(h)
+        if acc is None:
+            # The LAST day's identity, so an hour still carries a real
+            # timestamp and the newest day wins the "live" marker.
+            # Deep-copied, or the first day's own dict columns would be
+            # mutated by every day merged into them.
+            by_hour[h] = {k: (dict(v) if isinstance(v, dict) else v)
+                          for k, v in r.items()}
+            continue
+        for k, v in r.items():
+            if k in _HOUR_KEYS:
+                continue
+            acc[k] = _add(acc.get(k), v)
+        for k in ("hour", "day_ist"):
+            if k in r:
+                acc[k] = r[k]
+        acc["sessions_by_source"] = _add(acc.get("sessions_by_source"),
+                                         r.get("sessions_by_source"))
+        # The oldest export wins: it is the one that bounds how much of
+        # the window Google spend can honestly describe.
+        a, b = acc.get("google_spend_as_of"), r.get("google_spend_as_of")
+        acc["google_spend_as_of"] = min(x for x in (a, b) if x is not None) \
+            if (a or b) else None
+    return [by_hour[h] for h in sorted(by_hour)]
+
+
+def _totals(day: date, rows: list[HourlyRow],
+            days: list[date] | None = None) -> HourlyTotals | None:
     if not rows:
         return None
+    span = sorted(days) if days else [day]
     s = lambda k: sum(getattr(r, k) or 0 for r in rows)  # noqa: E731
 
     def have(k: str) -> bool:
@@ -14097,7 +14194,7 @@ def _totals(day: date, rows: list[HourlyRow]) -> HourlyTotals | None:
     revenue = s("revenue")
     ncr, users = s("new_customer_revenue"), s("ga4_active_users")
     return HourlyTotals(
-        day=day, hours=len(rows),
+        day=span[-1], first_day=span[0], day_count=len(span), hours=len(rows),
         sessions=sessions, sessions_paid=paid, sessions_direct=s("sessions_direct"),
         sessions_meta=s("sessions_meta"), sessions_google=s("sessions_google"),
         revenue=revenue, orders=orders,
@@ -14186,17 +14283,48 @@ def _rank_sources(rows: list[HourlyRow]) -> list[SourceSlice]:
 @cached_analytics(ttl=120.0)
 async def get_hourly_tracker(
     session: SessionDep,
-    day: date | None = Query(default=None, description="IST day. Default: today."),
+    day: date | None = Query(default=None,
+                             description="IST day, or the LAST day of the window. "
+                                         "Default: today."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the window. Default: `day`, "
+                                              "i.e. a single day."),
     compare_to: date | None = Query(
-        default=None, description="Day to compare against. Default: the day before."),
+        default=None, description="Last day of the comparison window. Default: the day "
+                                  "before the window starts."),
+    compare_from: date | None = Query(
+        default=None, description="First day of the comparison window. Default: a window "
+                                  "of the same length as the main one."),
 ) -> HourlyTrackerResponse:
-    """The campaign tracker, hour by hour, against another day."""
+    """The campaign tracker, hour by hour, against another window.
+
+    A WINDOW OF SEVERAL DAYS IS FOLDED ONTO TWENTY-FOUR ROWS, one per
+    hour-of-day, summed. That keeps the section hourly -- the question
+    it answers is when in the day the business trades -- and keeps the
+    payload the same size whether one day is asked for or ninety.
+
+    The comparison defaults to the window of equal length immediately
+    before this one, so "last 7 days" compares against the 7 before it
+    without the caller having to do the arithmetic.
+    """
     ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     target = day or ist_now.date()
-    baseline = compare_to or (target - timedelta(days=1))
+    window = _day_span(from_day or target, target)
 
+    # The comparison window matches the main one in LENGTH, not just in
+    # end date. Comparing seven days against one would read as a
+    # collapse that never happened.
+    if compare_to or compare_from:
+        c_end = compare_to or (compare_from + timedelta(days=len(window) - 1))
+        base_window = _day_span(compare_from or c_end, c_end)
+    else:
+        c_end = window[0] - timedelta(days=1)
+        base_window = _day_span(c_end - timedelta(days=len(window) - 1), c_end)
+    baseline = base_window[-1]
+
+    days = sorted({*window, *base_window})
     result = (await session.execute(text(_HOURLY_TRACKER_SQL),
-                                    {"days": [target, baseline]})).mappings().all()
+                                    {"days": days})).mappings().all()
 
     # Two statements rather than one: the span covers the whole table
     # while the rows are two days of it, and folding them together
@@ -14210,14 +14338,30 @@ async def get_hourly_tracker(
     span_row = (await session.execute(text(
         "SELECT MIN(day_ist) AS first_day, MAX(day_ist) AS last_day "
         "FROM public.hourly_campaign_tracker"))).mappings().first() or {}
-    rows = [_derive_hourly(dict(r)) for r in result]
-    today_rows = [r for r in rows if r.day_ist == target]
-    base_rows = [r for r in rows if r.day_ist == baseline]
+    raw = [dict(r) for r in result]
+    win, base = set(window), set(base_window)
+    today_rows = [_derive_hourly(m)
+                  for m in _merge_hours([m for m in raw if m["day_ist"] in win])]
+    base_rows = [_derive_hourly(m)
+                 for m in _merge_hours([m for m in raw if m["day_ist"] in base])]
 
-    latest = max((r.hour_of_day for r in today_rows), default=None)
-    # Clamp the baseline to the hours today has actually reached.
-    clamped = ([r for r in base_rows if r.hour_of_day <= latest]
-               if latest is not None else base_rows)
+    # The live hour is a property of the window's LAST day, not of the
+    # merged rows: once several days are folded together hour 23 exists
+    # for the complete ones even while today has not reached it, and
+    # taking the max off the merge would report the window as finished.
+    latest = max((m["hour_of_day"] for m in raw if m["day_ist"] == target),
+                 default=None)
+    # Clamp the baseline to the hours the window has actually reached.
+    # On a multi-day window only the newest day is partial, so the clamp
+    # is applied to the comparison's newest day alone -- clamping the
+    # whole of it would throw away complete days to match one that is
+    # still filling.
+    if latest is None or latest >= 23 or len(base_window) == 0:
+        clamped_raw = [m for m in raw if m["day_ist"] in base]
+    else:
+        clamped_raw = [m for m in raw if m["day_ist"] in base
+                       and (m["day_ist"] != baseline or m["hour_of_day"] <= latest)]
+    clamped = [_derive_hourly(m) for m in _merge_hours(clamped_raw)]
 
     sources = _rank_sources(today_rows)
 
@@ -14225,9 +14369,9 @@ async def get_hourly_tracker(
         rows=today_rows,
         sources=sources,
         compare_rows=base_rows,
-        today=_totals(target, today_rows),
-        compare=_totals(baseline, clamped),
-        compare_full=_totals(baseline, base_rows),
+        today=_totals(target, today_rows, window),
+        compare=_totals(baseline, clamped, base_window),
+        compare_full=_totals(baseline, base_rows, base_window),
         latest_hour=latest,
         fetched_at=ist_now,
         first_day=span_row.get("first_day"),
@@ -14948,7 +15092,11 @@ class QuantityResponse(BaseModel):
     channel exclusion, but broken down by IST hour so the day can be
     watched as it runs rather than read afterwards.
     """
+    #: The LAST day of the window. For a single day, that day.
     day: date
+    #: The first day of the window, and how many days it spans.
+    first_day: date | None = None
+    day_count: int = 1
     hours: list[QuantityHour]
     qty: int
     orders: int
@@ -14959,6 +15107,11 @@ class QuantityResponse(BaseModel):
     #: counted twice. Measured against Shopify's own day-grain figure
     #: it ran about two percent over, moving the rate a quarter of a
     #: point. Close enough to read, not exact.
+    #:
+    #: Over a WINDOW the same overcount compounds across days -- a
+    #: weekly shopper counts once per day they bought on -- so the
+    #: wider the window, the higher this reads against the true number
+    #: of distinct people. The page says so where it shows it.
     customers: int
     #: This one DOES sum exactly: "new" is a once-ever classification,
     #: so nobody can be new in two hours of the same day.
@@ -14976,12 +15129,12 @@ class QuantityResponse(BaseModel):
 
 
 _QUANTITY_SQL = """
-SELECT hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
+SELECT day_ist, hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
        shopify_total_sales, shopify_returns,
        ql_orders, ql_net_sales, ql_customers, ql_new_customers, ql_returning_customers,
        ql_sales_returning, ql_sales_first_time
   FROM public.hourly_campaign_tracker
- WHERE day_ist = :day
+ WHERE day_ist = ANY(:days)
  ORDER BY hour_of_day
 """
 
@@ -14990,12 +15143,29 @@ SELECT hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
 @cached_analytics(ttl=120.0)
 async def get_quantity(
     session: SessionDep,
-    day: date | None = Query(default=None, description="IST day. Default: today."),
+    day: date | None = Query(default=None,
+                             description="IST day, or the LAST day of the window. "
+                                         "Default: today."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the window. Default: `day`."),
 ) -> QuantityResponse:
-    """Units ordered and basket mix, by the hour."""
+    """Units ordered and basket mix, by the hour.
+
+    Several days fold onto twenty-four rows, summed per hour-of-day,
+    the same way the hourly tracker does -- see `_merge_hours`. The
+    ratios below are then re-divided from those sums, so a window
+    behaves exactly as one long day rather than as an average of days.
+
+    ONE FIGURE IS NOT ADDITIVE AND IS NOT CLAIMED TO BE. `ql_customers`
+    is a DISTINCT count, so a shopper who bought on Monday and again on
+    Friday counts once in each day and twice in their sum. Over a
+    window the customer counts -- and the returning RATE taken from
+    them -- read high. They are the only figures here that do.
+    """
     target = day or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
-    result = await session.execute(text(_QUANTITY_SQL), {"day": target})
-    rows = [dict(r) for r in result.mappings()]
+    window = _day_span(from_day or target, target)
+    result = await session.execute(text(_QUANTITY_SQL), {"days": window})
+    rows = _merge_hours([dict(r) for r in result.mappings()])
 
     hours: list[QuantityHour] = []
     total_mix: dict[str, int] = {}
@@ -15034,7 +15204,7 @@ async def get_quantity(
     t_cust = sum(h.customers for h in hours)
     t_ret = sum(h.returning_customers for h in hours)
     return QuantityResponse(
-        day=target, hours=hours,
+        day=window[-1], first_day=window[0], day_count=len(window), hours=hours,
         qty=t_qty, orders=t_orders,
         # Re-divided from the sums, never averaged across hours: a dead
         # 4am hour must not weigh the same as a 9pm peak.
