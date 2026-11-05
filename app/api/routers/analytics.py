@@ -23,8 +23,11 @@ from types import SimpleNamespace
 from collections.abc import Iterable
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
+
+from app.services import kwikchat_csv
+from app.services.kwikchat_csv import ACCOUNTS as KWIKCHAT_ACCOUNTS
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -15101,20 +15104,20 @@ class QuantityHour(BaseModel):
     mix: dict[str, int]
 
 
-class QuantityResponse(BaseModel):
-    """The Quantity report, hour by hour.
+class QuantityTotals(BaseModel):
+    """One window's Quantity figures.
 
-    Mirrors the Shopify report that groups by
-    `number_of_products_bought_together`, with the same Return Prime
-    channel exclusion, but broken down by IST hour so the day can be
-    watched as it runs rather than read afterwards.
+    Its own model so the comparison window can be reported in exactly
+    the same shape as the main one -- two hand-written blocks of the
+    same fifteen fields are two chances for them to drift apart.
     """
     #: The LAST day of the window. For a single day, that day.
     day: date
     #: The first day of the window, and how many days it spans.
     first_day: date | None = None
     day_count: int = 1
-    hours: list[QuantityHour]
+    #: Distinct hours-of-day covered: 24 for any complete window.
+    hours: int = 0
     qty: int
     orders: int
     qty_per_order: float | None
@@ -15145,6 +15148,25 @@ class QuantityResponse(BaseModel):
     pnl_qty: int
 
 
+class QuantityResponse(QuantityTotals):
+    """The Quantity report, hour by hour, against another window.
+
+    Mirrors the Shopify report that groups by
+    `number_of_products_bought_together`, with the same Return Prime
+    channel exclusion, but broken down by IST hour so the day can be
+    watched as it runs rather than read afterwards.
+
+    The totals are inherited FLAT rather than nested, because every
+    existing reader takes them from the top level; `hours` is widened
+    from a count to the rows themselves for the same reason.
+    """
+    hours: list[QuantityHour]
+    #: The same figures for the comparison window, clamped to the hours
+    #: this one has reached. None when there is nothing to compare
+    #: against, or when the caller asked for no comparison.
+    compare: QuantityTotals | None = None
+
+
 _QUANTITY_SQL = """
 SELECT day_ist, hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
        shopify_total_sales, shopify_returns,
@@ -15156,36 +15178,8 @@ SELECT day_ist, hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
 """
 
 
-@router.get("/quantity", response_model=QuantityResponse)
-@cached_analytics(ttl=120.0)
-async def get_quantity(
-    session: SessionDep,
-    day: date | None = Query(default=None,
-                             description="IST day, or the LAST day of the window. "
-                                         "Default: today."),
-    from_day: date | None = Query(default=None,
-                                  description="First day of the window. Default: `day`."),
-) -> QuantityResponse:
-    """Units ordered and basket mix, by the hour.
-
-    Several days fold onto twenty-four rows, summed per hour-of-day,
-    the same way the hourly tracker does -- see `_merge_hours`. The
-    ratios below are then re-divided from those sums, so a window
-    behaves exactly as one long day rather than as an average of days.
-
-    ONE FIGURE IS NOT ADDITIVE AND IS NOT CLAIMED TO BE. `ql_customers`
-    is a DISTINCT count, so a shopper who bought on Monday and again on
-    Friday counts once in each day and twice in their sum. Over a
-    window the customer counts -- and the returning RATE taken from
-    them -- read high. They are the only figures here that do.
-    """
-    target = day or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
-    window = _day_span(from_day or target, target)
-    result = await session.execute(text(_QUANTITY_SQL), {"days": window})
-    raw = [dict(r) for r in result.mappings()]
-    covered = sorted({r["day_ist"] for r in raw}) or window
-    rows = _merge_hours(raw)
-
+def _quantity_hours(rows: list[dict]) -> tuple[list[QuantityHour], dict[str, int]]:
+    """The merged rows as hour objects, plus the basket mix summed."""
     hours: list[QuantityHour] = []
     total_mix: dict[str, int] = {}
     for r in rows:
@@ -15214,21 +15208,31 @@ async def get_quantity(
             sales_returning=float(r["ql_sales_returning"] or 0),
             sales_first_time=float(r["ql_sales_first_time"] or 0),
             mix=mix))
+    return hours, total_mix
 
+
+def _quantity_totals(rows: list[dict], covered: list[date]) -> QuantityTotals | None:
+    """One window's totals. Ratios re-divided from the sums, as everywhere.
+
+    Averaging the hourly AOVs would weight a dead 4am the same as a 9pm
+    peak, and over a window it would weight a quiet Tuesday the same as
+    a sale weekend.
+    """
+    if not rows:
+        return None
+    hours, total_mix = _quantity_hours(rows)
     t_qty = sum(h.qty for h in hours)
     t_orders = sum(h.orders for h in hours)
-    t_sales = sum(h.sales for h in hours)
     t_aov_base = sum(float(r["ql_net_sales"] or 0) - float(r["shopify_returns"] or 0)
                      for r in rows)
     t_cust = sum(h.customers for h in hours)
     t_ret = sum(h.returning_customers for h in hours)
-    return QuantityResponse(
-        day=covered[-1], first_day=covered[0], day_count=len(covered), hours=hours,
+    return QuantityTotals(
+        day=covered[-1], first_day=covered[0], day_count=len(covered),
+        hours=len(hours),
         qty=t_qty, orders=t_orders,
-        # Re-divided from the sums, never averaged across hours: a dead
-        # 4am hour must not weigh the same as a 9pm peak.
         qty_per_order=(t_qty / t_orders) if t_orders else None,
-        sales=t_sales,
+        sales=sum(h.sales for h in hours),
         aov=(t_aov_base / t_orders) if t_orders else None,
         customers=t_cust,
         new_customers=sum(h.new_customers for h in hours),
@@ -15239,3 +15243,397 @@ async def get_quantity(
         mix=dict(sorted(total_mix.items(), key=lambda kv: int(kv[0]))),
         pnl_qty=sum(r["pnl_qty"] or 0 for r in rows),
     )
+
+
+@router.get("/quantity", response_model=QuantityResponse)
+@cached_analytics(ttl=120.0)
+async def get_quantity(
+    session: SessionDep,
+    day: date | None = Query(default=None,
+                             description="IST day, or the LAST day of the window. "
+                                         "Default: today."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the window. Default: `day`."),
+    compare_to: date | None = Query(
+        default=None, description="Last day of the comparison window. Default: the day "
+                                  "before the window starts."),
+    compare_from: date | None = Query(
+        default=None, description="First day of the comparison window. Default: a window "
+                                  "of the same length as the main one."),
+    compare: bool = Query(
+        default=True, description="false asks for NO comparison. Absent is not the same "
+                                  "thing: it means 'use the default window'."),
+) -> QuantityResponse:
+    """Units ordered and basket mix, by the hour, against another window.
+
+    Several days fold onto twenty-four rows, summed per hour-of-day,
+    the same way the hourly tracker does -- see `_merge_hours`. The
+    ratios are then re-divided from those sums, so a window behaves
+    exactly as one long day rather than as an average of days.
+
+    ONE FIGURE IS NOT ADDITIVE AND IS NOT CLAIMED TO BE. `ql_customers`
+    is a DISTINCT count, so a shopper who bought on Monday and again on
+    Friday counts once in each day and twice in their sum. Over a
+    window the customer counts -- and the returning RATE taken from
+    them -- read high. They are the only figures here that do.
+    """
+    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    target = day or ist_now.date()
+    window = _day_span(from_day or target, target)
+
+    # Same rule as the hourly tracker: the comparison matches the main
+    # window in LENGTH, not just in end date, so "last 7 days" compares
+    # against the 7 before it without the caller doing the arithmetic.
+    if not compare:
+        base_window = []
+    elif compare_to or compare_from:
+        c_end = compare_to or (compare_from + timedelta(days=len(window) - 1))
+        base_window = _day_span(compare_from or c_end, c_end)
+    else:
+        c_end = window[0] - timedelta(days=1)
+        base_window = _day_span(c_end - timedelta(days=len(window) - 1), c_end)
+
+    result = await session.execute(text(_QUANTITY_SQL),
+                                   {"days": sorted({*window, *base_window})})
+    raw = [dict(r) for r in result.mappings()]
+    win, base = set(window), set(base_window)
+    raw_win = [r for r in raw if r["day_ist"] in win]
+    covered = sorted({r["day_ist"] for r in raw_win}) or window
+    rows = _merge_hours(raw_win)
+
+    # The newest day of a live window is part-finished, so the
+    # comparison is clamped to the hours it has actually reached --
+    # and only on ITS newest day, since clamping the whole of it would
+    # throw away complete days to match one that is still filling.
+    latest = max((r["hour_of_day"] for r in raw_win
+                  if r["day_ist"] == target), default=None)
+    raw_base = [r for r in raw if r["day_ist"] in base]
+    if latest is not None and latest < 23 and base_window:
+        newest = base_window[-1]
+        raw_base = [r for r in raw_base
+                    if r["day_ist"] != newest or r["hour_of_day"] <= latest]
+    covered_base = sorted({r["day_ist"] for r in raw_base})
+    cmp_totals = (_quantity_totals(_merge_hours(raw_base), covered_base)
+                  if raw_base else None)
+
+    hours, total_mix = _quantity_hours(rows)
+    tot = _quantity_totals(rows, covered)
+    if tot is None:
+        return QuantityResponse(
+            day=covered[-1], first_day=covered[0], day_count=len(covered),
+            hours=[], qty=0, orders=0, qty_per_order=None, sales=0.0, aov=None,
+            customers=0, new_customers=0, returning_customers=0,
+            returning_rate=None, sales_returning=0.0, sales_first_time=0.0,
+            mix={}, pnl_qty=0, compare=cmp_totals)
+    # The totals stay flat on the response as well as nested, because
+    # every existing reader of this endpoint takes them from the top
+    # level and a rename would break all of them for no gain.
+    return QuantityResponse(
+        hours=hours, compare=cmp_totals,
+        **tot.model_dump(exclude={"hours"}))
+
+
+# ----------------------------------------------------------------------
+# Kwikchat spend: per-account upload
+#
+# Kwikchat is the third channel in the spend block and the only one with
+# no feed into this warehouse. Meta comes from the Insights API, Google
+# from the MapleMonk export; Kwikchat exists as a CSV somebody downloads
+# from a console, one file per workspace. Until now that meant a flat
+# daily placeholder against a real figure that swings by more than two
+# orders of magnitude day to day -- an error every ratio with spend in
+# it inherited.
+#
+# THIS ENDPOINT TAKES NO CREDENTIAL. That is a deliberate choice by the
+# owner, made with the exposure stated: the API is public and anyone who
+# finds this path can write spend. The mitigations that do not need auth
+# are all here -- a size cap, a known-accounts allowlist, a parse that
+# refuses anything that is not a daily-spend export, and an audit row
+# per (account, day) recording when it was written and from which file.
+#: One statement per entry. asyncpg prepares every statement it is
+#: given, and a prepared statement cannot carry two commands -- the
+#: table and its index in one string raise PostgresSyntaxError.
+_KWIKCHAT_ACCOUNT_DDL = (
+    """CREATE TABLE IF NOT EXISTS public.kwikchat_account_spend (
+           account     text    NOT NULL,
+           day         date    NOT NULL,
+           spend       numeric NOT NULL,
+           source      text    NOT NULL,
+           uploaded_at timestamptz NOT NULL DEFAULT now(),
+           PRIMARY KEY (account, day)
+       )""",
+    """CREATE INDEX IF NOT EXISTS ix_kwikchat_account_spend_day
+         ON public.kwikchat_account_spend(day)""",
+)
+
+
+async def _kwikchat_ensure(session: SessionDep) -> None:
+    for stmt in _KWIKCHAT_ACCOUNT_DDL:
+        await session.execute(text(stmt))
+
+#: One upload is a month of daily rows -- a few kilobytes. The cap is
+#: three orders of magnitude above that and exists so a public endpoint
+#: cannot be made to buffer something large.
+_KWIKCHAT_MAX_BYTES = 2_000_000
+
+
+class KwikchatAccount(BaseModel):
+    """One workspace, and how far its real spend reaches."""
+    account: str
+    #: The newest day this account has measured spend for. None means
+    #: nothing has ever been uploaded for it.
+    updated_to: date | None = None
+    first_day: date | None = None
+    days: int = 0
+    total: float = 0.0
+    last_upload: datetime | None = None
+
+
+class KwikchatStatus(BaseModel):
+    accounts: list[KwikchatAccount]
+    #: The newest day EVERY account has reached. The spend total is only
+    #: wholly measured up to here -- past it some accounts are still on
+    #: the placeholder, so the day reads low.
+    covered_to: date | None = None
+    #: Days that have at least one account but not all of them.
+    partial_days: list[date] = []
+
+
+class KwikchatDayResult(BaseModel):
+    day: date
+    spend: float
+    #: written | skipped. A day at or before the account's current
+    #: reach is skipped rather than replaced, unless overwrite is set.
+    status: str
+    was: float | None = None
+
+
+class KwikchatUploadResult(BaseModel):
+    account: str
+    files: list[str]
+    written: int
+    skipped: int
+    days: list[KwikchatDayResult]
+    updated_to: date | None = None
+    #: Days whose tracker rows were recomputed from the new totals.
+    rebuilt_days: int = 0
+    #: Days written for this ACCOUNT but left alone in the day total,
+    #: because the figure already there is larger and came from more
+    #: workspaces than this upload carries.
+    held_days: list[date] = []
+    message: str
+
+
+async def _kwikchat_status(session: SessionDep) -> KwikchatStatus:
+    rows = (await session.execute(text("""
+        SELECT account,
+               MAX(day)          AS updated_to,
+               MIN(day)          AS first_day,
+               COUNT(*)          AS days,
+               SUM(spend)        AS total,
+               MAX(uploaded_at)  AS last_upload
+          FROM public.kwikchat_account_spend
+         GROUP BY account
+    """))).mappings().all()
+    by_account = {r["account"]: r for r in rows}
+
+    accounts = [
+        KwikchatAccount(
+            account=name,
+            updated_to=(by_account.get(name) or {}).get("updated_to"),
+            first_day=(by_account.get(name) or {}).get("first_day"),
+            days=int((by_account.get(name) or {}).get("days") or 0),
+            total=float((by_account.get(name) or {}).get("total") or 0),
+            last_upload=(by_account.get(name) or {}).get("last_upload"),
+        )
+        for name in KWIKCHAT_ACCOUNTS
+    ]
+    # The weakest account bounds the total. A day where seven of eight
+    # have reported is not a measured day -- it is a day missing one
+    # workspace's spend, and it reads low by exactly that much.
+    reaches = [a.updated_to for a in accounts if a.updated_to is not None]
+    covered = min(reaches) if len(reaches) == len(accounts) and reaches else None
+
+    partial = (await session.execute(text("""
+        SELECT day FROM public.kwikchat_account_spend
+         GROUP BY day HAVING COUNT(DISTINCT account) < :n
+         ORDER BY day DESC LIMIT 60
+    """), {"n": len(KWIKCHAT_ACCOUNTS)})).scalars().all()
+    return KwikchatStatus(accounts=accounts, covered_to=covered,
+                          partial_days=list(partial))
+
+
+@router.get("/kwikchat/status", response_model=KwikchatStatus)
+async def get_kwikchat_status(session: SessionDep) -> KwikchatStatus:
+    """Which workspaces have uploaded, and how far each one reaches."""
+    await _kwikchat_ensure(session)
+    await session.commit()
+    return await _kwikchat_status(session)
+
+
+@router.post("/kwikchat/upload", response_model=KwikchatUploadResult)
+async def post_kwikchat_upload(
+    session: SessionDep,
+    account: str = Form(..., description="Which workspace these files belong to."),
+    overwrite: bool = Form(
+        default=False,
+        description="Replace days this account has already measured. Off by "
+                    "default: an upload that re-covers old ground reports "
+                    "them instead of silently rewriting them."),
+    files: list[UploadFile] = File(..., description="Daily-spend CSV exports."),
+) -> KwikchatUploadResult:
+    """Load one workspace's daily-spend export.
+
+    SEVERAL FILES FOR ONE ACCOUNT ARE SUMMED, not applied in turn. The
+    console exports per channel as well as per workspace, so a month can
+    arrive as three files covering the same dates; writing them one
+    after another would leave only the last and silently drop the rest.
+
+    A DAY THIS ACCOUNT HAS ALREADY MEASURED IS SKIPPED. The normal use
+    is filling forward, and an upload that happens to re-cover old
+    ground should not quietly change figures somebody has already read.
+    Backfilling and correcting are real needs, so `overwrite` does it
+    explicitly and the response says which days moved and from what.
+    """
+    if account not in KWIKCHAT_ACCOUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown account {account!r}. Known: {', '.join(KWIKCHAT_ACCOUNTS)}")
+    if not files:
+        raise HTTPException(status_code=422, detail="No file uploaded.")
+
+    await _kwikchat_ensure(session)
+
+    # Summed across the files, by day.
+    totals: dict[date, float] = {}
+    names: list[str] = []
+    for f in files:
+        raw = await f.read()
+        if len(raw) > _KWIKCHAT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{f.filename} is {len(raw):,} bytes; the limit is "
+                       f"{_KWIKCHAT_MAX_BYTES:,}. A daily-spend export is a few KB.")
+        try:
+            # utf-8-sig: the console writes a BOM, and without stripping
+            # it the first column is named "﻿Date" and never found.
+            body = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"{f.filename} is not UTF-8 text.") from exc
+        try:
+            rows = kwikchat_csv.read_rows(body, f.filename or "upload")
+        except kwikchat_csv.KwikchatCsvError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        names.append(f.filename or "upload")
+        for day, spend in rows:
+            totals[day] = totals.get(day, 0.0) + spend
+
+    reach = (await session.execute(text(
+        "SELECT MAX(day) FROM public.kwikchat_account_spend WHERE account = :a"),
+        {"a": account})).scalar()
+
+    existing = {
+        r["day"]: float(r["spend"]) for r in (await session.execute(text(
+            "SELECT day, spend FROM public.kwikchat_account_spend "
+            " WHERE account = :a AND day = ANY(:days)"),
+            {"a": account, "days": list(totals)})).mappings().all()
+    }
+
+    source = "kwikchat upload: " + ", ".join(names)
+    held: list[date] = []
+    results: list[KwikchatDayResult] = []
+    to_write: list[tuple[str, date, float, str]] = []
+    for day in sorted(totals):
+        spend = round(totals[day], 2)
+        known = existing.get(day)
+        # Already measured and not asked to replace it.
+        if known is not None and not overwrite:
+            results.append(KwikchatDayResult(day=day, spend=known, status="skipped",
+                                             was=known))
+            continue
+        results.append(KwikchatDayResult(day=day, spend=spend, status="written",
+                                         was=known))
+        to_write.append((account, day, spend, source))
+
+    if to_write:
+        await session.execute(text("""
+            INSERT INTO public.kwikchat_account_spend (account, day, spend, source,
+                                                       uploaded_at)
+            SELECT t.acct, t.day, t.spend, t.src, now()
+              FROM UNNEST(CAST(:accounts AS text[]), CAST(:days AS date[]),
+                          CAST(:spends AS numeric[]), CAST(:sources AS text[]))
+                     AS t(acct, day, spend, src)
+            ON CONFLICT (account, day) DO UPDATE SET
+              spend = EXCLUDED.spend,
+              source = EXCLUDED.source,
+              uploaded_at = EXCLUDED.uploaded_at
+        """), {"accounts": [r[0] for r in to_write],
+               "days": [r[1] for r in to_write],
+               "spends": [r[2] for r in to_write],
+               "sources": [r[3] for r in to_write]})
+
+        # The day total the rest of the warehouse reads is the SUM over
+        # accounts, rebuilt here rather than left to drift.
+        #
+        # A PARTIAL UPLOAD MUST NEVER REDUCE A MEASURED DAY. One
+        # workspace's figure is a lower bound on the day, not the day:
+        # rebuilding unconditionally replaced a correct multi-workspace
+        # total with one workspace's share AND marked it measured, so
+        # the number got worse while looking more trustworthy. A day is
+        # only written when it has nothing yet, when what it has is a
+        # placeholder, when the new sum is at least as large, or when
+        # every workspace has finally reported -- which is the one case
+        # where a LOWER figure is the right one.
+        #
+        # is_estimate stays TRUE until all of them are in, because
+        # until then the total is still short by whoever is missing.
+        rebuilt = (await session.execute(text("""
+            INSERT INTO public.kwikchat_spend_daily (day, spend, is_estimate,
+                                                     source, fetched_at)
+            SELECT a.day, a.total, a.n < :n_all,
+                   -- CAST(), not :n_all::text. SQLAlchemy's bind parser
+                   -- reads the parameter and the cast colons together and
+                   -- splits out a phantom bind, leaving a stray token the
+                   -- server rejects with `syntax error at or near ":"`.
+                   'kwikchat upload: ' || CAST(a.n AS text) || ' of '
+                     || CAST(:n_all AS text) || ' accounts', now()
+              FROM (SELECT day, SUM(spend) AS total,
+                           COUNT(DISTINCT account) AS n
+                      FROM public.kwikchat_account_spend
+                     WHERE day = ANY(:days)
+                     GROUP BY day) a
+              LEFT JOIN public.kwikchat_spend_daily d ON d.day = a.day
+             WHERE d.day IS NULL
+                OR d.is_estimate
+                OR a.total >= d.spend
+                OR a.n = :n_all
+            ON CONFLICT (day) DO UPDATE SET
+              spend = EXCLUDED.spend,
+              is_estimate = EXCLUDED.is_estimate,
+              source = EXCLUDED.source,
+              fetched_at = EXCLUDED.fetched_at
+            RETURNING day
+        """), {"days": [r[1] for r in to_write],
+               "n_all": len(KWIKCHAT_ACCOUNTS)})).scalars().all()
+        held = sorted(set(r[1] for r in to_write) - set(rebuilt))
+    await session.commit()
+
+    status = await _kwikchat_status(session)
+    mine = next((a for a in status.accounts if a.account == account), None)
+    written = sum(1 for r in results if r.status == "written")
+    skipped = len(results) - written
+    msg = (f"{account}: {written} day(s) written"
+           + (f", {skipped} already measured and left alone" if skipped else "")
+           + (f". Now updated to {mine.updated_to}" if mine and mine.updated_to else "."))
+    if skipped and not overwrite:
+        msg += (f" This account already had data to {reach}; re-upload with "
+                "overwrite to replace those days.")
+    if held:
+        msg += (f" {len(held)} day(s) kept their existing, larger measured total "
+                "\u2014 one workspace's figure cannot lower a day the others "
+                "have already reported on.")
+    return KwikchatUploadResult(
+        account=account, files=names, written=written, skipped=skipped,
+        days=results, updated_to=mine.updated_to if mine else None,
+        rebuilt_days=len(to_write) - len(held), held_days=held, message=msg)
