@@ -691,6 +691,12 @@
               margin-top: 6px; font-variant-numeric: tabular-nums; line-height: 1.1; }
   .dcard .s { display: block; font-size: 11.5px; color: var(--text-3); margin-top: 5px;
               line-height: 1.4; }
+  /* The comparison, on its own line under the caveat -- the same
+     shape the hourly tracker's KPIs use: the other window's figure in
+     grey, then the change. */
+  .dcard .c { display: block; font-size: 11.5px; margin-top: 4px;
+              font-variant-numeric: tabular-nums; color: var(--text-3); }
+  .dcard .c .was { margin-right: 7px; }
   .ddraw { border: 1px solid var(--border); border-radius: 12px; padding: 17px 19px;
            margin-top: 12px; }
   .ddraw-h { display: flex; flex-wrap: wrap; justify-content: space-between;
@@ -2058,7 +2064,8 @@ function drawDeck(deckEl, drawEl, cards, selId, onPick) {
     '<span class="k">' + esc(c.label) + "</span>" +
     '<span class="v"' + (c.colour ? ' style="color:' + c.colour + '"' : "") + ">" +
     c.value + "</span>" +
-    '<span class="s">' + esc(c.sub || "") + "</span></button>").join("");
+    '<span class="s">' + esc(c.sub || "") + "</span>" +
+    (c.cmp ? '<span class="c">' + c.cmp + "</span>" : "") + "</button>").join("");
 
   $(drawEl).innerHTML =
     '<div class="ddraw-h"><strong>' + esc(sel.label) + "</strong>" +
@@ -2088,13 +2095,21 @@ function loadQty() {
   // Keyed on the WINDOW, not the end day: widening 3 Nov to 1-3 Nov
   // leaves the end day unchanged, and a cache keyed on it alone would
   // serve the single day back for the window.
-  const key = (from || day) + ".." + day;
+  const cmp = cmpTo();
+  const cfrom = $("cmp-from").value;
+  // Keyed on the COMPARISON as well: changing only the baseline leaves
+  // the period untouched, and a cache keyed on the period alone would
+  // serve back figures measured against the wrong window.
+  const key = [from || day, day, CMP_MODE, cfrom, cmp].join("..");
   if (QTY && QTY_DAY === key) { drawQty(); return; }
   if (QTY_LOADING) return;
   QTY_LOADING = true; QTY_DAY = key;
   $("qty-kpis").innerHTML = '<div class="sub">Loading\u2026</div>';
   fetch(apiBase() + "/admin/analytics/quantity?day=" + encodeURIComponent(day) +
-        (from && from !== day ? "&from_day=" + encodeURIComponent(from) : ""))
+        (from && from !== day ? "&from_day=" + encodeURIComponent(from) : "") +
+        (CMP_MODE === "none" ? "&compare=false" : "") +
+        (cmp ? "&compare_to=" + encodeURIComponent(cmp) : "") +
+        (cfrom && cfrom !== cmp ? "&compare_from=" + encodeURIComponent(cfrom) : ""))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => { QTY = d; QTY_LOADING = false; drawQty(); })
     .catch(e => {
@@ -2107,20 +2122,47 @@ function loadQty() {
 function drawQty() {
   if (!QTY || VIEW !== "qty") return;
   const d = QTY;
-  $("qty-span").textContent = (d.day_count || 1) > 1
+  const span = (d.day_count || 1) > 1
     ? d.day_count + " days  \u00b7  " + (d.first_day || d.day) + " \u2192 " + d.day
     : d.day + "  \u00b7  " + d.hours.length + " hours";
+  $("qty-span").textContent = span + (d.compare
+    ? "   vs   " + ((d.compare.day_count || 1) > 1
+        ? (d.compare.first_day || d.compare.day) + " \u2192 " + d.compare.day
+        : d.compare.day)
+    : "");
 
   const coinGap = d.qty - d.pnl_qty;
   const E = "";
   const n2 = v => v == null ? "\u2014" : v.toFixed(2);
   const share = (a, b) => b ? pc(a / b, 0) : "\u2014";
+
+  // The comparison line on a card. `k` is the field, `fmt` how it is
+  // written, `dir` whether up is good. Honours the "% change" box, and
+  // disappears entirely when there is nothing to compare -- a card
+  // reading "\u2014" under every figure is noise.
+  //
+  // The API clamps the comparison to the hours this window has
+  // reached, so a part-finished day is never measured against a whole
+  // one.
+  const c = d.compare;
+  const showPct = $("deltas") ? $("deltas").checked : true;
+  const cmp = (k, fmt, dir, points) => {
+    if (!c || c[k] == null || d[k] == null) return "";
+    return '<span class="was">' + fmt(c[k]) + "</span>" +
+           (showPct ? changeHTML(d[k], c[k], dir || "up", points) : "");
+  };
+  // A deduction-free section: more units, more orders, more revenue is
+  // better everywhere here. The only judgement call is the coin gap,
+  // which is neither good nor bad on its own.
+  const cmpN = k => cmp(k, num);
+  const cmpR = k => cmp(k, v => inr(v, 0));
   // Every metric carries the caveat it specifically needs. These used
   // to live in one footnote paragraph long enough that nobody read it,
   // which is how a figure gets misread for weeks.
   drawDeck("qty-kpis", "qty-draw", [
     { id: "aov", label: "Avg order value", value: inr(d.aov, 0),
-      sub: "Shopify's definition", source: "derived from the report",
+      sub: "Shopify's definition", cmp: cmp("aov", v => inr(v, 0)),
+      source: "derived from the report",
       note: "NOT Total sales &divide; orders &mdash; that reads a few percent low. " +
             "Shopify divides <strong>net sales before returns</strong>. Checked against its " +
             "own <code>average_order_value</code> on four days at both day and hour grain.",
@@ -2128,21 +2170,24 @@ function drawQty() {
                 value: inr((d.aov || 0) * (d.orders || 0), 0) },
               { op: "\u00f7", label: "Orders", value: num(d.orders) }] },
     { id: "qty", label: "Units ordered", value: num(d.qty),
-      sub: n2(d.qty_per_order) + " per order", source: "Shopify's quantity_ordered",
+      sub: n2(d.qty_per_order) + " per order", cmp: cmpN("qty"),
+      source: "Shopify's quantity_ordered",
       note: "Counts the gift coin. Return Prime's zero-value return orders are excluded, the " +
             "same exclusion the Shopify report uses &mdash; they carry no money but they do " +
             "inflate the counts.",
       steps: [{ op: "", label: "Orders", value: num(d.orders) },
               { op: "\u00d7", label: "Units per order", value: n2(d.qty_per_order) }] },
     { id: "orders", label: "Orders", value: num(d.orders),
-      sub: inr(d.sales, 0) + " of sales", source: "Shopify's own order count",
+      sub: inr(d.sales, 0) + " of sales", cmp: cmpN("orders"),
+      source: "Shopify's own order count",
       note: "This is Shopify's count on the report's population, which is NOT the tracker's " +
             "<code>orders</code> elsewhere in this dashboard &mdash; that one drops a different " +
             "set. Units per order and AOV both divide by THIS one, so numerator and " +
             "denominator come from the same place.",
       steps: [{ op: "", label: "Orders on the report's population", value: num(d.orders) }] },
     { id: "pnl", label: "P&L units", value: num(d.pnl_qty),
-      sub: "gift coin excluded", source: "counted from the orders",
+      sub: "gift coin excluded", cmp: cmpN("pnl_qty"),
+      source: "counted from the orders",
       note: "A deliberately different measure from Units ordered, not a correction of it. It " +
             "drops the gift coin, <code>inf</code> and Return Prime orders, so the two " +
             "legitimately differ.",
@@ -2150,55 +2195,71 @@ function drawQty() {
               { op: "\u2212", label: "Coin, inf, Return Prime", value: num(coinGap),
                 colour: "var(--s4)" }] },
     { id: "diff", label: "Difference", value: num(coinGap), colour: "var(--s4)",
-      sub: "almost all gift coin", source: "the gap, named",
+      sub: "almost all gift coin",
+      // Shown grey, not green or red. The gap is very nearly the coin
+      // count: it moving is neither good nor bad on its own, and
+      // colouring it would assert a judgement the figure cannot carry.
+      cmp: (c && c.qty != null && c.pnl_qty != null)
+        ? '<span class="was">' + num(c.qty - c.pnl_qty) + "</span>" +
+          (showPct ? changeHTML(coinGap, c.qty - c.pnl_qty, "flat") : "")
+        : "",
+      source: "the gap, named",
       note: "Shown on purpose. Two &ldquo;quantity&rdquo; figures side by side with no " +
             "explanation is how people stop trusting a dashboard, so the gap gets its own " +
             "card instead of a footnote.",
       steps: [{ op: "", label: "Units ordered", value: num(d.qty) },
               { op: "\u2212", label: "P&L units", value: num(d.pnl_qty) }] },
     { id: "cust", label: "Customers", value: num(d.customers),
-      sub: "distinct", source: "distinct count per hour",
+      sub: "distinct", cmp: cmpN("customers"), source: "distinct count per hour",
       note: "A <strong>distinct</strong> count, so each hour is exact but the Day row counts " +
             "anyone who ordered in two hours twice &mdash; measured at about two percent over " +
             "Shopify's own day figure, moving the returning rate a quarter of a point.",
       steps: [{ op: "", label: "Summed across " + d.hours.length + " hours",
                 value: num(d.customers) }] },
     { id: "new", label: "New customers", value: num(d.new_customers),
-      sub: inr(d.sales_first_time, 0), source: "Shopify's classification",
+      sub: inr(d.sales_first_time, 0), cmp: cmpN("new_customers"),
+      source: "Shopify's classification",
       note: "This one <strong>does</strong> sum exactly &mdash; new is a once-ever " +
             "classification, so nobody is new in two hours of the same day. It will not match " +
             "the tracker's own <code>new_customers</code>, derived from each order's lifetime " +
             "count.",
       steps: [{ op: "", label: "First-time buyers", value: num(d.new_customers) }] },
     { id: "ret", label: "Returning", value: num(d.returning_customers),
-      sub: inr(d.sales_returning, 0), source: "Shopify's classification",
+      sub: inr(d.sales_returning, 0), cmp: cmpN("returning_customers"),
+      source: "Shopify's classification",
       note: "New and returning <strong>overlap</strong> and sum higher than the customer " +
             "count &mdash; someone whose first order and a later one both fall in the window " +
             "is in both buckets. That is why they cannot be the rate's denominator.",
       steps: [{ op: "", label: "Repeat buyers", value: num(d.returning_customers) }] },
     { id: "retrate", label: "Returning rate", value: pc(d.returning_rate),
       sub: num(d.returning_customers) + " of " + num(d.customers),
+      // A RATE moves in points, not percent: "35.2% is 2% up on 34.5%"
+      // is a different and much smaller claim than "up 0.7 points".
+      cmp: cmp("returning_rate", v => pc(v), "up", true),
       source: "Shopify's own denominator",
       note: "Divides by <strong>customers</strong>, not by new + returning. Verified by " +
             "reproducing Shopify's own rate to six decimals from the counts.",
       steps: [{ op: "", label: "Returning customers", value: num(d.returning_customers) },
               { op: "\u00f7", label: "Customers", value: num(d.customers) }] },
     { id: "sales", label: "Total sales", value: inr(d.sales, 0),
-      sub: "Return Prime excluded", source: "Shopify's own, verbatim",
+      sub: "Return Prime excluded", cmp: cmpR("sales"),
+      source: "Shopify's own, verbatim",
       note: "Identical with or without the Return Prime filter &mdash; those orders carry no " +
             "money. Only the COUNTS move, which is why the filter is applied: the headline " +
             "stays exact while orders and units stop being inflated.",
       steps: [{ op: "", label: "Gross less discounts and returns, plus tax",
                 value: inr(d.sales, 0) }] },
     { id: "ft", label: "First-time sales", value: inr(d.sales_first_time, 0),
-      sub: share(d.sales_first_time, d.sales) + " of total", source: "Shopify split",
+      sub: share(d.sales_first_time, d.sales) + " of total",
+      cmp: cmpR("sales_first_time"), source: "Shopify split",
       note: "First-time and returning revenue do not sum to Total sales &mdash; there is an " +
             "unclassified remainder. The residue is left visible rather than forced to " +
             "reconcile.",
       steps: [{ op: "", label: "Revenue from first-time buyers",
                 value: inr(d.sales_first_time, 0) }] },
     { id: "rs", label: "Returning sales", value: inr(d.sales_returning, 0),
-      sub: share(d.sales_returning, d.sales) + " of total", source: "Shopify split",
+      sub: share(d.sales_returning, d.sales) + " of total",
+      cmp: cmpR("sales_returning"), source: "Shopify split",
       note: "Per returning customer that is " +
             inr(d.returning_customers ? d.sales_returning / d.returning_customers : null, 0) +
             ", against " +
@@ -4233,10 +4294,23 @@ function dpApply() {
     CMP_MODE = "custom";
     $("cmp").value = hi;
     $("cmp-from").value = lo === hi ? "" : lo;
+    QTY = null;
   }
   dpClose();
   dpLabels();
+  reloadWindow();
+}
+
+/** Re-fetch whatever the window feeds.
+ *
+ *  load() covers the Hourly Tracker and the P&L, which share one
+ *  response. Quantity is its own request, so without this a change to
+ *  the period or the comparison left the Quantity tab showing figures
+ *  measured against the window the reader had just moved away from.
+ */
+function reloadWindow() {
   load();
+  if (VIEW === "qty") loadQty();
 }
 
 /** The two buttons, after any change to the window. */
@@ -4298,9 +4372,10 @@ $("dp").addEventListener("click", e => {
     }
     CMP_MODE = key;
     cmpResolve();
+    QTY = null;        // its figures are measured against the old window
     dpClose();
     dpLabels();
-    return load();
+    return reloadWindow();
   }
   const pre = e.target.closest("[data-f]");
   if (pre) {
@@ -4354,7 +4429,10 @@ $("chart").addEventListener("pointerleave", hideTip);
 $("refresh").onclick = load;
 // A re-render, not a re-fetch: the figures are already in hand and the
 // toggle only decides whether the third line is drawn.
-$("deltas").onchange = () => { if (LAST) render(LAST.d, LAST.day); };
+$("deltas").onchange = () => {
+  if (VIEW === "qty") return drawQty();   // its own figures, already in hand
+  if (LAST) render(LAST.d, LAST.day);
+};
 
 // Delegated: the table body is rebuilt on every toggle, so per-row
 // handlers would not survive it. A re-render, not a refetch -- the

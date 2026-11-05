@@ -15101,20 +15101,20 @@ class QuantityHour(BaseModel):
     mix: dict[str, int]
 
 
-class QuantityResponse(BaseModel):
-    """The Quantity report, hour by hour.
+class QuantityTotals(BaseModel):
+    """One window's Quantity figures.
 
-    Mirrors the Shopify report that groups by
-    `number_of_products_bought_together`, with the same Return Prime
-    channel exclusion, but broken down by IST hour so the day can be
-    watched as it runs rather than read afterwards.
+    Its own model so the comparison window can be reported in exactly
+    the same shape as the main one -- two hand-written blocks of the
+    same fifteen fields are two chances for them to drift apart.
     """
     #: The LAST day of the window. For a single day, that day.
     day: date
     #: The first day of the window, and how many days it spans.
     first_day: date | None = None
     day_count: int = 1
-    hours: list[QuantityHour]
+    #: Distinct hours-of-day covered: 24 for any complete window.
+    hours: int = 0
     qty: int
     orders: int
     qty_per_order: float | None
@@ -15145,6 +15145,25 @@ class QuantityResponse(BaseModel):
     pnl_qty: int
 
 
+class QuantityResponse(QuantityTotals):
+    """The Quantity report, hour by hour, against another window.
+
+    Mirrors the Shopify report that groups by
+    `number_of_products_bought_together`, with the same Return Prime
+    channel exclusion, but broken down by IST hour so the day can be
+    watched as it runs rather than read afterwards.
+
+    The totals are inherited FLAT rather than nested, because every
+    existing reader takes them from the top level; `hours` is widened
+    from a count to the rows themselves for the same reason.
+    """
+    hours: list[QuantityHour]
+    #: The same figures for the comparison window, clamped to the hours
+    #: this one has reached. None when there is nothing to compare
+    #: against, or when the caller asked for no comparison.
+    compare: QuantityTotals | None = None
+
+
 _QUANTITY_SQL = """
 SELECT day_ist, hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
        shopify_total_sales, shopify_returns,
@@ -15156,36 +15175,8 @@ SELECT day_ist, hour_of_day, qty_ordered, orders, basket_mix, pnl_qty,
 """
 
 
-@router.get("/quantity", response_model=QuantityResponse)
-@cached_analytics(ttl=120.0)
-async def get_quantity(
-    session: SessionDep,
-    day: date | None = Query(default=None,
-                             description="IST day, or the LAST day of the window. "
-                                         "Default: today."),
-    from_day: date | None = Query(default=None,
-                                  description="First day of the window. Default: `day`."),
-) -> QuantityResponse:
-    """Units ordered and basket mix, by the hour.
-
-    Several days fold onto twenty-four rows, summed per hour-of-day,
-    the same way the hourly tracker does -- see `_merge_hours`. The
-    ratios below are then re-divided from those sums, so a window
-    behaves exactly as one long day rather than as an average of days.
-
-    ONE FIGURE IS NOT ADDITIVE AND IS NOT CLAIMED TO BE. `ql_customers`
-    is a DISTINCT count, so a shopper who bought on Monday and again on
-    Friday counts once in each day and twice in their sum. Over a
-    window the customer counts -- and the returning RATE taken from
-    them -- read high. They are the only figures here that do.
-    """
-    target = day or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
-    window = _day_span(from_day or target, target)
-    result = await session.execute(text(_QUANTITY_SQL), {"days": window})
-    raw = [dict(r) for r in result.mappings()]
-    covered = sorted({r["day_ist"] for r in raw}) or window
-    rows = _merge_hours(raw)
-
+def _quantity_hours(rows: list[dict]) -> tuple[list[QuantityHour], dict[str, int]]:
+    """The merged rows as hour objects, plus the basket mix summed."""
     hours: list[QuantityHour] = []
     total_mix: dict[str, int] = {}
     for r in rows:
@@ -15214,21 +15205,31 @@ async def get_quantity(
             sales_returning=float(r["ql_sales_returning"] or 0),
             sales_first_time=float(r["ql_sales_first_time"] or 0),
             mix=mix))
+    return hours, total_mix
 
+
+def _quantity_totals(rows: list[dict], covered: list[date]) -> QuantityTotals | None:
+    """One window's totals. Ratios re-divided from the sums, as everywhere.
+
+    Averaging the hourly AOVs would weight a dead 4am the same as a 9pm
+    peak, and over a window it would weight a quiet Tuesday the same as
+    a sale weekend.
+    """
+    if not rows:
+        return None
+    hours, total_mix = _quantity_hours(rows)
     t_qty = sum(h.qty for h in hours)
     t_orders = sum(h.orders for h in hours)
-    t_sales = sum(h.sales for h in hours)
     t_aov_base = sum(float(r["ql_net_sales"] or 0) - float(r["shopify_returns"] or 0)
                      for r in rows)
     t_cust = sum(h.customers for h in hours)
     t_ret = sum(h.returning_customers for h in hours)
-    return QuantityResponse(
-        day=covered[-1], first_day=covered[0], day_count=len(covered), hours=hours,
+    return QuantityTotals(
+        day=covered[-1], first_day=covered[0], day_count=len(covered),
+        hours=len(hours),
         qty=t_qty, orders=t_orders,
-        # Re-divided from the sums, never averaged across hours: a dead
-        # 4am hour must not weigh the same as a 9pm peak.
         qty_per_order=(t_qty / t_orders) if t_orders else None,
-        sales=t_sales,
+        sales=sum(h.sales for h in hours),
         aov=(t_aov_base / t_orders) if t_orders else None,
         customers=t_cust,
         new_customers=sum(h.new_customers for h in hours),
@@ -15239,3 +15240,91 @@ async def get_quantity(
         mix=dict(sorted(total_mix.items(), key=lambda kv: int(kv[0]))),
         pnl_qty=sum(r["pnl_qty"] or 0 for r in rows),
     )
+
+
+@router.get("/quantity", response_model=QuantityResponse)
+@cached_analytics(ttl=120.0)
+async def get_quantity(
+    session: SessionDep,
+    day: date | None = Query(default=None,
+                             description="IST day, or the LAST day of the window. "
+                                         "Default: today."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the window. Default: `day`."),
+    compare_to: date | None = Query(
+        default=None, description="Last day of the comparison window. Default: the day "
+                                  "before the window starts."),
+    compare_from: date | None = Query(
+        default=None, description="First day of the comparison window. Default: a window "
+                                  "of the same length as the main one."),
+    compare: bool = Query(
+        default=True, description="false asks for NO comparison. Absent is not the same "
+                                  "thing: it means 'use the default window'."),
+) -> QuantityResponse:
+    """Units ordered and basket mix, by the hour, against another window.
+
+    Several days fold onto twenty-four rows, summed per hour-of-day,
+    the same way the hourly tracker does -- see `_merge_hours`. The
+    ratios are then re-divided from those sums, so a window behaves
+    exactly as one long day rather than as an average of days.
+
+    ONE FIGURE IS NOT ADDITIVE AND IS NOT CLAIMED TO BE. `ql_customers`
+    is a DISTINCT count, so a shopper who bought on Monday and again on
+    Friday counts once in each day and twice in their sum. Over a
+    window the customer counts -- and the returning RATE taken from
+    them -- read high. They are the only figures here that do.
+    """
+    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    target = day or ist_now.date()
+    window = _day_span(from_day or target, target)
+
+    # Same rule as the hourly tracker: the comparison matches the main
+    # window in LENGTH, not just in end date, so "last 7 days" compares
+    # against the 7 before it without the caller doing the arithmetic.
+    if not compare:
+        base_window = []
+    elif compare_to or compare_from:
+        c_end = compare_to or (compare_from + timedelta(days=len(window) - 1))
+        base_window = _day_span(compare_from or c_end, c_end)
+    else:
+        c_end = window[0] - timedelta(days=1)
+        base_window = _day_span(c_end - timedelta(days=len(window) - 1), c_end)
+
+    result = await session.execute(text(_QUANTITY_SQL),
+                                   {"days": sorted({*window, *base_window})})
+    raw = [dict(r) for r in result.mappings()]
+    win, base = set(window), set(base_window)
+    raw_win = [r for r in raw if r["day_ist"] in win]
+    covered = sorted({r["day_ist"] for r in raw_win}) or window
+    rows = _merge_hours(raw_win)
+
+    # The newest day of a live window is part-finished, so the
+    # comparison is clamped to the hours it has actually reached --
+    # and only on ITS newest day, since clamping the whole of it would
+    # throw away complete days to match one that is still filling.
+    latest = max((r["hour_of_day"] for r in raw_win
+                  if r["day_ist"] == target), default=None)
+    raw_base = [r for r in raw if r["day_ist"] in base]
+    if latest is not None and latest < 23 and base_window:
+        newest = base_window[-1]
+        raw_base = [r for r in raw_base
+                    if r["day_ist"] != newest or r["hour_of_day"] <= latest]
+    covered_base = sorted({r["day_ist"] for r in raw_base})
+    cmp_totals = (_quantity_totals(_merge_hours(raw_base), covered_base)
+                  if raw_base else None)
+
+    hours, total_mix = _quantity_hours(rows)
+    tot = _quantity_totals(rows, covered)
+    if tot is None:
+        return QuantityResponse(
+            day=covered[-1], first_day=covered[0], day_count=len(covered),
+            hours=[], qty=0, orders=0, qty_per_order=None, sales=0.0, aov=None,
+            customers=0, new_customers=0, returning_customers=0,
+            returning_rate=None, sales_returning=0.0, sales_first_time=0.0,
+            mix={}, pnl_qty=0, compare=cmp_totals)
+    # The totals stay flat on the response as well as nested, because
+    # every existing reader of this endpoint takes them from the top
+    # level and a rename would break all of them for no gain.
+    return QuantityResponse(
+        hours=hours, compare=cmp_totals,
+        **tot.model_dump(exclude={"hours"}))
