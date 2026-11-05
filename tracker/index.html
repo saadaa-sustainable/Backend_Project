@@ -1540,6 +1540,19 @@ function render(d, day) {
   }
   $("pnlcard").hidden = true;
 
+  // Every other section owns the page too, and this gate was missing.
+  // render() runs whenever a tracker fetch LANDS -- the hourly
+  // auto-refresh, a Refresh click, or a request still in flight when
+  // the reader switched tabs -- and it showed the tracker's cards
+  // unconditionally, so they reappeared stacked above whatever
+  // section was actually on. applyView() hides them on the switch;
+  // nothing stopped the next response putting them back.
+  if (VIEW !== "tracker") {
+    TRACKER_CARDS.forEach(id => { $(id).hidden = true; });
+    $("footnote").textContent = "";
+    return;
+  }
+
   // --- totals ---
   if (t) {
     const base = c || {};                  // no baseline: every read is undefined
