@@ -348,11 +348,37 @@ COLUMNS = [
     "ga4_sessions", "ga4_revenue", "ga4_active_users",
 ]
 
+#: Columns a FAILED fetch must not erase.
+#:
+#: The GA4 read needs a service-account credential the CI job does not
+#: have ("GOOGLE_CREDS_JSON not set -- GA4 columns will be null"), so
+#: there it raises, returns nothing, and these arrive NULL. With a
+#: plain `c = EXCLUDED.c` that NULL was written straight over figures a
+#: local run had just put in, every hour, on the hour. A hand-filled
+#: day survived fourteen minutes.
+#:
+#: NULL from this fetch means "could not read", never "genuinely none":
+#: an hour GA4 really reports nothing for is written as 0, and a zero
+#: still overwrites.
+#:
+#: NOT the Google spend columns. Those are legitimately NULL for the
+#: hours after the daily export, and the allocation is recomputed on
+#: every run, so preserving an old value there would freeze a share
+#: that is no longer correct.
+_KEEP_IF_NULL = {"ga4_sessions", "ga4_revenue", "ga4_active_users"}
+
+#: Unqualified: inside ON CONFLICT DO UPDATE the target is referenced
+#: by its bare table name, never schema-qualified.
+_TARGET = TABLE.split(".")[-1]
+
 UPSERT = f"""
 INSERT INTO {TABLE} ({", ".join(COLUMNS)})
 VALUES %s
 ON CONFLICT (hour) DO UPDATE SET
-  {", ".join(f"{c} = EXCLUDED.{c}" for c in COLUMNS if c != "hour")},
+  {", ".join(
+      f"{c} = COALESCE(EXCLUDED.{c}, {_TARGET}.{c})" if c in _KEEP_IF_NULL
+      else f"{c} = EXCLUDED.{c}"
+      for c in COLUMNS if c != "hour")},
   fetched_at = now()
 """
 
