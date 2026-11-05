@@ -509,9 +509,14 @@
   .kw[open] > summary::before { content: "\25BE"; }
   .kw > summary .sub { font-weight: 400; }
   .kw-body { margin-top: 14px; }
-  .kw-accts { display: grid; grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+  /* Fixed counts, not auto-fit. Eight workspaces against a flexible
+     track laid out seven across and left one stranded on a line of
+     its own, which reads as a ninth that failed to load. */
+  .kw-accts { display: grid; grid-template-columns: repeat(2, 1fr);
               gap: 1px; background: var(--border-soft); border: 1px solid var(--border-soft);
               border-radius: 10px; overflow: hidden; }
+  @media (min-width: 620px)  { .kw-accts { grid-template-columns: repeat(4, 1fr); } }
+  @media (min-width: 1180px) { .kw-accts { grid-template-columns: repeat(8, 1fr); } }
   .kw-a { background: var(--surface); padding: 11px 13px; display: flex;
           align-items: flex-start; gap: 9px; }
   .kw-a .tick { font-size: 13px; line-height: 1.2; flex-shrink: 0; }
@@ -887,6 +892,28 @@
     </div>
   </div>
 
+  <details class="card kw" id="kwcard" hidden>
+    <summary>Kwikchat spend &middot; import
+      <span class="sub" id="kw-cover"></span></summary>
+    <div class="kw-body">
+      <div class="kw-accts" id="kw-accts"></div>
+      <div class="kw-form">
+        <select id="kw-acct" aria-label="Which workspace"></select>
+        <input type="file" id="kw-files" accept=".csv,text/csv" multiple
+               aria-label="Daily-spend CSV export">
+        <label class="f"><input type="checkbox" id="kw-over"> Replace days already measured</label>
+        <button type="button" id="kw-go" disabled>Upload</button>
+      </div>
+      <div class="kw-out" id="kw-out"></div>
+      <p class="note">One workspace at a time. If the console gives several files
+        for the same workspace, pick them all together &mdash; the day is their
+        <strong>sum</strong>, and uploading them one after another would leave only
+        the last. Days this workspace has already measured are left alone unless
+        you tick replace, and a day keeps its existing total whenever that total
+        came from more workspaces than this upload carries.</p>
+    </div>
+  </details>
+
   <div id="error"></div>
 
   <!-- Shown until the first response lands, then never again: a
@@ -1133,28 +1160,6 @@
     </div>
     <table id="hourly-table"><thead id="thead"></thead><tbody id="tbody"></tbody></table>
   </div>
-
-  <details class="card kw" id="kwcard" hidden>
-    <summary>Kwikchat spend &middot; import
-      <span class="sub" id="kw-cover"></span></summary>
-    <div class="kw-body">
-      <div class="kw-accts" id="kw-accts"></div>
-      <div class="kw-form">
-        <select id="kw-acct" aria-label="Which workspace"></select>
-        <input type="file" id="kw-files" accept=".csv,text/csv" multiple
-               aria-label="Daily-spend CSV export">
-        <label class="f"><input type="checkbox" id="kw-over"> Replace days already measured</label>
-        <button type="button" id="kw-go" disabled>Upload</button>
-      </div>
-      <div class="kw-out" id="kw-out"></div>
-      <p class="note">One workspace at a time. If the console gives several files
-        for the same workspace, pick them all together &mdash; the day is their
-        <strong>sum</strong>, and uploading them one after another would leave only
-        the last. Days this workspace has already measured are left alone unless
-        you tick replace, and a day keeps its existing total whenever that total
-        came from more workspaces than this upload carries.</p>
-    </div>
-  </details>
 
   <p class="note" id="footnote"></p>
 </div>
@@ -1700,8 +1705,6 @@ function render(d, day) {
 
   // --- table ---
   $("tablewrap").hidden = false;
-  $("kwcard").hidden = false;
-  if (!KW) kwLoad();
   $("thead").innerHTML = "<tr><th>Hour</th>" +
     METRICS.map(m => "<th>" + m[1] + "</th>").join("") + "</tr>";
 
@@ -4417,6 +4420,11 @@ let KW = null;
 
 function kwDraw() {
   if (!KW) return;
+  // Shown as soon as ITS OWN status lands rather than waiting on the
+  // tracker's response. The two are unrelated requests and the tracker
+  // one can take minutes, which is a long time to hide a panel that is
+  // ready and sits at the top of the page.
+  if (VIEW === "tracker") $("kwcard").hidden = false;
   const accts = KW.accounts || [];
   const today = istToday();
   $("kw-accts").innerHTML = accts.map(a => {
@@ -4665,6 +4673,7 @@ $("chart").addEventListener("pointerleave", hideTip);
 
 $("refresh").onclick = load;
 $("kw-files").onchange = () => { $("kw-go").disabled = !$("kw-files").files.length; };
+kwLoad();
 $("kw-go").onclick = kwUpload;
 // A re-render, not a re-fetch: the figures are already in hand and the
 // toggle only decides whether the third line is drawn.
