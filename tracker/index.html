@@ -527,10 +527,45 @@
               font-variant-numeric: tabular-nums; }
   .kw-a.stale .to { color: var(--warn); }
   .kw-form { display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-             margin-top: 14px; }
-  .kw-form select, .kw-form input[type=file] { font: inherit; font-size: 12.5px;
+             margin-top: 12px; }
+  .kw-form select { font: inherit; font-size: 12.5px;
              color: var(--text); background: var(--surface);
-             border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; }
+             border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+
+  /* A drop zone, not <input type=file>. The native control renders the
+     operating system's own button and label -- a grey "Choose files /
+     No file chosen" that matches nothing else here and cannot be
+     styled -- and it does not accept a drag, which is how a file that
+     is already in a folder actually gets picked. The input is still
+     there, just not shown: it is what carries the files, and the
+     label keeps the keyboard and the file dialog working. */
+  .kw-drop { display: flex; align-items: center; gap: 12px; margin-top: 14px;
+             padding: 14px 16px; border: 1.5px dashed var(--border);
+             border-radius: 10px; cursor: pointer; background: var(--muted);
+             transition: border-color .12s, background .12s; }
+  .kw-drop:hover { border-color: var(--text-3); }
+  .kw-drop.over { border-color: var(--s1); background: var(--surface);
+                  border-style: solid; }
+  .kw-drop:focus-within { border-color: var(--text-3); border-style: solid; }
+  .kw-drop input[type=file] { position: absolute; width: 1px; height: 1px;
+             opacity: 0; pointer-events: none; }
+  .kw-drop .ic { width: 30px; height: 30px; flex-shrink: 0; border-radius: 8px;
+             display: flex; align-items: center; justify-content: center;
+             background: var(--surface); border: 1px solid var(--border-soft);
+             font-size: 14px; color: var(--text-3); }
+  .kw-drop .t { font-size: 12.5px; font-weight: 600; display: block; }
+  .kw-drop .h { font-size: 11.5px; color: var(--text-3); display: block;
+                margin-top: 2px; }
+  .kw-drop.has .ic { color: var(--good); border-color: var(--good); }
+  .kw-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .kw-file { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px;
+             background: var(--surface); border: 1px solid var(--border-soft);
+             border-radius: 999px; padding: 4px 6px 4px 11px; }
+  .kw-file .sz { color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .kw-file button { font: inherit; font-size: 13px; line-height: 1; color: var(--text-3);
+             background: transparent; border: 0; border-radius: 50%; cursor: pointer;
+             width: 18px; height: 18px; }
+  .kw-file button:hover { color: var(--bad); background: var(--muted); }
   .kw-form button { font: inherit; font-size: 12.5px; font-weight: 600;
              border-radius: 8px; padding: 8px 16px; cursor: pointer;
              border: 1px solid var(--text); background: var(--text);
@@ -897,20 +932,25 @@
       <span class="sub" id="kw-cover"></span></summary>
     <div class="kw-body">
       <div class="kw-accts" id="kw-accts"></div>
+      <label class="kw-drop" id="kw-drop">
+        <input type="file" id="kw-files" accept=".csv,text/csv" multiple>
+        <span class="ic" id="kw-ic">&#8593;</span>
+        <span><span class="t" id="kw-drop-t">Drop the daily-spend CSVs here, or click to choose</span>
+          <span class="h" id="kw-drop-h">One workspace at a time &middot; several files for the
+            same workspace are summed</span></span>
+      </label>
+      <div class="kw-files" id="kw-chosen"></div>
       <div class="kw-form">
         <select id="kw-acct" aria-label="Which workspace"></select>
-        <input type="file" id="kw-files" accept=".csv,text/csv" multiple
-               aria-label="Daily-spend CSV export">
         <label class="f"><input type="checkbox" id="kw-over"> Replace days already measured</label>
         <button type="button" id="kw-go" disabled>Upload</button>
       </div>
       <div class="kw-out" id="kw-out"></div>
-      <p class="note">One workspace at a time. If the console gives several files
-        for the same workspace, pick them all together &mdash; the day is their
-        <strong>sum</strong>, and uploading them one after another would leave only
-        the last. Days this workspace has already measured are left alone unless
-        you tick replace, and a day keeps its existing total whenever that total
-        came from more workspaces than this upload carries.</p>
+      <p class="note">Uploading several files one after another would leave only
+        the last, which on a real month is most of the money &mdash; so pick a
+        workspace's files together. Days it has already measured are left alone
+        unless you tick replace, and a day keeps its existing total whenever that
+        total came from more workspaces than this upload carries.</p>
     </div>
   </details>
 
@@ -4462,6 +4502,53 @@ function kwLoad() {
     .catch(() => {});
 }
 
+/** The chosen files, named, with a way to drop one.
+ *
+ *  The native control shows "3 files" and no way to see WHICH three or
+ *  to remove the wrong one without starting again -- and picking the
+ *  wrong workspace's export is the mistake this panel exists to make
+ *  recoverable.
+ */
+function kwChosen() {
+  const files = [...($("kw-files").files || [])];
+  const kb = n => n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " KB";
+  $("kw-chosen").innerHTML = files.map((f, i) =>
+    '<span class="kw-file">' + esc(f.name) +
+    ' <span class="sz">' + kb(f.size) + "</span>" +
+    '<button type="button" data-drop="' + i + '" aria-label="Remove ' +
+    esc(f.name) + '">×</button></span>').join("");
+  $("kw-drop").classList.toggle("has", files.length > 0);
+  $("kw-ic").innerHTML = files.length ? "✓" : "↑";
+  $("kw-drop-t").textContent = files.length
+    ? files.length + (files.length === 1 ? " file ready" : " files ready, summed per day")
+    : "Drop the daily-spend CSVs here, or click to choose";
+  // The hint earns its line twice: what to do when empty, and WHICH
+  // workspace it is about to be filed under when not -- the one
+  // mistake here that is tedious to undo.
+  $("kw-drop-h").textContent = files.length
+    ? "Will be filed under " + $("kw-acct").value
+    : "One workspace at a time \u00b7 several files for the same workspace are summed";
+  $("kw-go").disabled = !files.length;
+}
+
+/** Replace the input's FileList.
+ *
+ *  A FileList cannot be edited, so adding a dragged file or removing a
+ *  chosen one means building a fresh DataTransfer and assigning it --
+ *  which also keeps the native input as the single source of what will
+ *  be uploaded, rather than a parallel array that could drift from it.
+ */
+function kwSetFiles(files) {
+  const dt = new DataTransfer();
+  // Only CSVs. A folder drag or a stray screenshot would otherwise be
+  // posted and come back as a parse error that reads like our bug.
+  for (const f of files) {
+    if (/\.csv$/i.test(f.name) || f.type === "text/csv") dt.items.add(f);
+  }
+  $("kw-files").files = dt.files;
+  kwChosen();
+}
+
 async function kwUpload() {
   const files = $("kw-files").files;
   if (!files || !files.length) return;
@@ -4484,7 +4571,7 @@ async function kwUpload() {
         (r.status === "written" && r.was != null
           ? " (was " + inr(r.was, 0) + ")" : "") + "</td></tr>").join("") +
       "</tbody></table>";
-    $("kw-files").value = "";
+    kwSetFiles([]);
     kwLoad();
     // The spend split on this page is now wrong by whatever just
     // landed, so it is refetched rather than left to the next hour.
@@ -4493,8 +4580,8 @@ async function kwUpload() {
   } catch (e) {
     $("kw-out").innerHTML = '<span class="no">✗</span> ' + esc(String(e.message || e));
   }
-  btn.disabled = !$("kw-files").files.length;
   btn.textContent = "Upload";
+  btn.disabled = !$("kw-files").files.length;
 }
 
 // --- the loading state ------------------------------------------------
@@ -4672,7 +4759,32 @@ $("chart").addEventListener("pointermove", hoverAt);
 $("chart").addEventListener("pointerleave", hideTip);
 
 $("refresh").onclick = load;
-$("kw-files").onchange = () => { $("kw-go").disabled = !$("kw-files").files.length; };
+$("kw-files").onchange = kwChosen;
+$("kw-acct").onchange = kwChosen;   // the hint names the workspace
+$("kw-chosen").onclick = e => {
+  const b = e.target.closest("[data-drop]");
+  if (!b) return;
+  const i = Number(b.getAttribute("data-drop"));
+  kwSetFiles([...$("kw-files").files].filter((_, n) => n !== i));
+};
+// The label already opens the dialog on click; the drop zone adds the
+// drag. preventDefault on dragover is what stops the browser doing its
+// own thing -- navigating to the file -- and without it a drop just
+// replaces the page.
+["dragenter", "dragover"].forEach(ev => $("kw-drop").addEventListener(ev, e => {
+  e.preventDefault();
+  $("kw-drop").classList.add("over");
+}));
+["dragleave", "dragend"].forEach(ev => $("kw-drop").addEventListener(ev, e => {
+  if (e.target === $("kw-drop")) $("kw-drop").classList.remove("over");
+}));
+$("kw-drop").addEventListener("drop", e => {
+  e.preventDefault();
+  $("kw-drop").classList.remove("over");
+  if (e.dataTransfer && e.dataTransfer.files.length) {
+    kwSetFiles([...$("kw-files").files, ...e.dataTransfer.files]);
+  }
+});
 kwLoad();
 $("kw-go").onclick = kwUpload;
 // A re-render, not a re-fetch: the figures are already in hand and the
