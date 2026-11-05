@@ -497,112 +497,122 @@
   .chain .b.inp input { -moz-appearance: textfield; }
   .chain-note { margin-top: 8px; }
 
-  /* ---- date-window picker ---------------------------------------
-     A range, not a day. The two <input type=date> boxes it replaces
-     fired a fetch on every keystroke, so typing a year walked through
-     0002-, 0020-, 0202- and issued a request for each. Nothing here
-     reaches the caller until Apply. */
+  /* ---- period picker ---------------------------------------------
+     Shaped after the Shopify analytics control: a Period button and a
+     Compare button, the first opening a calendar and the second a
+     list of RELATIONS rather than dates -- "previous period" has to
+     follow the period when it changes, and a raw date cannot. */
   .dpf { gap: 8px; }
   .dpf .k { color: var(--text-3); }
-  .dpb { font: inherit; font-size: 12.5px; color: var(--text);
-         background: transparent; border: 0; padding: 2px 0; cursor: pointer;
-         font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .dpb { font: inherit; font-size: 12.5px; font-weight: 500; color: var(--text);
+         background: var(--muted); border: 1px solid transparent; border-radius: 8px;
+         padding: 6px 10px; cursor: pointer; white-space: nowrap;
+         display: inline-flex; align-items: center; gap: 8px; min-height: 32px; }
+  .dpb:hover { border-color: var(--border); }
+  .dpb[aria-expanded="true"] { background: var(--surface); border-color: var(--text-3); }
   .dpb:focus { outline: none; }
-  .dpb:focus-visible { outline: 2px solid var(--s1); outline-offset: 3px;
-                       border-radius: 4px; }
-  .dpb::after { content: " \25BE"; color: var(--text-3); font-size: 10px; }
+  .dpb:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+  /* The up/down pair Shopify uses, which reads as "change this" where
+     a single down-caret reads as "a menu of other things". */
+  .dpb .cv { color: var(--text-3); font-size: 10px; line-height: 1; letter-spacing: -1px; }
 
   .dp { position: absolute; z-index: 60; display: flex; background: var(--surface);
         border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
         box-shadow: 0 16px 48px rgba(0,0,0,.24); }
   .dp[hidden] { display: none; }
-  .dp-presets { display: flex; flex-direction: column; gap: 2px; padding: 10px;
-                border-right: 1px solid var(--border-soft); background: var(--muted);
-                min-width: 150px; }
-  .dp-presets button { font: inherit; font-size: 12px; text-align: left; color: var(--text-2);
-                       background: transparent; border: 0; border-radius: 7px;
-                       padding: 7px 10px; cursor: pointer; white-space: nowrap; }
-  .dp-presets button:hover { background: var(--surface); color: var(--text); }
-  .dp-presets button[aria-pressed="true"] { background: var(--surface); color: var(--text);
-                                            font-weight: 650; }
-  .dp-main { padding: 12px 14px 10px; }
-  .dp-months { display: flex; gap: 20px; }
-  .dp-mon { width: 218px; }
+  .dp-presets { display: flex; flex-direction: column; gap: 1px; padding: 10px 8px;
+                border-right: 1px solid var(--border-soft); min-width: 168px; }
+  .dp-presets button { font: inherit; font-size: 12.5px; text-align: left;
+                       color: var(--text); background: transparent; border: 0;
+                       border-radius: 8px; padding: 8px 12px; cursor: pointer;
+                       white-space: nowrap; }
+  .dp-presets button:hover { background: var(--muted); }
+  .dp-presets button[aria-pressed="true"] { background: var(--muted); font-weight: 650; }
+  .dp-presets button[disabled] { color: var(--text-3); opacity: .5; cursor: default; }
+  .dp-presets button[disabled]:hover { background: transparent; }
+  /* Shopify groups the presets and rules between the groups; without
+     it a list of nine reads as one undifferentiated column. */
+  .dp-presets hr { border: 0; border-top: 1px solid var(--border-soft);
+                   margin: 6px 10px; }
+  /* NOT .why -- that class is the coin-order reason pill, and reusing
+     the name drew a bordered capsule round every sub-line here. */
+  .dp-presets .dpnote { display: block; font-size: 10.5px; color: var(--text-3);
+                        font-weight: 400; margin-top: 3px; white-space: normal;
+                        background: none; border: 0; padding: 0; }
+
+  .dp-main { padding: 14px 16px 12px; }
+  /* The two ends of the range, typed or read. The calendar is faster
+     for a nearby day and hopeless for one eight months back. */
+  .dp-ends { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .dp-ends input { font: inherit; font-size: 12.5px; color: var(--text); width: 152px;
+                   background: var(--surface); border: 1px solid var(--border);
+                   border-radius: 8px; padding: 8px 10px; }
+  .dp-ends input:focus { outline: none; border-color: var(--text-3); }
+  .dp-ends input.bad { border-color: var(--bad); }
+  .dp-ends .arrow { color: var(--text-3); }
+
+  .dp-months { display: flex; gap: 0; }
+  .dp-mon { width: 244px; padding: 0 14px; }
+  .dp-mon + .dp-mon { border-left: 1px solid var(--border-soft); }
   .dp-mhead { display: flex; align-items: center; justify-content: space-between;
-              font-size: 12px; font-weight: 650; margin-bottom: 8px; min-height: 24px; }
-  .dp-nav { font: inherit; font-size: 13px; line-height: 1; color: var(--text-2);
-            background: transparent; border: 1px solid var(--border-soft);
-            border-radius: 6px; width: 24px; height: 24px; cursor: pointer; }
-  .dp-nav:hover { color: var(--text); border-color: var(--text-3); }
-  .dp-nav[disabled] { opacity: .3; cursor: default; }
-  .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px 0; }
-  .dp-dow { font-size: 10px; color: var(--text-3); text-align: center; padding-bottom: 4px; }
-  /* The cell is the hit target AND the range band, so the highlight is
-     continuous across a week instead of seven detached pills. */
-  .dp-d { font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
+              font-size: 13px; font-weight: 650; margin-bottom: 10px; min-height: 26px; }
+  .dp-nav { font: inherit; font-size: 14px; line-height: 1; color: var(--text-2);
+            background: transparent; border: 0; border-radius: 6px;
+            width: 26px; height: 26px; cursor: pointer; }
+  .dp-nav:hover { background: var(--muted); color: var(--text); }
+  .dp-nav[disabled] { opacity: .25; cursor: default; background: transparent; }
+  .dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px 0; }
+  .dp-dow { font-size: 11px; color: var(--text-2); text-align: center;
+            padding-bottom: 6px; }
+  /* The cell is the hit target AND the range band, so a week-long
+     selection is one continuous strip rather than seven detached
+     pills. */
+  .dp-d { font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums;
           color: var(--text); background: transparent; border: 0; cursor: pointer;
-          height: 28px; padding: 0; position: relative; }
+          height: 30px; padding: 0; position: relative; }
   .dp-d.pad { visibility: hidden; }
-  .dp-d[disabled] { color: var(--text-3); opacity: .4; cursor: default; }
-  .dp-d:not([disabled]):hover { background: var(--muted); }
-  .dp-d.in { background: color-mix(in srgb, var(--s1) 16%, transparent); }
-  .dp-d.end { background: var(--s1); color: #fff; font-weight: 650; }
+  .dp-d[disabled] { color: var(--text-3); opacity: .45; cursor: default; }
+  .dp-d:not([disabled]):hover { background: var(--muted); border-radius: 7px; }
+  .dp-d.in { background: var(--muted); }
+  .dp-d.end { background: var(--text); color: var(--surface); font-weight: 650; }
   .dp-d.end.lo { border-radius: 7px 0 0 7px; }
   .dp-d.end.hi { border-radius: 0 7px 7px 0; }
   .dp-d.end.lo.hi { border-radius: 7px; }
+  .dp-d.in.lo { border-radius: 7px 0 0 7px; }
+  .dp-d.in.hi { border-radius: 0 7px 7px 0; }
   .dp-d.today::after { content: ""; position: absolute; left: 50%; bottom: 3px;
                        width: 3px; height: 3px; margin-left: -1.5px; border-radius: 50%;
                        background: currentColor; opacity: .7; }
+
   .dp-foot { display: flex; align-items: center; justify-content: space-between;
-             gap: 14px; margin-top: 10px; padding-top: 10px;
+             gap: 14px; margin-top: 12px; padding-top: 12px;
              border-top: 1px solid var(--border-soft); }
   .dp-sum { font-size: 11.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
   .dp-acts { display: flex; gap: 8px; }
-  .dp-acts button { font: inherit; font-size: 12px; font-weight: 600; border-radius: 7px;
-                    padding: 7px 14px; cursor: pointer; border: 1px solid var(--border);
-                    background: var(--surface); color: var(--text-2); }
-  .dp-acts button:hover { color: var(--text); border-color: var(--text-3); }
-  .dp-acts .go { background: var(--s1); border-color: var(--s1); color: #fff; }
-  .dp-acts .go:hover { background: var(--s1); border-color: var(--s1); color: #fff;
-                       filter: brightness(1.08); }
+  .dp-acts button { font: inherit; font-size: 12.5px; font-weight: 600;
+                    border-radius: 8px; padding: 8px 16px; cursor: pointer;
+                    border: 1px solid var(--border); background: var(--surface);
+                    color: var(--text); }
+  .dp-acts button:hover { border-color: var(--text-3); }
+  .dp-acts .go { background: var(--text); border-color: var(--text);
+                 color: var(--surface); }
+  .dp-acts .go[disabled] { opacity: .35; cursor: default; }
+  /* A menu, not a calendar: the Compare control picks a RELATION. */
+  .dp.menu { display: block; min-width: 258px; }
+  .dp.menu .dp-presets { border-right: 0; min-width: 0; padding: 8px; }
+
   /* Two months do not fit a phone; one does, and the range still works
-     across the month boundary by paging. */
-  @media (max-width: 640px) {
+     across the boundary by paging. */
+  @media (max-width: 680px) {
     .dp { flex-direction: column; left: 8px !important; right: 8px; width: auto; }
     .dp-presets { flex-direction: row; flex-wrap: wrap; border-right: 0;
                   border-bottom: 1px solid var(--border-soft); min-width: 0; }
+    .dp-presets hr { display: none; }
+    .dp-presets .dpnote { display: none; }
     .dp-mon:last-child { display: none; }
-    .dp-months { gap: 0; }
-    .dp-mon { width: 100%; }
+    .dp-mon { width: 100%; padding: 0; border-left: 0; }
+    .dp-ends input { width: 100%; }
   }
-
-  /* ---- export ---------------------------------------------------
-     A quiet button in the card header: it is a convenience beside the
-     figures, not a thing to reach for before reading them. */
-  .xbtn { font: inherit; font-size: 11.5px; font-weight: 600; line-height: 1;
-          color: var(--text-2); background: var(--surface);
-          border: 1px solid var(--border); border-radius: 7px;
-          padding: 6px 10px; cursor: pointer; white-space: nowrap; }
-  .xbtn:hover { color: var(--text); border-color: var(--text-3); }
-  .xbtn:focus { outline: none; }
-  .xbtn:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
-  .xbtn[disabled] { opacity: .45; cursor: default; }
-  .xbtn[disabled]:hover { color: var(--text-2); border-color: var(--border); }
-  .card-x { display: flex; align-items: center; gap: 8px; }
-
-  /* The row picker. Narrow, centred, and never wrapped: it is the one
-     column that must not grow when an address beside it does. */
-  th.pick, td.pick { width: 30px; text-align: center !important;
-                     padding-left: 10px !important; padding-right: 4px !important; }
-  td.pick { vertical-align: middle !important; }
-  .pick input { width: 15px; height: 15px; margin: 0; cursor: pointer;
-                accent-color: var(--s1); }
-  /* A picked row is tinted so a selection spread over a long scroll is
-     still findable, and the tint follows the theme's own token. */
-  #coin-orders-table tbody tr.picked td {
-    background: color-mix(in srgb, var(--s1) 13%, transparent); }
-  #coin-orders-table tbody tr.picked:hover td {
-    background: color-mix(in srgb, var(--s1) 19%, transparent); }
 
   /* ---- the order tables ----------------------------------------
      The page's base table right-aligns every cell, which suits the
@@ -764,12 +774,14 @@
       <button id="view-coin" role="tab" aria-selected="false">Coin Orders</button>
       <button id="view-qty" role="tab" aria-selected="false">Quantity</button>
     </div>
-    <div class="f dpf" id="f-day"><span class="k">Day</span>
+    <div class="f dpf" id="f-day"><span class="k">Period</span>
       <button type="button" class="dpb" id="day-btn" aria-haspopup="dialog"
-              aria-expanded="false"><span id="day-lbl">—</span></button></div>
-    <div class="f dpf" id="f-cmp"><span class="k">Compare to</span>
-      <button type="button" class="dpb" id="cmp-btn" aria-haspopup="dialog"
-              aria-expanded="false"><span id="cmp-lbl">—</span></button></div>
+              aria-expanded="false"><span id="day-lbl">—</span>
+        <span class="cv">⌃⌄</span></button></div>
+    <div class="f dpf" id="f-cmp"><span class="k">Compare</span>
+      <button type="button" class="dpb" id="cmp-btn" aria-haspopup="menu"
+              aria-expanded="false"><span id="cmp-lbl">—</span>
+        <span class="cv">⌃⌄</span></button></div>
     <!-- The date inputs the rest of the page still reads. Hidden, not
          removed: every caller asks them for the window, so they stay
          the single place it lives and the picker just writes to them. -->
@@ -783,9 +795,16 @@
     </label>
   </div>
 
-  <div class="dp" id="dp" role="dialog" aria-label="Choose a date window" hidden>
+  <div class="dp" id="dp" role="dialog" aria-label="Choose a period" hidden>
     <div class="dp-presets" id="dp-presets"></div>
-    <div class="dp-main">
+    <div class="dp-main" id="dp-main">
+      <div class="dp-ends">
+        <input type="text" id="dp-lo" inputmode="numeric" autocomplete="off"
+               aria-label="First day" placeholder="YYYY-MM-DD">
+        <span class="arrow">&rarr;</span>
+        <input type="text" id="dp-hi" inputmode="numeric" autocomplete="off"
+               aria-label="Last day" placeholder="YYYY-MM-DD">
+      </div>
       <div class="dp-months" id="dp-months"></div>
       <div class="dp-foot">
         <span class="dp-sum" id="dp-sum"></span>
@@ -1447,8 +1466,11 @@ async function load() {
   }
   // from_day is sent only when the window is wider than a day, so a
   // single-day request is byte-for-byte what it always was.
+  // compare=false is NOT the same as leaving compare_to out: absent
+  // means "use the default window", so "no comparison" needs saying.
   const url = base + "/admin/analytics/hourly-tracker?day=" + day +
               (from && from !== day ? "&from_day=" + from : "") +
+              (CMP_MODE === "none" ? "&compare=false" : "") +
               (cmp ? "&compare_to=" + cmp : "") +
               (cfrom && cfrom !== cmp ? "&compare_from=" + cfrom : "");
   $("status").textContent = "loading…";
@@ -1470,6 +1492,14 @@ let LAST = null;
 
 function render(d, day) {
   LAST = { d, day };
+  // The first day the tracker holds, learned from the response rather
+  // than hardcoded: the picker greys out everything before it, and a
+  // comparison that would reach past it is offered dead with the
+  // reason on it instead of silently returning nothing.
+  if (d.first_day && d.first_day !== DATA_FLOOR) {
+    DATA_FLOOR = d.first_day;
+    if (DP.which) dpDraw();
+  }
   const isToday = day === istToday();
   const rows = d.rows || [];
   const prev = new Map((d.compare_rows || []).map(r => [r.hour_of_day, r]));
@@ -1519,9 +1549,8 @@ function render(d, day) {
     // hours" of a seven-day window invites it to be read as elapsed
     // time rather than as hours-of-day covered.
     $("ttl-title").textContent = spanLabel(t, true);
-    $("ttl-vs").textContent = c
-      ? "against " + spanLabel(c, false) +
-        (c.day_count === 1 && c.hours < 24 ? "" : "")
+    $("ttl-vs").textContent = c ? "against " + spanLabel(c, false)
+      : CMP_MODE === "none" ? "no comparison"
       : baselineDay + " is not in the tracker, so there is nothing to compare against";
     // Spend adds three numbers that are not the same KIND of number --
     // Meta is measured hourly, Google is a daily total shared across
@@ -3930,21 +3959,30 @@ function hideTip() {
 }
 
 
-// --- the date-window picker -------------------------------------------
-// A RANGE, replacing the two bare <input type=date> boxes. Everything
-// on the page that used to read one day now reads a window, and a
-// window of one day behaves exactly as the single day did.
+// --- the period picker ------------------------------------------------
+// Shaped after Shopify's analytics control: a PERIOD button opening a
+// calendar, and a COMPARE button opening a list of RELATIONS.
 //
-// Nothing reaches the caller until Apply. The old inputs fired a fetch
-// on every keystroke, so typing a year walked through 0002-, 0020-,
-// 0202- and issued a request for each -- against an endpoint whose
-// cold path is measured in seconds.
+// The compare is a relation and not a date on purpose. "Previous
+// period" has to follow the period when it changes -- pick Last 7
+// Days and it must become the 7 days before, pick a single day and it
+// must become yesterday -- and a stored date cannot do that. Only
+// "Custom" pins actual dates.
+//
+// Nothing reaches the API until Apply. The <input type=date> boxes
+// this replaces fired a fetch on every keystroke, so typing a year
+// walked through 0002-, 0020-, 0202- and issued a request for each.
 const DP = {
   which: null,        // "day" | "cmp"
   from: "", to: "",   // the edit in progress, committed only on Apply
   anchor: null,       // first click of a new range
   month: null,        // Date, first of the LEFT month on show
+  was: "",            // the window as it was on open, to detect a change
 };
+
+//: How the comparison is chosen. Held across period changes so the
+//: relation is re-resolved rather than frozen as dates.
+let CMP_MODE = "prev";
 
 const dIso = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
                   "-" + String(d.getDate()).padStart(2, "0");
@@ -3952,17 +3990,30 @@ const dParse = s => { const [y, m, d] = String(s).split("-").map(Number);
                       return new Date(y, m - 1, d); };
 const dAdd = (s, n) => { const d = dParse(s); d.setDate(d.getDate() + n); return dIso(d); };
 const dDays = (a, b) => Math.round((dParse(b) - dParse(a)) / 86400000) + 1;
+const dOk = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(dParse(s)) &&
+                 dIso(dParse(s)) === s;
 
-// The window the page is actually showing. An empty `from` means it
-// equals `to`: a single day, the exact shape every caller had before.
+// The window the page is showing. An empty `from` means it equals
+// `to`: a single day, the exact shape every caller had before.
 const winFrom = () => $("day-from").value || $("day").value || istToday();
 const winTo = () => $("day").value || istToday();
 const cmpTo = () => $("cmp").value;
 const cmpFrom = () => $("cmp-from").value || $("cmp").value;
 
-const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+const MON = ["January", "February", "March", "April", "May", "June", "July",
+             "August", "September", "October", "November", "December"];
+const MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+//: The first day the tracker holds, learned from the API. Until a
+//: response lands, nothing is ruled out.
+let DATA_FLOOR = null;
+
+/** "Nov 5, 2026" -- the form the reference uses on the buttons. */
+const dNice = iso => !iso ? "—"
+  : MON3[dParse(iso).getMonth()] + " " + dParse(iso).getDate() + ", " +
+    dParse(iso).getFullYear();
 
 // Named windows, resolved against TODAY at the moment they are picked
 // rather than when the page loaded -- a tab left open overnight would
@@ -3975,27 +4026,60 @@ function dpPresets() {
   return [
     ["Today", t, t],
     ["Yesterday", dAdd(t, -1), dAdd(t, -1)],
-    ["Last 7 Days", dAdd(t, -6), t],
-    ["Last 14 Days", dAdd(t, -13), t],
-    ["Last 30 Days", dAdd(t, -29), t],
-    ["This Month", mStart, t],
-    ["Last Month", lmStart, lmEnd],
-    ["Last 90 Days", dAdd(t, -89), t],
+    [null],
+    ["Last 7 days", dAdd(t, -6), t],
+    ["Last 14 days", dAdd(t, -13), t],
+    ["Last 30 days", dAdd(t, -29), t],
+    ["Last 90 days", dAdd(t, -89), t],
+    [null],
+    ["Month to date", mStart, t],
+    ["Last month", lmStart, lmEnd],
   ];
 }
 
-/** What the button says. A single day reads as a day, not as a range
-    from itself to itself. */
-function winLabel(from, to) {
-  if (!to) return "—";
-  if (!from || from === to) return to;
-  return from + " → " + to + "  (" + dDays(from, to) + "d)";
+/** The comparison windows on offer, resolved against the CURRENT
+ *  period. Each returns [from, to] or null for "no comparison". */
+function cmpModes(lo, hi) {
+  const n = dDays(lo, hi);
+  return [
+    ["none", "No comparison", null],
+    ["prev", n === 1 ? "Previous day" : "Previous period",
+     [dAdd(lo, -n), dAdd(lo, -1)]],
+    ["year", "Previous year", [dAdd(lo, -365), dAdd(hi, -365)]],
+    // 364 days, not 365: 52 whole weeks, so a Thursday lands on a
+    // Thursday. Retail weeks are not comparable across weekdays.
+    ["year_dow", "Previous year (match day of week)",
+     [dAdd(lo, -364), dAdd(hi, -364)]],
+    ["custom", "Custom", null],
+  ];
+}
+
+/** What the Compare button says. */
+function cmpLabel() {
+  if (CMP_MODE === "none") return "No comparison";
+  const lo = cmpFrom(), hi = cmpTo();
+  if (!hi) return "No comparison";
+  return lo && lo !== hi ? dNice(lo) + " – " + dNice(hi) : dNice(hi);
+}
+
+/** Re-resolve the comparison against whatever the period now is.
+ *  Custom is left alone -- the reader pinned those dates deliberately. */
+function cmpResolve() {
+  if (CMP_MODE === "custom") return;
+  if (CMP_MODE === "none") { $("cmp").value = $("cmp-from").value = ""; return; }
+  const m = cmpModes(winFrom(), winTo()).find(x => x[0] === CMP_MODE);
+  const r = m && m[2];
+  if (!r) { $("cmp").value = $("cmp-from").value = ""; return; }
+  $("cmp-from").value = r[0] === r[1] ? "" : r[0];
+  $("cmp").value = r[1];
 }
 
 function dpOpen(which, btn) {
   DP.which = which;
-  DP.from = which === "day" ? winFrom() : (cmpFrom() || "");
-  DP.to = which === "day" ? winTo() : (cmpTo() || "");
+  const custom = which === "cmp";
+  DP.from = custom ? (cmpFrom() || "") : winFrom();
+  DP.to = custom ? (cmpTo() || "") : winTo();
+  DP.was = DP.from + ".." + DP.to;
   DP.anchor = null;
   const seed = DP.to || istToday();
   const sd = dParse(seed);
@@ -4003,13 +4087,21 @@ function dpOpen(which, btn) {
   // without paging back.
   DP.month = new Date(sd.getFullYear(), sd.getMonth() - 1, 1);
   const dp = $("dp");
+  // The compare control opens as a MENU of relations; it only becomes
+  // a calendar once Custom is chosen.
+  dp.classList.toggle("menu", which === "cmp");
+  $("dp-main").hidden = which === "cmp";
   dp.hidden = false;
   btn.setAttribute("aria-expanded", "true");
-  const r = btn.getBoundingClientRect();
+  dpPlace(btn);
+  dpDraw();
+}
+
+function dpPlace(btn) {
+  const dp = $("dp"), r = btn.getBoundingClientRect();
   dp.style.top = (r.bottom + window.scrollY + 6) + "px";
   dp.style.left = Math.max(8, Math.min(r.left + window.scrollX,
                            window.innerWidth - dp.offsetWidth - 12)) + "px";
-  dpDraw();
 }
 
 function dpClose() {
@@ -4031,25 +4123,28 @@ function dpMonth(first, nav) {
   for (let i = 0; i < lead; i++) cells += '<button class="dp-d pad" disabled></button>';
   for (let n = 1; n <= len; n++) {
     const iso = dIso(new Date(y, m, n));
-    // Future days hold nothing. Offering them invites a window that
-    // comes back empty and reads as a broken page rather than as a
-    // day nobody has ingested.
-    const off = iso > today;
+    // Future days hold nothing, and days before the first ingest hold
+    // nothing either. Offering them invites a window that comes back
+    // empty and reads as a broken page.
+    const off = iso > today || (DATA_FLOOR && iso < DATA_FLOOR);
     const inRange = lo && hi && iso >= lo && iso <= hi;
     const isEnd = iso === lo || iso === hi;
+    // The band is rounded where it STARTS and ENDS, including at a
+    // week break, so a long selection reads as one strip per row.
+    const edgeL = inRange && (n === 1 || new Date(y, m, n).getDay() === 0 || iso === lo);
+    const edgeR = inRange && (n === len || new Date(y, m, n).getDay() === 6 || iso === hi);
     cells += '<button type="button" class="dp-d' +
       (inRange ? (isEnd ? " end" : " in") : "") +
-      (isEnd && iso === lo ? " lo" : "") + (isEnd && iso === hi ? " hi" : "") +
+      (edgeL ? " lo" : "") + (edgeR ? " hi" : "") +
       (iso === today ? " today" : "") + '" data-d="' + iso + '"' +
       (off ? " disabled" : "") + ">" + n + "</button>";
   }
-  // One arrow per side, so the pair of months always moves together.
   const slot = dir => dir
     ? '<button type="button" class="dp-nav" data-nav="' + dir + '" aria-label="' +
       (dir < 0 ? "Previous" : "Next") + ' month"' +
       (nav && nav.off === dir ? " disabled" : "") + ">" +
-      (dir < 0 ? "\u2039" : "\u203a") + "</button>"
-    : '<span style="width:24px"></span>';
+      (dir < 0 ? "‹" : "›") + "</button>"
+    : '<span style="width:26px"></span>';
   return '<div class="dp-mon"><div class="dp-mhead">' +
     slot(nav && nav.left ? -1 : 0) + "<span>" + MON[m] + " " + y + "</span>" +
     slot(nav && nav.right ? 1 : 0) +
@@ -4057,34 +4152,55 @@ function dpMonth(first, nav) {
 }
 
 function dpDraw() {
-  const left = DP.month;
-  const right = new Date(left.getFullYear(), left.getMonth() + 1, 1);
-  const t = istToday();
-  const atEnd = right.getFullYear() === dParse(t).getFullYear() &&
-                right.getMonth() === dParse(t).getMonth();
-  const cur = dpPresets().find(([, f, to]) => f === DP.from && to === DP.to);
-
-  $("dp-presets").innerHTML = dpPresets().map(([label, f, to]) =>
-    '<button type="button" data-f="' + f + '" data-t="' + to + '" aria-pressed="' +
-    (cur && cur[0] === label ? "true" : "false") + '">' + esc(label) + "</button>").join("") +
-    (DP.which === "cmp"
-      ? '<button type="button" data-clear="1">No comparison</button>' : "");
-
-  $("dp-months").innerHTML =
-    dpMonth(left, { left: true }) +
-    dpMonth(right, { right: true, off: atEnd ? 1 : 0 });
-
   const lo = DP.from && DP.to ? (DP.from < DP.to ? DP.from : DP.to) : DP.from;
   const hi = DP.from && DP.to ? (DP.from < DP.to ? DP.to : DP.from) : DP.from;
-  $("dp-sum").textContent = !lo
-    ? (DP.which === "cmp" ? "No comparison" : "Pick a day")
-    : (lo === hi ? lo : lo + "  →  " + hi + "   ·   " + dDays(lo, hi) + " days");
+
+  if (DP.which === "cmp") return dpDrawMenu();
+
+  const cur = dpPresets().find(([, f, t]) => f === DP.from && t === DP.to);
+  $("dp-presets").innerHTML = dpPresets().map(x => x[0] === null ? "<hr>" :
+    '<button type="button" data-f="' + x[1] + '" data-t="' + x[2] + '" aria-pressed="' +
+    (cur && cur[0] === x[0] ? "true" : "false") + '">' + esc(x[0]) + "</button>").join("");
+
+  const left = DP.month;
+  const right = new Date(left.getFullYear(), left.getMonth() + 1, 1);
+  const t = dParse(istToday());
+  const atEnd = right.getFullYear() === t.getFullYear() && right.getMonth() === t.getMonth();
+  $("dp-months").innerHTML =
+    dpMonth(left, { left: true }) + dpMonth(right, { right: true, off: atEnd ? 1 : 0 });
+
+  if (document.activeElement !== $("dp-lo")) $("dp-lo").value = lo || "";
+  if (document.activeElement !== $("dp-hi")) $("dp-hi").value = hi || "";
+  $("dp-sum").textContent = !lo ? "Pick a day"
+    : (lo === hi ? dNice(lo)
+       : dNice(lo) + "  →  " + dNice(hi) + "   ·   " + dDays(lo, hi) + " days");
+  // Apply stays dead until something actually changed, so the button
+  // never promises a refetch it will not perform.
+  $("dp-apply").disabled = !lo || (DP.from + ".." + DP.to) === DP.was;
+}
+
+function dpDrawMenu() {
+  const lo = winFrom(), hi = winTo();
+  $("dp-presets").innerHTML = cmpModes(lo, hi).map(([key, label, range]) => {
+    // A window the tracker cannot reach is offered but dead, with the
+    // reason on it: silently dropping it would leave the reader
+    // wondering where last year went.
+    const tooOld = range && DATA_FLOOR && range[0] < DATA_FLOOR;
+    return '<button type="button" data-mode="' + key + '" aria-pressed="' +
+      (CMP_MODE === key ? "true" : "false") + '"' + (tooOld ? " disabled" : "") + ">" +
+      esc(label) +
+      (range && !tooOld
+        ? '<span class="dpnote">' + esc(range[0] === range[1] ? dNice(range[0])
+            : dNice(range[0]) + " – " + dNice(range[1])) + "</span>" : "") +
+      (tooOld ? '<span class="dpnote">the tracker starts ' + esc(dNice(DATA_FLOOR)) +
+                "</span>" : "") + "</button>";
+  }).join("");
 }
 
 function dpPick(iso) {
-  // First click starts a range, second closes it. Clicking a third
-  // time starts over -- the alternative, extending whichever end is
-  // nearer, guesses at an intent the click does not carry.
+  // First click starts a range, second closes it. A third starts over
+  // -- extending whichever end is nearer guesses at an intent the
+  // click does not carry.
   if (!DP.anchor) { DP.anchor = iso; DP.from = iso; DP.to = iso; }
   else { DP.from = DP.anchor; DP.to = iso; DP.anchor = null; }
   dpDraw();
@@ -4093,27 +4209,29 @@ function dpPick(iso) {
 function dpApply() {
   const lo = DP.from && DP.to ? (DP.from < DP.to ? DP.from : DP.to) : DP.from;
   const hi = DP.from && DP.to ? (DP.from < DP.to ? DP.to : DP.from) : DP.from;
+  if (!lo) return dpClose();
   if (DP.which === "day") {
-    if (!lo) return dpClose();
     $("day").value = hi;
     $("day-from").value = lo === hi ? "" : lo;
     DAY_PINNED = true;
     QTY = null;
+    cmpResolve();
   } else {
-    $("cmp").value = hi || "";
-    $("cmp-from").value = (lo && hi && lo !== hi) ? lo : "";
+    CMP_MODE = "custom";
+    $("cmp").value = hi;
+    $("cmp-from").value = lo === hi ? "" : lo;
   }
   dpClose();
   dpLabels();
   load();
 }
 
-/** The buttons, after any change to the window. */
+/** The two buttons, after any change to the window. */
 function dpLabels() {
-  $("day-lbl").textContent = winLabel($("day-from").value, $("day").value || istToday());
-  $("cmp-lbl").textContent = $("cmp").value
-    ? winLabel($("cmp-from").value, $("cmp").value)
-    : "the window before";
+  const lo = $("day-from").value, hi = $("day").value || istToday();
+  $("day-lbl").textContent = lo && lo !== hi
+    ? dNice(lo) + " – " + dNice(hi) : dNice(hi);
+  $("cmp-lbl").textContent = cmpLabel();
 }
 
 // --- wiring -----------------------------------------------------------
@@ -4123,7 +4241,11 @@ $("day").value = qs.get("day") || istToday();
 $("day-from").value = qs.get("from") || "";
 $("cmp").value = qs.get("compare_to") || "";
 $("cmp-from").value = qs.get("compare_from") || "";
+// A compare pinned in the URL is a deliberate choice, so it stays put
+// rather than being re-resolved from a relation on the first load.
+if (qs.get("compare_to")) CMP_MODE = "custom";
 $("api").value = apiBase();
+cmpResolve();
 dpLabels();
 
 $("day-btn").onclick = () => DP.which === "day" ? dpClose() : dpOpen("day", $("day-btn"));
@@ -4138,6 +4260,34 @@ $("dp").addEventListener("click", e => {
     DP.month = new Date(DP.month.getFullYear(),
                         DP.month.getMonth() + Number(nav.getAttribute("data-nav")), 1);
     return dpDraw();
+  }
+  const mode = e.target.closest("[data-mode]");
+  if (mode) {
+    const key = mode.getAttribute("data-mode");
+    if (key === "custom") {
+      // Custom turns the menu into the calendar in place, seeded with
+      // whatever the comparison currently resolves to.
+      DP.which = "cmp";
+      DP.from = cmpFrom() || winFrom();
+      DP.to = cmpTo() || winTo();
+      DP.was = "";
+      DP.anchor = null;
+      const sd = dParse(DP.to);
+      DP.month = new Date(sd.getFullYear(), sd.getMonth() - 1, 1);
+      $("dp").classList.remove("menu");
+      $("dp-main").hidden = false;
+      dpPlace($("cmp-btn"));
+      // dpDraw would bounce straight back to the menu on which="cmp",
+      // so the calendar is drawn by the period branch directly.
+      const keep = DP.which; DP.which = "day"; dpDraw(); DP.which = keep;
+      $("dp-apply").disabled = false;
+      return;
+    }
+    CMP_MODE = key;
+    cmpResolve();
+    dpClose();
+    dpLabels();
+    return load();
   }
   const pre = e.target.closest("[data-f]");
   if (pre) {
@@ -4156,6 +4306,24 @@ $("dp").addEventListener("click", e => {
   }
   const d = e.target.closest("[data-d]");
   if (d && !d.disabled) dpPick(d.getAttribute("data-d"));
+});
+
+// The typed ends. A half-finished date is not an error yet, so the
+// field only reddens once it is complete and still unparseable.
+["dp-lo", "dp-hi"].forEach(id => $(id).addEventListener("input", e => {
+  const v = e.target.value.trim();
+  const ok = dOk(v);
+  e.target.classList.toggle("bad", v.length >= 10 && !ok);
+  if (!ok) { $("dp-apply").disabled = true; return; }
+  if (v > istToday()) { e.target.classList.add("bad"); return; }
+  if (id === "dp-lo") DP.from = v; else DP.to = v;
+  DP.anchor = null;
+  const sd = dParse(v);
+  DP.month = new Date(sd.getFullYear(), sd.getMonth() - (id === "dp-lo" ? 0 : 1), 1);
+  dpDraw();
+}));
+$("dp-main").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !$("dp-apply").disabled) dpApply();
 });
 
 // Click-away and Escape close WITHOUT applying: the panel is a draft

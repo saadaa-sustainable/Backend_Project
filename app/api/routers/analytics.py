@@ -14295,6 +14295,9 @@ async def get_hourly_tracker(
     compare_from: date | None = Query(
         default=None, description="First day of the comparison window. Default: a window "
                                   "of the same length as the main one."),
+    compare: bool = Query(
+        default=True, description="false asks for NO comparison at all. Absent is not "
+                                  "the same thing: it means 'use the default window'."),
 ) -> HourlyTrackerResponse:
     """The campaign tracker, hour by hour, against another window.
 
@@ -14314,13 +14317,20 @@ async def get_hourly_tracker(
     # The comparison window matches the main one in LENGTH, not just in
     # end date. Comparing seven days against one would read as a
     # collapse that never happened.
-    if compare_to or compare_from:
+    if not compare:
+        # Asked for explicitly. An ABSENT compare_to means "default",
+        # so there has to be a way to say "none" that is not an absent
+        # date -- and it halves the rows this has to read.
+        base_window = []
+        baseline = window[0] - timedelta(days=1)
+    elif compare_to or compare_from:
         c_end = compare_to or (compare_from + timedelta(days=len(window) - 1))
         base_window = _day_span(compare_from or c_end, c_end)
+        baseline = base_window[-1]
     else:
         c_end = window[0] - timedelta(days=1)
         base_window = _day_span(c_end - timedelta(days=len(window) - 1), c_end)
-    baseline = base_window[-1]
+        baseline = base_window[-1]
 
     days = sorted({*window, *base_window})
     result = (await session.execute(text(_HOURLY_TRACKER_SQL),
@@ -14340,6 +14350,13 @@ async def get_hourly_tracker(
         "FROM public.hourly_campaign_tracker"))).mappings().first() or {}
     raw = [dict(r) for r in result]
     win, base = set(window), set(base_window)
+    # The days that ACTUALLY produced rows, not the days asked for. A
+    # "last 90 days" against a table holding fifty would otherwise
+    # report a 90-day window and a first day nobody has ingested --
+    # the count is what the figures are built from, so it has to be
+    # the days that exist.
+    covered = sorted({m["day_ist"] for m in raw if m["day_ist"] in win})
+    covered_base = sorted({m["day_ist"] for m in raw if m["day_ist"] in base})
     today_rows = [_derive_hourly(m)
                   for m in _merge_hours([m for m in raw if m["day_ist"] in win])]
     base_rows = [_derive_hourly(m)
@@ -14369,9 +14386,9 @@ async def get_hourly_tracker(
         rows=today_rows,
         sources=sources,
         compare_rows=base_rows,
-        today=_totals(target, today_rows, window),
-        compare=_totals(baseline, clamped, base_window),
-        compare_full=_totals(baseline, base_rows, base_window),
+        today=_totals(target, today_rows, covered or window),
+        compare=_totals(baseline, clamped, covered_base or base_window),
+        compare_full=_totals(baseline, base_rows, covered_base or base_window),
         latest_hour=latest,
         fetched_at=ist_now,
         first_day=span_row.get("first_day"),
@@ -15165,7 +15182,9 @@ async def get_quantity(
     target = day or datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
     window = _day_span(from_day or target, target)
     result = await session.execute(text(_QUANTITY_SQL), {"days": window})
-    rows = _merge_hours([dict(r) for r in result.mappings()])
+    raw = [dict(r) for r in result.mappings()]
+    covered = sorted({r["day_ist"] for r in raw}) or window
+    rows = _merge_hours(raw)
 
     hours: list[QuantityHour] = []
     total_mix: dict[str, int] = {}
@@ -15204,7 +15223,7 @@ async def get_quantity(
     t_cust = sum(h.customers for h in hours)
     t_ret = sum(h.returning_customers for h in hours)
     return QuantityResponse(
-        day=window[-1], first_day=window[0], day_count=len(window), hours=hours,
+        day=covered[-1], first_day=covered[0], day_count=len(covered), hours=hours,
         qty=t_qty, orders=t_orders,
         # Re-divided from the sums, never averaged across hours: a dead
         # 4am hour must not weigh the same as a 9pm peak.
