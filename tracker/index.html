@@ -418,6 +418,16 @@
      layout. */
   @media (min-width: 880px) { .strip.s3 { grid-template-columns: repeat(3, minmax(0,1fr)); } }
   .strip.s3 { margin-top: 10px; }
+  /* FIVE cards, so five columns. Over three they filled a row and a
+     half and left a shaded dead cell, which reads as a sixth figure
+     that failed to load rather than as layout -- the same trap the
+     six-card strip above was moved off four columns to avoid. */
+  @media (min-width: 1100px) { .strip.s5 { grid-template-columns: repeat(5, minmax(0,1fr)); } }
+  @media (min-width: 880px) and (max-width: 1099px) {
+    .strip.s5 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    /* At three the last card would sit alone; it spans instead. */
+    .strip.s5 > div:last-child { grid-column: span 2; }
+  }
   .strip > div { background: var(--surface); padding: 15px 17px; }
   /* The dispatch desk's tab bar: a row of buckets, each with its
      count in a pill, and the active one underlined. A tab bar beats
@@ -496,6 +506,13 @@
   .chain .b.inp input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .chain .b.inp input { -moz-appearance: textfield; }
   .chain-note { margin-top: 8px; }
+
+  /* A heading over a strip, so two blocks of cards that answer
+     different questions cannot be read as one run of KPIs. */
+  .kwh { margin-top: 18px; margin-bottom: 8px; font-size: 12px; font-weight: 700;
+         letter-spacing: .04em; text-transform: uppercase; color: var(--text-2); }
+  .kwh .sub { display: block; margin-top: 4px; font-size: 11.5px; font-weight: 400;
+              letter-spacing: 0; text-transform: none; }
 
   /* ---- Kwikchat import -------------------------------------------
      Collapsed by default. It is a once-a-week job for one person, so
@@ -1016,6 +1033,16 @@
         <button type="button" class="xbtn" id="x-coin-daily">Export days</button></span>
     </div>
     <div class="strip" id="coin-kpis"></div>
+
+    <div class="kwh" id="coin-ship-h">Shipment standing
+      <span class="sub" id="coin-ship-span"></span></div>
+    <div class="strip s5" id="coin-shipment"></div>
+
+    <div class="kwh">Dispatch desk &middot; whole promotion
+      <span class="sub">Why a parcel is held, by the desk&rsquo;s rules. A different
+        question from the block above, over all days &mdash; the two are the same
+        orders counted differently and are not meant to reconcile line for
+        line.</span></div>
     <div class="strip s3" id="coin-dispatch"></div>
     <div class="chain" id="coin-chain"></div>
     <div class="sub chain-note">Cost per coin is editable &mdash; the figures are
@@ -2018,10 +2045,15 @@ function applyView() {
   // change a date and watch nothing happen. Hidden rather than
   // disabled, because a greyed control still claims the section has
   // a day dimension it does not have.
-  const dayless = VIEW === "inv" || VIEW === "coin";
-  $("f-day").hidden = dayless;
-  $("f-cmp").hidden = dayless;
-  $("f-deltas").hidden = dayless;
+  // Inventory is a live snapshot and reads no date at all. Coin Orders
+  // now has ONE block that does -- the shipment standing -- so its
+  // Period control comes back while Compare stays away: nothing on
+  // that tab is measured against another window.
+  const dayless = VIEW === "inv";
+  $("f-day").hidden = dayless || false;
+  $("f-cmp").hidden = dayless || VIEW === "coin";
+  $("f-deltas").hidden = dayless || VIEW === "coin";
+  if (VIEW === "inv") $("f-day").hidden = true;
   // Inventory does not move hour to hour and is a separate request, so
   // it is fetched once and then redrawn from memory.
   if (VIEW === "inv") { loadInventory(); return; }
@@ -2459,13 +2491,23 @@ let COINS = null, COINS_LOADING = false;
 // does not exist until the first draw.
 let COIN_COST = 500;
 
+//: The window the held response was fetched for. The coin figures are
+//: cumulative EXCEPT the shipment block, so a date change has to
+//: refetch -- the cache cannot be keyed on the cost alone.
+let COINS_KEY = null;
+
 function loadCoins() {
   $("coincard").hidden = false;
-  if (COINS) { drawCoins(); return; }
+  const to = winTo();
+  const from = $("day-from").value || to;
+  const key = COIN_COST + "|" + from + ".." + to;
+  if (COINS && COINS_KEY === key) { drawCoins(); return; }
   if (COINS_LOADING) return;
   COINS_LOADING = true;
+  COINS_KEY = key;
   $("coin-kpis").innerHTML = skeleton(4, 5);
-  fetch(apiBase() + "/admin/analytics/coins?coin_cost=" + encodeURIComponent(COIN_COST))
+  fetch(apiBase() + "/admin/analytics/coins?coin_cost=" + encodeURIComponent(COIN_COST) +
+        "&from_day=" + encodeURIComponent(from) + "&day=" + encodeURIComponent(to))
     .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
     .then(d => { COINS = d; COINS_LOADING = false; drawCoins(); })
     .catch(e => {
@@ -2507,6 +2549,31 @@ function drawCoins() {
   // address issues, coin only, shipped -- partition the coin orders
   // exactly, so they sum to the total. Bundle-no-coin does NOT: those
   // orders carry no coin at all, which is why it is coloured apart.
+  // Shipment standing, for the SELECTED window. The only block on this
+  // tab that moves with the date control, which is why it carries the
+  // window in its own heading rather than relying on the control bar.
+  const sh = d.shipment;
+  $("coin-ship-h").hidden = $("coin-shipment").hidden = !sh;
+  if (sh) {
+    $("coin-ship-span").textContent =
+      (sh.first_day === sh.last_day ? dNice(sh.first_day)
+        : dNice(sh.first_day) + " \u2192 " + dNice(sh.last_day)) +
+      "  \u00b7  cleared and held add back to pending";
+    $("coin-shipment").innerHTML = [
+      ["To be shipped", num(sh.total), "coin orders placed in this window", ""],
+      ["Already shipped", num(sh.shipped),
+       pc(sh.total ? sh.shipped / sh.total : null, 0) + " of them", ""],
+      ["Pending shipment", num(sh.pending), "still to go out", "var(--s3)"],
+      ["Cleared to ship", num(sh.cleared),
+       "prepaid, low risk, or verified", "var(--good)"],
+      ["Held for confirmation", num(sh.held),
+       "medium or high risk, or unscored COD", "var(--bad)"],
+    ].map(([k, v, sub, colour]) =>
+      '<div><div class="k">' + esc(k) + "</div>" +
+      '<div class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" + v +
+      "</div>" + '<div class="s">' + esc(sub) + "</div></div>").join("");
+  }
+
   $("coin-dispatch").innerHTML = [
     ["Cleared to ship", num(d.total_ship_now), "not yet fulfilled",
      "var(--good)"],
@@ -4643,6 +4710,9 @@ function bootDone() {
 function reloadWindow() {
   load();
   if (VIEW === "qty") loadQty();
+  // Coin Orders is mostly cumulative, but its shipment block reads the
+  // window, so a date change has to reach it too.
+  if (VIEW === "coin") { COINS = null; loadCoins(); }
 }
 
 /** The two buttons, after any change to the window. */

@@ -14720,6 +14720,43 @@ class CoinDay(BaseModel):
     address_bad: int
 
 
+class CoinShipment(BaseModel):
+    """Where the coin orders stand on getting out of the door.
+
+    A different cut from the dispatch buckets above it: those answer
+    "what is stopping this parcel", this answers "how many can go
+    today". The two populations are the same orders counted by
+    different questions and are not meant to reconcile line for line.
+
+    WHAT CLEARS AN ORDER. Prepaid is cleared because the money is
+    already in. A COD is cleared once GoKwik has scored it LOW, or
+    once the desk has rung it and tagged `silver-cod-verified`.
+    Everything else pending is held: medium and high risk, and COD
+    that carries no score at all -- never scored is not the same as
+    scored safe, and shipping an unchecked COD is the mistake this
+    split exists to prevent.
+
+    The two sub-counts PARTITION the pending orders, so they add back
+    to it exactly. A low-risk COD is cleared, by the rule above; there
+    are enough of them that reading it the other way would move the
+    held count several-fold, which is why the rule is written out
+    rather than left to the column names.
+    """
+    #: The window these counts cover. Null means the whole promotion.
+    first_day: date | None = None
+    last_day: date | None = None
+    #: Every coin order placed in the window.
+    total: int
+    #: Already fulfilled in Shopify.
+    shipped: int
+    #: total - shipped. What is still to go out.
+    pending: int
+    #: Prepaid, low risk, or rung and verified.
+    cleared: int
+    #: Medium or high risk, or COD with no score.
+    held: int
+
+
 class CoinsResponse(BaseModel):
     """The gift-coin promotion, every day it has run.
 
@@ -14739,6 +14776,9 @@ class CoinsResponse(BaseModel):
     total_cost: float
     #: Coin orders over all orders, across the whole run.
     attach_rate: float | None
+    #: Shipment standing for the SELECTED window, not the whole run --
+    #: the only block here that moves with the date control.
+    shipment: CoinShipment | None = None
     #: The dispatch desk's breakdown of the same coin population.
     #: Payment and fulfilment are read when the hour is ingested and
     #: both move afterwards, so a past day holds the state as it was
@@ -14782,16 +14822,67 @@ HAVING COALESCE(sum(silver_coin_orders), 0) > 0
 """
 
 
+_COIN_SHIPMENT_SQL = """
+SELECT MIN(day_ist) AS first_day,
+       MAX(day_ist) AS last_day,
+       COUNT(*)                                            AS total,
+       COUNT(*) FILTER (WHERE shipped)                     AS shipped,
+       COUNT(*) FILTER (WHERE NOT shipped)                 AS pending,
+       COUNT(*) FILTER (WHERE NOT shipped AND cleared)     AS cleared,
+       COUNT(*) FILTER (WHERE NOT shipped AND NOT cleared) AS held
+  FROM (
+    SELECT day_ist,
+           COALESCE(fulfillment ILIKE 'fulfilled', false) AS shipped,
+           -- Prepaid: the money is in. Low: GoKwik scored it safe.
+           -- cod_verified: the desk rang it. Anything else pending is
+           -- held -- including COD with NO score, because never
+           -- scored is not the same as scored safe.
+           --
+           -- COALESCE AROUND THE WHOLE CHAIN, not around one term.
+           -- `NULL OR false` is NULL, not false, so an order with no
+           -- payment and no risk tag made the test NULL and fell out
+           -- of BOTH sub-counts -- they stopped adding back to
+           -- pending, by 365 orders on the first window tried. TRUE
+           -- still wins over a NULL beside it, so a known-good order
+           -- is unaffected.
+           COALESCE(payment = 'Prepaid' OR risk_tag = 'Low'
+                      OR cod_verified, false) AS cleared
+      FROM public.silver_coin_order
+     WHERE (CAST(:from_day AS date) IS NULL OR day_ist >= CAST(:from_day AS date))
+       AND (CAST(:to_day   AS date) IS NULL OR day_ist <= CAST(:to_day   AS date))
+  ) t
+"""
+
+
 @router.get("/coins", response_model=CoinsResponse)
 @cached_analytics(ttl=120.0)
 async def get_coins(
     session: SessionDep,
     coin_cost: float = Query(default=500.0, ge=0, le=100000,
                              description="Rupees per coin. Default 500."),
+    day: date | None = Query(default=None,
+                             description="Last day of the shipment window. Default: "
+                                         "the whole promotion."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the shipment window."),
 ) -> CoinsResponse:
-    """Silver coin orders and their cost, for every day the promotion ran."""
+    """Silver coin orders and their cost, for every day the promotion ran.
+
+    ONE BLOCK MOVES WITH THE DATE and the rest does not. The coins,
+    the cost and the attach rate are cumulative by design -- the
+    question they answer is how many have gone out since the promotion
+    started -- while the shipment standing is about what the desk has
+    to do with a particular stretch of orders. Mixing the two would
+    make "cost to date" mean something different depending on a
+    control three rows above it.
+    """
     result = await session.execute(text(_COINS_SQL))
     rows = [dict(r) for r in result.mappings()]
+
+    ship = (await session.execute(
+        text(_COIN_SHIPMENT_SQL),
+        {"from_day": from_day, "to_day": day})).mappings().first()
+    shipment = CoinShipment(**dict(ship)) if ship and ship["total"] else None
 
     days = [
         CoinDay(day=r["day"], orders=r["orders"], coin_orders=r["coin_orders"],
@@ -14827,6 +14918,7 @@ async def get_coins(
         total_orders=t_orders, total_coin_orders=t_coin_orders, total_coins=t_coins,
         total_cost=t_coins * coin_cost,
         attach_rate=(t_coin_orders / t_orders) if t_orders else None,
+        shipment=shipment,
         total_coin_only=sum(d.coin_only for d in days),
         total_shipped=sum(d.shipped for d in days),
         total_prepaid=sum(d.prepaid for d in days),
