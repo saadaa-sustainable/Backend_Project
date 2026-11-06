@@ -594,6 +594,12 @@ CREATE TABLE IF NOT EXISTS {COIN_TABLE} (
     -- "flag" means deliverable but worth knowing -- a shop or a
     -- hostel room. It never holds the order.
     address_flag    text,
+    -- A COD the desk has already rung and confirmed, read from the
+    -- order's `silver-cod-verified` tag at ingest. Kept as a column
+    -- because the alternative -- matching that tag in shopify_orders
+    -- at query time -- cannot use an index and costs a sequential
+    -- scan of the whole order book.
+    cod_verified    boolean,
     fetched_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_coin_order_created ON {COIN_TABLE} (created_at DESC);
@@ -614,15 +620,49 @@ ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address2 text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS address1 text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS phone text;
 ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS customer_name text;
+ALTER TABLE {COIN_TABLE} ADD COLUMN IF NOT EXISTS cod_verified boolean;
 CREATE INDEX IF NOT EXISTS ix_coin_order_bucket ON {COIN_TABLE} (bucket);
 """
 
 COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "units",
                 "amount", "payment", "fulfillment", "risk_tag", "customer_orders",
                 "is_returning", "city", "state", "pincode", "coin_only",
+                 "cod_verified",
                 "bucket", "bucket_reason", "address_flag", "watchlist",
                 "customer_name", "phone", "address1", "address2", "channel",
                 "item_count", "bundles", "call_reasons", "address_issues"]
+
+#: How far back to re-check fulfilment on every run.
+#:
+#: A coin row records the order's fulfilment at the hour it was PLACED
+#: and the ingest never revisits that hour, so a parcel shipping days
+#: later stayed "not yet fulfilled" for good. Measured against Shopify
+#: before this was added, the dispatch strip had less than half the
+#: orders that had actually gone out, and the error grew with order
+#: age -- always understating dispatch and overstating the backlog.
+#:
+#: Twenty days is well past the point where orders stop moving, and the
+#: join rides the orders table's primary key.
+COIN_REFRESH_DAYS = 20
+
+REFRESH_FULFILMENT = """
+UPDATE public.silver_coin_order c
+   SET fulfillment = o.fulfillment_status,
+       -- Shipped wins over every other bucket -- a parcel that has gone
+       -- cannot be held for anything -- which is why promoting it here
+       -- is enough and the rest of classify() need not be re-run.
+       bucket = CASE WHEN o.fulfillment_status ILIKE 'fulfilled' THEN 'shipped'
+                     ELSE c.bucket END
+  FROM public.shopify_orders o
+ -- order_id, not name: it is the orders table's PRIMARY KEY, while
+ -- `name` carries no index at all and joining on it costs a sequential
+ -- scan of the whole order book.
+ WHERE o.order_id = c.order_id
+   AND c.day_ist >= (now() AT TIME ZONE 'Asia/Kolkata')::date - CAST(%(days)s AS int)
+   -- Only rows that actually changed, so a quiet hour writes nothing.
+   AND c.fulfillment IS DISTINCT FROM o.fulfillment_status
+"""
+
 
 COIN_UPSERT = f"""
 INSERT INTO {COIN_TABLE} ({", ".join(COIN_COLUMNS)}) VALUES %s
@@ -955,6 +995,14 @@ def coin_order_row(n: dict, cust: dict, created: datetime,
         "payment": PAYMENT_LABEL.get((n.get("displayFinancialStatus") or "").upper()),
         "fulfillment": (n.get("displayFulfillmentStatus") or "").title() or None,
         "risk_tag": risk_of(n.get("tags")),
+        # A COD the desk has already rung and confirmed. Stored here
+        # rather than read from shopify_orders.tags at query time: that
+        # join cannot use an index on a `tags::text ILIKE` and costs a
+        # sequential scan of every order in the shop -- about 89,000
+        # blocks for one KPI card, on a page that loads it every visit.
+        "cod_verified": any(
+            (t or "").strip().lower() == "silver-cod-verified"
+            for t in (n.get("tags") or [])),
         "customer_orders": nord,
         "is_returning": (nord > 1) if nord is not None else None,
         "city": addr.get("city"), "state": addr.get("province"),
@@ -1503,6 +1551,11 @@ def write(rows: list[dict], coin_rows: list[dict] | None = None) -> int:
                 cur, COIN_UPSERT,
                 [tuple(r.get(c) for c in COIN_COLUMNS) for r in coin_rows],
                 page_size=200)
+            cur.execute(REFRESH_FULFILMENT, {"days": COIN_REFRESH_DAYS})
+            moved = cur.rowcount
+            if moved:
+                print(f"          {moved:,} coin order(s) caught up on fulfilment",
+                      flush=True)
         conn.commit()
     return len(tuples)
 
