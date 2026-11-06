@@ -14779,6 +14779,11 @@ class CoinsResponse(BaseModel):
     #: Shipment standing for the SELECTED window, not the whole run --
     #: the only block here that moves with the date control.
     shipment: CoinShipment | None = None
+    #: How many orders the five dispatch buckets partition. Counted
+    #: from the same rows as the buckets themselves, so the strip adds
+    #: up; it differs slightly from total_coin_orders, which is summed
+    #: from the per-hour columns.
+    dispatch_orders: int = 0
     #: The dispatch desk's breakdown of the same coin population.
     #: Payment and fulfilment are read when the hour is ingested and
     #: both move afterwards, so a past day holds the state as it was
@@ -14819,6 +14824,32 @@ SELECT day_ist AS day,
  GROUP BY day_ist
 HAVING COALESCE(sum(silver_coin_orders), 0) > 0
  ORDER BY day_ist
+"""
+
+
+_COIN_DISPATCH_SQL = """
+-- The desk's buckets, counted from the ORDER ROWS rather than from the
+-- per-hour columns on hourly_campaign_tracker.
+--
+-- Those columns are frozen at the hour an order was written and never
+-- revisited, so a parcel that ships three days after the order was
+-- placed stayed "not yet fulfilled" for ever: shipped read well under
+-- what Shopify said, and the error grew with order age, always
+-- understating dispatch and overstating the backlog.
+--
+-- The two sources are also different POPULATIONS -- the hourly column
+-- and this table disagree on what counts as a coin order, by enough to
+-- notice -- so the numerator and the denominator have to come
+-- from the same place or the five buckets stop summing to the total
+-- they are drawn under.
+SELECT COUNT(*) FILTER (WHERE bucket <> 'bundle_no_coin')  AS coin_orders,
+       COUNT(*) FILTER (WHERE bucket = 'ship_now')         AS ship_now,
+       COUNT(*) FILTER (WHERE bucket = 'call_list')        AS call_list,
+       COUNT(*) FILTER (WHERE bucket = 'address_bad')      AS address_bad,
+       COUNT(*) FILTER (WHERE bucket = 'shipped')          AS shipped,
+       COUNT(*) FILTER (WHERE bucket = 'coin_only')        AS coin_only,
+       COUNT(*) FILTER (WHERE bucket = 'bundle_no_coin')   AS bundle_no_coin
+  FROM public.silver_coin_order
 """
 
 
@@ -14879,6 +14910,8 @@ async def get_coins(
     result = await session.execute(text(_COINS_SQL))
     rows = [dict(r) for r in result.mappings()]
 
+    disp = (await session.execute(text(_COIN_DISPATCH_SQL))).mappings().first() or {}
+
     ship = (await session.execute(
         text(_COIN_SHIPMENT_SQL),
         {"from_day": from_day, "to_day": day})).mappings().first()
@@ -14919,15 +14952,29 @@ async def get_coins(
         total_cost=t_coins * coin_cost,
         attach_rate=(t_coin_orders / t_orders) if t_orders else None,
         shipment=shipment,
-        total_coin_only=sum(d.coin_only for d in days),
-        total_shipped=sum(d.shipped for d in days),
+        # From the order rows, not the per-hour columns: those freeze an
+        # order's fulfilment at the hour it was placed and never revisit
+        # it. See _COIN_DISPATCH_SQL.
+        total_coin_only=disp.get("coin_only", 0),
+        total_shipped=disp.get("shipped", 0),
         total_prepaid=sum(d.prepaid for d in days),
         total_partial=sum(d.partial for d in days),
         total_cod=sum(d.cod for d in days),
+        # STILL from the hourly columns, unlike the five above. The
+        # order table holds only a fraction of these, a small part of
+        # what the ingest counted -- and until that gap is understood,
+        # taking the smaller number would silently drop orders from a
+        # card. It is not part of the partition, so the mixed source
+        # costs nothing in consistency.
         total_bundle_no_coin=sum(d.bundle_no_coin for d in days),
-        total_ship_now=sum(d.ship_now for d in days),
-        total_call_list=sum(d.call_list for d in days),
-        total_address_bad=sum(d.address_bad for d in days),
+        total_ship_now=disp.get("ship_now", 0),
+        total_call_list=disp.get("call_list", 0),
+        total_address_bad=disp.get("address_bad", 0),
+        #: The denominator the five buckets partition. NOT
+        #: total_coin_orders: that is summed from the hourly columns,
+        #: which count a slightly different population, and dividing
+        #: one source by the other made the strip fail to add up.
+        dispatch_orders=disp.get("coin_orders", 0),
         total_watchlist=watch,
     )
 

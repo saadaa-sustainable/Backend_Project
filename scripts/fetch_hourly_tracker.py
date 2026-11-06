@@ -632,6 +632,38 @@ COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "uni
                 "customer_name", "phone", "address1", "address2", "channel",
                 "item_count", "bundles", "call_reasons", "address_issues"]
 
+#: How far back to re-check fulfilment on every run.
+#:
+#: A coin row records the order's fulfilment at the hour it was PLACED
+#: and the ingest never revisits that hour, so a parcel shipping days
+#: later stayed "not yet fulfilled" for good. Measured against Shopify
+#: before this was added, the dispatch strip had less than half the
+#: orders that had actually gone out, and the error grew with order
+#: age -- always understating dispatch and overstating the backlog.
+#:
+#: Twenty days is well past the point where orders stop moving, and the
+#: join rides the orders table's primary key.
+COIN_REFRESH_DAYS = 20
+
+REFRESH_FULFILMENT = """
+UPDATE public.silver_coin_order c
+   SET fulfillment = o.fulfillment_status,
+       -- Shipped wins over every other bucket -- a parcel that has gone
+       -- cannot be held for anything -- which is why promoting it here
+       -- is enough and the rest of classify() need not be re-run.
+       bucket = CASE WHEN o.fulfillment_status ILIKE 'fulfilled' THEN 'shipped'
+                     ELSE c.bucket END
+  FROM public.shopify_orders o
+ -- order_id, not name: it is the orders table's PRIMARY KEY, while
+ -- `name` carries no index at all and joining on it costs a sequential
+ -- scan of the whole order book.
+ WHERE o.order_id = c.order_id
+   AND c.day_ist >= (now() AT TIME ZONE 'Asia/Kolkata')::date - CAST(%(days)s AS int)
+   -- Only rows that actually changed, so a quiet hour writes nothing.
+   AND c.fulfillment IS DISTINCT FROM o.fulfillment_status
+"""
+
+
 COIN_UPSERT = f"""
 INSERT INTO {COIN_TABLE} ({", ".join(COIN_COLUMNS)}) VALUES %s
 ON CONFLICT (order_id) DO UPDATE SET
@@ -1519,6 +1551,11 @@ def write(rows: list[dict], coin_rows: list[dict] | None = None) -> int:
                 cur, COIN_UPSERT,
                 [tuple(r.get(c) for c in COIN_COLUMNS) for r in coin_rows],
                 page_size=200)
+            cur.execute(REFRESH_FULFILMENT, {"days": COIN_REFRESH_DAYS})
+            moved = cur.rowcount
+            if moved:
+                print(f"          {moved:,} coin order(s) caught up on fulfilment",
+                      flush=True)
         conn.commit()
     return len(tuples)
 

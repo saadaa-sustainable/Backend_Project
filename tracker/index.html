@@ -2582,7 +2582,10 @@ function drawCoins() {
     ["Held for address fix", num(d.total_address_bad), "address cannot be delivered",
      "var(--bad)"],
     ["Already shipped", num(d.total_shipped),
-     pc(d.total_coin_orders ? d.total_shipped / d.total_coin_orders : null, 0) +
+     // Over the population the buckets partition, not over
+     // total_coin_orders -- those come from different sources and the
+     // share would not match the cards beside it.
+     pc(d.dispatch_orders ? d.total_shipped / d.dispatch_orders : null, 0) +
      " of coin orders", ""],
     ["Coin only", num(d.total_coin_only),
      d.total_coin_only ? "held \u00b7 coin and nothing else" : "none", "var(--bad)",
