@@ -507,6 +507,33 @@
   .chain .b.inp input { -moz-appearance: textfield; }
   .chain-note { margin-top: 8px; }
 
+  /* ---- shipment standing -----------------------------------------
+     Three figures that subtract, then the remainder split in two.
+     Shown as arithmetic rather than as five equal cards: laid out
+     flat, nothing said that cleared and held are PARTS of pending
+     rather than two more totals beside it. */
+  .ship-of { margin-top: 10px; border: 1px solid var(--border-soft);
+             border-radius: 10px; padding: 13px 15px; }
+  .ship-of .hd { display: flex; flex-wrap: wrap; align-items: baseline;
+                 justify-content: space-between; gap: 10px; font-size: 11.5px;
+                 color: var(--text-3); }
+  /* One bar, two segments, so the split is readable before any number
+     is. Widths come from the counts, so a sliver IS a sliver. */
+  .ship-bar { display: flex; height: 10px; margin: 10px 0 11px; border-radius: 5px;
+              overflow: hidden; background: var(--muted); }
+  .ship-bar > i { display: block; height: 100%; }
+  .ship-bar .ok { background: var(--good); }
+  .ship-bar .no { background: var(--bad); }
+  .ship-legs { display: flex; flex-wrap: wrap; gap: 12px 44px; }
+  .ship-leg { display: flex; align-items: baseline; gap: 9px; }
+  .ship-leg .sw { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0;
+                  transform: translateY(1px); }
+  .ship-leg .n { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums;
+                 line-height: 1.1; }
+  .ship-leg .lb { font-size: 12px; font-weight: 600; display: block; }
+  .ship-leg .sb { font-size: 11px; color: var(--text-3); display: block;
+                  margin-top: 2px; }
+
   /* A heading over a strip, so two blocks of cards that answer
      different questions cannot be read as one run of KPIs. */
   .kwh { margin-top: 18px; margin-bottom: 8px; font-size: 12px; font-weight: 700;
@@ -1036,7 +1063,8 @@
 
     <div class="kwh" id="coin-ship-h">Shipment standing
       <span class="sub" id="coin-ship-span"></span></div>
-    <div class="strip s5" id="coin-shipment"></div>
+    <div class="chain" id="coin-shipment"></div>
+    <div class="ship-of" id="coin-ship-of" hidden></div>
 
     <div class="kwh">Dispatch desk &middot; whole promotion
       <span class="sub">Why a parcel is held, by the desk&rsquo;s rules. A different
@@ -2554,24 +2582,51 @@ function drawCoins() {
   // window in its own heading rather than relying on the control bar.
   const sh = d.shipment;
   $("coin-ship-h").hidden = $("coin-shipment").hidden = !sh;
+  $("coin-ship-of").hidden = !sh;
   if (sh) {
     $("coin-ship-span").textContent =
-      (sh.first_day === sh.last_day ? dNice(sh.first_day)
-        : dNice(sh.first_day) + " \u2192 " + dNice(sh.last_day)) +
-      "  \u00b7  cleared and held add back to pending";
-    $("coin-shipment").innerHTML = [
-      ["To be shipped", num(sh.total), "coin orders placed in this window", ""],
-      ["Already shipped", num(sh.shipped),
-       pc(sh.total ? sh.shipped / sh.total : null, 0) + " of them", ""],
-      ["Pending shipment", num(sh.pending), "still to go out", "var(--s3)"],
-      ["Cleared to ship", num(sh.cleared),
-       "prepaid, low risk, or verified", "var(--good)"],
-      ["Held for confirmation", num(sh.held),
-       "medium or high risk, or unscored COD", "var(--bad)"],
-    ].map(([k, v, sub, colour]) =>
-      '<div><div class="k">' + esc(k) + "</div>" +
-      '<div class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" + v +
-      "</div>" + '<div class="s">' + esc(sub) + "</div></div>").join("");
+      sh.first_day === sh.last_day ? dNice(sh.first_day)
+        : dNice(sh.first_day) + " \u2192 " + dNice(sh.last_day);
+
+    // The subtraction, left to right, in the shape the coin cost uses
+    // further down this page.
+    const sbox = (k, v, cls) =>
+      '<div class="b ' + (cls || "") + '"><div class="k">' + esc(k) + "</div>" +
+      '<div class="v">' + v + "</div></div>";
+    $("coin-shipment").innerHTML =
+      sbox("To be shipped", num(sh.total)) +
+      '<div class="op">\u2212</div>' +
+      sbox("Already shipped", num(sh.shipped)) +
+      '<div class="op">=</div>' +
+      // `mid`, not `end`. The end box is bordered in the deduction red
+      // the cost chain uses, and pending is not a loss -- it is simply
+      // the work left. The figure carries the amber on its own.
+      sbox("Pending shipment",
+           '<span style="color:var(--s3)">' + num(sh.pending) + "</span>", "mid");
+
+    // Cleared and held are PARTS of pending, not two more totals beside
+    // it. Laid out as five equal cards nothing said which figures add
+    // up to which, so they sit underneath as a split of one bar.
+    const pctOfPending = n => sh.pending ? (n / sh.pending * 100) : 0;
+    const leg = (good, label, n, sub) =>
+      '<div class="ship-leg"><span class="sw" style="background:var(--' +
+      (good ? "good" : "bad") + ')"></span><span>' +
+      '<span class="n">' + num(n) + "</span>" +
+      '<span class="lb">' + esc(label) + "</span>" +
+      '<span class="sb">' + esc(sub) + "</span></span></div>";
+    $("coin-ship-of").innerHTML =
+      '<div class="hd"><span>Of those ' + num(sh.pending) +
+      " pending \u2014 they add back to it exactly</span>" +
+      "<span>" + pc(sh.pending ? sh.cleared / sh.pending : null, 0) +
+      " ready to go</span></div>" +
+      '<div class="ship-bar"><i class="ok" style="width:' +
+      pctOfPending(sh.cleared).toFixed(1) + '%"></i><i class="no" style="width:' +
+      pctOfPending(sh.held).toFixed(1) + '%"></i></div>' +
+      '<div class="ship-legs">' +
+      leg(true, "Cleared to ship", sh.cleared, "prepaid, low risk, or verified") +
+      leg(false, "Held for confirmation", sh.held,
+          "medium or high risk, or unscored COD") +
+      "</div>";
   }
 
   $("coin-dispatch").innerHTML = [
