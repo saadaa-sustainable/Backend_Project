@@ -509,10 +509,19 @@
 
   /* A heading over a block, so two sets of cards that answer
      different questions cannot be read as one run of KPIs. */
-  .kwh { margin-top: 18px; margin-bottom: 8px; font-size: 12px; font-weight: 700;
+  .kwh { margin-top: 30px; margin-bottom: 10px; font-size: 12px; font-weight: 700;
          letter-spacing: .04em; text-transform: uppercase; color: var(--text-2); }
-  .kwh .sub { display: block; margin-top: 4px; font-size: 11.5px; font-weight: 400;
-              letter-spacing: 0; text-transform: none; }
+  /* The second heading follows a BRANCH, whose cards hang below the
+     row they belong to, so it needs more clearance than a heading
+     after a plain strip -- at the strip's spacing it sat on top of
+     them. */
+  .kwh.after-flow { margin-top: 38px; }
+  /* Measure, not width. The note ran the full fourteen hundred pixels
+     of the card as one line, which is about three times the length a
+     line of prose can be read at without losing its place. */
+  .kwh .sub { display: block; margin-top: 5px; max-width: 78ch; font-size: 11.5px;
+              font-weight: 400; letter-spacing: 0; text-transform: none;
+              line-height: 1.5; }
 
   /* ---- shipment standing -----------------------------------------
      Three figures that subtract, and then the remainder BRANCHES into
@@ -867,7 +876,7 @@
       <span class="sub" id="coin-ship-span"></span></div>
     <div class="flow" id="coin-shipment"></div>
 
-    <div class="kwh">Dispatch desk &middot; whole promotion
+    <div class="kwh after-flow">Dispatch desk &middot; whole promotion
       <span class="sub">Why a parcel is held, by the desk&rsquo;s rules. A different
         question from the block above, over all days &mdash; the two are the same
         orders counted differently and are not meant to reconcile line for
