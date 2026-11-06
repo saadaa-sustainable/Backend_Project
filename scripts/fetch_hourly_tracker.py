@@ -647,20 +647,31 @@ COIN_REFRESH_DAYS = 20
 
 REFRESH_FULFILMENT = """
 UPDATE public.silver_coin_order c
-   SET fulfillment = o.fulfillment_status,
+   SET fulfillment = 'FULFILLED',
        -- Shipped wins over every other bucket -- a parcel that has gone
        -- cannot be held for anything -- which is why promoting it here
        -- is enough and the rest of classify() need not be re-run.
-       bucket = CASE WHEN o.fulfillment_status ILIKE 'fulfilled' THEN 'shipped'
-                     ELSE c.bucket END
+       bucket = 'shipped'
   FROM public.shopify_orders o
  -- order_id, not name: it is the orders table's PRIMARY KEY, while
  -- `name` carries no index at all and joining on it costs a sequential
  -- scan of the whole order book.
  WHERE o.order_id = c.order_id
    AND c.day_ist >= (now() AT TIME ZONE 'Asia/Kolkata')::date - CAST(%(days)s AS int)
-   -- Only rows that actually changed, so a quiet hour writes nothing.
-   AND c.fulfillment IS DISTINCT FROM o.fulfillment_status
+   -- PROMOTE ONLY. shopify_orders is a flattened MIRROR refreshed by a
+   -- separate job, and it lags -- by fourteen hours when this was
+   -- written. The coin row, by contrast, is filled from a live
+   -- GraphQL read at ingest. Copying the mirror wholesale therefore
+   -- overwrote fresh `Fulfilled` rows with the mirror's stale
+   -- `UNFULFILLED`, leaving hundreds of rows a day whose bucket said
+   -- shipped while their own fulfilment column denied it.
+   --
+   -- Taking only the transition to fulfilled makes this purely
+   -- additive: it catches up the old orders the ingest never revisits
+   -- and can never contradict a fresher read. Fulfilment is one-way in
+   -- practice; a cancelled one is corrected by re-ingesting the day.
+   AND o.fulfillment_status ILIKE 'fulfilled'
+   AND c.fulfillment IS DISTINCT FROM 'FULFILLED'
 """
 
 
