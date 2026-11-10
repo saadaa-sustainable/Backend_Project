@@ -650,8 +650,20 @@
                        white-space: nowrap; }
   .dp-presets button:hover { background: var(--muted); }
   .dp-presets button[aria-pressed="true"] { background: var(--muted); font-weight: 650; }
-  .dp-presets button[disabled] { color: var(--text-3); opacity: .5; cursor: default; }
-  .dp-presets button[disabled]:hover { background: transparent; }
+  /* NOT the `disabled` attribute. Chrome swallows every pointer event
+     on a disabled button -- it reaches neither the menu's own handler
+     nor the click-away listener on the document -- so an unreachable
+     comparison was a dead patch of the menu: clicking it did nothing
+     AND would not dismiss the panel, which reads as the whole control
+     being broken. aria-disabled says the same thing to a screen reader
+     while leaving the click to JavaScript, which can then say why. */
+  .dp-presets button[aria-disabled="true"] { color: var(--text-3); opacity: .5;
+                                             cursor: not-allowed; }
+  .dp-presets button[aria-disabled="true"]:hover { background: transparent; }
+  /* The reason is already on the row; this just points at it when the
+     row is clicked, so the click is answered rather than ignored. */
+  .dp-presets button[aria-disabled="true"].nudge .dpnote { color: var(--bad);
+                                                           opacity: 1; }
   /* Shopify groups the presets and rules between the groups; without
      it a list of nine reads as one undifferentiated column. */
   .dp-presets hr { border: 0; border-top: 1px solid var(--border-soft);
@@ -4705,7 +4717,8 @@ function dpDrawMenu() {
     // wondering where last year went.
     const tooOld = range && DATA_FLOOR && range[0] < DATA_FLOOR;
     return '<button type="button" data-mode="' + key + '" aria-pressed="' +
-      (CMP_MODE === key ? "true" : "false") + '"' + (tooOld ? " disabled" : "") + ">" +
+      (CMP_MODE === key ? "true" : "false") + '"' +
+      (tooOld ? ' aria-disabled="true"' : "") + ">" +
       esc(label) +
       (range && !tooOld
         ? '<span class="dpnote">' + esc(range[0] === range[1] ? dNice(range[0])
@@ -4982,6 +4995,19 @@ $("dp").addEventListener("click", e => {
   }
   const mode = e.target.closest("[data-mode]");
   if (mode) {
+    // An unreachable window is offered and refused, not removed: the
+    // row carries the reason, and dropping it silently would leave a
+    // reader wondering where last year went. Refusing it has to SAY
+    // so -- a click that does nothing at all is how this read as a
+    // broken button. The menu stays open, because the reader still has
+    // a choice to make.
+    if (mode.getAttribute("aria-disabled") === "true") {
+      mode.classList.remove("nudge");
+      void mode.offsetWidth;            // restart the flash on a second click
+      mode.classList.add("nudge");
+      setTimeout(() => mode.classList.remove("nudge"), 900);
+      return;
+    }
     const key = mode.getAttribute("data-mode");
     if (key === "custom") {
       // Custom turns the menu into the calendar in place, seeded with
