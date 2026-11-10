@@ -2378,10 +2378,19 @@ function computePnl(r, a) {
     // there has had the reversals taken out while the denominator
     // still counts every order.
     //
-    // `ql_orders` and not our own `orders`: the two count a different
-    // population, and a ratio with a Shopify numerator over our
-    // denominator would be a mongrel that matches neither.
-    const qo = r.ql_orders;
+    // `ql_orders_all` and not our own `orders`, nor even `ql_orders`.
+    //
+    // Shopify's admin card counts EVERY order, Return Prime's
+    // zero-value return legs included, and only that count reproduces
+    // the AOV it shows -- checked against the card on two days, to the
+    // paisa. The filtered count divides the same money by fewer orders
+    // and so lands roughly a tenth high.
+    //
+    // Those legs carry no money, so the numerator is identical either
+    // way -- this is a denominator question and nothing else. Falls
+    // back to the filtered count only for hours stored before the
+    // unfiltered one existed, which reads high rather than blank.
+    const qo = r.ql_orders_all || r.ql_orders;
     return { gross: g, discounts: disc, reversals: rev, netSales: ns,
              shipping: ship, returnFees: rfee, taxes: tax, other: other,
              total: sales, ok: ok,
@@ -4105,7 +4114,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
               ? " " + changeHTML(d.bd.aov, c.bd.aov, "up") : "") +
             '<em style="font-style:normal;display:block;font-size:10px">' +
             "net sales less reversals \u00f7 " + num(d.bd.orders) +
-            " Shopify orders</em></span>" : "") +
+            " orders, as Shopify counts them</em></span>" : "") +
         "</div>"
       : "") +
     breakdown +

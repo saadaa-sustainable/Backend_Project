@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- ratios, and a stored ratio cannot be re-divided when hours are
     -- summed. They are computed on read from these counts.
     ql_orders               integer,
+    -- Shopify's OWN order count, unfiltered -- the denominator its
+    -- "Orders and average order value" card divides by, Return Prime's
+    -- zero-value return legs included. `ql_orders` beside it has those
+    -- legs removed, so it is the right denominator for a conversion
+    -- rate and the WRONG one for an AOV that has to tie to the admin.
+    ql_orders_all           integer,
     ql_net_sales            numeric,
     ql_customers            integer,
     ql_new_customers        integer,
@@ -348,6 +354,7 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS qty_ordered integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS basket_mix jsonb",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_orders_all integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_net_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_customers integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_new_customers integer",
@@ -366,7 +373,8 @@ COLUMNS = [
     "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
     "shopify_return_fees", "shopify_taxes", "shopify_duties",
     "shopify_additional_fees",
-    "ql_orders", "ql_net_sales", "ql_customers", "ql_new_customers", "ql_returning_customers",
+    "ql_orders", "ql_orders_all",
+    "ql_net_sales", "ql_customers", "ql_new_customers", "ql_returning_customers",
     "ql_sales_returning", "ql_sales_first_time",
     "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
@@ -923,13 +931,21 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
          f"orders, quantity_ordered, "
          f"customers, new_customers, returning_customers, "
          f"total_sales_returning, total_sales_first_time "
-         # Return Prime's zero-value return orders are excluded, the
-         # same exclusion the Shopify report uses. Checked on three
-         # days: total_sales, returns and gross_sales come back
-         # IDENTICAL either way, because those orders carry no money --
-         # so the headline stays exact to the paisa while the COUNTS
-         # stop being inflated. Left unfiltered they ran a few percent
-         # over the report on both orders and units.
+         # Return Prime's zero-value return orders are excluded.
+         # Checked on three days: total_sales, returns and gross_sales
+         # come back IDENTICAL either way, because those orders carry
+         # no money -- so every AMOUNT below is the same with or
+         # without this filter, and only the COUNTS move.
+         #
+         # CORRECTED 2026-11-10: this used to say the exclusion was
+         # "the same one the Shopify report uses". It is not. The
+         # admin's "Orders and average order value" card counts every
+         # order, return legs included, and divides its AOV by that
+         # larger number. Which report you check decides which count
+         # looks right, so BOTH are stored now: this one for anything
+         # needing orders that carry money, and `ql_orders_all` from
+         # the second query below for anything that has to tie to the
+         # admin.
          f"WHERE sales_channel != 'Return Prime: Order Return' "
          f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
          f"GROUP BY hour ORDER BY hour LIMIT 100")
@@ -977,6 +993,9 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
             # divided by THIS one, so both numerator and denominator
             # come from the same population.
             "ql_orders": int(float(row.get("orders") or 0)),
+            # Filled by the second query below. Declared here so every
+            # hour carries the key whether or not that query reached it.
+            "ql_orders_all": None,
             # The numerator of Shopify's average_order_value, which is
             # NOT total_sales / orders: that reads a few percent low.
             # Shopify divides net sales BEFORE returns, i.e.
@@ -1010,6 +1029,37 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
             "ql_sales_returning": round(float(row.get("total_sales_returning") or 0), 2),
             "ql_sales_first_time": round(float(row.get("total_sales_first_time") or 0), 2),
         }
+    # THE ADMIN'S ORDER COUNT, which is NOT the one above.
+    #
+    # Shopify's "Orders and average order value" card counts EVERY
+    # order, Return Prime's return legs included. Verified against the
+    # card on two days: only the unfiltered count reproduces its AOV,
+    # to the paisa. The filtered count divides the same money by fewer
+    # orders and so lands roughly a tenth high.
+    #
+    # The money is identical either way, to the paisa, because those
+    # legs carry none: total_sales, net_sales, returns and gross_sales
+    # all come back the same. ONLY the count moves. So the filtered
+    # query above still owns every amount and still owns `qty_ordered`,
+    # which the legs would inflate, and this second query exists purely
+    # to supply the denominator Shopify divides by.
+    #
+    # Two counts rather than one, under names that say which is which:
+    # `ql_orders` is orders that carry money, and is the honest
+    # denominator for a conversion rate; `ql_orders_all` is what the
+    # admin shows, and is the only one whose AOV ties to it.
+    q_all = (f"FROM sales SHOW orders "
+             f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
+             f"GROUP BY hour ORDER BY hour LIMIT 100")
+    resp_all = (await graphql_request(client, store, SHOPIFYQL_QUERY,
+                                      {"q": q_all}))["shopifyqlQuery"]
+    if resp_all.get("parseErrors"):
+        raise RuntimeError(f"sales(all) parseErrors: {resp_all['parseErrors']}")
+    for row in (resp_all.get("tableData") or {}).get("rows", []):
+        hour = ist_hour(datetime.fromisoformat(row["hour"].replace("Z", "+00:00")))
+        if hour in out:
+            out[hour]["ql_orders_all"] = int(float(row.get("orders") or 0))
+
     return out
 
 

@@ -13791,7 +13791,7 @@ SELECT hour, day_ist, hour_of_day,
        revenue_shopifyql, shopify_total_sales, shopify_returns,
        shopify_gross_sales, shopify_discounts, shopify_shipping,
        shopify_return_fees, shopify_taxes, shopify_duties,
-       shopify_additional_fees, ql_net_sales, ql_orders,
+       shopify_additional_fees, ql_net_sales, ql_orders, ql_orders_all,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
@@ -13900,19 +13900,26 @@ class HourlyRow(BaseModel):
     #: Shopify reported, and a second copy of a subtraction is a second
     #: chance to disagree with it.
     ql_net_sales: float | None = None
-    #: SHOPIFY'S OWN ORDER COUNT, and the denominator of its AOV.
-    #:
-    #: Kept apart from `orders`, which is derived from the orders
-    #: themselves and drops a different set. Shopify's
-    #: average_order_value is
-    #:
-    #:     (net_sales - returns) / ql_orders
-    #:
-    #: and NOT total_sales / orders, which reads about nine per cent
-    #: low -- verified against its own `average_order_value` on four
-    #: days, agreeing to the paisa every time. Both halves have to come
-    #: from this same population or the ratio is a mongrel.
+    #: Shopify's order count with Return Prime's zero-value return
+    #: legs EXCLUDED -- orders that carry money. The right denominator
+    #: for a conversion rate, and the wrong one for an AOV.
     ql_orders: int | None = None
+    #: SHOPIFY'S OWN ORDER COUNT, unfiltered, and the denominator of
+    #: the AOV its admin shows.
+    #:
+    #:     average_order_value = (net_sales - returns) / ql_orders_all
+    #:
+    #: Verified against the admin's "Orders and average order value"
+    #: card on two days: the unfiltered count reproduces its AOV to the
+    #: paisa, and the filtered one lands roughly a tenth high.
+    #:
+    #: The money is the same either way, because the return legs carry
+    #: none. Only the count moves, which is why there are two of them.
+    #:
+    #: It is also NOT total_sales / orders, which runs LOW: that
+    #: numerator has had the reversals taken out while the denominator
+    #: still counts every order.
+    ql_orders_all: int | None = None
     #: The ORDER-derived total, which is what the per-channel splits are
     #: carved from. Gross of returns, so it does not tie to `revenue`
     #: above -- a refund belongs to no campaign hour.
@@ -14066,6 +14073,7 @@ class HourlyTotals(BaseModel):
     shopify_additional_fees: float | None = None
     ql_net_sales: float | None = None
     ql_orders: int | None = None
+    ql_orders_all: int | None = None
     #: The order-derived total the channel splits are carved from.
     #: Gross of returns, so it does NOT tie to `revenue`.
     revenue_attributed: float
@@ -14266,7 +14274,8 @@ def _totals(day: date, rows: list[HourlyRow],
         **{k: (s(k) if have(k) else None) for k in (
             "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
             "shopify_return_fees", "shopify_taxes", "shopify_duties",
-            "shopify_additional_fees", "ql_net_sales", "ql_orders")},
+            "shopify_additional_fees", "ql_net_sales", "ql_orders",
+            "ql_orders_all")},
         revenue_attributed=s("revenue_attributed"),
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
