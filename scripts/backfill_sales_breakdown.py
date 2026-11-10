@@ -58,7 +58,7 @@ from scripts.fetch_hourly_tracker import (  # noqa: E402
 #: migrations this script is allowed to run.
 NEW_COLS = ("shopify_gross_sales", "shopify_discounts", "shopify_shipping",
             "shopify_return_fees", "shopify_taxes", "shopify_duties",
-            "shopify_additional_fees")
+            "shopify_additional_fees", "ql_orders_all")
 
 #: THE WHOLE RECONCILING SET IS WRITTEN, not just the new columns.
 #:
@@ -80,7 +80,11 @@ UPDATE {TABLE} SET
   shopify_gross_sales = %s, shopify_discounts = %s, shopify_shipping = %s,
   shopify_return_fees = %s, shopify_taxes = %s, shopify_duties = %s,
   shopify_additional_fees = %s,
-  shopify_total_sales = %s, shopify_returns = %s, ql_net_sales = %s
+  shopify_total_sales = %s, shopify_returns = %s, ql_net_sales = %s,
+  -- Shopify's unfiltered order count, the denominator its admin
+  -- divides by. Backfilled with the rest because an AOV is only as
+  -- good as the count under it, and history had no count at all.
+  ql_orders_all = %s
 WHERE hour = %s
 """
 
@@ -122,6 +126,12 @@ def _targets(args) -> list[date]:
             cols = ", ".join(f"count({c}) < count(*)" for c in
                              (*NEW_COLS, "shopify_total_sales",
                               "shopify_returns", "ql_net_sales"))
+            # `ql_orders_all` is NULL on an hour Shopify reported no
+            # orders for, which is legitimate -- but so is a day that
+            # predates the column, and only the second needs refetching.
+            # The per-column test above handles both: a day with even
+            # one unfilled hour is refetched, and refetching a genuinely
+            # empty hour costs one query and writes the same NULL back.
             cur.execute(f"SELECT day_ist FROM {TABLE} GROUP BY day_ist "
                         f"HAVING {cols.replace(', ', ' OR ')} ORDER BY 1")
         return [r[0] for r in cur.fetchall()]
@@ -169,7 +179,7 @@ async def pull(days: list[date]) -> tuple[list[tuple], list[str]]:
                 rows.append((gross, disc, h["shopify_shipping"],
                              h["shopify_return_fees"], h["shopify_taxes"],
                              h["shopify_duties"], h["shopify_additional_fees"],
-                             total, rets, net, hour))
+                             total, rets, net, h.get("ql_orders_all"), hour))
                 kept += 1
             print(f"  {day}  {kept:2d} hours  gross {sum(h['shopify_gross_sales'] for h in hours.values()):>14,.2f}")
     return rows, problems

@@ -165,13 +165,25 @@
      input on top of its own label. */
   .pnl-assump { display: block; }
   .pnl-assump label { display: flex; align-items: center; justify-content: space-between;
-                      gap: 10px; font-size: 12px; color: var(--text-2);
+                      gap: 10px 10px; flex-wrap: wrap; font-size: 12px; color: var(--text-2);
                       padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
   .pnl-assump label > span { flex-shrink: 0; white-space: nowrap; }
+  /* What the figure is when nobody overrides it. Full width under the
+     input rather than beside it: the panel is 280px and a reference
+     squeezed onto the same line would push the input off the end. */
+  .pnl-assump .fhint { flex-basis: 100%; font-style: normal; font-size: 10px;
+                       color: var(--text-3); line-height: 1.5; margin-top: -2px; }
+  .pnl-assump .fhint b { font-weight: 600; color: var(--text-2);
+                         font-variant-numeric: tabular-nums; }
+  .pnl-assump .fback { font: inherit; font-size: 10px; cursor: pointer; margin-right: 6px;
+                       padding: 2px 6px; border-radius: 4px; color: var(--text-3);
+                       border: 1px solid var(--border); background: transparent; }
+  .pnl-assump .fback:hover { color: var(--text); border-color: var(--text-3); }
   .pnl-assump .note { border-bottom: 0; padding-top: 10px; }
   .pnl-assump input { width: 72px; text-align: right; font: inherit; font-size: 11.5px;
                       background: transparent; color: var(--text); border: 1px solid var(--border);
                       border-radius: 4px; padding: 2px 5px; font-variant-numeric: tabular-nums; }
+  .pnl-hrs-wrap { overflow-x: auto; }
   .pnl-hrs { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 8px;
              font-variant-numeric: tabular-nums; }
   .pnl-hrs th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
@@ -358,6 +370,23 @@
   .led-break .led-row.sum { border-top: 1px solid var(--border-soft);
                             border-radius: 0 0 6px 6px; }
   .led-break .led-row .v { font-size: 12.5px; }
+  /* Per-order economics. Tiles rather than another row of the ledger,
+     because these are RATIOS taken off the chain, not steps in it --
+     and because the whole difficulty is that two of them look like the
+     same number and are not. Each carries its own divisor. */
+  .led-stats { display: grid; gap: 10px; margin-top: 10px;
+               grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .led-stat { border: 1px solid var(--border-soft); border-radius: 8px;
+              padding: 10px 12px; background: var(--muted); min-width: 0; }
+  .led-stat .k { display: block; font-size: 11px; color: var(--text-3); }
+  .led-stat .val { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
+  .led-stat strong { font-size: 18px; font-weight: 700; letter-spacing: -.01em;
+                     font-variant-numeric: tabular-nums; }
+  .led-stat em { display: block; font-style: normal; font-size: 10.5px;
+                 color: var(--text-3); margin-top: 4px; line-height: 1.45; }
+  /* Said out loud when a section would otherwise be two identical
+     numbers with nothing between them. */
+  .led-none { font-size: 11.5px; color: var(--text-3); padding: 8px 0 2px; }
   /* A deduction is a length, not just a figure: ad spend and COGS
      being the whole story is the one thing to see at a glance. */
   .led-bar { display: flex; align-items: center; gap: 11px; padding: 6px 0; }
@@ -413,6 +442,17 @@
      The track is the one to drop: it is a sense of scale, and the
      figures beside it are the thing being compared. */
   @media (max-width: 920px) { .led-bar .t { display: none; } }
+  /* On a phone the bar is a 150px label plus three fixed figure
+     columns, which together are wider than the screen -- so the whole
+     page scrolled sideways, and the figure a reader came for was the
+     part off the edge. The label takes its own line and the figures
+     sit under it, right-aligned as before. */
+  @media (max-width: 620px) {
+    .led-bar { flex-wrap: wrap; gap: 0 10px; padding: 8px 0; }
+    .led-bar .l { width: 100%; }
+    .led-bar .wasc { margin-left: auto; }
+    .led-stats { grid-template-columns: 1fr; }
+  }
   .led-box { border: 1px solid var(--border-soft); border-radius: 12px; padding: 16px 18px; }
   .led-box h4 { margin: 0 0 10px; font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
                 text-transform: uppercase; color: var(--text-3); }
@@ -657,6 +697,8 @@
      AND would not dismiss the panel, which reads as the whole control
      being broken. aria-disabled says the same thing to a screen reader
      while leaving the click to JavaScript, which can then say why. */
+  .dp-hint { font-size: 10.5px; color: var(--text-3); margin-left: 10px; }
+  @media (max-width: 680px) { .dp-hint { display: none; } }
   .dp-presets button[aria-disabled="true"] { color: var(--text-3); opacity: .5;
                                              cursor: not-allowed; }
   .dp-presets button[aria-disabled="true"]:hover { background: transparent; }
@@ -1015,6 +1057,7 @@
       <div class="dp-months" id="dp-months"></div>
       <div class="dp-foot">
         <span class="dp-sum" id="dp-sum"></span>
+        <span class="dp-hint">Pick two dates &mdash; or the same date twice for one day</span>
         <span class="dp-acts">
           <button type="button" id="dp-cancel">Cancel</button>
           <button type="button" class="go" id="dp-apply">Apply</button>
@@ -1254,12 +1297,15 @@
       is the total. It is drawn only when both of those sums reach the headline exactly, so a
       window reaching back past the day those lines were first stored shows the headline alone
       rather than a breakdown that does not add up.
-      Total sales still contains cancelled orders Shopify has not refunded — a COD order
-      cancelled before payment produces no refund — and they are left in on purpose:
-      cancellation is modelled by the <strong>Further cancellation</strong> rate alone, with the
-      share that actually cancelled reported beside it so the rate can be set against something
-      measured. Orders and units are counted the same way, every one placed, so Logistics, AOV
-      and ASP all sit on one population. Everything under the Realisable sales line
+      Cancellations are <strong>already deducted</strong>: Shopify reverses the goods value of a
+      cancelled order whether or not any cash moved, and the <strong>Sales reversals</strong> line
+      is that — measured against cancelled value day by day, with Return Prime&rsquo;s return
+      orders contributing nothing to it. So <strong>Further cancellation</strong> starts at nil
+      and is yours to set as a forward-looking allowance, not ours to assume.
+      <strong>Returns are not measured anywhere in this warehouse</strong>, so nothing removes them
+      but the Incremental returns rate. Orders and units are counted the same way, every one
+      placed, so Logistics, AOV and ASP all sit on one population. Everything under the
+      Realisable sales line
       is a model built from the rates above, and the day is still running, so a margin here is an
       estimate rather than a result.
     </p>
@@ -2072,10 +2118,31 @@ $("donutbody").addEventListener("pointerleave", () => {
 // move while you type.
 const PNL_KEY = "tracker_pnl_assumptions";
 const PNL_DEFAULTS = {
-  // An allowance for cancellations that have NOT happened yet, on top
-  // of those counted from the orders. Signed: negative takes the
-  // measured figure back down.
-  extraCancelRate: 0.05,
+  // ZERO, because Shopify has already taken cancellations out.
+  //
+  // This was 5%, on the belief that a cancellation only leaves Total
+  // sales when it was REFUNDED -- so the unrefunded part, a COD order
+  // cancelled before payment, was still inside and needed deducting.
+  // Measured 2026-11-10, that is wrong. Shopify reverses the GOODS
+  // value of a cancellation whether or not cash moved; the zero-value
+  // refund record a COD cancellation leaves behind is only the cash
+  // leg. The Sales reversals line in the breakdown IS cancellation,
+  // tracking cancelled value day by day, and Return Prime's return
+  // orders contribute nothing to it -- that channel reports zero
+  // reversals and zero gross.
+  //
+  // Over a month and a bit, reversals booked and cancellations of
+  // orders placed came to the same share of gross within two
+  // hundredths of a percentage point. The store is in steady state,
+  // so Total sales is already net of cancellation and a standing
+  // allowance deducted it twice.
+  //
+  // Kept as an editable field rather than deleted: a day still
+  // running has its own orders at full value while their
+  // cancellations reverse out over the days that follow, so there is
+  // a real forward-looking allowance to make if someone wants to make
+  // it. It is now theirs to set, not ours to assume.
+  extraCancelRate: 0,
   // Share of orders that come back as an exchange, and what one costs
   // to service. An exchange ships twice and collects once, so the cost
   // is per EXCHANGE, not per order -- see the deduction below.
@@ -2097,16 +2164,54 @@ const PNL_DEFAULTS = {
   pgRate: 0.01,
   coinCost: 500,
   cogsRate: 0.28,
+  // RTO -- an order dispatched, refused or undeliverable, and carried
+  // back. Shopify books none of it: there is no refund and often no
+  // cancellation, so the sale is still sitting in Total sales while
+  // the goods are in a van going the wrong way.
+  //
+  // ZERO by default, deliberately. The contribution model this came
+  // from ships 8%, which is a real estimate but not a measured one,
+  // and defaulting to it would move the margin on this page by eight
+  // per cent of sales without anyone choosing it. Set it and it
+  // applies; leave it and nothing changes.
+  rtoRate: 0,
+  // Returns BEYOND the ones Shopify has already booked. The reversals
+  // in the breakdown above are money already handed back and already
+  // out of Total sales; this is the part still to come on orders
+  // placed in the window. Same reasoning for the zero default.
+  returnsRate: 0,
+  // Not a cost -- a target. The margin the business wants to clear
+  // after ads, which is what turns a contribution into the ROAS the
+  // media has to deliver. Changes no figure in the chain; it only
+  // sets the second ROAS on the rail.
+  minMargin: 0.15,
+  // Override the MEASURED ad spend with a cost per order.
+  //
+  // NULL means "follow the measured figure", and the input shows that
+  // figure rather than a nought -- a nought there read as "we spent
+  // nothing", which is the opposite of what it meant. It also freed
+  // zero to mean zero: a genuine no-spend scenario is now something
+  // this field can express, which under the old scheme it could not.
+  adPerOrder: null,
 };
 const PNL_FIELDS = [
   ["extraCancelRate", "Further cancellation", true, true],
-  ["exchangeRate", "Exchange %", true],
+  ["rtoRate", "RTO impact", true],
+  ["returnsRate", "Incremental returns", true],
+  // "Exchange rate", not "Exchange %": the panel appends the unit
+  // itself, so the old label rendered as "Exchange % %".
+  ["exchangeRate", "Exchange rate", true],
   ["exchangeCost", "Cost / exchange", false],
   ["cogsRate", "COGS", true],
   ["gstRate", "GST on ad spend", true],
   ["pgRate", "PG fees", true],
   ["logistics", "Logistics / order", false],
   ["coinCost", "Silver coin / order", false],
+  // Rupees, not a percentage, because it is a cost per order like the
+  // two above it -- and because the question it answers is "what can
+  // we afford to pay for an order", which is a price.
+  ["adPerOrder", "Ad spend / order", false],
+  ["minMargin", "Target margin", true],
 ];
 
 function pnlAssumptions() {
@@ -2114,9 +2219,34 @@ function pnlAssumptions() {
   // corrupt JSON must not take the section down with it.
   try {
     const raw = localStorage.getItem(PNL_KEY);
-    if (raw) return Object.assign({}, PNL_DEFAULTS, JSON.parse(raw));
+    if (raw) {
+      const a = Object.assign({}, PNL_DEFAULTS, JSON.parse(raw));
+      // ONE-TIME: clear the old 5% cancellation allowance.
+      //
+      // Stored assumptions outlive a change of default, so every
+      // browser that has used this page is still carrying 0.05 and
+      // would go on double-deducting cancellation however the default
+      // reads. Only the exact old default is cleared, and only once --
+      // `pnlV` marks it done -- so a 5% someone chose deliberately
+      // after this lands is left alone.
+      if (!(a.pnlV >= 2)) {
+        if (a.extraCancelRate === 0.05) a.extraCancelRate = 0;
+      }
+      if (!(a.pnlV >= 3)) {
+        // A stored 0 meant "use the measured spend" under the old
+        // scheme and means "spend nothing" under this one, which would
+        // silently wipe ad spend out of the P&L for anyone who had the
+        // field at its old default.
+        if (a.adPerOrder === 0) a.adPerOrder = null;
+      }
+      if (a.pnlV !== 3) {
+        a.pnlV = 3;
+        try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
+      }
+      return a;
+    }
   } catch {}
-  return Object.assign({}, PNL_DEFAULTS);
+  return Object.assign({}, PNL_DEFAULTS, { pnlV: 3 });
 }
 
 //: Which view is on screen. Both are drawn from the same payload, so
@@ -2196,14 +2326,47 @@ function computePnl(r, a) {
   // the right assumption when the true count is unknown, and it is
   // never an overcharge.
   const coinQty = r.silver_coin_qty != null ? r.silver_coin_qty : coinOrders;
-  const adSpend = r.spend || 0;
+  // AD SPEND IS MEASURED, AND CAN BE OVERRIDDEN PER ORDER.
+  //
+  // Meta, Google and Kwikchat are real figures and stay the default.
+  // The override exists for the question the measured number cannot
+  // answer: what would the day look like at a different cost of
+  // acquisition? Enter a rupee figure per order and the whole chain
+  // recomputes on it -- deduction, GST, both ROASes.
+  //
+  // ZERO means "use what was measured", not "spend nothing". A day
+  // with genuinely no spend already reports zero on its own, and an
+  // override that could not be switched off would be a trap.
+  const measuredAd = r.spend || 0;
+  // THE DENOMINATOR FOR AD SPEND IS NOT THE ORDER COUNT.
+  //
+  // An exchange leg is the second half of a sale already paid for, so
+  // no advertising bought it; dividing spend by a count that includes
+  // them makes acquisition look cheaper than it was. Influencer and
+  // daily-report orders (`inf`) are out already -- goods that went out
+  // with no sale behind them -- so they never reach this count.
+  //
+  // Every OTHER per-order cost keeps the whole population: an exchange
+  // ships, so its logistics are real, and netting it out there would
+  // be hiding a cost rather than attributing one.
+  //
+  // Null, not zero, where no hour reported the column -- a day
+  // ingested before it existed has an unknown number of exchanges, not
+  // none, and subtracting zero would quietly claim otherwise.
+  const exchangeOrders = r.pnl_exchange_orders;
+  const adOrders = Math.max(0, orders - (exchangeOrders || 0));
+  const adAssumed = a.adPerOrder != null && isFinite(a.adPerOrder);
+  const adSpend = adAssumed ? a.adPerOrder * adOrders : measuredAd;
   // The three platforms behind that one figure. Kept separate rather
   // than re-summed: `spend` is what the API computed and is the number
   // the rest of the P&L is built on, so a component that goes missing
   // must show as a gap in the split, never as a quietly smaller total.
-  const metaSpend = r.meta_spend;
-  const googleSpend = r.google_spend;
-  const kwikSpend = r.kwikchat_spend;
+  //
+  // Dropped entirely when the figure is assumed: a split of a number
+  // nobody spent would be three inventions under a fourth.
+  const metaSpend = adAssumed ? null : r.meta_spend;
+  const googleSpend = adAssumed ? null : r.google_spend;
+  const kwikSpend = adAssumed ? null : r.kwikchat_spend;
 
   // CANCELLATION IS ONE LINE, AND IT IS THE ALLOWANCE.
   //
@@ -2229,10 +2392,33 @@ function computePnl(r, a) {
   // of why our figure read high against theirs.
   const refunds = r.pnl_refunds || 0;
   const afterRefunds = sales - refunds;
-  // On what is left, not on gross: an allowance for cancellations
-  // still to come can only apply to money still standing.
+  // THREE ALLOWANCES, ONE BASE.
+  //
+  // All on `afterRefunds` and none on each other. Compounding them
+  // would make the order they are written in change the answer, which
+  // is a property no one wants in a P&L: RTO after returns would
+  // deduct less than returns after RTO, for no reason a reader could
+  // name. The contribution model these came from applies all of its
+  // allowances to AOV for the same reason; this is the same shape,
+  // taken after the refunds Shopify has already booked.
+  //
+  // What each one is for:
+  //   Further cancellation -- orders that will cancel before dispatch
+  //   RTO                  -- dispatched, refused or undeliverable,
+  //                           carried back. No refund, often no
+  //                           cancellation, so Shopify books none of
+  //                           it and the sale is still in Total sales
+  //   Incremental returns  -- returns still to come, BEYOND the
+  //                           reversals Shopify has already taken out
+  //                           (the Sales reversals line above)
+  //
+  // The word "incremental" is doing real work in that last one: the
+  // breakdown's reversals are money already gone, and an allowance
+  // that covered them too would deduct the same refund twice.
   const extraCancellation = afterRefunds * (a.extraCancelRate || 0);
-  const net = afterRefunds - extraCancellation;
+  const rto = afterRefunds * (a.rtoRate || 0);
+  const incReturns = afterRefunds * (a.returnsRate || 0);
+  const net = afterRefunds - extraCancellation - rto - incReturns;
 
   // Every order placed, cancelled or not -- see the note above. The
   // allowance moves MONEY only and never touches a count, so sales
@@ -2263,6 +2449,31 @@ function computePnl(r, a) {
   const cogs = net * a.cogsRate;
   const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
+
+  // WHAT THE MEDIA HAS TO RETURN.
+  //
+  // `preAd` is the contribution with every operating cost out and
+  // nothing taken for advertising yet -- the money there is to spend.
+  // Both ROASes fall out of it, and both are ratios, so they hold at
+  // any grain: a day, a week or one order give the same answer.
+  //
+  //   break-even:  spend(1 + gst) = preAd
+  //                ROAS = sales / spend = sales(1 + gst) / preAd
+  //
+  //   at a margin floor m:
+  //                spend(1 + gst) = preAd - m x sales
+  //                ROAS = (1 + gst) / (preAd/sales - m)
+  //
+  // Null rather than Infinity where they cannot be answered: preAd at
+  // or below zero means no spend breaks even, and a floor above the
+  // pre-ad margin is unreachable at any ROAS. A number there would be
+  // a lie with a decimal point on it.
+  const preAd = cm + adSpend + adGst;
+  const preAdMargin = sales ? preAd / sales : null;
+  const gst = 1 + (a.gstRate || 0);
+  const beRoas = preAd > 0 ? sales * gst / preAd : null;
+  const targetRoas = (preAdMargin != null && preAdMargin > (a.minMargin || 0))
+    ? gst / (preAdMargin - (a.minMargin || 0)) : null;
 
   // HOW SHOPIFY GETS TO THAT HEADLINE.
   //
@@ -2296,15 +2507,45 @@ function computePnl(r, a) {
     if ([g, disc, rev, ns, ship, rfee, tax].some(v => v == null)) return null;
     const ok = Math.abs((g + disc + rev) - ns) < 1
             && Math.abs((ns + ship + rfee + tax + other) - sales) < 1;
+    // SHOPIFY'S OWN AOV, reproduced exactly.
+    //
+    //     (net sales - returns) / Shopify's own order count
+    //
+    // Verified against ShopifyQL's `average_order_value` on four days,
+    // agreeing to the paisa every time. It is NOT total sales over
+    // orders, which reads about nine per cent LOW -- the numerator
+    // there has had the reversals taken out while the denominator
+    // still counts every order.
+    //
+    // `ql_orders_all` and not our own `orders`, nor even `ql_orders`.
+    //
+    // Shopify's admin card counts EVERY order, Return Prime's
+    // zero-value return legs included, and only that count reproduces
+    // the AOV it shows -- checked against the card on two days, to the
+    // paisa. The filtered count divides the same money by fewer orders
+    // and so lands roughly a tenth high.
+    //
+    // Those legs carry no money, so the numerator is identical either
+    // way -- this is a denominator question and nothing else. Falls
+    // back to the filtered count only for hours stored before the
+    // unfiltered one existed, which reads high rather than blank.
+    const qo = r.ql_orders_all || r.ql_orders;
     return { gross: g, discounts: disc, reversals: rev, netSales: ns,
              shipping: ship, returnFees: rfee, taxes: tax, other: other,
-             total: sales, ok: ok };
+             total: sales, ok: ok,
+             orders: qo || null,
+             aov: qo ? (ns - rev) / qo : null };
   })();
 
-  return { bd,
+  return { bd, adAssumed, measuredAd, adOrders, exchangeOrders,
+           //: What one order cost to buy. Measured unless overridden,
+           //: and null rather than zero where there are no orders to
+           //: divide by -- a cost per order of nothing is not zero.
+           adPerOrder: adOrders ? adSpend / adOrders : null,
            sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
-           cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
+           cancelledOrders, refunds, extraCancellation, rto, incReturns,
+           liveOrders, liveUnits, net, preAd, preAdMargin, beRoas, targetRoas,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
            aov: liveOrders ? net / liveOrders : null,
@@ -2341,7 +2582,12 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
     '<strong style="font-size:12px">Hour by hour</strong>' +
     '<span class="sub">Same assumptions. Bars are contribution margin, right for a profit ' +
     'and left for a loss, on one scale.</span></div>' +
-    '<table class="pnl-hrs"><thead><tr>' +
+    // Wrapped in its own scroller. Ten columns of figures do not fit a
+    // phone, and without this the TABLE pushed the whole page sideways
+    // -- every section scrolled to read one that could not fit either
+    // way. Scrolling the table alone is the behaviour every other wide
+    // table here already has.
+    '<div class="pnl-hrs-wrap"><table class="pnl-hrs"><thead><tr>' +
     ["Hour","Sales","Orders","ASP","AOV","Realisable","Spend","CM","CM %"]
       .concat(cmpRows && cmpRows.length ? ["vs"] : []).concat([""])
       .map(h => "<th>" + esc(h) + "</th>").join("") +
@@ -2370,7 +2616,7 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
         '<div class="f" style="' + (good ? "left:50%" : "right:50%") +
         ";width:" + frac + "%;background:var(--" + (good ? "good" : "bad") + ')"></div>' +
         "</div></td></tr>";
-    }).join("") + "</tbody></table>";
+    }).join("") + "</tbody></table></div>";
 }
 
 // --- quantity --------------------------------------------------------
@@ -3358,8 +3604,13 @@ $("x-pnl").onclick = () => {
   // -- the same line on the baseline day. Four columns keep that
   // reading order, which is the whole point of the section. Read whole,
   // a row would come out as "Cancelled, not refunded40 orders - 4.2%".
+  // `.led-stat` is in the list because the per-order figures moved out
+  // of the sub-line into tiles of their own. They were exported before
+  // and a reader would not notice they had stopped being -- a missing
+  // row in a file reads as "there was none", not as "we dropped it".
   const sel = "#pnl-lines .led-row, #pnl-lines .led-bar, #pnl-lines .led-head, " +
-              "#pnl-lines .led-split > span, #pnl-lines .led-sub > span";
+              "#pnl-lines .led-split > span, #pnl-lines .led-sub > span, " +
+              "#pnl-lines .led-stat";
   const rows = [...document.querySelectorAll(sel)].map(r => {
     // The ad-spend split is not a ledger line: it is three platforms
     // under one, written as label / share / amount. Indented in the
@@ -3381,6 +3632,18 @@ $("x-pnl").onclick = () => {
               share ? partsText(share) : "",
               amt ? unformat(partsText(amt)) : "", "",
               ch ? unformat(partsText(ch)) : ""];
+    }
+    // A per-order tile is label / value / note, with the note in an
+    // <em> OUTSIDE the label -- so it needs naming here rather than
+    // falling through to the ledger-row shape, which would take the
+    // note as part of the label and write "Shopify AOVnet sales less".
+    if (r.classList.contains("led-stat")) {
+      const k = r.querySelector(".k"), sv = r.querySelector("strong");
+      const sn = r.querySelector("em");
+      const sc = r.querySelector(".good, .bad, .flat");
+      return [CSV_SUB + partsText(k), sn ? partsText(sn) : "",
+              sv ? unformat(partsText(sv)) : "", "",
+              sc ? unformat(partsText(sc)) : ""];
     }
     const l = r.querySelector(".l") || r.querySelector(".lbl");
     const v = r.querySelector(".v") || r.querySelector(".led-big");
@@ -3811,6 +4074,12 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ["Kwikchat", "sw-kwik", d.kwikSpend],
   ];
   const adSplit = (() => {
+    // An assumed figure has no platforms behind it, so it says what it
+    // is instead of pretending to a split.
+    if (d.adAssumed) {
+      return { note: inr(a.adPerOrder, 0) + " / order assumed \u00b7 "
+                     + inr(d.measuredAd, 0) + " measured", segs: "" };
+    }
     const known = SPEND_PARTS.filter(x => x[2] != null);
     // Nothing to split, or the parts do not account for the total --
     // which happens on a row written before a column existed. Showing
@@ -3861,19 +4130,76 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     { key: "cogs", label: "COGS", note: "" },
   ];
 
-  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) =>
-    "<label>" + esc(label) +
-    '<span><input type="number" ' + (signed ? "" : 'min="0" ') + 'step="' + (isPct ? "0.1" : "1") +
+  // WHAT THE FIGURE IS WITHOUT THE OVERRIDE.
+  //
+  // Ad spend is the one assumption with a MEASURED counterpart -- the
+  // hour-by-hour spend this page already has -- so an override is only
+  // meaningful against it. The reference sits under the input, with
+  // the margin the measured figure produces, so "what happens to the
+  // margin at a different cost per order" can be read off the panel
+  // instead of remembered from before the edit.
+  //
+  // Recomputed with the override cleared rather than cached from an
+  // earlier draw: the other assumptions move too, and a baseline from
+  // before a COGS change would answer a question nobody asked.
+  // NULL clears the override. Zero does not -- it is now a real
+  // figure meaning "spent nothing", so clearing with it computed the
+  // baseline at no spend at all and reported a measured margin far
+  // above the true one.
+  const base = d.adAssumed
+    ? computePnl(t, Object.assign({}, a, { adPerOrder: null })) : d;
+  const HINTS = {
+    adPerOrder: d.adAssumed
+      ? "assumed \u00b7 measured was <b>" +
+        (base.adPerOrder == null ? "\u2014" : inr(base.adPerOrder)) +
+        "</b> / order, <b>" + inr(base.adSpend, 0) + "</b> in all \u00b7 " +
+        "margin there <b>" + inr(base.cm, 0) + "</b> (" + pc(base.cmPct, 1) +
+        "), here <b>" + inr(d.cm, 0) + "</b> (" + pc(d.cmPct, 1) + ")"
+      : "measured \u00b7 <b>" + inr(d.adSpend, 0) + "</b> of spend across <b>" +
+        num(d.adOrders) + "</b> orders" +
+        (d.exchangeOrders
+          ? " (<b>" + num(d.exchangeOrders) + "</b> exchange legs and any " +
+            "influencer orders excluded)" : "") +
+        ". Edit to model a different one.",
+  };
+
+  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) => {
+    // AD SPEND SHOWS THE MEASURED FIGURE, not a nought standing in for
+    // it. The field is seeded from what the day actually cost per
+    // order, so editing it starts from the real number instead of from
+    // nothing -- a cost to reason about, where the nought was just a
+    // switch whose off position looked like an answer.
+    const live = key === "adPerOrder" && !d.adAssumed;
+    const shown = live
+      ? (d.adPerOrder == null ? 0 : +d.adPerOrder.toFixed(2))
+      : (isPct ? +(a[key] * 100).toFixed(2) : a[key]);
+    return "<label>" + esc(label) +
+    '<span>' +
+    // Only once overridden: there is nothing to go back to otherwise,
+    // and a reset that does nothing is a button that teaches people
+    // their clicks do not count.
+    (key === "adPerOrder" && d.adAssumed
+      ? '<button type="button" class="fback" data-reset="adPerOrder" ' +
+        'title="Back to the measured spend">measured</button>' : "") +
+    '<input type="number" ' + (signed ? "" : 'min="0" ') + 'step="' + (isPct ? "0.1" : "1") +
     '" data-k="' + key + '" data-pct="' + (isPct ? "1" : "") +
-    '" data-signed="' + (signed ? "1" : "") + '" value="' +
-    (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
-    (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
+    '" data-signed="' + (signed ? "1" : "") + '" value="' + shown + '">' +
+    (isPct ? " %" : " \u20B9") + "</span>" +
+    (HINTS[key] ? '<em class="fhint">' + HINTS[key] + "</em>" : "") +
+    "</label>"; }).join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
     "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
-    "Refunds are counted from the orders themselves. Cancellation is modelled " +
-    "<strong>only</strong> by <strong>Further cancellation</strong> \u2014 the share " +
-    "that actually cancelled is reported beside it to set the rate against, and " +
-    "it may be set negative to take the figure back down.</p>";
+    "Cancellations are <strong>already out</strong> of Total sales \u2014 the Sales " +
+    "reversals line above is cancellation, not returns \u2014 so " +
+    "<strong>Further cancellation</strong> starts at nil. Set it only as a " +
+    "forward-looking allowance for a day still running, whose own cancellations " +
+    "have not reversed out yet. It, <strong>RTO</strong> and " +
+    "<strong>Incremental returns</strong> all apply to the same figure and never " +
+    "to each other, so the order they are listed in cannot change the answer, and " +
+    "any of them may be set negative. Returns are <strong>not measured anywhere " +
+    "in this warehouse</strong>, so Incremental returns is the only place they " +
+    "enter. <strong>Target margin</strong> costs nothing \u2014 it only sets the " +
+    "second ROAS on the rail.</p>";
 
   // ---- the ledger -------------------------------------------------
   // One spine, top to bottom, in the order the arithmetic happens. The
@@ -3980,7 +4306,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
       '<div class="led-cap">Total sales breakdown \u2014 Shopify\u2019s own lines</div>' +
       line("Gross sales", "", "gross", "up") +
       line("Discounts", "", "discounts", "down") +
-      line("Sales reversals", "returns, dated by the refund", "reversals", "down") +
+      // NOT returns, whatever Shopify's own wording suggests. Measured
+      // against cancelled value day by day, this line is cancellation,
+      // and Return Prime's return orders report zero reversals and
+      // zero gross against it. Saying "returns" here is what led the
+      // P&L to deduct cancellation a second time.
+      line("Sales reversals", "cancellations, dated by the cancellation",
+           "reversals", "down") +
       line("Net sales", "", "netSales", "up", "sum") +
       line("Shipping charges", "", "shipping", "up") +
       line("Return fees", "", "returnFees", "up") +
@@ -4004,23 +4336,50 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     "</div>" +
 
     '<div class="led-step">' +
+    '<div class="led-cap">Allowances \u2014 what we expect not to keep</div>' +
+    // Two identical totals with nothing between them reads as a bug.
+    // Said out loud instead, with the reason, because "why are these
+    // the same number" is the first question the section raises.
+    ((!refunds && !extraCancellation && !d.rto && !d.incReturns)
+      ? '<div class="led-none">None set. Cancellations are already out of Total sales ' +
+        "above, and nothing else is deducted until a rate is entered beside this. " +
+        "Realisable sales therefore equals Total sales.</div>"
+      : "") +
     (refunds > 0 || (c && c.refunds > 0)
       ? row("\u2212 Refunds", "on orders that still stand",
             "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null,
             refunds, c ? c.refunds : null)
       : "") +
-    // The ONE cancellation line. The note carries the measured rate
-    // beside the rate being applied, because a 5% allowance set against
-    // an 8% actual is the thing a reader needs to notice, and the
-    // measured figure is no longer deducted anywhere to say it for
-    // them.
-    row("\u2212 Further cancellation",
-        pc(a.extraCancelRate, 1) + " allowance"
-        + (cancelPct != null
-            ? " \u00b7 " + num(cancelledOrders) + " of " + num(orders)
-              + " actually cancelled, " + pc(cancelPct, 1) : ", not measured"),
-        signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
-        extraCancellation, c ? c.extraCancellation : null) +
+    // Nil unless someone sets it, and drawn only when they have.
+    // Cancellations are already out of Total sales via the Sales
+    // reversals line above, so a standing allowance here deducted them
+    // twice; what is left is a forward-looking allowance for a day
+    // still running, which is a judgement, not a measurement. The
+    // measured share stays on the rail either way.
+    (extraCancellation || (c && c.extraCancellation)
+      ? row("\u2212 Further cancellation",
+            pc(a.extraCancelRate, 1) + " allowance"
+            + (cancelPct != null
+                ? " \u00b7 " + num(cancelledOrders) + " of " + num(orders)
+                  + " cancelled, already out via reversals" : ", not measured"),
+            signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
+            extraCancellation, c ? c.extraCancellation : null)
+      : "") +
+    // Drawn only when set. Both default to zero, and a permanent pair
+    // of "- Rs 0" lines would be two rows of noise above the one line
+    // that is doing something.
+    (d.rto || (c && c.rto)
+      ? row("\u2212 RTO impact",
+            pc(a.rtoRate, 1) + " allowance \u00b7 dispatched, refused, carried back",
+            signedDed(d.rto), c ? signedDed(c.rto) : null,
+            d.rto, c ? c.rto : null)
+      : "") +
+    (d.incReturns || (c && c.incReturns)
+      ? row("\u2212 Incremental returns",
+            pc(a.returnsRate, 1) + " allowance \u00b7 beyond the reversals already booked",
+            signedDed(d.incReturns), c ? signedDed(c.incReturns) : null,
+            d.incReturns, c ? c.incReturns : null)
+      : "") +
     "</div>" +
 
     '<div class="led-step total led-sep" style="margin-top:4px">' +
@@ -4028,19 +4387,62 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     " units</div>" +
     '<div class="led-head"><span class="lbl">Realisable sales</span>' +
     '<span class="led-big">' + inr(net, 0) + "</span></div>" +
-    // AOV and ASP belong HERE, at the line they are divided from, not
-    // in a card at the top that says nothing about where they come from.
-    '<div class="led-sub">' +
-    "<span>\u00f7 " + num(liveOrders) + " orders = <strong>" +
-    (d.aov === null ? "\u2014" : inr(d.aov)) + "</strong> AOV</span>" +
-    "<span>\u00f7 " + num(liveUnits) + " units = <strong>" +
-    (d.asp === null ? "\u2014" : inr(d.asp)) + "</strong> ASP</span>" +
-    (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.net, 0) + "</strong> " +
-         changeHTML(net, c.net, "up") + "</span>" : "") +
-    "</div></div>" +
+    (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
+         inr(c.net, 0) + "</strong> " + changeHTML(net, c.net, "up") +
+         "</span></div>" : "") +
+    // PER ORDER, in a section of its own.
+    //
+    // These two look like the same number and are not, which is the
+    // whole reason they are side by side with their divisors written
+    // out. Shopify's AOV divides money it defines by a count it
+    // defines; ours divides realisable sales by the orders that
+    // carry money. The gap between the two counts is Return Prime's
+    // return legs, so the page names them and how many there were
+    // rather than leaving a reader to find the difference.
+    (() => {
+      const legs = (d.bd && d.bd.orders != null)
+        ? d.bd.orders - liveOrders : null;
+      // `dir` because one of these tiles is a COST. On revenue per
+      // order a rise is good; on ad spend per order it is the bad
+      // direction, and painting it green would be a lie in colour.
+      const stat = (k, v, note, was, dir) =>
+        '<div class="led-stat"><span class="k">' + esc(k) + "</span>" +
+        '<div class="val"><strong>' + (v == null ? "\u2014" : inr(v)) + "</strong>" +
+        (was != null && v != null ? changeHTML(v, was, dir || "up") : "") + "</div>" +
+        "<em>" + note + "</em></div>";
+      return '<div class="led-cap" style="padding-top:14px">Per order</div>' +
+        '<div class="led-stats">' +
+        (d.bd && d.bd.aov != null
+          ? stat("Shopify AOV", d.bd.aov,
+                 "net sales less reversals \u00f7 " + num(d.bd.orders) +
+                 " orders \u2014 the figure Shopify\u2019s admin shows",
+                 c && c.bd && c.bd.aov != null ? c.bd.aov : null)
+          : "") +
+        stat("Realisable / order", d.aov,
+             "realisable sales \u00f7 " + num(liveOrders) + " orders" +
+             (legs ? ", " + num(legs) + " Return Prime return legs excluded" : ""),
+             c ? c.aov : null) +
+        stat("Realisable / unit", d.asp,
+             "\u00f7 " + num(liveUnits) + " units", c ? c.asp : null) +
+        // What one order cost to buy, against what one order is worth
+        // -- the two tiles beside it. Read with "down" because a
+        // RISING cost per order is the bad direction, which is the
+        // opposite of every other tile here.
+        stat("Ad spend / order", d.adPerOrder,
+             (d.adAssumed
+               ? "assumed \u2014 overriding " + inr(d.measuredAd, 0) + " measured"
+               : "measured spend \u00f7 " + num(d.adOrders) + " orders") +
+             (d.exchangeOrders
+               ? ", " + num(d.exchangeOrders) + " exchange legs excluded"
+               : ""),
+             c ? c.adPerOrder : null, "down") +
+        "</div>";
+    })() +
+    "</div>" +
 
     '<div class="led-step" style="margin-top:4px"><div class="led-cap" ' +
-    'style="padding-top:14px">Modelled from the assumptions beside this</div>' +
+    'style="padding-top:14px">Contribution margin breakdown \u2014 ' +
+    'modelled from the assumptions beside this</div>' +
     ded.map(x => bar(x.label, x.note, d[x.key], x.segs,
                      c ? c[x.key] : null) +
                  (x.key === "adSpend" ? (adSplit.split || "") : "")).join("") +
@@ -4069,7 +4471,27 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     '<div class="led-kv"><span class="k">' + esc(k) + "</span>" +
     '<span class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" +
     v + "</span></div>";
+  // The two ROASes answer the only question the spend lines raise --
+  // what does the media have to return? -- so they go at the TOP of
+  // the rail, above the measured shares that merely describe the day.
+  //
+  // A dash where there is no answer: with no contribution before ads
+  // there is no spend that breaks even, and a floor above the pre-ad
+  // margin is out of reach at any ROAS. Said in words rather than as
+  // a number, because a number there would be believed.
+  const roasRow = (k, v, note) =>
+    '<div class="led-kv"><span class="k">' + esc(k) +
+    (note ? '<em style="font-style:normal;display:block;font-size:10px;' +
+            'color:var(--text-3)">' + esc(note) + "</em>" : "") + "</span>" +
+    '<span class="v">' + (v != null ? v.toFixed(2) + "\u00d7" : "\u2014") +
+    "</span></div>";
+
   $("pnl-rail").innerHTML = "<h4>Where the line sits</h4>" +
+    roasRow("Break-even ROAS", d.beRoas,
+            d.beRoas == null ? "no contribution before ads" : "") +
+    roasRow("ROAS at " + pc(a.minMargin, 0), d.targetRoas,
+            d.targetRoas == null
+              ? "above the " + pc(d.preAdMargin, 1) + " available" : "") +
     // Named for what it IS -- the share of orders that cancelled, as
     // measured. "Cancellation" sat here while a deduction of the same
     // name sat in the spine, and with that deduction gone the word on
@@ -4086,6 +4508,22 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour);
 }
 
+// Back to the measured figure. Delegated for the same reason as the
+// input handler below -- the control is rebuilt on every draw.
+$("pnl-assump").addEventListener("click", e => {
+  const b = e.target.closest("[data-reset]");
+  if (!b || !LAST) return;
+  const a = pnlAssumptions();
+  // null, not 0: nought is a real figure this field can now carry, so
+  // clearing has to be a different value from entering nothing.
+  a[b.getAttribute("data-reset")] = null;
+  try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
+  drawPnl(LAST.d.today, LAST.d.rows || [],
+          LAST.day === istToday() ? LAST.d.latest_hour : null,
+          LAST.d.compare, LAST.d.compare_rows || [],
+          LAST.d.compare ? LAST.d.compare.day : "");
+});
+
 // Delegated, because drawPnl replaces the inputs on every change.
 $("pnl-assump").addEventListener("input", e => {
   const el = e.target.closest("input[data-k]");
@@ -4101,8 +4539,18 @@ $("pnl-assump").addEventListener("input", e => {
           LAST.d.compare, LAST.d.compare_rows || [],
           LAST.d.compare ? LAST.d.compare.day : "");
   // Redrawing blew away focus mid-keystroke; put it back.
+  //
+  // setSelectionRange THROWS on <input type="number"> -- the spec gives
+  // it no selection to set -- so this raised on every keystroke in the
+  // panel. Nothing visible broke, because the save and the redraw had
+  // already happened by then, which is exactly why it went unnoticed:
+  // a console full of a harmless error is where a real one hides.
+  // Focus is restored, and the caret lands at the end by itself.
   const again = $("pnl-assump").querySelector('input[data-k="' + el.getAttribute("data-k") + '"]');
-  if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+  if (again) {
+    again.focus();
+    try { again.setSelectionRange(again.value.length, again.value.length); } catch {}
+  }
 });
 
 
@@ -4746,9 +5194,21 @@ function dpPick(iso) {
   // First click starts a range, second closes it. A third starts over
   // -- extending whichever end is nearer guesses at an intent the
   // click does not carry.
-  if (!DP.anchor) { DP.anchor = iso; DP.from = iso; DP.to = iso; }
-  else { DP.from = DP.anchor; DP.to = iso; DP.anchor = null; }
+  if (!DP.anchor) { DP.anchor = iso; DP.from = iso; DP.to = iso; dpDraw(); return; }
+  DP.from = DP.anchor; DP.to = iso; DP.anchor = null;
+  // THE SECOND CLICK APPLIES AND CLOSES.
+  //
+  // It used to only redraw, leaving a finished selection sitting in an
+  // open panel waiting for an Apply button at the bottom that people
+  // did not look for -- the panel read as stuck. A completed range is
+  // an unambiguous instruction, so it is carried out.
+  //
+  // The same day twice is how a single date is chosen, which is what
+  // the hint under the calendar now says. Cancel, Escape and clicking
+  // away still abandon a HALF-made selection, so the draft is only
+  // committed by finishing it.
   dpDraw();
+  dpApply();
 }
 
 function dpApply() {

@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- ratios, and a stored ratio cannot be re-divided when hours are
     -- summed. They are computed on read from these counts.
     ql_orders               integer,
+    -- Shopify's OWN order count, unfiltered -- the denominator its
+    -- "Orders and average order value" card divides by, Return Prime's
+    -- zero-value return legs included. `ql_orders` beside it has those
+    -- legs removed, so it is the right denominator for a conversion
+    -- rate and the WRONG one for an AOV that has to tie to the admin.
+    ql_orders_all           integer,
     ql_net_sales            numeric,
     ql_customers            integer,
     ql_new_customers        integer,
@@ -216,6 +222,12 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- instead of a number that has already quietly had it taken out.
     pnl_sales               numeric,
     pnl_orders              integer,
+    -- Orders in the P&L population carrying an `Exchange` tag. The
+    -- second leg of a sale already paid for, so they are not orders
+    -- the advertising bought -- the ad-spend-per-order figure divides
+    -- by `pnl_orders` LESS these. Everything else keeps the whole
+    -- population: an exchange ships, so its logistics are real.
+    pnl_exchange_orders     integer,
     -- Units sold, with the Saadaa Silver Coin taken out: it is a gift
     -- line, not an item sold, and counting it would deflate ASP.
     pnl_qty                 integer,
@@ -250,13 +262,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     pnl_refunds             numeric,
     -- How much of the CANCELLED value Shopify has already refunded.
     --
-    -- This exists because Shopify's Total sales removes a cancellation
-    -- only when it was refunded. A COD order cancelled before payment
-    -- produces no refund, so it stays inside Total sales -- money that
-    -- will never arrive. The P&L deducts exactly the unrefunded part:
-    --   pnl_cancelled_sales - pnl_cancelled_refunded
-    -- Deducting the whole cancelled value instead would double-count
-    -- the part Shopify had already taken out.
+    -- CORRECTED 2026-11-10. This used to say Total sales removes a
+    -- cancellation ONLY when it was refunded, so the unrefunded part
+    -- stayed in and had to be deducted. Measured, that is wrong:
+    -- Shopify reverses the GOODS value of a cancellation whether or
+    -- not cash moved. The zero-value refund record a COD cancellation
+    -- leaves behind is only its cash leg, and `returns` tracks
+    -- cancelled value day by day regardless.
+    --
+    -- So nothing downstream should deduct cancellation again. The
+    -- column stays because the cash split is worth knowing -- how much
+    -- of what was cancelled had actually been collected -- but it is
+    -- no longer the basis of a deduction anywhere.
     pnl_cancelled_refunded  numeric,
     -- Orders CONTAINING a coin, and the number of COINS in them.
     -- They are not the same: an order can ship more than one, so
@@ -320,6 +337,7 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS google_spend_as_of timestamptz",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_exchange_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_qty integer",
@@ -348,6 +366,7 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS qty_ordered integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS basket_mix jsonb",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_orders_all integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_net_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_customers integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_new_customers integer",
@@ -366,12 +385,14 @@ COLUMNS = [
     "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
     "shopify_return_fees", "shopify_taxes", "shopify_duties",
     "shopify_additional_fees",
-    "ql_orders", "ql_net_sales", "ql_customers", "ql_new_customers", "ql_returning_customers",
+    "ql_orders", "ql_orders_all",
+    "ql_net_sales", "ql_customers", "ql_new_customers", "ql_returning_customers",
     "ql_sales_returning", "ql_sales_first_time",
     "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
-    "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders", "silver_coin_qty",
+    "pnl_sales", "pnl_orders", "pnl_exchange_orders", "pnl_qty",
+    "silver_coin_orders", "silver_coin_qty",
     "coin_only_orders", "coin_shipped_orders", "coin_ship_now_orders",
     "coin_call_list_orders", "coin_address_bad_orders", "coin_prepaid_orders",
     "coin_partial_orders", "coin_cod_orders", "bundle_no_coin_orders",
@@ -898,13 +919,21 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
     It is NOT the same measure as the order-derived `revenue` beside
     it, and the difference is not drift:
 
-      * RETURNS are dated by the day the REFUND was issued, against an
-        order from any day. Our order-derived figures date everything by
-        the order. So an hour's total_sales can be pulled down by a
-        refund on a three-week-old order.
-      * Cancelled orders that were never REFUNDED stay inside it. A COD
-        order cancelled before payment produces no refund, so Shopify
-        still counts it; the P&L deducts it separately.
+      * `returns` is CANCELLATION, not customer returns. Measured
+        2026-11-10 against cancelled value day by day, the two track
+        each other; Return Prime's return orders report zero reversals
+        and zero gross, so they contribute nothing to it. Shopify
+        reverses the goods value of a cancelled order whether or not
+        any cash moved.
+      * It is dated by the day the order was CANCELLED, against an
+        order from any day. Our order-derived figures date everything
+        by the order. So an hour's total_sales can be pulled down by a
+        cancellation on a three-week-old order.
+      * Customer returns are NOT in here and are not measured anywhere
+        in this warehouse. Return Prime settles them outside Shopify's
+        refund API, `easyecom_returns` is a 52-row stub last written in
+        September, and the only live signal is a `Return` tag landing
+        on the order weeks later.
 
     Both are kept because they answer different questions, and a single
     number cannot be both Shopify-identical and attributable by channel.
@@ -923,13 +952,21 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
          f"orders, quantity_ordered, "
          f"customers, new_customers, returning_customers, "
          f"total_sales_returning, total_sales_first_time "
-         # Return Prime's zero-value return orders are excluded, the
-         # same exclusion the Shopify report uses. Checked on three
-         # days: total_sales, returns and gross_sales come back
-         # IDENTICAL either way, because those orders carry no money --
-         # so the headline stays exact to the paisa while the COUNTS
-         # stop being inflated. Left unfiltered they ran a few percent
-         # over the report on both orders and units.
+         # Return Prime's zero-value return orders are excluded.
+         # Checked on three days: total_sales, returns and gross_sales
+         # come back IDENTICAL either way, because those orders carry
+         # no money -- so every AMOUNT below is the same with or
+         # without this filter, and only the COUNTS move.
+         #
+         # CORRECTED 2026-11-10: this used to say the exclusion was
+         # "the same one the Shopify report uses". It is not. The
+         # admin's "Orders and average order value" card counts every
+         # order, return legs included, and divides its AOV by that
+         # larger number. Which report you check decides which count
+         # looks right, so BOTH are stored now: this one for anything
+         # needing orders that carry money, and `ql_orders_all` from
+         # the second query below for anything that has to tie to the
+         # admin.
          f"WHERE sales_channel != 'Return Prime: Order Return' "
          f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
          f"GROUP BY hour ORDER BY hour LIMIT 100")
@@ -977,6 +1014,9 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
             # divided by THIS one, so both numerator and denominator
             # come from the same population.
             "ql_orders": int(float(row.get("orders") or 0)),
+            # Filled by the second query below. Declared here so every
+            # hour carries the key whether or not that query reached it.
+            "ql_orders_all": None,
             # The numerator of Shopify's average_order_value, which is
             # NOT total_sales / orders: that reads a few percent low.
             # Shopify divides net sales BEFORE returns, i.e.
@@ -1010,6 +1050,37 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
             "ql_sales_returning": round(float(row.get("total_sales_returning") or 0), 2),
             "ql_sales_first_time": round(float(row.get("total_sales_first_time") or 0), 2),
         }
+    # THE ADMIN'S ORDER COUNT, which is NOT the one above.
+    #
+    # Shopify's "Orders and average order value" card counts EVERY
+    # order, Return Prime's return legs included. Verified against the
+    # card on two days: only the unfiltered count reproduces its AOV,
+    # to the paisa. The filtered count divides the same money by fewer
+    # orders and so lands roughly a tenth high.
+    #
+    # The money is identical either way, to the paisa, because those
+    # legs carry none: total_sales, net_sales, returns and gross_sales
+    # all come back the same. ONLY the count moves. So the filtered
+    # query above still owns every amount and still owns `qty_ordered`,
+    # which the legs would inflate, and this second query exists purely
+    # to supply the denominator Shopify divides by.
+    #
+    # Two counts rather than one, under names that say which is which:
+    # `ql_orders` is orders that carry money, and is the honest
+    # denominator for a conversion rate; `ql_orders_all` is what the
+    # admin shows, and is the only one whose AOV ties to it.
+    q_all = (f"FROM sales SHOW orders "
+             f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
+             f"GROUP BY hour ORDER BY hour LIMIT 100")
+    resp_all = (await graphql_request(client, store, SHOPIFYQL_QUERY,
+                                      {"q": q_all}))["shopifyqlQuery"]
+    if resp_all.get("parseErrors"):
+        raise RuntimeError(f"sales(all) parseErrors: {resp_all['parseErrors']}")
+    for row in (resp_all.get("tableData") or {}).get("rows", []):
+        hour = ist_hour(datetime.fromisoformat(row["hour"].replace("Z", "+00:00")))
+        if hour in out:
+            out[hour]["ql_orders_all"] = int(float(row.get("orders") or 0))
+
     return out
 
 
@@ -1130,6 +1201,7 @@ async def fetch_orders(client, store, day: date,
                                           orders_excluded=0, revenue_excluded=0.0,
                                           new_customers=0, new_customer_revenue=0.0,
                                           pnl_sales=0.0, pnl_orders=0, pnl_qty=0,
+                                          pnl_exchange_orders=0,
                                           silver_coin_orders=0, silver_coin_qty=0,
                                           coin_only_orders=0, coin_shipped_orders=0,
                                           coin_prepaid_orders=0, coin_partial_orders=0,
@@ -1147,6 +1219,21 @@ async def fetch_orders(client, store, day: date,
                 b["pnl_sales"] += price
                 b["pnl_orders"] += 1
                 b["pnl_qty"] += units
+                # An exchange leg is not an order advertising won. It
+                # is the second half of a sale already paid for, so
+                # counting it among the orders the spend bought makes
+                # acquisition look cheaper than it was. Counted here
+                # rather than deducted, because the P&L's other
+                # per-order costs -- logistics above all -- are real on
+                # an exchange and must keep the whole population.
+                #
+                # The tag lands DAYS after the order, so a live day
+                # reports nearly none of these and the count fills in
+                # behind it. That is the same lateness every tag-based
+                # figure on this page carries.
+                if "exchange" in {str(x).strip().lower()
+                                  for x in (n.get("tags") or [])}:
+                    b["pnl_exchange_orders"] += 1
                 # The coin count runs its own exclusions; see
                 # is_coin_excluded for why they are stricter than the
                 # P&L's. Units and sales above are unaffected.

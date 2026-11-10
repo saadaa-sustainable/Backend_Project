@@ -13785,13 +13785,14 @@ SELECT hour, day_ist, hour_of_day,
        sessions_by_source,
        revenue, orders, orders_paid, orders_direct,
        orders_excluded, revenue_excluded,
-       pnl_sales, pnl_orders, pnl_qty, silver_coin_orders, silver_coin_qty,
+       pnl_sales, pnl_orders, pnl_exchange_orders, pnl_qty,
+       silver_coin_orders, silver_coin_qty,
        pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
        pnl_refunds, pnl_cancelled_refunded,
        revenue_shopifyql, shopify_total_sales, shopify_returns,
        shopify_gross_sales, shopify_discounts, shopify_shipping,
        shopify_return_fees, shopify_taxes, shopify_duties,
-       shopify_additional_fees, ql_net_sales,
+       shopify_additional_fees, ql_net_sales, ql_orders, ql_orders_all,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
@@ -13857,6 +13858,14 @@ class HourlyRow(BaseModel):
     #: counts by the day a refund was ISSUED rather than the day the
     #: order was placed.
     pnl_refunds: float | None = None
+    #: Orders in the P&L population carrying an `Exchange` tag -- the
+    #: second leg of a sale already paid for. Not orders the
+    #: advertising bought, so ad spend per order divides by
+    #: `pnl_orders` LESS these. Every other per-order cost keeps the
+    #: whole population, because an exchange ships and its logistics
+    #: are real. The tag lands days late, so a live day reports nearly
+    #: none and the count fills in behind it.
+    pnl_exchange_orders: int | None = None
     #: How much of the cancelled value Shopify has ALREADY refunded and
     #: therefore already removed from Total sales. The P&L deducts only
     #: `pnl_cancelled_sales - pnl_cancelled_refunded`, or it would take
@@ -13900,6 +13909,26 @@ class HourlyRow(BaseModel):
     #: Shopify reported, and a second copy of a subtraction is a second
     #: chance to disagree with it.
     ql_net_sales: float | None = None
+    #: Shopify's order count with Return Prime's zero-value return
+    #: legs EXCLUDED -- orders that carry money. The right denominator
+    #: for a conversion rate, and the wrong one for an AOV.
+    ql_orders: int | None = None
+    #: SHOPIFY'S OWN ORDER COUNT, unfiltered, and the denominator of
+    #: the AOV its admin shows.
+    #:
+    #:     average_order_value = (net_sales - returns) / ql_orders_all
+    #:
+    #: Verified against the admin's "Orders and average order value"
+    #: card on two days: the unfiltered count reproduces its AOV to the
+    #: paisa, and the filtered one lands roughly a tenth high.
+    #:
+    #: The money is the same either way, because the return legs carry
+    #: none. Only the count moves, which is why there are two of them.
+    #:
+    #: It is also NOT total_sales / orders, which runs LOW: that
+    #: numerator has had the reversals taken out while the denominator
+    #: still counts every order.
+    ql_orders_all: int | None = None
     #: The ORDER-derived total, which is what the per-channel splits are
     #: carved from. Gross of returns, so it does not tie to `revenue`
     #: above -- a refund belongs to no campaign hour.
@@ -14052,6 +14081,8 @@ class HourlyTotals(BaseModel):
     shopify_duties: float | None = None
     shopify_additional_fees: float | None = None
     ql_net_sales: float | None = None
+    ql_orders: int | None = None
+    ql_orders_all: int | None = None
     #: The order-derived total the channel splits are carved from.
     #: Gross of returns, so it does NOT tie to `revenue`.
     revenue_attributed: float
@@ -14070,6 +14101,7 @@ class HourlyTotals(BaseModel):
     pnl_cancelled_qty: int
     pnl_refunds: float
     pnl_cancelled_refunded: float
+    pnl_exchange_orders: int | None = None
     spend: float
     meta_impressions: int
     meta_spend: float
@@ -14252,7 +14284,8 @@ def _totals(day: date, rows: list[HourlyRow],
         **{k: (s(k) if have(k) else None) for k in (
             "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
             "shopify_return_fees", "shopify_taxes", "shopify_duties",
-            "shopify_additional_fees", "ql_net_sales")},
+            "shopify_additional_fees", "ql_net_sales", "ql_orders",
+            "ql_orders_all")},
         revenue_attributed=s("revenue_attributed"),
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
@@ -14264,6 +14297,8 @@ def _totals(day: date, rows: list[HourlyRow],
         pnl_cancelled_qty=s("pnl_cancelled_qty"),
         pnl_refunds=s("pnl_refunds"),
         pnl_cancelled_refunded=s("pnl_cancelled_refunded"),
+        pnl_exchange_orders=(s("pnl_exchange_orders")
+                             if have("pnl_exchange_orders") else None),
         spend=spend, meta_impressions=s("meta_impressions"),
         meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
         google_spend=s("google_spend"),
