@@ -172,6 +172,7 @@
   .pnl-assump input { width: 72px; text-align: right; font: inherit; font-size: 11.5px;
                       background: transparent; color: var(--text); border: 1px solid var(--border);
                       border-radius: 4px; padding: 2px 5px; font-variant-numeric: tabular-nums; }
+  .pnl-hrs-wrap { overflow-x: auto; }
   .pnl-hrs { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-top: 8px;
              font-variant-numeric: tabular-nums; }
   .pnl-hrs th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
@@ -358,6 +359,23 @@
   .led-break .led-row.sum { border-top: 1px solid var(--border-soft);
                             border-radius: 0 0 6px 6px; }
   .led-break .led-row .v { font-size: 12.5px; }
+  /* Per-order economics. Tiles rather than another row of the ledger,
+     because these are RATIOS taken off the chain, not steps in it --
+     and because the whole difficulty is that two of them look like the
+     same number and are not. Each carries its own divisor. */
+  .led-stats { display: grid; gap: 10px; margin-top: 10px;
+               grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  .led-stat { border: 1px solid var(--border-soft); border-radius: 8px;
+              padding: 10px 12px; background: var(--muted); min-width: 0; }
+  .led-stat .k { display: block; font-size: 11px; color: var(--text-3); }
+  .led-stat .val { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; }
+  .led-stat strong { font-size: 18px; font-weight: 700; letter-spacing: -.01em;
+                     font-variant-numeric: tabular-nums; }
+  .led-stat em { display: block; font-style: normal; font-size: 10.5px;
+                 color: var(--text-3); margin-top: 4px; line-height: 1.45; }
+  /* Said out loud when a section would otherwise be two identical
+     numbers with nothing between them. */
+  .led-none { font-size: 11.5px; color: var(--text-3); padding: 8px 0 2px; }
   /* A deduction is a length, not just a figure: ad spend and COGS
      being the whole story is the one thing to see at a glance. */
   .led-bar { display: flex; align-items: center; gap: 11px; padding: 6px 0; }
@@ -413,6 +431,17 @@
      The track is the one to drop: it is a sense of scale, and the
      figures beside it are the thing being compared. */
   @media (max-width: 920px) { .led-bar .t { display: none; } }
+  /* On a phone the bar is a 150px label plus three fixed figure
+     columns, which together are wider than the screen -- so the whole
+     page scrolled sideways, and the figure a reader came for was the
+     part off the edge. The label takes its own line and the figures
+     sit under it, right-aligned as before. */
+  @media (max-width: 620px) {
+    .led-bar { flex-wrap: wrap; gap: 0 10px; padding: 8px 0; }
+    .led-bar .l { width: 100%; }
+    .led-bar .wasc { margin-left: auto; }
+    .led-stats { grid-template-columns: 1fr; }
+  }
   .led-box { border: 1px solid var(--border-soft); border-radius: 12px; padding: 16px 18px; }
   .led-box h4 { margin: 0 0 10px; font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
                 text-transform: uppercase; color: var(--text-3); }
@@ -2479,7 +2508,12 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
     '<strong style="font-size:12px">Hour by hour</strong>' +
     '<span class="sub">Same assumptions. Bars are contribution margin, right for a profit ' +
     'and left for a loss, on one scale.</span></div>' +
-    '<table class="pnl-hrs"><thead><tr>' +
+    // Wrapped in its own scroller. Ten columns of figures do not fit a
+    // phone, and without this the TABLE pushed the whole page sideways
+    // -- every section scrolled to read one that could not fit either
+    // way. Scrolling the table alone is the behaviour every other wide
+    // table here already has.
+    '<div class="pnl-hrs-wrap"><table class="pnl-hrs"><thead><tr>' +
     ["Hour","Sales","Orders","ASP","AOV","Realisable","Spend","CM","CM %"]
       .concat(cmpRows && cmpRows.length ? ["vs"] : []).concat([""])
       .map(h => "<th>" + esc(h) + "</th>").join("") +
@@ -2508,7 +2542,7 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
         '<div class="f" style="' + (good ? "left:50%" : "right:50%") +
         ";width:" + frac + "%;background:var(--" + (good ? "good" : "bad") + ')"></div>' +
         "</div></td></tr>";
-    }).join("") + "</tbody></table>";
+    }).join("") + "</tbody></table></div>";
 }
 
 // --- quantity --------------------------------------------------------
@@ -3496,8 +3530,13 @@ $("x-pnl").onclick = () => {
   // -- the same line on the baseline day. Four columns keep that
   // reading order, which is the whole point of the section. Read whole,
   // a row would come out as "Cancelled, not refunded40 orders - 4.2%".
+  // `.led-stat` is in the list because the per-order figures moved out
+  // of the sub-line into tiles of their own. They were exported before
+  // and a reader would not notice they had stopped being -- a missing
+  // row in a file reads as "there was none", not as "we dropped it".
   const sel = "#pnl-lines .led-row, #pnl-lines .led-bar, #pnl-lines .led-head, " +
-              "#pnl-lines .led-split > span, #pnl-lines .led-sub > span";
+              "#pnl-lines .led-split > span, #pnl-lines .led-sub > span, " +
+              "#pnl-lines .led-stat";
   const rows = [...document.querySelectorAll(sel)].map(r => {
     // The ad-spend split is not a ledger line: it is three platforms
     // under one, written as label / share / amount. Indented in the
@@ -3519,6 +3558,18 @@ $("x-pnl").onclick = () => {
               share ? partsText(share) : "",
               amt ? unformat(partsText(amt)) : "", "",
               ch ? unformat(partsText(ch)) : ""];
+    }
+    // A per-order tile is label / value / note, with the note in an
+    // <em> OUTSIDE the label -- so it needs naming here rather than
+    // falling through to the ledger-row shape, which would take the
+    // note as part of the label and write "Shopify AOVnet sales less".
+    if (r.classList.contains("led-stat")) {
+      const k = r.querySelector(".k"), sv = r.querySelector("strong");
+      const sn = r.querySelector("em");
+      const sc = r.querySelector(".good, .bad, .flat");
+      return [CSV_SUB + partsText(k), sn ? partsText(sn) : "",
+              sv ? unformat(partsText(sv)) : "", "",
+              sc ? unformat(partsText(sc)) : ""];
     }
     const l = r.querySelector(".l") || r.querySelector(".lbl");
     const v = r.querySelector(".v") || r.querySelector(".led-big");
@@ -4148,27 +4199,22 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   $("pnl-lines").innerHTML =
     step("measured", "Measured \u2014 Shopify's own figure, stored verbatim",
          "Total sales", inr(sales, 0)) +
-    // The MEASURED average order value, next to the measured total it
-    // comes from -- and deliberately not down beside the modelled one,
-    // which answers a different question on a different population and
-    // had been read as this.
-    ((c || (d.bd && d.bd.aov != null))
-      ? '<div class="led-sub">' +
-        (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.sales, 0) +
-             "</strong> " + changeHTML(sales, c.sales, "up") + "</span>" : "") +
-        (d.bd && d.bd.aov != null
-          ? "<span>Shopify AOV <strong>" + inr(d.bd.aov) + "</strong>" +
-            (c && c.bd && c.bd.aov != null
-              ? " " + changeHTML(d.bd.aov, c.bd.aov, "up") : "") +
-            '<em style="font-style:normal;display:block;font-size:10px">' +
-            "net sales less reversals \u00f7 " + num(d.bd.orders) +
-            " orders, as Shopify counts them</em></span>" : "") +
-        "</div>"
-      : "") +
+    (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
+         inr(c.sales, 0) + "</strong> " + changeHTML(sales, c.sales, "up") +
+         "</span></div>" : "") +
     breakdown +
     "</div>" +
 
     '<div class="led-step">' +
+    '<div class="led-cap">Allowances \u2014 what we expect not to keep</div>' +
+    // Two identical totals with nothing between them reads as a bug.
+    // Said out loud instead, with the reason, because "why are these
+    // the same number" is the first question the section raises.
+    ((!refunds && !extraCancellation && !d.rto && !d.incReturns)
+      ? '<div class="led-none">None set. Cancellations are already out of Total sales ' +
+        "above, and nothing else is deducted until a rate is entered beside this. " +
+        "Realisable sales therefore equals Total sales.</div>"
+      : "") +
     (refunds > 0 || (c && c.refunds > 0)
       ? row("\u2212 Refunds", "on orders that still stand",
             "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null,
@@ -4211,24 +4257,47 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     " units</div>" +
     '<div class="led-head"><span class="lbl">Realisable sales</span>' +
     '<span class="led-big">' + inr(net, 0) + "</span></div>" +
-    // AOV and ASP belong HERE, at the line they are divided from, not
-    // in a card at the top that says nothing about where they come from.
-    '<div class="led-sub">' +
-    // "Realisable per order", not "AOV". It is this line -- after every
-    // allowance -- over OUR order count, so it is lower than Shopify's
-    // AOV by the allowances and by the difference in the two order
-    // populations. Calling both of them AOV is what made the gap look
-    // like an error instead of two different questions.
-    "<span>\u00f7 " + num(liveOrders) + " orders = <strong>" +
-    (d.aov === null ? "\u2014" : inr(d.aov)) + "</strong> realisable / order</span>" +
-    "<span>\u00f7 " + num(liveUnits) + " units = <strong>" +
-    (d.asp === null ? "\u2014" : inr(d.asp)) + "</strong> realisable / unit</span>" +
-    (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.net, 0) + "</strong> " +
-         changeHTML(net, c.net, "up") + "</span>" : "") +
-    "</div></div>" +
+    (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
+         inr(c.net, 0) + "</strong> " + changeHTML(net, c.net, "up") +
+         "</span></div>" : "") +
+    // PER ORDER, in a section of its own.
+    //
+    // These two look like the same number and are not, which is the
+    // whole reason they are side by side with their divisors written
+    // out. Shopify's AOV divides money it defines by a count it
+    // defines; ours divides realisable sales by the orders that
+    // carry money. The gap between the two counts is Return Prime's
+    // return legs, so the page names them and how many there were
+    // rather than leaving a reader to find the difference.
+    (() => {
+      const legs = (d.bd && d.bd.orders != null)
+        ? d.bd.orders - liveOrders : null;
+      const stat = (k, v, note, was) =>
+        '<div class="led-stat"><span class="k">' + esc(k) + "</span>" +
+        '<div class="val"><strong>' + (v == null ? "\u2014" : inr(v)) + "</strong>" +
+        (was != null && v != null ? changeHTML(v, was, "up") : "") + "</div>" +
+        "<em>" + note + "</em></div>";
+      return '<div class="led-cap" style="padding-top:14px">Per order</div>' +
+        '<div class="led-stats">' +
+        (d.bd && d.bd.aov != null
+          ? stat("Shopify AOV", d.bd.aov,
+                 "net sales less reversals \u00f7 " + num(d.bd.orders) +
+                 " orders \u2014 the figure Shopify\u2019s admin shows",
+                 c && c.bd && c.bd.aov != null ? c.bd.aov : null)
+          : "") +
+        stat("Realisable / order", d.aov,
+             "realisable sales \u00f7 " + num(liveOrders) + " orders" +
+             (legs ? ", " + num(legs) + " Return Prime return legs excluded" : ""),
+             c ? c.aov : null) +
+        stat("Realisable / unit", d.asp,
+             "\u00f7 " + num(liveUnits) + " units", c ? c.asp : null) +
+        "</div>";
+    })() +
+    "</div>" +
 
     '<div class="led-step" style="margin-top:4px"><div class="led-cap" ' +
-    'style="padding-top:14px">Modelled from the assumptions beside this</div>' +
+    'style="padding-top:14px">Contribution margin breakdown \u2014 ' +
+    'modelled from the assumptions beside this</div>' +
     ded.map(x => bar(x.label, x.note, d[x.key], x.segs,
                      c ? c[x.key] : null) +
                  (x.key === "adSpend" ? (adSplit.split || "") : "")).join("") +
