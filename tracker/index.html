@@ -175,6 +175,10 @@
                        color: var(--text-3); line-height: 1.5; margin-top: -2px; }
   .pnl-assump .fhint b { font-weight: 600; color: var(--text-2);
                          font-variant-numeric: tabular-nums; }
+  .pnl-assump .fback { font: inherit; font-size: 10px; cursor: pointer; margin-right: 6px;
+                       padding: 2px 6px; border-radius: 4px; color: var(--text-3);
+                       border: 1px solid var(--border); background: transparent; }
+  .pnl-assump .fback:hover { color: var(--text); border-color: var(--text-3); }
   .pnl-assump .note { border-bottom: 0; padding-top: 10px; }
   .pnl-assump input { width: 72px; text-align: right; font: inherit; font-size: 11.5px;
                       background: transparent; color: var(--text); border: 1px solid var(--border);
@@ -2181,9 +2185,14 @@ const PNL_DEFAULTS = {
   // media has to deliver. Changes no figure in the chain; it only
   // sets the second ROAS on the rail.
   minMargin: 0.15,
-  // Override the MEASURED ad spend with a cost per order. Zero means
-  // use what was measured -- see the note where it is applied.
-  adPerOrder: 0,
+  // Override the MEASURED ad spend with a cost per order.
+  //
+  // NULL means "follow the measured figure", and the input shows that
+  // figure rather than a nought -- a nought there read as "we spent
+  // nothing", which is the opposite of what it meant. It also freed
+  // zero to mean zero: a genuine no-spend scenario is now something
+  // this field can express, which under the old scheme it could not.
+  adPerOrder: null,
 };
 const PNL_FIELDS = [
   ["extraCancelRate", "Further cancellation", true, true],
@@ -2220,15 +2229,24 @@ function pnlAssumptions() {
       // reads. Only the exact old default is cleared, and only once --
       // `pnlV` marks it done -- so a 5% someone chose deliberately
       // after this lands is left alone.
-      if (a.pnlV !== 2) {
+      if (!(a.pnlV >= 2)) {
         if (a.extraCancelRate === 0.05) a.extraCancelRate = 0;
-        a.pnlV = 2;
+      }
+      if (!(a.pnlV >= 3)) {
+        // A stored 0 meant "use the measured spend" under the old
+        // scheme and means "spend nothing" under this one, which would
+        // silently wipe ad spend out of the P&L for anyone who had the
+        // field at its old default.
+        if (a.adPerOrder === 0) a.adPerOrder = null;
+      }
+      if (a.pnlV !== 3) {
+        a.pnlV = 3;
         try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
       }
       return a;
     }
   } catch {}
-  return Object.assign({}, PNL_DEFAULTS, { pnlV: 2 });
+  return Object.assign({}, PNL_DEFAULTS, { pnlV: 3 });
 }
 
 //: Which view is on screen. Both are drawn from the same payload, so
@@ -2320,7 +2338,7 @@ function computePnl(r, a) {
   // with genuinely no spend already reports zero on its own, and an
   // override that could not be switched off would be a trap.
   const measuredAd = r.spend || 0;
-  const adAssumed = (a.adPerOrder || 0) > 0;
+  const adAssumed = a.adPerOrder != null && isFinite(a.adPerOrder);
   const adSpend = adAssumed ? a.adPerOrder * orders : measuredAd;
   // The three platforms behind that one figure. Kept separate rather
   // than re-summed: `spend` is what the API computed and is the number
@@ -4107,29 +4125,47 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   // Recomputed with the override cleared rather than cached from an
   // earlier draw: the other assumptions move too, and a baseline from
   // before a COGS change would answer a question nobody asked.
+  // NULL clears the override. Zero does not -- it is now a real
+  // figure meaning "spent nothing", so clearing with it computed the
+  // baseline at no spend at all and reported a measured margin far
+  // above the true one.
   const base = d.adAssumed
-    ? computePnl(t, Object.assign({}, a, { adPerOrder: 0 })) : d;
+    ? computePnl(t, Object.assign({}, a, { adPerOrder: null })) : d;
   const HINTS = {
-    adPerOrder:
-      "0 uses the measured spend \u00b7 <b>" +
-      (base.adPerOrder == null ? "\u2014" : inr(base.adPerOrder)) +
-      "</b> / order, <b>" + inr(base.adSpend, 0) + "</b> in all" +
-      (d.adAssumed
-        ? " \u00b7 margin there <b>" + inr(base.cm, 0) + "</b> (" +
-          pc(base.cmPct, 1) + "), here <b>" + inr(d.cm, 0) + "</b> (" +
-          pc(d.cmPct, 1) + ")"
-        : ""),
+    adPerOrder: d.adAssumed
+      ? "assumed \u00b7 measured was <b>" +
+        (base.adPerOrder == null ? "\u2014" : inr(base.adPerOrder)) +
+        "</b> / order, <b>" + inr(base.adSpend, 0) + "</b> in all \u00b7 " +
+        "margin there <b>" + inr(base.cm, 0) + "</b> (" + pc(base.cmPct, 1) +
+        "), here <b>" + inr(d.cm, 0) + "</b> (" + pc(d.cmPct, 1) + ")"
+      : "measured \u00b7 <b>" + inr(d.adSpend, 0) + "</b> of spend across <b>" +
+        num(d.orders) + "</b> orders. Edit to model a different one.",
   };
 
-  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) =>
-    "<label>" + esc(label) +
-    '<span><input type="number" ' + (signed ? "" : 'min="0" ') + 'step="' + (isPct ? "0.1" : "1") +
+  $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) => {
+    // AD SPEND SHOWS THE MEASURED FIGURE, not a nought standing in for
+    // it. The field is seeded from what the day actually cost per
+    // order, so editing it starts from the real number instead of from
+    // nothing -- a cost to reason about, where the nought was just a
+    // switch whose off position looked like an answer.
+    const live = key === "adPerOrder" && !d.adAssumed;
+    const shown = live
+      ? (d.adPerOrder == null ? 0 : +d.adPerOrder.toFixed(2))
+      : (isPct ? +(a[key] * 100).toFixed(2) : a[key]);
+    return "<label>" + esc(label) +
+    '<span>' +
+    // Only once overridden: there is nothing to go back to otherwise,
+    // and a reset that does nothing is a button that teaches people
+    // their clicks do not count.
+    (key === "adPerOrder" && d.adAssumed
+      ? '<button type="button" class="fback" data-reset="adPerOrder" ' +
+        'title="Back to the measured spend">measured</button>' : "") +
+    '<input type="number" ' + (signed ? "" : 'min="0" ') + 'step="' + (isPct ? "0.1" : "1") +
     '" data-k="' + key + '" data-pct="' + (isPct ? "1" : "") +
-    '" data-signed="' + (signed ? "1" : "") + '" value="' +
-    (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
+    '" data-signed="' + (signed ? "1" : "") + '" value="' + shown + '">' +
     (isPct ? " %" : " \u20B9") + "</span>" +
     (HINTS[key] ? '<em class="fhint">' + HINTS[key] + "</em>" : "") +
-    "</label>").join("") +
+    "</label>"; }).join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
     "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
     "Cancellations are <strong>already out</strong> of Total sales \u2014 the Sales " +
@@ -4447,6 +4483,22 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
 
   drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour);
 }
+
+// Back to the measured figure. Delegated for the same reason as the
+// input handler below -- the control is rebuilt on every draw.
+$("pnl-assump").addEventListener("click", e => {
+  const b = e.target.closest("[data-reset]");
+  if (!b || !LAST) return;
+  const a = pnlAssumptions();
+  // null, not 0: nought is a real figure this field can now carry, so
+  // clearing has to be a different value from entering nothing.
+  a[b.getAttribute("data-reset")] = null;
+  try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
+  drawPnl(LAST.d.today, LAST.d.rows || [],
+          LAST.day === istToday() ? LAST.d.latest_hour : null,
+          LAST.d.compare, LAST.d.compare_rows || [],
+          LAST.d.compare ? LAST.d.compare.day : "");
+});
 
 // Delegated, because drawPnl replaces the inputs on every change.
 $("pnl-assump").addEventListener("input", e => {
