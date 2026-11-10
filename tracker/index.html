@@ -686,6 +686,8 @@
      AND would not dismiss the panel, which reads as the whole control
      being broken. aria-disabled says the same thing to a screen reader
      while leaving the click to JavaScript, which can then say why. */
+  .dp-hint { font-size: 10.5px; color: var(--text-3); margin-left: 10px; }
+  @media (max-width: 680px) { .dp-hint { display: none; } }
   .dp-presets button[aria-disabled="true"] { color: var(--text-3); opacity: .5;
                                              cursor: not-allowed; }
   .dp-presets button[aria-disabled="true"]:hover { background: transparent; }
@@ -1044,6 +1046,7 @@
       <div class="dp-months" id="dp-months"></div>
       <div class="dp-foot">
         <span class="dp-sum" id="dp-sum"></span>
+        <span class="dp-hint">Pick two dates &mdash; or the same date twice for one day</span>
         <span class="dp-acts">
           <button type="button" id="dp-cancel">Cancel</button>
           <button type="button" class="go" id="dp-apply">Apply</button>
@@ -5070,9 +5073,21 @@ function dpPick(iso) {
   // First click starts a range, second closes it. A third starts over
   // -- extending whichever end is nearer guesses at an intent the
   // click does not carry.
-  if (!DP.anchor) { DP.anchor = iso; DP.from = iso; DP.to = iso; }
-  else { DP.from = DP.anchor; DP.to = iso; DP.anchor = null; }
+  if (!DP.anchor) { DP.anchor = iso; DP.from = iso; DP.to = iso; dpDraw(); return; }
+  DP.from = DP.anchor; DP.to = iso; DP.anchor = null;
+  // THE SECOND CLICK APPLIES AND CLOSES.
+  //
+  // It used to only redraw, leaving a finished selection sitting in an
+  // open panel waiting for an Apply button at the bottom that people
+  // did not look for -- the panel read as stuck. A completed range is
+  // an unambiguous instruction, so it is carried out.
+  //
+  // The same day twice is how a single date is chosen, which is what
+  // the hint under the calendar now says. Cancel, Escape and clicking
+  // away still abandon a HALF-made selection, so the draft is only
+  // committed by finishing it.
   dpDraw();
+  dpApply();
 }
 
 function dpApply() {
