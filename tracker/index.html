@@ -2368,9 +2368,25 @@ function computePnl(r, a) {
     if ([g, disc, rev, ns, ship, rfee, tax].some(v => v == null)) return null;
     const ok = Math.abs((g + disc + rev) - ns) < 1
             && Math.abs((ns + ship + rfee + tax + other) - sales) < 1;
+    // SHOPIFY'S OWN AOV, reproduced exactly.
+    //
+    //     (net sales - returns) / Shopify's own order count
+    //
+    // Verified against ShopifyQL's `average_order_value` on four days,
+    // agreeing to the paisa every time. It is NOT total sales over
+    // orders, which reads about nine per cent LOW -- the numerator
+    // there has had the reversals taken out while the denominator
+    // still counts every order.
+    //
+    // `ql_orders` and not our own `orders`: the two count a different
+    // population, and a ratio with a Shopify numerator over our
+    // denominator would be a mongrel that matches neither.
+    const qo = r.ql_orders;
     return { gross: g, discounts: disc, reversals: rev, netSales: ns,
              shipping: ship, returnFees: rfee, taxes: tax, other: other,
-             total: sales, ok: ok };
+             total: sales, ok: ok,
+             orders: qo || null,
+             aov: qo ? (ns - rev) / qo : null };
   })();
 
   return { bd,
@@ -4075,9 +4091,23 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   $("pnl-lines").innerHTML =
     step("measured", "Measured \u2014 Shopify's own figure, stored verbatim",
          "Total sales", inr(sales, 0)) +
-    (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
-         inr(c.sales, 0) + "</strong> " + changeHTML(sales, c.sales, "up") +
-         "</span></div>" : "") +
+    // The MEASURED average order value, next to the measured total it
+    // comes from -- and deliberately not down beside the modelled one,
+    // which answers a different question on a different population and
+    // had been read as this.
+    ((c || (d.bd && d.bd.aov != null))
+      ? '<div class="led-sub">' +
+        (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.sales, 0) +
+             "</strong> " + changeHTML(sales, c.sales, "up") + "</span>" : "") +
+        (d.bd && d.bd.aov != null
+          ? "<span>Shopify AOV <strong>" + inr(d.bd.aov) + "</strong>" +
+            (c && c.bd && c.bd.aov != null
+              ? " " + changeHTML(d.bd.aov, c.bd.aov, "up") : "") +
+            '<em style="font-style:normal;display:block;font-size:10px">' +
+            "net sales less reversals \u00f7 " + num(d.bd.orders) +
+            " Shopify orders</em></span>" : "") +
+        "</div>"
+      : "") +
     breakdown +
     "</div>" +
 
@@ -4124,10 +4154,15 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     // AOV and ASP belong HERE, at the line they are divided from, not
     // in a card at the top that says nothing about where they come from.
     '<div class="led-sub">' +
+    // "Realisable per order", not "AOV". It is this line -- after every
+    // allowance -- over OUR order count, so it is lower than Shopify's
+    // AOV by the allowances and by the difference in the two order
+    // populations. Calling both of them AOV is what made the gap look
+    // like an error instead of two different questions.
     "<span>\u00f7 " + num(liveOrders) + " orders = <strong>" +
-    (d.aov === null ? "\u2014" : inr(d.aov)) + "</strong> AOV</span>" +
+    (d.aov === null ? "\u2014" : inr(d.aov)) + "</strong> realisable / order</span>" +
     "<span>\u00f7 " + num(liveUnits) + " units = <strong>" +
-    (d.asp === null ? "\u2014" : inr(d.asp)) + "</strong> ASP</span>" +
+    (d.asp === null ? "\u2014" : inr(d.asp)) + "</strong> realisable / unit</span>" +
     (c ? "<span>" + esc(cmpDay || "") + " <strong>" + inr(c.net, 0) + "</strong> " +
          changeHTML(net, c.net, "up") + "</span>" : "") +
     "</div></div>" +

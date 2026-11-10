@@ -13791,7 +13791,7 @@ SELECT hour, day_ist, hour_of_day,
        revenue_shopifyql, shopify_total_sales, shopify_returns,
        shopify_gross_sales, shopify_discounts, shopify_shipping,
        shopify_return_fees, shopify_taxes, shopify_duties,
-       shopify_additional_fees, ql_net_sales,
+       shopify_additional_fees, ql_net_sales, ql_orders,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
@@ -13900,6 +13900,19 @@ class HourlyRow(BaseModel):
     #: Shopify reported, and a second copy of a subtraction is a second
     #: chance to disagree with it.
     ql_net_sales: float | None = None
+    #: SHOPIFY'S OWN ORDER COUNT, and the denominator of its AOV.
+    #:
+    #: Kept apart from `orders`, which is derived from the orders
+    #: themselves and drops a different set. Shopify's
+    #: average_order_value is
+    #:
+    #:     (net_sales - returns) / ql_orders
+    #:
+    #: and NOT total_sales / orders, which reads about nine per cent
+    #: low -- verified against its own `average_order_value` on four
+    #: days, agreeing to the paisa every time. Both halves have to come
+    #: from this same population or the ratio is a mongrel.
+    ql_orders: int | None = None
     #: The ORDER-derived total, which is what the per-channel splits are
     #: carved from. Gross of returns, so it does not tie to `revenue`
     #: above -- a refund belongs to no campaign hour.
@@ -14052,6 +14065,7 @@ class HourlyTotals(BaseModel):
     shopify_duties: float | None = None
     shopify_additional_fees: float | None = None
     ql_net_sales: float | None = None
+    ql_orders: int | None = None
     #: The order-derived total the channel splits are carved from.
     #: Gross of returns, so it does NOT tie to `revenue`.
     revenue_attributed: float
@@ -14252,7 +14266,7 @@ def _totals(day: date, rows: list[HourlyRow],
         **{k: (s(k) if have(k) else None) for k in (
             "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
             "shopify_return_fees", "shopify_taxes", "shopify_duties",
-            "shopify_additional_fees", "ql_net_sales")},
+            "shopify_additional_fees", "ql_net_sales", "ql_orders")},
         revenue_attributed=s("revenue_attributed"),
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
