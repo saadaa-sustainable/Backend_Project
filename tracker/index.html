@@ -2097,9 +2097,32 @@ const PNL_DEFAULTS = {
   pgRate: 0.01,
   coinCost: 500,
   cogsRate: 0.28,
+  // RTO -- an order dispatched, refused or undeliverable, and carried
+  // back. Shopify books none of it: there is no refund and often no
+  // cancellation, so the sale is still sitting in Total sales while
+  // the goods are in a van going the wrong way.
+  //
+  // ZERO by default, deliberately. The contribution model this came
+  // from ships 8%, which is a real estimate but not a measured one,
+  // and defaulting to it would move the margin on this page by eight
+  // per cent of sales without anyone choosing it. Set it and it
+  // applies; leave it and nothing changes.
+  rtoRate: 0,
+  // Returns BEYOND the ones Shopify has already booked. The reversals
+  // in the breakdown above are money already handed back and already
+  // out of Total sales; this is the part still to come on orders
+  // placed in the window. Same reasoning for the zero default.
+  returnsRate: 0,
+  // Not a cost -- a target. The margin the business wants to clear
+  // after ads, which is what turns a contribution into the ROAS the
+  // media has to deliver. Changes no figure in the chain; it only
+  // sets the second ROAS on the rail.
+  minMargin: 0.15,
 };
 const PNL_FIELDS = [
   ["extraCancelRate", "Further cancellation", true, true],
+  ["rtoRate", "RTO impact", true],
+  ["returnsRate", "Incremental returns", true],
   ["exchangeRate", "Exchange %", true],
   ["exchangeCost", "Cost / exchange", false],
   ["cogsRate", "COGS", true],
@@ -2107,6 +2130,7 @@ const PNL_FIELDS = [
   ["pgRate", "PG fees", true],
   ["logistics", "Logistics / order", false],
   ["coinCost", "Silver coin / order", false],
+  ["minMargin", "Target margin", true],
 ];
 
 function pnlAssumptions() {
@@ -2229,10 +2253,33 @@ function computePnl(r, a) {
   // of why our figure read high against theirs.
   const refunds = r.pnl_refunds || 0;
   const afterRefunds = sales - refunds;
-  // On what is left, not on gross: an allowance for cancellations
-  // still to come can only apply to money still standing.
+  // THREE ALLOWANCES, ONE BASE.
+  //
+  // All on `afterRefunds` and none on each other. Compounding them
+  // would make the order they are written in change the answer, which
+  // is a property no one wants in a P&L: RTO after returns would
+  // deduct less than returns after RTO, for no reason a reader could
+  // name. The contribution model these came from applies all of its
+  // allowances to AOV for the same reason; this is the same shape,
+  // taken after the refunds Shopify has already booked.
+  //
+  // What each one is for:
+  //   Further cancellation -- orders that will cancel before dispatch
+  //   RTO                  -- dispatched, refused or undeliverable,
+  //                           carried back. No refund, often no
+  //                           cancellation, so Shopify books none of
+  //                           it and the sale is still in Total sales
+  //   Incremental returns  -- returns still to come, BEYOND the
+  //                           reversals Shopify has already taken out
+  //                           (the Sales reversals line above)
+  //
+  // The word "incremental" is doing real work in that last one: the
+  // breakdown's reversals are money already gone, and an allowance
+  // that covered them too would deduct the same refund twice.
   const extraCancellation = afterRefunds * (a.extraCancelRate || 0);
-  const net = afterRefunds - extraCancellation;
+  const rto = afterRefunds * (a.rtoRate || 0);
+  const incReturns = afterRefunds * (a.returnsRate || 0);
+  const net = afterRefunds - extraCancellation - rto - incReturns;
 
   // Every order placed, cancelled or not -- see the note above. The
   // allowance moves MONEY only and never touches a count, so sales
@@ -2263,6 +2310,31 @@ function computePnl(r, a) {
   const cogs = net * a.cogsRate;
   const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
+
+  // WHAT THE MEDIA HAS TO RETURN.
+  //
+  // `preAd` is the contribution with every operating cost out and
+  // nothing taken for advertising yet -- the money there is to spend.
+  // Both ROASes fall out of it, and both are ratios, so they hold at
+  // any grain: a day, a week or one order give the same answer.
+  //
+  //   break-even:  spend(1 + gst) = preAd
+  //                ROAS = sales / spend = sales(1 + gst) / preAd
+  //
+  //   at a margin floor m:
+  //                spend(1 + gst) = preAd - m x sales
+  //                ROAS = (1 + gst) / (preAd/sales - m)
+  //
+  // Null rather than Infinity where they cannot be answered: preAd at
+  // or below zero means no spend breaks even, and a floor above the
+  // pre-ad margin is unreachable at any ROAS. A number there would be
+  // a lie with a decimal point on it.
+  const preAd = cm + adSpend + adGst;
+  const preAdMargin = sales ? preAd / sales : null;
+  const gst = 1 + (a.gstRate || 0);
+  const beRoas = preAd > 0 ? sales * gst / preAd : null;
+  const targetRoas = (preAdMargin != null && preAdMargin > (a.minMargin || 0))
+    ? gst / (preAdMargin - (a.minMargin || 0)) : null;
 
   // HOW SHOPIFY GETS TO THAT HEADLINE.
   //
@@ -2304,7 +2376,8 @@ function computePnl(r, a) {
   return { bd,
            sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
-           cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
+           cancelledOrders, refunds, extraCancellation, rto, incReturns,
+           liveOrders, liveUnits, net, preAd, preAdMargin, beRoas, targetRoas,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
            aov: liveOrders ? net / liveOrders : null,
@@ -3873,7 +3946,12 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     "Refunds are counted from the orders themselves. Cancellation is modelled " +
     "<strong>only</strong> by <strong>Further cancellation</strong> \u2014 the share " +
     "that actually cancelled is reported beside it to set the rate against, and " +
-    "it may be set negative to take the figure back down.</p>";
+    "it may be set negative to take the figure back down. That rate, " +
+    "<strong>RTO</strong> and <strong>Incremental returns</strong> all apply to the " +
+    "same figure and not to each other, so the order they are listed in cannot " +
+    "change the answer; incremental means beyond the reversals Shopify has " +
+    "already taken out. <strong>Target margin</strong> costs nothing \u2014 it only " +
+    "sets the second ROAS on the rail.</p>";
 
   // ---- the ledger -------------------------------------------------
   // One spine, top to bottom, in the order the arithmetic happens. The
@@ -4021,6 +4099,21 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
               + " actually cancelled, " + pc(cancelPct, 1) : ", not measured"),
         signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
         extraCancellation, c ? c.extraCancellation : null) +
+    // Drawn only when set. Both default to zero, and a permanent pair
+    // of "- Rs 0" lines would be two rows of noise above the one line
+    // that is doing something.
+    (d.rto || (c && c.rto)
+      ? row("\u2212 RTO impact",
+            pc(a.rtoRate, 1) + " allowance \u00b7 dispatched, refused, carried back",
+            signedDed(d.rto), c ? signedDed(c.rto) : null,
+            d.rto, c ? c.rto : null)
+      : "") +
+    (d.incReturns || (c && c.incReturns)
+      ? row("\u2212 Incremental returns",
+            pc(a.returnsRate, 1) + " allowance \u00b7 beyond the reversals already booked",
+            signedDed(d.incReturns), c ? signedDed(c.incReturns) : null,
+            d.incReturns, c ? c.incReturns : null)
+      : "") +
     "</div>" +
 
     '<div class="led-step total led-sep" style="margin-top:4px">' +
@@ -4069,7 +4162,27 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     '<div class="led-kv"><span class="k">' + esc(k) + "</span>" +
     '<span class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" +
     v + "</span></div>";
+  // The two ROASes answer the only question the spend lines raise --
+  // what does the media have to return? -- so they go at the TOP of
+  // the rail, above the measured shares that merely describe the day.
+  //
+  // A dash where there is no answer: with no contribution before ads
+  // there is no spend that breaks even, and a floor above the pre-ad
+  // margin is out of reach at any ROAS. Said in words rather than as
+  // a number, because a number there would be believed.
+  const roasRow = (k, v, note) =>
+    '<div class="led-kv"><span class="k">' + esc(k) +
+    (note ? '<em style="font-style:normal;display:block;font-size:10px;' +
+            'color:var(--text-3)">' + esc(note) + "</em>" : "") + "</span>" +
+    '<span class="v">' + (v != null ? v.toFixed(2) + "\u00d7" : "\u2014") +
+    "</span></div>";
+
   $("pnl-rail").innerHTML = "<h4>Where the line sits</h4>" +
+    roasRow("Break-even ROAS", d.beRoas,
+            d.beRoas == null ? "no contribution before ads" : "") +
+    roasRow("ROAS at " + pc(a.minMargin, 0), d.targetRoas,
+            d.targetRoas == null
+              ? "above the " + pc(d.preAdMargin, 1) + " available" : "") +
     // Named for what it IS -- the share of orders that cancelled, as
     // measured. "Cancellation" sat here while a deduction of the same
     // name sat in the spine, and with that deduction gone the word on
