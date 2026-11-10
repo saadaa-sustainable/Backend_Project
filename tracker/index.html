@@ -341,6 +341,23 @@
   .led-row .v { font-size: 13px; font-variant-numeric: tabular-nums; }
   .led-row .was { font-size: 10.5px; color: var(--text-3); margin-right: 8px;
                   font-variant-numeric: tabular-nums; }
+  /* Shopify's own Total sales breakdown. Banded like its admin card,
+     because eight lines of near-identical shape are hard to read
+     across; the banding is what keeps a label with its own figure.
+     The padding is on the row so the band reaches the edges of the
+     block rather than stopping at the text. */
+  .led-break { margin-top: 12px; padding-top: 11px;
+               border-top: 1px dashed var(--border-soft); }
+  .led-break .led-row { padding: 7px 10px; border-radius: 6px; }
+  .led-break .led-row:nth-of-type(even) { background: var(--muted); }
+  /* Net sales and Total sales are not lines, they are where the lines
+     arrive. Marked, or a reader has to re-add the column to find out
+     which two rows the other six resolve into. */
+  .led-break .led-row.sum .l,
+  .led-break .led-row.sum .v { font-weight: 650; color: var(--text); }
+  .led-break .led-row.sum { border-top: 1px solid var(--border-soft);
+                            border-radius: 0 0 6px 6px; }
+  .led-break .led-row .v { font-size: 12.5px; }
   /* A deduction is a length, not just a figure: ad spend and COGS
      being the whole story is the one thing to see at a glance. */
   .led-bar { display: flex; align-items: center; gap: 11px; padding: 6px 0; }
@@ -633,8 +650,20 @@
                        white-space: nowrap; }
   .dp-presets button:hover { background: var(--muted); }
   .dp-presets button[aria-pressed="true"] { background: var(--muted); font-weight: 650; }
-  .dp-presets button[disabled] { color: var(--text-3); opacity: .5; cursor: default; }
-  .dp-presets button[disabled]:hover { background: transparent; }
+  /* NOT the `disabled` attribute. Chrome swallows every pointer event
+     on a disabled button -- it reaches neither the menu's own handler
+     nor the click-away listener on the document -- so an unreachable
+     comparison was a dead patch of the menu: clicking it did nothing
+     AND would not dismiss the panel, which reads as the whole control
+     being broken. aria-disabled says the same thing to a screen reader
+     while leaving the click to JavaScript, which can then say why. */
+  .dp-presets button[aria-disabled="true"] { color: var(--text-3); opacity: .5;
+                                             cursor: not-allowed; }
+  .dp-presets button[aria-disabled="true"]:hover { background: transparent; }
+  /* The reason is already on the row; this just points at it when the
+     row is clicked, so the click is answered rather than ignored. */
+  .dp-presets button[aria-disabled="true"].nudge .dpnote { color: var(--bad);
+                                                           opacity: 1; }
   /* Shopify groups the presets and rules between the groups; without
      it a list of nine reads as one undifferentiated column. */
   .dp-presets hr { border: 0; border-top: 1px solid var(--border-soft);
@@ -1220,9 +1249,17 @@
     <div id="pnl-hourly"></div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
       The top line is <strong>Shopify's own Total sales</strong>, stored verbatim, so it equals
-      what the Shopify admin shows. It still contains cancellations Shopify has not refunded — a
-      COD order cancelled before payment produces no refund — and only that unrefunded part is
-      deducted below, never the whole cancelled value. Everything under the Realisable sales line
+      what the Shopify admin shows, and the breakdown under it is Shopify’s own eight lines:
+      gross less discounts less reversals is net sales, and plus shipping, return fees and taxes
+      is the total. It is drawn only when both of those sums reach the headline exactly, so a
+      window reaching back past the day those lines were first stored shows the headline alone
+      rather than a breakdown that does not add up.
+      Total sales still contains cancelled orders Shopify has not refunded — a COD order
+      cancelled before payment produces no refund — and they are left in on purpose:
+      cancellation is modelled by the <strong>Further cancellation</strong> rate alone, with the
+      share that actually cancelled reported beside it so the rate can be set against something
+      measured. Orders and units are counted the same way, every one placed, so Logistics, AOV
+      and ASP all sit on one population. Everything under the Realisable sales line
       is a model built from the rates above, and the day is still running, so a margin here is an
       estimate rather than a result.
     </p>
@@ -1405,6 +1442,16 @@ function csvField(v) {
   if (/^[=+\-@\t\r]/.test(t) && !/^[-+]?\d+(\.\d+)?%?$/.test(t)) t = "'" + t;
   return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
 }
+
+//: How a sub-line is marked in an exported file.
+//:
+//: NOT whitespace, which is what this used to be: `csvField` collapses
+//: runs of space and trims the ends -- correctly, since a stray newline
+//: out of the DOM would otherwise break the row -- and a figure-space
+//: indent is whitespace to that regex, so it was being eaten before it
+//: ever reached the file. A visible glyph survives, and still reads as
+//: "this hangs off the line above" rather than as a line of its own.
+const CSV_SUB = "\u00B7 ";
 
 const csvText = (head, rows) =>
   [head.map(csvField).join(",")]
@@ -2158,50 +2205,48 @@ function computePnl(r, a) {
   const googleSpend = r.google_spend;
   const kwikSpend = r.kwikchat_spend;
 
-  // Cancellation used to be a flat 5% of sales. It is counted from the
-  // orders now, so the deduction is the real one and the rate is an
-  // output rather than an input.
+  // CANCELLATION IS ONE LINE, AND IT IS THE ALLOWANCE.
   //
-  // Rows written before these columns existed report null, which reads
-  // as no cancellation -- an understatement that re-ingesting the day
-  // fixes, and better than inventing a rate for them.
-  // Only the part Shopify has NOT already taken out. Its Total sales
-  // removes a cancellation via `returns`, which exists only when the
-  // order was refunded; a COD order cancelled before payment produces
-  // no refund and is still sitting in the figure above. Deducting the
-  // whole cancelled value would take the refunded part out twice.
-  const cancellation = Math.max(
-    0, (r.pnl_cancelled_sales || 0) - (r.pnl_cancelled_refunded || 0));
+  // The measured cancelled value used to be deducted here as well, on
+  // top of the allowance below. Two deductions for one thing is one
+  // too many, and reading the section meant knowing which half of the
+  // cancellation each was carrying. The measured figure now informs
+  // the rate rather than being added to it: the rail still reports
+  // what share of orders actually cancelled, so the allowance beside
+  // it can be set against something real.
+  //
+  // The COUNTS follow the money. Cancelled orders stay in `orders` and
+  // `units`, so Logistics is charged on every order placed and AOV and
+  // ASP divide by every order placed. That is deliberately a touch
+  // pessimistic on cost -- a cancelled order does not ship -- and it
+  // keeps numerator and denominator over the same population, which
+  // the alternative did not: dropping the value while keeping the
+  // count out would have left the cancelled money in the numerator and
+  // its order out of the divisor, reading AOV several per cent high.
   const cancelledOrders = r.pnl_cancelled_orders || 0;
-  // Money already handed back on orders that still stand. Shopify nets
-  // this off and we did not, which is most of why our figure read high
-  // against theirs. Cancelled orders are excluded from it -- they are
-  // already deducted at full price.
+  // Money already handed back on orders that still stand -- NOT a
+  // cancellation. Shopify nets this off and we did not, which is most
+  // of why our figure read high against theirs.
   const refunds = r.pnl_refunds || 0;
-  const afterRefunds = sales - cancellation - refunds;
-  // On what is left, not on gross: an allowance for cancellations still
-  // to come can only apply to orders that have not already cancelled.
+  const afterRefunds = sales - refunds;
+  // On what is left, not on gross: an allowance for cancellations
+  // still to come can only apply to money still standing.
   const extraCancellation = afterRefunds * (a.extraCancelRate || 0);
   const net = afterRefunds - extraCancellation;
 
-  // Net of cancellation on BOTH sides of every ratio. A net numerator
-  // over a gross denominator would understate ASP and AOV by exactly
-  // the cancelled share.
-  // Counts are MEASURED and the allowance does not touch them. It moves
-  // money only: the cancelled-order count stays what the orders
-  // actually say, and so do units and the logistics that follows them.
-  //
-  // The consequence is deliberate: because sales fall while units and
-  // orders do not, ASP and AOV fall as the allowance rises. Read them
+  // Every order placed, cancelled or not -- see the note above. The
+  // allowance moves MONEY only and never touches a count, so sales
+  // fall as it rises while units and orders do not: read ASP and AOV
   // as "value per order placed", not as a price.
-  const liveOrders = Math.max(0, orders - cancelledOrders);
-  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty || 0));
+  const liveOrders = orders;
+  const liveUnits = units;
 
   const adGst = adSpend * a.gstRate;
-  // Per order DISPATCHED: a cancellation is cancelled before it ships
-  // in all but the rare post-dispatch case, which Shopify tags as a
-  // return rather than a cancellation -- so charging it logistics would
-  // be inventing a cost.
+  // Per order PLACED. A cancelled order does not ship, so this is the
+  // pessimistic reading on purpose: the allowance above is the one
+  // adjustment for cancellation anywhere in the section, and netting
+  // the count down here too would be a second one wearing a different
+  // hat.
   const logistics = liveOrders * a.logistics;
   const pgFees = net * a.pgRate;
   // Still on the whole population, deliberately: the gift ships with
@@ -2218,7 +2263,46 @@ function computePnl(r, a) {
   const cogs = net * a.cogsRate;
   const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
-  return { sales, orders, units, coinOrders, coinQty, adSpend, cancellation,
+
+  // HOW SHOPIFY GETS TO THAT HEADLINE.
+  //
+  // The eight lines its admin shows under Total sales, carried through
+  // verbatim rather than rebuilt here. Two identities hold to the
+  // paisa on every day measured:
+  //
+  //   gross + discounts + returns                 = net sales
+  //   net + shipping + return fees + taxes
+  //       + duties + additional fees              = total sales
+  //
+  // `discounts` and `returns` arrive NEGATIVE and are kept that way,
+  // so both are additions and no line flips sign between the API and
+  // the page.
+  //
+  // `ok` is the gate, and it is deliberately strict: an hour ingested
+  // before these columns existed reports null, and a window that mixes
+  // such hours with filled ones would produce a breakdown whose lines
+  // do not reach the headline above them. Better to show the headline
+  // alone than a block that quietly does not add up.
+  const bd = (() => {
+    const g = r.shopify_gross_sales, disc = r.shopify_discounts;
+    const rev = r.shopify_returns, ns = r.ql_net_sales;
+    const ship = r.shopify_shipping, rfee = r.shopify_return_fees;
+    const tax = r.shopify_taxes;
+    // Nil on this store today. Summed into one line rather than given
+    // two of their own, so the block does not carry two permanent
+    // zeroes -- but still present, or it stops reconciling the first
+    // time either is charged.
+    const other = (r.shopify_duties || 0) + (r.shopify_additional_fees || 0);
+    if ([g, disc, rev, ns, ship, rfee, tax].some(v => v == null)) return null;
+    const ok = Math.abs((g + disc + rev) - ns) < 1
+            && Math.abs((ns + ship + rfee + tax + other) - sales) < 1;
+    return { gross: g, discounts: disc, reversals: rev, netSales: ns,
+             shipping: ship, returnFees: rfee, taxes: tax, other: other,
+             total: sales, ok: ok };
+  })();
+
+  return { bd,
+           sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
@@ -3293,7 +3377,7 @@ $("x-pnl").onclick = () => {
       // changeHTML writes its own good/bad/flat span rather than a
       // .chg, so it is pulled out by tone here.
       const ch = r.querySelector(".good, .bad, .flat");
-      return ["\u2007\u2007" + partsText(r, "strong, em, i, .good, .bad, .flat"),
+      return [CSV_SUB + partsText(r, "strong, em, i, .good, .bad, .flat"),
               share ? partsText(share) : "",
               amt ? unformat(partsText(amt)) : "", "",
               ch ? unformat(partsText(ch)) : ""];
@@ -3301,13 +3385,21 @@ $("x-pnl").onclick = () => {
     const l = r.querySelector(".l") || r.querySelector(".lbl");
     const v = r.querySelector(".v") || r.querySelector(".led-big");
     const note = l && l.querySelector("em");
+    // The Total sales breakdown is a THIRD kind of sub-line: Shopify's
+    // own eight lines taking the headline apart, not eight more
+    // deductions from it. Indented like the other two, because the
+    // Value column already carries Total sales at the top and summing
+    // it with these would count the same day's sales three times over
+    // -- once as the headline, once as gross, once again as the
+    // breakdown's own Total sales row.
+    const inset = r.closest(".led-break") ? CSV_SUB : "";
     // A deduction bar keeps its comparison in a column of its own; a
     // ledger row keeps it inside the value. Both land in the same file
     // column, or the file would disagree with the page about which day
     // a number belongs to.
     const was = (v && v.querySelector(".was")) || r.querySelector(".wasc");
     const change = r.querySelector(".chg");
-    return [partsText(l, "em"),
+    return [inset + partsText(l, "em"),
             note ? partsText(note) : "",
             unformat(partsText(v, ".was, .chg")),
             was ? unformat(partsText(was)) : "",
@@ -3702,7 +3794,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   // arithmetic waiting to disagree with each other.
   const d = computePnl(t, a);
   const c = cmp ? computePnl(cmp, a) : null;
-  const { sales, orders, cancellation, cancelledOrders, cancelPct, refunds,
+  const { sales, orders, cancelledOrders, cancelPct, refunds,
           extraCancellation, liveOrders, liveUnits, net, cm, cmPct, totalDed } = d;
 
   // Ad spend is three platforms in one line, and WHICH of them moved is
@@ -3757,7 +3849,10 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   const ded = [
     { key: "adSpend", label: "Ad spend", note: adSplit.note, segs: adSplit.segs },
     { key: "adGst", label: "GST on ad spend", note: "" },
-    { key: "logistics", label: "Logistics", note: num(liveOrders) + " dispatched" },
+    // "placed", not "dispatched". Cancelled orders are no longer netted
+    // out of the count, so this is charged on every order -- saying
+    // dispatched would claim a dozen parcels went out that did not.
+    { key: "logistics", label: "Logistics", note: num(liveOrders) + " orders placed" },
     { key: "pgFees", label: "PG fees", note: "" },
     { key: "coins", label: "Silver coin",
       note: num(d.coinQty) + " coins in " + num(d.coinOrders) + " orders" },
@@ -3775,9 +3870,10 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
     "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
-    "Cancellations and refunds are counted from the orders themselves; only " +
-    "<strong>Further cancellation</strong> is an allowance, and it may be set " +
-    "negative to take the figure back down.</p>";
+    "Refunds are counted from the orders themselves. Cancellation is modelled " +
+    "<strong>only</strong> by <strong>Further cancellation</strong> \u2014 the share " +
+    "that actually cancelled is reported beside it to set the rate against, and " +
+    "it may be set negative to take the figure back down.</p>";
 
   // ---- the ledger -------------------------------------------------
   // One spine, top to bottom, in the order the arithmetic happens. The
@@ -3798,11 +3894,15 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     c && nowN != null && wasN != null && wasN
       ? '<span class="chg">' + changeHTML(nowN, wasN, dir || "down") + "</span>" : "";
 
-  const row = (label, note, value, was, nowN, wasN) =>
-    '<div class="led-row"><span class="l">' + esc(label) +
+  // `dir` because this helper draws both kinds of line. On a deduction
+  // a rise is bad, which is the default; on Gross sales or Net sales a
+  // rise is the good news, and painting it red would be a lie told in
+  // colour.
+  const row = (label, note, value, was, nowN, wasN, dir, cls) =>
+    '<div class="led-row' + (cls ? " " + cls : "") + '"><span class="l">' + esc(label) +
     (note ? "<em>" + esc(note) + "</em>" : "") + "</span>" +
     '<span class="v">' + (was ? '<span class="was">' + was + "</span>" : "") +
-    value + chg(nowN, wasN) + "</span></div>";
+    value + chg(nowN, wasN, dir) + "</span></div>";
 
   // Bars are scaled to the LARGEST deduction, not to realisable sales:
   // against revenue every bar but ad spend would be a sliver, and the
@@ -3835,25 +3935,90 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
 
   const vs = cmpDay ? " vs " + esc(cmpDay) : "";
 
+  // ---- how Shopify reaches that headline ---------------------------
+  // The same eight lines the Shopify admin shows under Total sales,
+  // in its order. This does not model anything and nothing below it
+  // depends on it: it exists so the one number the whole page is built
+  // on can be taken apart -- a headline that moved because discounts
+  // widened is a different day from one that moved because gross fell.
+  //
+  // Drawn only when the lines reconcile to the headline. `bd.ok` is
+  // checked on BOTH days: a window that half-predates these columns
+  // would otherwise show a comparison column against nothing.
+  //
+  // Discounts and reversals arrive negative, so they are written with
+  // their own minus and read with dir "down" -- a wider discount is
+  // bad news however the sign is carried.
+  const breakdown = (() => {
+    const b = d.bd;
+    if (!b || !b.ok) return "";
+    const cb = c && c.bd && c.bd.ok ? c.bd : null;
+    // Against the comparison's own breakdown, not against `c` -- if
+    // the baseline day predates these columns there is nothing to
+    // compare a line to, and an empty change column is honest where a
+    // zero would not be.
+    const line = (label, note, key, dir, cls) => {
+      const now = b[key], was = cb ? cb[key] : null;
+      // Discounts and reversals are STORED negative. Two consequences,
+      // both of which bit on the first draw:
+      //
+      //  * written raw they came out "-31,246" against the ledger's
+      //    own "\u2212 \u20B9" a few rows below, so the column read as
+      //    two different conventions;
+      //  * compared signed, a discount of 31k against yesterday's 34k
+      //    is a RISE -- less negative -- and a line that narrowed got
+      //    an up arrow painted red. The change is taken on magnitude,
+      //    which is what "discounts grew" means to anyone reading it.
+      const neg = now < 0 || (was != null && was < 0);
+      const fmt = v => v == null ? null
+                     : (neg ? "\u2212 " + inr(-v, 0) : inr(v, 0));
+      const mag = v => v == null ? null : (neg ? -v : v);
+      return row(label, note, fmt(now), cb ? fmt(was) : null,
+                 mag(now), mag(was), dir, cls);
+    };
+    return '<div class="led-break">' +
+      '<div class="led-cap">Total sales breakdown \u2014 Shopify\u2019s own lines</div>' +
+      line("Gross sales", "", "gross", "up") +
+      line("Discounts", "", "discounts", "down") +
+      line("Sales reversals", "returns, dated by the refund", "reversals", "down") +
+      line("Net sales", "", "netSales", "up", "sum") +
+      line("Shipping charges", "", "shipping", "up") +
+      line("Return fees", "", "returnFees", "up") +
+      line("Taxes", "", "taxes", "up") +
+      // Nil on this store, so it is drawn only when there is something
+      // to draw -- on either day, or the comparison column would have
+      // a line on one side and not the other.
+      (b.other || (cb && cb.other)
+        ? line("Duties & additional fees", "", "other", "up") : "") +
+      line("Total sales", "", "total", "up", "sum") +
+      "</div>";
+  })();
+
   $("pnl-lines").innerHTML =
     step("measured", "Measured \u2014 Shopify's own figure, stored verbatim",
          "Total sales", inr(sales, 0)) +
     (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
          inr(c.sales, 0) + "</strong> " + changeHTML(sales, c.sales, "up") +
          "</span></div>" : "") +
+    breakdown +
     "</div>" +
 
     '<div class="led-step">' +
-    row("\u2212 Cancelled, not refunded",
-        num(cancelledOrders) + " orders \u00b7 " + pc(cancelPct, 1),
-        "\u2212 " + inr(cancellation, 0), c ? "\u2212 " + inr(c.cancellation, 0) : null,
-        cancellation, c ? c.cancellation : null) +
     (refunds > 0 || (c && c.refunds > 0)
       ? row("\u2212 Refunds", "on orders that still stand",
             "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null,
             refunds, c ? c.refunds : null)
       : "") +
-    row("\u2212 Further cancellation", pc(a.extraCancelRate, 1) + " allowance, not measured",
+    // The ONE cancellation line. The note carries the measured rate
+    // beside the rate being applied, because a 5% allowance set against
+    // an 8% actual is the thing a reader needs to notice, and the
+    // measured figure is no longer deducted anywhere to say it for
+    // them.
+    row("\u2212 Further cancellation",
+        pc(a.extraCancelRate, 1) + " allowance"
+        + (cancelPct != null
+            ? " \u00b7 " + num(cancelledOrders) + " of " + num(orders)
+              + " actually cancelled, " + pc(cancelPct, 1) : ", not measured"),
         signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
         extraCancellation, c ? c.extraCancellation : null) +
     "</div>" +
@@ -3905,7 +4070,11 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     '<span class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" +
     v + "</span></div>";
   $("pnl-rail").innerHTML = "<h4>Where the line sits</h4>" +
-    railRow("Cancellation", pc(cancelPct, 1)) +
+    // Named for what it IS -- the share of orders that cancelled, as
+    // measured. "Cancellation" sat here while a deduction of the same
+    // name sat in the spine, and with that deduction gone the word on
+    // its own would now read as the allowance, which it is not.
+    railRow("Orders cancelled", pc(cancelPct, 1)) +
     railRow("Coin orders", pc(d.coinPct, 1)) +
     railRow("Units sold", num(liveUnits)) +
     railRow("Exchanges", num(Math.round(d.exchanges))) +
@@ -4562,7 +4731,8 @@ function dpDrawMenu() {
     // wondering where last year went.
     const tooOld = range && DATA_FLOOR && range[0] < DATA_FLOOR;
     return '<button type="button" data-mode="' + key + '" aria-pressed="' +
-      (CMP_MODE === key ? "true" : "false") + '"' + (tooOld ? " disabled" : "") + ">" +
+      (CMP_MODE === key ? "true" : "false") + '"' +
+      (tooOld ? ' aria-disabled="true"' : "") + ">" +
       esc(label) +
       (range && !tooOld
         ? '<span class="dpnote">' + esc(range[0] === range[1] ? dNice(range[0])
@@ -4839,6 +5009,19 @@ $("dp").addEventListener("click", e => {
   }
   const mode = e.target.closest("[data-mode]");
   if (mode) {
+    // An unreachable window is offered and refused, not removed: the
+    // row carries the reason, and dropping it silently would leave a
+    // reader wondering where last year went. Refusing it has to SAY
+    // so -- a click that does nothing at all is how this read as a
+    // broken button. The menu stays open, because the reader still has
+    // a choice to make.
+    if (mode.getAttribute("aria-disabled") === "true") {
+      mode.classList.remove("nudge");
+      void mode.offsetWidth;            // restart the flash on a second click
+      mode.classList.add("nudge");
+      setTimeout(() => mode.classList.remove("nudge"), 900);
+      return;
+    }
     const key = mode.getAttribute("data-mode");
     if (key === "custom") {
       // Custom turns the menu into the calendar in place, seeded with

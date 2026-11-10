@@ -13789,6 +13789,9 @@ SELECT hour, day_ist, hour_of_day,
        pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
        pnl_refunds, pnl_cancelled_refunded,
        revenue_shopifyql, shopify_total_sales, shopify_returns,
+       shopify_gross_sales, shopify_discounts, shopify_shipping,
+       shopify_return_fees, shopify_taxes, shopify_duties,
+       shopify_additional_fees, ql_net_sales,
        revenue_meta, revenue_google, revenue_paid,
        orders_meta, new_customers, new_customer_revenue,
        meta_spend, meta_impressions, kwikchat_spend,
@@ -13870,6 +13873,33 @@ class HourlyRow(BaseModel):
     shopify_total_sales: float | None = None
     #: Negative, as ShopifyQL reports it.
     shopify_returns: float | None = None
+    #: Shopify's own Total sales breakdown, the eight lines its admin
+    #: shows under the headline. Two identities hold to the paisa:
+    #:
+    #:     gross + discounts + returns                = net sales
+    #:     net + shipping + return fees + taxes
+    #:         + duties + additional fees             = total sales
+    #:
+    #: `shopify_discounts` is NEGATIVE, like `shopify_returns` -- both
+    #: arrive that way from ShopifyQL and are stored unchanged, so the
+    #: identities above are additions rather than a mix of signs.
+    #:
+    #: NULL on an hour ingested before the columns existed, and on an
+    #: hour Shopify reported no sales for at all. The page draws the
+    #: breakdown only when the lines reconcile, so a part-filled window
+    #: shows the headline alone rather than a block that does not add up.
+    shopify_gross_sales: float | None = None
+    shopify_discounts: float | None = None
+    shopify_shipping: float | None = None
+    shopify_return_fees: float | None = None
+    shopify_taxes: float | None = None
+    shopify_duties: float | None = None
+    shopify_additional_fees: float | None = None
+    #: Shopify's own `net_sales` -- gross less discounts less returns.
+    #: Not re-derived from the three columns above: it is the figure
+    #: Shopify reported, and a second copy of a subtraction is a second
+    #: chance to disagree with it.
+    ql_net_sales: float | None = None
     #: The ORDER-derived total, which is what the per-channel splits are
     #: carved from. Gross of returns, so it does not tie to `revenue`
     #: above -- a refund belongs to no campaign hour.
@@ -14009,6 +14039,19 @@ class HourlyTotals(BaseModel):
     revenue: float
     shopify_total_sales: float
     shopify_returns: float
+    #: Shopify's own breakdown, summed. Additive every one of them, so
+    #: a ninety-day window reconciles exactly as a single day does.
+    #: None where no hour in the window reported the column, which is
+    #: not the same as zero -- the page needs to tell those apart
+    #: before it draws a line saying a figure was nil.
+    shopify_gross_sales: float | None = None
+    shopify_discounts: float | None = None
+    shopify_shipping: float | None = None
+    shopify_return_fees: float | None = None
+    shopify_taxes: float | None = None
+    shopify_duties: float | None = None
+    shopify_additional_fees: float | None = None
+    ql_net_sales: float | None = None
     #: The order-derived total the channel splits are carved from.
     #: Gross of returns, so it does NOT tie to `revenue`.
     revenue_attributed: float
@@ -14203,6 +14246,13 @@ def _totals(day: date, rows: list[HourlyRow],
         revenue=revenue, orders=orders,
         shopify_total_sales=revenue,
         shopify_returns=s("shopify_returns"),
+        # `have()` rather than a bare sum: an hour written before these
+        # columns existed reads NULL, and summing those to 0 would draw
+        # a confident "Gross sales 0" under a headline of lakhs.
+        **{k: (s(k) if have(k) else None) for k in (
+            "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
+            "shopify_return_fees", "shopify_taxes", "shopify_duties",
+            "shopify_additional_fees", "ql_net_sales")},
         revenue_attributed=s("revenue_attributed"),
         orders_paid=s("orders_paid"), orders_direct=s("orders_direct"),
         orders_excluded=s("orders_excluded"), revenue_excluded=s("revenue_excluded"),
