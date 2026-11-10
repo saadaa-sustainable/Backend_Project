@@ -701,6 +701,54 @@ COIN_COLUMNS = ["order_id", "order_name", "created_at", "day_ist", "coins", "uni
 #: join rides the orders table's primary key.
 COIN_REFRESH_DAYS = 20
 
+#: The hourly tracker's coin BUCKET columns, recomputed from the table
+#: that is kept current rather than written once and left.
+#:
+#: They were counted at ingest and never revisited, so an order that
+#: was unfulfilled when its hour was first written stayed `ship_now`
+#: for ever. Measured 2026-11-10 that had the two sources disagreeing
+#: by a quarter on the shipped count -- and BOTH were on screen at the
+#: same time, `shipment.shipped` from the table and `total_shipped`
+#: from here, which is the worst way for a dashboard to be wrong.
+#:
+#: The table is the authority: it carries the trailing fulfilment
+#: refresh above, so it tracks reality. These columns follow it.
+#:
+#: COALESCE to 0 rather than leaving the old value: an hour whose coin
+#: orders have all moved out of a bucket must read zero, and skipping
+#: it would strand whatever was there when the hour was ingested.
+#:
+#: `silver_coin_orders` and `silver_coin_qty` are deliberately NOT
+#: touched. They are the P&L's coin-cost basis, counted from the line
+#: items under `is_coin_excluded`'s stricter rules, and the two
+#: populations are meant to differ.
+REFRESH_COIN_BUCKETS = """
+UPDATE public.hourly_campaign_tracker h
+   SET coin_shipped_orders     = COALESCE(b.shipped, 0),
+       coin_ship_now_orders    = COALESCE(b.ship_now, 0),
+       coin_call_list_orders   = COALESCE(b.call_list, 0),
+       coin_address_bad_orders = COALESCE(b.address_bad, 0),
+       bundle_no_coin_orders   = COALESCE(b.bundle_no_coin, 0),
+       coin_only_orders        = COALESCE(b.coin_only, 0)
+  FROM (SELECT hour, day_ist, hour_of_day
+          FROM public.hourly_campaign_tracker
+         WHERE day_ist > (now() AT TIME ZONE 'Asia/Kolkata')::date
+                         - CAST(%(days)s AS integer)) r
+  LEFT JOIN (
+        SELECT day_ist AS d,
+               EXTRACT(hour FROM created_at AT TIME ZONE 'Asia/Kolkata')::int AS hh,
+               count(*) FILTER (WHERE bucket = 'shipped')        AS shipped,
+               count(*) FILTER (WHERE bucket = 'ship_now')       AS ship_now,
+               count(*) FILTER (WHERE bucket = 'call_list')      AS call_list,
+               count(*) FILTER (WHERE bucket = 'address_bad')    AS address_bad,
+               count(*) FILTER (WHERE bucket = 'bundle_no_coin') AS bundle_no_coin,
+               count(*) FILTER (WHERE bucket = 'coin_only')      AS coin_only
+          FROM public.silver_coin_order
+         GROUP BY 1, 2) b
+    ON b.d = r.day_ist AND b.hh = r.hour_of_day
+ WHERE h.hour = r.hour
+"""
+
 REFRESH_FULFILMENT = """
 UPDATE public.silver_coin_order c
    SET fulfillment = 'FULFILLED',
@@ -1714,6 +1762,12 @@ def write(rows: list[dict], coin_rows: list[dict] | None = None) -> int:
             if moved:
                 print(f"          {moved:,} coin order(s) caught up on fulfilment",
                       flush=True)
+            # AFTER the promotion, never before: these columns count the
+            # buckets the statement above has just corrected, and running
+            # them first would copy the state it was about to fix.
+            cur.execute(REFRESH_COIN_BUCKETS, {"days": COIN_REFRESH_DAYS})
+            print(f"          {cur.rowcount:,} hour(s) re-counted by coin bucket",
+                  flush=True)
         conn.commit()
     return len(tuples)
 
