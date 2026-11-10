@@ -165,9 +165,16 @@
      input on top of its own label. */
   .pnl-assump { display: block; }
   .pnl-assump label { display: flex; align-items: center; justify-content: space-between;
-                      gap: 10px; font-size: 12px; color: var(--text-2);
+                      gap: 10px 10px; flex-wrap: wrap; font-size: 12px; color: var(--text-2);
                       padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
   .pnl-assump label > span { flex-shrink: 0; white-space: nowrap; }
+  /* What the figure is when nobody overrides it. Full width under the
+     input rather than beside it: the panel is 280px and a reference
+     squeezed onto the same line would push the input off the end. */
+  .pnl-assump .fhint { flex-basis: 100%; font-style: normal; font-size: 10px;
+                       color: var(--text-3); line-height: 1.5; margin-top: -2px; }
+  .pnl-assump .fhint b { font-weight: 600; color: var(--text-2);
+                         font-variant-numeric: tabular-nums; }
   .pnl-assump .note { border-bottom: 0; padding-top: 10px; }
   .pnl-assump input { width: 72px; text-align: right; font: inherit; font-size: 11.5px;
                       background: transparent; color: var(--text); border: 1px solid var(--border);
@@ -4088,13 +4095,41 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     { key: "cogs", label: "COGS", note: "" },
   ];
 
+  // WHAT THE FIGURE IS WITHOUT THE OVERRIDE.
+  //
+  // Ad spend is the one assumption with a MEASURED counterpart -- the
+  // hour-by-hour spend this page already has -- so an override is only
+  // meaningful against it. The reference sits under the input, with
+  // the margin the measured figure produces, so "what happens to the
+  // margin at a different cost per order" can be read off the panel
+  // instead of remembered from before the edit.
+  //
+  // Recomputed with the override cleared rather than cached from an
+  // earlier draw: the other assumptions move too, and a baseline from
+  // before a COGS change would answer a question nobody asked.
+  const base = d.adAssumed
+    ? computePnl(t, Object.assign({}, a, { adPerOrder: 0 })) : d;
+  const HINTS = {
+    adPerOrder:
+      "0 uses the measured spend \u00b7 <b>" +
+      (base.adPerOrder == null ? "\u2014" : inr(base.adPerOrder)) +
+      "</b> / order, <b>" + inr(base.adSpend, 0) + "</b> in all" +
+      (d.adAssumed
+        ? " \u00b7 margin there <b>" + inr(base.cm, 0) + "</b> (" +
+          pc(base.cmPct, 1) + "), here <b>" + inr(d.cm, 0) + "</b> (" +
+          pc(d.cmPct, 1) + ")"
+        : ""),
+  };
+
   $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) =>
     "<label>" + esc(label) +
     '<span><input type="number" ' + (signed ? "" : 'min="0" ') + 'step="' + (isPct ? "0.1" : "1") +
     '" data-k="' + key + '" data-pct="' + (isPct ? "1" : "") +
     '" data-signed="' + (signed ? "1" : "") + '" value="' +
     (isPct ? +(a[key] * 100).toFixed(2) : a[key]) + '">' +
-    (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
+    (isPct ? " %" : " \u20B9") + "</span>" +
+    (HINTS[key] ? '<em class="fhint">' + HINTS[key] + "</em>" : "") +
+    "</label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
     "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
     "Cancellations are <strong>already out</strong> of Total sales \u2014 the Sales " +
@@ -4428,8 +4463,18 @@ $("pnl-assump").addEventListener("input", e => {
           LAST.d.compare, LAST.d.compare_rows || [],
           LAST.d.compare ? LAST.d.compare.day : "");
   // Redrawing blew away focus mid-keystroke; put it back.
+  //
+  // setSelectionRange THROWS on <input type="number"> -- the spec gives
+  // it no selection to set -- so this raised on every keystroke in the
+  // panel. Nothing visible broke, because the save and the redraw had
+  // already happened by then, which is exactly why it went unnoticed:
+  // a console full of a harmless error is where a real one hides.
+  // Focus is restored, and the caret lands at the end by itself.
   const again = $("pnl-assump").querySelector('input[data-k="' + el.getAttribute("data-k") + '"]');
-  if (again) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
+  if (again) {
+    again.focus();
+    try { again.setSelectionRange(again.value.length, again.value.length); } catch {}
+  }
 });
 
 
