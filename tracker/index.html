@@ -2171,18 +2171,27 @@ const PNL_DEFAULTS = {
   // media has to deliver. Changes no figure in the chain; it only
   // sets the second ROAS on the rail.
   minMargin: 0.15,
+  // Override the MEASURED ad spend with a cost per order. Zero means
+  // use what was measured -- see the note where it is applied.
+  adPerOrder: 0,
 };
 const PNL_FIELDS = [
   ["extraCancelRate", "Further cancellation", true, true],
   ["rtoRate", "RTO impact", true],
   ["returnsRate", "Incremental returns", true],
-  ["exchangeRate", "Exchange %", true],
+  // "Exchange rate", not "Exchange %": the panel appends the unit
+  // itself, so the old label rendered as "Exchange % %".
+  ["exchangeRate", "Exchange rate", true],
   ["exchangeCost", "Cost / exchange", false],
   ["cogsRate", "COGS", true],
   ["gstRate", "GST on ad spend", true],
   ["pgRate", "PG fees", true],
   ["logistics", "Logistics / order", false],
   ["coinCost", "Silver coin / order", false],
+  // Rupees, not a percentage, because it is a cost per order like the
+  // two above it -- and because the question it answers is "what can
+  // we afford to pay for an order", which is a price.
+  ["adPerOrder", "Ad spend / order", false],
   ["minMargin", "Target margin", true],
 ];
 
@@ -2289,14 +2298,30 @@ function computePnl(r, a) {
   // the right assumption when the true count is unknown, and it is
   // never an overcharge.
   const coinQty = r.silver_coin_qty != null ? r.silver_coin_qty : coinOrders;
-  const adSpend = r.spend || 0;
+  // AD SPEND IS MEASURED, AND CAN BE OVERRIDDEN PER ORDER.
+  //
+  // Meta, Google and Kwikchat are real figures and stay the default.
+  // The override exists for the question the measured number cannot
+  // answer: what would the day look like at a different cost of
+  // acquisition? Enter a rupee figure per order and the whole chain
+  // recomputes on it -- deduction, GST, both ROASes.
+  //
+  // ZERO means "use what was measured", not "spend nothing". A day
+  // with genuinely no spend already reports zero on its own, and an
+  // override that could not be switched off would be a trap.
+  const measuredAd = r.spend || 0;
+  const adAssumed = (a.adPerOrder || 0) > 0;
+  const adSpend = adAssumed ? a.adPerOrder * orders : measuredAd;
   // The three platforms behind that one figure. Kept separate rather
   // than re-summed: `spend` is what the API computed and is the number
   // the rest of the P&L is built on, so a component that goes missing
   // must show as a gap in the split, never as a quietly smaller total.
-  const metaSpend = r.meta_spend;
-  const googleSpend = r.google_spend;
-  const kwikSpend = r.kwikchat_spend;
+  //
+  // Dropped entirely when the figure is assumed: a split of a number
+  // nobody spent would be three inventions under a fourth.
+  const metaSpend = adAssumed ? null : r.meta_spend;
+  const googleSpend = adAssumed ? null : r.google_spend;
+  const kwikSpend = adAssumed ? null : r.kwikchat_spend;
 
   // CANCELLATION IS ONE LINE, AND IT IS THE ALLOWANCE.
   //
@@ -2467,7 +2492,11 @@ function computePnl(r, a) {
              aov: qo ? (ns - rev) / qo : null };
   })();
 
-  return { bd,
+  return { bd, adAssumed, measuredAd,
+           //: What one order cost to buy. Measured unless overridden,
+           //: and null rather than zero where there are no orders to
+           //: divide by -- a cost per order of nothing is not zero.
+           adPerOrder: orders ? adSpend / orders : null,
            sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, rto, incReturns,
@@ -4000,6 +4029,12 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ["Kwikchat", "sw-kwik", d.kwikSpend],
   ];
   const adSplit = (() => {
+    // An assumed figure has no platforms behind it, so it says what it
+    // is instead of pretending to a split.
+    if (d.adAssumed) {
+      return { note: inr(a.adPerOrder, 0) + " / order assumed \u00b7 "
+                     + inr(d.measuredAd, 0) + " measured", segs: "" };
+    }
     const known = SPEND_PARTS.filter(x => x[2] != null);
     // Nothing to split, or the parts do not account for the total --
     // which happens on a row written before a column existed. Showing
@@ -4272,10 +4307,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (() => {
       const legs = (d.bd && d.bd.orders != null)
         ? d.bd.orders - liveOrders : null;
-      const stat = (k, v, note, was) =>
+      // `dir` because one of these tiles is a COST. On revenue per
+      // order a rise is good; on ad spend per order it is the bad
+      // direction, and painting it green would be a lie in colour.
+      const stat = (k, v, note, was, dir) =>
         '<div class="led-stat"><span class="k">' + esc(k) + "</span>" +
         '<div class="val"><strong>' + (v == null ? "\u2014" : inr(v)) + "</strong>" +
-        (was != null && v != null ? changeHTML(v, was, "up") : "") + "</div>" +
+        (was != null && v != null ? changeHTML(v, was, dir || "up") : "") + "</div>" +
         "<em>" + note + "</em></div>";
       return '<div class="led-cap" style="padding-top:14px">Per order</div>' +
         '<div class="led-stats">' +
@@ -4291,6 +4329,15 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
              c ? c.aov : null) +
         stat("Realisable / unit", d.asp,
              "\u00f7 " + num(liveUnits) + " units", c ? c.asp : null) +
+        // What one order cost to buy, against what one order is worth
+        // -- the two tiles beside it. Read with "down" because a
+        // RISING cost per order is the bad direction, which is the
+        // opposite of every other tile here.
+        stat("Ad spend / order", d.adPerOrder,
+             d.adAssumed
+               ? "assumed \u2014 overriding " + inr(d.measuredAd, 0) + " measured"
+               : "measured spend \u00f7 " + num(liveOrders) + " orders",
+             c ? c.adPerOrder : null, "down") +
         "</div>";
     })() +
     "</div>" +
