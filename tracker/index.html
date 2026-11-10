@@ -1254,9 +1254,12 @@
       is the total. It is drawn only when both of those sums reach the headline exactly, so a
       window reaching back past the day those lines were first stored shows the headline alone
       rather than a breakdown that does not add up.
-      Total sales still contains cancellations Shopify has not refunded — a
-      COD order cancelled before payment produces no refund — and only that unrefunded part is
-      deducted below, never the whole cancelled value. Everything under the Realisable sales line
+      Total sales still contains cancelled orders Shopify has not refunded — a COD order
+      cancelled before payment produces no refund — and they are left in on purpose:
+      cancellation is modelled by the <strong>Further cancellation</strong> rate alone, with the
+      share that actually cancelled reported beside it so the rate can be set against something
+      measured. Orders and units are counted the same way, every one placed, so Logistics, AOV
+      and ASP all sit on one population. Everything under the Realisable sales line
       is a model built from the rates above, and the day is still running, so a margin here is an
       estimate rather than a result.
     </p>
@@ -2202,50 +2205,48 @@ function computePnl(r, a) {
   const googleSpend = r.google_spend;
   const kwikSpend = r.kwikchat_spend;
 
-  // Cancellation used to be a flat 5% of sales. It is counted from the
-  // orders now, so the deduction is the real one and the rate is an
-  // output rather than an input.
+  // CANCELLATION IS ONE LINE, AND IT IS THE ALLOWANCE.
   //
-  // Rows written before these columns existed report null, which reads
-  // as no cancellation -- an understatement that re-ingesting the day
-  // fixes, and better than inventing a rate for them.
-  // Only the part Shopify has NOT already taken out. Its Total sales
-  // removes a cancellation via `returns`, which exists only when the
-  // order was refunded; a COD order cancelled before payment produces
-  // no refund and is still sitting in the figure above. Deducting the
-  // whole cancelled value would take the refunded part out twice.
-  const cancellation = Math.max(
-    0, (r.pnl_cancelled_sales || 0) - (r.pnl_cancelled_refunded || 0));
+  // The measured cancelled value used to be deducted here as well, on
+  // top of the allowance below. Two deductions for one thing is one
+  // too many, and reading the section meant knowing which half of the
+  // cancellation each was carrying. The measured figure now informs
+  // the rate rather than being added to it: the rail still reports
+  // what share of orders actually cancelled, so the allowance beside
+  // it can be set against something real.
+  //
+  // The COUNTS follow the money. Cancelled orders stay in `orders` and
+  // `units`, so Logistics is charged on every order placed and AOV and
+  // ASP divide by every order placed. That is deliberately a touch
+  // pessimistic on cost -- a cancelled order does not ship -- and it
+  // keeps numerator and denominator over the same population, which
+  // the alternative did not: dropping the value while keeping the
+  // count out would have left the cancelled money in the numerator and
+  // its order out of the divisor, reading AOV several per cent high.
   const cancelledOrders = r.pnl_cancelled_orders || 0;
-  // Money already handed back on orders that still stand. Shopify nets
-  // this off and we did not, which is most of why our figure read high
-  // against theirs. Cancelled orders are excluded from it -- they are
-  // already deducted at full price.
+  // Money already handed back on orders that still stand -- NOT a
+  // cancellation. Shopify nets this off and we did not, which is most
+  // of why our figure read high against theirs.
   const refunds = r.pnl_refunds || 0;
-  const afterRefunds = sales - cancellation - refunds;
-  // On what is left, not on gross: an allowance for cancellations still
-  // to come can only apply to orders that have not already cancelled.
+  const afterRefunds = sales - refunds;
+  // On what is left, not on gross: an allowance for cancellations
+  // still to come can only apply to money still standing.
   const extraCancellation = afterRefunds * (a.extraCancelRate || 0);
   const net = afterRefunds - extraCancellation;
 
-  // Net of cancellation on BOTH sides of every ratio. A net numerator
-  // over a gross denominator would understate ASP and AOV by exactly
-  // the cancelled share.
-  // Counts are MEASURED and the allowance does not touch them. It moves
-  // money only: the cancelled-order count stays what the orders
-  // actually say, and so do units and the logistics that follows them.
-  //
-  // The consequence is deliberate: because sales fall while units and
-  // orders do not, ASP and AOV fall as the allowance rises. Read them
+  // Every order placed, cancelled or not -- see the note above. The
+  // allowance moves MONEY only and never touches a count, so sales
+  // fall as it rises while units and orders do not: read ASP and AOV
   // as "value per order placed", not as a price.
-  const liveOrders = Math.max(0, orders - cancelledOrders);
-  const liveUnits = Math.max(0, units - (r.pnl_cancelled_qty || 0));
+  const liveOrders = orders;
+  const liveUnits = units;
 
   const adGst = adSpend * a.gstRate;
-  // Per order DISPATCHED: a cancellation is cancelled before it ships
-  // in all but the rare post-dispatch case, which Shopify tags as a
-  // return rather than a cancellation -- so charging it logistics would
-  // be inventing a cost.
+  // Per order PLACED. A cancelled order does not ship, so this is the
+  // pessimistic reading on purpose: the allowance above is the one
+  // adjustment for cancellation anywhere in the section, and netting
+  // the count down here too would be a second one wearing a different
+  // hat.
   const logistics = liveOrders * a.logistics;
   const pgFees = net * a.pgRate;
   // Still on the whole population, deliberately: the gift ships with
@@ -2301,7 +2302,7 @@ function computePnl(r, a) {
   })();
 
   return { bd,
-           sales, orders, units, coinOrders, coinQty, adSpend, cancellation,
+           sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
@@ -3793,7 +3794,7 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   // arithmetic waiting to disagree with each other.
   const d = computePnl(t, a);
   const c = cmp ? computePnl(cmp, a) : null;
-  const { sales, orders, cancellation, cancelledOrders, cancelPct, refunds,
+  const { sales, orders, cancelledOrders, cancelPct, refunds,
           extraCancellation, liveOrders, liveUnits, net, cm, cmPct, totalDed } = d;
 
   // Ad spend is three platforms in one line, and WHICH of them moved is
@@ -3848,7 +3849,10 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
   const ded = [
     { key: "adSpend", label: "Ad spend", note: adSplit.note, segs: adSplit.segs },
     { key: "adGst", label: "GST on ad spend", note: "" },
-    { key: "logistics", label: "Logistics", note: num(liveOrders) + " dispatched" },
+    // "placed", not "dispatched". Cancelled orders are no longer netted
+    // out of the count, so this is charged on every order -- saying
+    // dispatched would claim a dozen parcels went out that did not.
+    { key: "logistics", label: "Logistics", note: num(liveOrders) + " orders placed" },
     { key: "pgFees", label: "PG fees", note: "" },
     { key: "coins", label: "Silver coin",
       note: num(d.coinQty) + " coins in " + num(d.coinOrders) + " orders" },
@@ -3866,9 +3870,10 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
     "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
-    "Cancellations and refunds are counted from the orders themselves; only " +
-    "<strong>Further cancellation</strong> is an allowance, and it may be set " +
-    "negative to take the figure back down.</p>";
+    "Refunds are counted from the orders themselves. Cancellation is modelled " +
+    "<strong>only</strong> by <strong>Further cancellation</strong> \u2014 the share " +
+    "that actually cancelled is reported beside it to set the rate against, and " +
+    "it may be set negative to take the figure back down.</p>";
 
   // ---- the ledger -------------------------------------------------
   // One spine, top to bottom, in the order the arithmetic happens. The
@@ -3999,16 +4004,21 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     "</div>" +
 
     '<div class="led-step">' +
-    row("\u2212 Cancelled, not refunded",
-        num(cancelledOrders) + " orders \u00b7 " + pc(cancelPct, 1),
-        "\u2212 " + inr(cancellation, 0), c ? "\u2212 " + inr(c.cancellation, 0) : null,
-        cancellation, c ? c.cancellation : null) +
     (refunds > 0 || (c && c.refunds > 0)
       ? row("\u2212 Refunds", "on orders that still stand",
             "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null,
             refunds, c ? c.refunds : null)
       : "") +
-    row("\u2212 Further cancellation", pc(a.extraCancelRate, 1) + " allowance, not measured",
+    // The ONE cancellation line. The note carries the measured rate
+    // beside the rate being applied, because a 5% allowance set against
+    // an 8% actual is the thing a reader needs to notice, and the
+    // measured figure is no longer deducted anywhere to say it for
+    // them.
+    row("\u2212 Further cancellation",
+        pc(a.extraCancelRate, 1) + " allowance"
+        + (cancelPct != null
+            ? " \u00b7 " + num(cancelledOrders) + " of " + num(orders)
+              + " actually cancelled, " + pc(cancelPct, 1) : ", not measured"),
         signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
         extraCancellation, c ? c.extraCancellation : null) +
     "</div>" +
@@ -4060,7 +4070,11 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     '<span class="v"' + (colour ? ' style="color:' + colour + '"' : "") + ">" +
     v + "</span></div>";
   $("pnl-rail").innerHTML = "<h4>Where the line sits</h4>" +
-    railRow("Cancellation", pc(cancelPct, 1)) +
+    // Named for what it IS -- the share of orders that cancelled, as
+    // measured. "Cancellation" sat here while a deduction of the same
+    // name sat in the spine, and with that deduction gone the word on
+    // its own would now read as the allowance, which it is not.
+    railRow("Orders cancelled", pc(cancelPct, 1)) +
     railRow("Coin orders", pc(d.coinPct, 1)) +
     railRow("Units sold", num(liveUnits)) +
     railRow("Exchanges", num(Math.round(d.exchanges))) +
