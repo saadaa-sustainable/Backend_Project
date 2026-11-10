@@ -1292,12 +1292,24 @@ function apiBase() {
   const fromUrl = qs.get("api");
   if (fromUrl) { try { localStorage.setItem("tracker_api", fromUrl); } catch {} return fromUrl.replace(/\/+$/, ""); }
   try { const v = localStorage.getItem("tracker_api"); if (v) return v.replace(/\/+$/, ""); } catch {}
-  // Only a sensible guess while developing. On a deployed origin it is
-  // not: a first-time visitor would get a connection error pointing at
-  // their OWN machine, which reads as "the dashboard is broken" rather
-  // than "nobody has told it where the API lives".
+  // Nothing asked for and nothing remembered, so fall back by origin.
+  //
+  // On localhost that is the dev API. ANYWHERE ELSE it is the real
+  // backend -- which it did not used to be, and that was the bug: a
+  // deployed page with no ?api= and an empty localStorage returned ""
+  // and rendered "No backend configured". It worked for whoever had
+  // once opened it with ?api= and broke for everybody else, so a fresh
+  // browser, a cleared cache, a second device or a private window all
+  // looked like the dashboard being down.
+  //
+  // The old reasoning -- that a guess would point a first-time visitor
+  // at their own machine -- only argues against defaulting to
+  // localhost off localhost. It never argued against knowing where
+  // this site's own backend lives. The box above still overrides it,
+  // and ?api= still wins over both.
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
-  return local ? "http://localhost:8002" : "";
+  return local ? "http://localhost:8002"
+               : "https://backend-project-mlk9.onrender.com";
 }
 
 const IST_MIN = 330;
@@ -4634,6 +4646,10 @@ function kwDraw() {
 }
 
 function kwLoad() {
+  // Nothing to ask when no backend is configured: a relative URL would
+  // hit the static host instead and 404 into the console, which reads
+  // as a broken panel rather than an unset API.
+  if (!apiBase()) return;
   fetch(apiBase() + "/admin/analytics/kwikchat/status")
     .then(r => r.ok ? r.json() : null)
     .then(d => { if (d) { KW = d; kwDraw(); } })
