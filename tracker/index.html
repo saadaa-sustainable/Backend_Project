@@ -2471,6 +2471,12 @@ function computePnl(r, a) {
   const preAd = cm + adSpend + adGst;
   const preAdMargin = sales ? preAd / sales : null;
   const gst = 1 + (a.gstRate || 0);
+  // What the spend actually returned. Break-even and the target say
+  // what it HAS to return; without this the reader has to divide two
+  // figures from different parts of the page to find out whether it
+  // did. Gross of GST, like the two beside it, so all three are the
+  // same kind of number.
+  const roas = adSpend ? sales / adSpend : null;
   const beRoas = preAd > 0 ? sales * gst / preAd : null;
   const targetRoas = (preAdMargin != null && preAdMargin > (a.minMargin || 0))
     ? gst / (preAdMargin - (a.minMargin || 0)) : null;
@@ -2534,7 +2540,18 @@ function computePnl(r, a) {
              shipping: ship, returnFees: rfee, taxes: tax, other: other,
              total: sales, ok: ok,
              orders: qo || null,
-             aov: qo ? (ns - rev) / qo : null };
+             aov: qo ? (ns - rev) / qo : null,
+             // Reversals per order, on Shopify's own count, so it
+             // reads against the AOV beside it.
+             //
+             // POSITIVE, and NOT deducted anywhere. The contribution
+             // model this came from starts at an AOV taken before
+             // reversals and subtracts them; ours starts at Total
+             // sales, which Shopify has already taken them out of.
+             // Subtracting again would be the cancellation mistake a
+             // second time -- reversals ARE cancellation.
+             revPerOrder: qo ? -rev / qo : null,
+             discPerOrder: qo ? -disc / qo : null };
   })();
 
   return { bd, adAssumed, measuredAd, adOrders, exchangeOrders,
@@ -2545,7 +2562,7 @@ function computePnl(r, a) {
            sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, rto, incReturns,
-           liveOrders, liveUnits, net, preAd, preAdMargin, beRoas, targetRoas,
+           liveOrders, liveUnits, net, preAd, preAdMargin, roas, beRoas, targetRoas,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
            aov: liveOrders ? net / liveOrders : null,
@@ -4305,7 +4322,9 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     return '<div class="led-break">' +
       '<div class="led-cap">Total sales breakdown \u2014 Shopify\u2019s own lines</div>' +
       line("Gross sales", "", "gross", "up") +
-      line("Discounts", "", "discounts", "down") +
+      line("Discounts",
+           b.gross ? pc(-b.discounts / b.gross, 1) + " of gross" : "",
+           "discounts", "down") +
       // NOT returns, whatever Shopify's own wording suggests. Measured
       // against cancelled value day by day, this line is cancellation,
       // and Return Prime's return orders report zero reversals and
@@ -4405,9 +4424,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
       // `dir` because one of these tiles is a COST. On revenue per
       // order a rise is good; on ad spend per order it is the bad
       // direction, and painting it green would be a lie in colour.
-      const stat = (k, v, note, was, dir) =>
+      // `fmt` because not every tile is money. Units per order is a
+      // count and rendering it through inr() put a rupee sign on a
+      // basket size.
+      const stat = (k, v, note, was, dir, fmt) =>
         '<div class="led-stat"><span class="k">' + esc(k) + "</span>" +
-        '<div class="val"><strong>' + (v == null ? "\u2014" : inr(v)) + "</strong>" +
+        '<div class="val"><strong>' +
+        (v == null ? "\u2014" : (fmt ? fmt(v) : inr(v))) + "</strong>" +
         (was != null && v != null ? changeHTML(v, was, dir || "up") : "") + "</div>" +
         "<em>" + note + "</em></div>";
       return '<div class="led-cap" style="padding-top:14px">Per order</div>' +
@@ -4422,8 +4445,21 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
              "realisable sales \u00f7 " + num(liveOrders) + " orders" +
              (legs ? ", " + num(legs) + " Return Prime return legs excluded" : ""),
              c ? c.aov : null) +
+        // Already out of the headline, so it carries no minus and sits
+        // among the per-order figures rather than among the
+        // deductions. Read "down": reversals rising is the bad way.
+        (d.bd && d.bd.revPerOrder != null
+          ? stat("Sales reversals / order", d.bd.revPerOrder,
+                 "\u00f7 " + num(d.bd.orders) + " orders \u00b7 already out of " +
+                 "Total sales, shown not deducted",
+                 c && c.bd ? c.bd.revPerOrder : null, "down")
+          : "") +
         stat("Realisable / unit", d.asp,
              "\u00f7 " + num(liveUnits) + " units", c ? c.asp : null) +
+        stat("Units / order", liveOrders ? liveUnits / liveOrders : null,
+             num(liveUnits) + " units \u00f7 " + num(liveOrders) + " orders",
+             c && c.liveOrders ? c.liveUnits / c.liveOrders : null, "up",
+             v => "\u00d7 " + v.toFixed(2)) +
         // What one order cost to buy, against what one order is worth
         // -- the two tiles beside it. Read with "down" because a
         // RISING cost per order is the bad direction, which is the
@@ -4487,6 +4523,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     "</span></div>";
 
   $("pnl-rail").innerHTML = "<h4>Where the line sits</h4>" +
+    // Achieved first, then the two bars it is being held to -- the
+    // order a reader asks the questions in.
+    roasRow("ROAS achieved", d.roas,
+            d.roas == null ? "no spend to divide by"
+              : (d.beRoas != null
+                  ? (d.roas >= d.beRoas ? "above break-even" : "below break-even")
+                  : "")) +
     roasRow("Break-even ROAS", d.beRoas,
             d.beRoas == null ? "no contribution before ads" : "") +
     roasRow("ROAS at " + pc(a.minMargin, 0), d.targetRoas,
