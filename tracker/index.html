@@ -1254,12 +1254,15 @@
       is the total. It is drawn only when both of those sums reach the headline exactly, so a
       window reaching back past the day those lines were first stored shows the headline alone
       rather than a breakdown that does not add up.
-      Total sales still contains cancelled orders Shopify has not refunded — a COD order
-      cancelled before payment produces no refund — and they are left in on purpose:
-      cancellation is modelled by the <strong>Further cancellation</strong> rate alone, with the
-      share that actually cancelled reported beside it so the rate can be set against something
-      measured. Orders and units are counted the same way, every one placed, so Logistics, AOV
-      and ASP all sit on one population. Everything under the Realisable sales line
+      Cancellations are <strong>already deducted</strong>: Shopify reverses the goods value of a
+      cancelled order whether or not any cash moved, and the <strong>Sales reversals</strong> line
+      is that — measured against cancelled value day by day, with Return Prime&rsquo;s return
+      orders contributing nothing to it. So <strong>Further cancellation</strong> starts at nil
+      and is yours to set as a forward-looking allowance, not ours to assume.
+      <strong>Returns are not measured anywhere in this warehouse</strong>, so nothing removes them
+      but the Incremental returns rate. Orders and units are counted the same way, every one
+      placed, so Logistics, AOV and ASP all sit on one population. Everything under the
+      Realisable sales line
       is a model built from the rates above, and the day is still running, so a margin here is an
       estimate rather than a result.
     </p>
@@ -2072,10 +2075,31 @@ $("donutbody").addEventListener("pointerleave", () => {
 // move while you type.
 const PNL_KEY = "tracker_pnl_assumptions";
 const PNL_DEFAULTS = {
-  // An allowance for cancellations that have NOT happened yet, on top
-  // of those counted from the orders. Signed: negative takes the
-  // measured figure back down.
-  extraCancelRate: 0.05,
+  // ZERO, because Shopify has already taken cancellations out.
+  //
+  // This was 5%, on the belief that a cancellation only leaves Total
+  // sales when it was REFUNDED -- so the unrefunded part, a COD order
+  // cancelled before payment, was still inside and needed deducting.
+  // Measured 2026-11-10, that is wrong. Shopify reverses the GOODS
+  // value of a cancellation whether or not cash moved; the zero-value
+  // refund record a COD cancellation leaves behind is only the cash
+  // leg. The Sales reversals line in the breakdown IS cancellation,
+  // tracking cancelled value day by day, and Return Prime's return
+  // orders contribute nothing to it -- that channel reports zero
+  // reversals and zero gross.
+  //
+  // Over a month and a bit, reversals booked and cancellations of
+  // orders placed came to the same share of gross within two
+  // hundredths of a percentage point. The store is in steady state,
+  // so Total sales is already net of cancellation and a standing
+  // allowance deducted it twice.
+  //
+  // Kept as an editable field rather than deleted: a day still
+  // running has its own orders at full value while their
+  // cancellations reverse out over the days that follow, so there is
+  // a real forward-looking allowance to make if someone wants to make
+  // it. It is now theirs to set, not ours to assume.
+  extraCancelRate: 0,
   // Share of orders that come back as an exchange, and what one costs
   // to service. An exchange ships twice and collects once, so the cost
   // is per EXCHANGE, not per order -- see the deduction below.
@@ -2138,9 +2162,25 @@ function pnlAssumptions() {
   // corrupt JSON must not take the section down with it.
   try {
     const raw = localStorage.getItem(PNL_KEY);
-    if (raw) return Object.assign({}, PNL_DEFAULTS, JSON.parse(raw));
+    if (raw) {
+      const a = Object.assign({}, PNL_DEFAULTS, JSON.parse(raw));
+      // ONE-TIME: clear the old 5% cancellation allowance.
+      //
+      // Stored assumptions outlive a change of default, so every
+      // browser that has used this page is still carrying 0.05 and
+      // would go on double-deducting cancellation however the default
+      // reads. Only the exact old default is cleared, and only once --
+      // `pnlV` marks it done -- so a 5% someone chose deliberately
+      // after this lands is left alone.
+      if (a.pnlV !== 2) {
+        if (a.extraCancelRate === 0.05) a.extraCancelRate = 0;
+        a.pnlV = 2;
+        try { localStorage.setItem(PNL_KEY, JSON.stringify(a)); } catch {}
+      }
+      return a;
+    }
   } catch {}
-  return Object.assign({}, PNL_DEFAULTS);
+  return Object.assign({}, PNL_DEFAULTS, { pnlV: 2 });
 }
 
 //: Which view is on screen. Both are drawn from the same payload, so
@@ -3968,15 +4008,17 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (isPct ? " %" : " \u20B9") + "</span></label>").join("") +
     '<p class="note" style="grid-column:1/-1;margin-top:2px">Saved in this browser. ' +
     "Percentages on COGS and PG fees apply to <strong>realisable</strong> sales. " +
-    "Refunds are counted from the orders themselves. Cancellation is modelled " +
-    "<strong>only</strong> by <strong>Further cancellation</strong> \u2014 the share " +
-    "that actually cancelled is reported beside it to set the rate against, and " +
-    "it may be set negative to take the figure back down. That rate, " +
-    "<strong>RTO</strong> and <strong>Incremental returns</strong> all apply to the " +
-    "same figure and not to each other, so the order they are listed in cannot " +
-    "change the answer; incremental means beyond the reversals Shopify has " +
-    "already taken out. <strong>Target margin</strong> costs nothing \u2014 it only " +
-    "sets the second ROAS on the rail.</p>";
+    "Cancellations are <strong>already out</strong> of Total sales \u2014 the Sales " +
+    "reversals line above is cancellation, not returns \u2014 so " +
+    "<strong>Further cancellation</strong> starts at nil. Set it only as a " +
+    "forward-looking allowance for a day still running, whose own cancellations " +
+    "have not reversed out yet. It, <strong>RTO</strong> and " +
+    "<strong>Incremental returns</strong> all apply to the same figure and never " +
+    "to each other, so the order they are listed in cannot change the answer, and " +
+    "any of them may be set negative. Returns are <strong>not measured anywhere " +
+    "in this warehouse</strong>, so Incremental returns is the only place they " +
+    "enter. <strong>Target margin</strong> costs nothing \u2014 it only sets the " +
+    "second ROAS on the rail.</p>";
 
   // ---- the ledger -------------------------------------------------
   // One spine, top to bottom, in the order the arithmetic happens. The
@@ -4083,7 +4125,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
       '<div class="led-cap">Total sales breakdown \u2014 Shopify\u2019s own lines</div>' +
       line("Gross sales", "", "gross", "up") +
       line("Discounts", "", "discounts", "down") +
-      line("Sales reversals", "returns, dated by the refund", "reversals", "down") +
+      // NOT returns, whatever Shopify's own wording suggests. Measured
+      // against cancelled value day by day, this line is cancellation,
+      // and Return Prime's return orders report zero reversals and
+      // zero gross against it. Saying "returns" here is what led the
+      // P&L to deduct cancellation a second time.
+      line("Sales reversals", "cancellations, dated by the cancellation",
+           "reversals", "down") +
       line("Net sales", "", "netSales", "up", "sum") +
       line("Shipping charges", "", "shipping", "up") +
       line("Return fees", "", "returnFees", "up") +
@@ -4126,18 +4174,21 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
             "\u2212 " + inr(refunds, 0), c ? "\u2212 " + inr(c.refunds, 0) : null,
             refunds, c ? c.refunds : null)
       : "") +
-    // The ONE cancellation line. The note carries the measured rate
-    // beside the rate being applied, because a 5% allowance set against
-    // an 8% actual is the thing a reader needs to notice, and the
-    // measured figure is no longer deducted anywhere to say it for
-    // them.
-    row("\u2212 Further cancellation",
-        pc(a.extraCancelRate, 1) + " allowance"
-        + (cancelPct != null
-            ? " \u00b7 " + num(cancelledOrders) + " of " + num(orders)
-              + " actually cancelled, " + pc(cancelPct, 1) : ", not measured"),
-        signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
-        extraCancellation, c ? c.extraCancellation : null) +
+    // Nil unless someone sets it, and drawn only when they have.
+    // Cancellations are already out of Total sales via the Sales
+    // reversals line above, so a standing allowance here deducted them
+    // twice; what is left is a forward-looking allowance for a day
+    // still running, which is a judgement, not a measurement. The
+    // measured share stays on the rail either way.
+    (extraCancellation || (c && c.extraCancellation)
+      ? row("\u2212 Further cancellation",
+            pc(a.extraCancelRate, 1) + " allowance"
+            + (cancelPct != null
+                ? " \u00b7 " + num(cancelledOrders) + " of " + num(orders)
+                  + " cancelled, already out via reversals" : ", not measured"),
+            signedDed(extraCancellation), c ? signedDed(c.extraCancellation) : null,
+            extraCancellation, c ? c.extraCancellation : null)
+      : "") +
     // Drawn only when set. Both default to zero, and a permanent pair
     // of "- Rs 0" lines would be two rows of noise above the one line
     // that is doing something.

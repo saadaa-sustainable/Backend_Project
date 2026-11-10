@@ -256,13 +256,18 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     pnl_refunds             numeric,
     -- How much of the CANCELLED value Shopify has already refunded.
     --
-    -- This exists because Shopify's Total sales removes a cancellation
-    -- only when it was refunded. A COD order cancelled before payment
-    -- produces no refund, so it stays inside Total sales -- money that
-    -- will never arrive. The P&L deducts exactly the unrefunded part:
-    --   pnl_cancelled_sales - pnl_cancelled_refunded
-    -- Deducting the whole cancelled value instead would double-count
-    -- the part Shopify had already taken out.
+    -- CORRECTED 2026-11-10. This used to say Total sales removes a
+    -- cancellation ONLY when it was refunded, so the unrefunded part
+    -- stayed in and had to be deducted. Measured, that is wrong:
+    -- Shopify reverses the GOODS value of a cancellation whether or
+    -- not cash moved. The zero-value refund record a COD cancellation
+    -- leaves behind is only its cash leg, and `returns` tracks
+    -- cancelled value day by day regardless.
+    --
+    -- So nothing downstream should deduct cancellation again. The
+    -- column stays because the cash split is worth knowing -- how much
+    -- of what was cancelled had actually been collected -- but it is
+    -- no longer the basis of a deduction anywhere.
     pnl_cancelled_refunded  numeric,
     -- Orders CONTAINING a coin, and the number of COINS in them.
     -- They are not the same: an order can ship more than one, so
@@ -906,13 +911,21 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
     It is NOT the same measure as the order-derived `revenue` beside
     it, and the difference is not drift:
 
-      * RETURNS are dated by the day the REFUND was issued, against an
-        order from any day. Our order-derived figures date everything by
-        the order. So an hour's total_sales can be pulled down by a
-        refund on a three-week-old order.
-      * Cancelled orders that were never REFUNDED stay inside it. A COD
-        order cancelled before payment produces no refund, so Shopify
-        still counts it; the P&L deducts it separately.
+      * `returns` is CANCELLATION, not customer returns. Measured
+        2026-11-10 against cancelled value day by day, the two track
+        each other; Return Prime's return orders report zero reversals
+        and zero gross, so they contribute nothing to it. Shopify
+        reverses the goods value of a cancelled order whether or not
+        any cash moved.
+      * It is dated by the day the order was CANCELLED, against an
+        order from any day. Our order-derived figures date everything
+        by the order. So an hour's total_sales can be pulled down by a
+        cancellation on a three-week-old order.
+      * Customer returns are NOT in here and are not measured anywhere
+        in this warehouse. Return Prime settles them outside Shopify's
+        refund API, `easyecom_returns` is a 52-row stub last written in
+        September, and the only live signal is a `Return` tag landing
+        on the order weeks later.
 
     Both are kept because they answer different questions, and a single
     number cannot be both Shopify-identical and attributable by channel.
