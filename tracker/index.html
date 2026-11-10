@@ -424,7 +424,13 @@
                       font-variant-numeric: tabular-nums; }
   .led-split em { font-style: normal; }
   @media (max-width: 760px) { .led-split { margin-left: 0; } }
-  .led-bar .v { width: 100px; text-align: right; flex-shrink: 0; font-size: 12.5px;
+  /* The second line under a deduction: per order, and share of sales.
+     Block so it sits under the figure rather than beside it, and the
+     column widens a little to hold "1,234 / order - 12.3%". */
+  .led-bar .v em, .led-row .v em { display: block; font-style: normal; font-size: 10px;
+                   color: var(--text-3); line-height: 1.4; margin-top: 1px;
+                   white-space: nowrap; font-weight: 400; }
+  .led-bar .v { width: 128px; text-align: right; flex-shrink: 0; font-size: 12.5px;
                 font-variant-numeric: tabular-nums; color: var(--bad); }
   /* The comparison gets its own column rather than sitting inside the
      value: run together, two amounts in the same red read as one
@@ -2471,6 +2477,12 @@ function computePnl(r, a) {
   const preAd = cm + adSpend + adGst;
   const preAdMargin = sales ? preAd / sales : null;
   const gst = 1 + (a.gstRate || 0);
+  // What the spend actually returned. Break-even and the target say
+  // what it HAS to return; without this the reader has to divide two
+  // figures from different parts of the page to find out whether it
+  // did. Gross of GST, like the two beside it, so all three are the
+  // same kind of number.
+  const roas = adSpend ? sales / adSpend : null;
   const beRoas = preAd > 0 ? sales * gst / preAd : null;
   const targetRoas = (preAdMargin != null && preAdMargin > (a.minMargin || 0))
     ? gst / (preAdMargin - (a.minMargin || 0)) : null;
@@ -2534,7 +2546,18 @@ function computePnl(r, a) {
              shipping: ship, returnFees: rfee, taxes: tax, other: other,
              total: sales, ok: ok,
              orders: qo || null,
-             aov: qo ? (ns - rev) / qo : null };
+             aov: qo ? (ns - rev) / qo : null,
+             // Reversals per order, on Shopify's own count, so it
+             // reads against the AOV beside it.
+             //
+             // POSITIVE, and NOT deducted anywhere. The contribution
+             // model this came from starts at an AOV taken before
+             // reversals and subtracts them; ours starts at Total
+             // sales, which Shopify has already taken them out of.
+             // Subtracting again would be the cancellation mistake a
+             // second time -- reversals ARE cancellation.
+             revPerOrder: qo ? -rev / qo : null,
+             discPerOrder: qo ? -disc / qo : null };
   })();
 
   return { bd, adAssumed, measuredAd, adOrders, exchangeOrders,
@@ -2545,7 +2568,7 @@ function computePnl(r, a) {
            sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, rto, incReturns,
-           liveOrders, liveUnits, net, preAd, preAdMargin, beRoas, targetRoas,
+           liveOrders, liveUnits, net, preAd, preAdMargin, roas, beRoas, targetRoas,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
            asp: liveUnits ? net / liveUnits : null,
            aov: liveOrders ? net / liveOrders : null,
@@ -3662,9 +3685,12 @@ $("x-pnl").onclick = () => {
     // a number belongs to.
     const was = (v && v.querySelector(".was")) || r.querySelector(".wasc");
     const change = r.querySelector(".chg");
+    // `em` skipped as well: a deduction's value cell now carries a
+    // second line (per order, share of sales) under the figure, and
+    // without this the file read "-254028708 / order - 25.4%".
     return [inset + partsText(l, "em"),
             note ? partsText(note) : "",
-            unformat(partsText(v, ".was, .chg")),
+            unformat(partsText(v, ".was, .chg, em")),
             was ? unformat(partsText(was)) : "",
             change ? unformat(partsText(change)) : ""];
   }).filter(r => r[0] || r[2]);
@@ -4240,7 +4266,16 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     ...ded.map(x => Math.abs(d[x.key] || 0)),
     ...(c ? ded.map(x => Math.abs(c[x.key] || 0)) : []), 1);
   const pctOf = v => Math.min(100, Math.max(0, Math.abs(v)) / maxDed * 100);
-  const bar = (label, note, value, segs, was) =>
+  // Ad spend divides by the orders advertising could have bought, the
+  // same population its tile uses. Every other deduction divides by
+  // every order placed, because every order placed incurs them. Two
+  // figures called "per order" in one card had better be the same
+  // figure -- and on a day with exchange legs they were not.
+  const perOrder = (key, v) => {
+    const n = key === "adSpend" ? d.adOrders : liveOrders;
+    return n ? inr(v / n, 0) + " / order" : "";
+  };
+  const bar = (label, note, value, segs, was, key) =>
     '<div class="led-bar"><span class="l">' + esc(label) +
     (note ? "<em>" + esc(note) + "</em>" : "") + "</span>" +
     '<span class="t"><span' + (segs ? ' class="seg"' : "") + ' style="width:' +
@@ -4256,7 +4291,18 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     "</span>" +
     (c ? '<span class="wasc">' + (was != null ? "\u2212 " + inr(was, 0) : "") +
          "</span>" : "") +
-    '<span class="v">\u2212 ' + inr(value, 0) + "</span>" +
+    // THE ANALYTICAL PART. A rupee total says how big a line is; what
+    // a reader actually asks is what it costs per order and what share
+    // of sales it eats, and those were two divisions away on a page
+    // that had both figures already. Per order first, because that is
+    // the basis every assumption beside it is set in.
+    '<span class="v">\u2212 ' + inr(value, 0) +
+    (liveOrders || sales
+      ? "<em>" + perOrder(key, value) +
+        (liveOrders && sales ? " \u00b7 " : "") +
+        (sales ? pc(value / sales, 1) : "") + "</em>"
+      : "") +
+    "</span>" +
     (c ? chg(value, was) || '<span class="chg"></span>' : "") + "</div>";
 
   const vs = cmpDay ? " vs " + esc(cmpDay) : "";
@@ -4305,7 +4351,9 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     return '<div class="led-break">' +
       '<div class="led-cap">Total sales breakdown \u2014 Shopify\u2019s own lines</div>' +
       line("Gross sales", "", "gross", "up") +
-      line("Discounts", "", "discounts", "down") +
+      line("Discounts",
+           b.gross ? pc(-b.discounts / b.gross, 1) + " of gross" : "",
+           "discounts", "down") +
       // NOT returns, whatever Shopify's own wording suggests. Measured
       // against cancelled value day by day, this line is cancellation,
       // and Return Prime's return orders report zero reversals and
@@ -4400,14 +4448,23 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     // return legs, so the page names them and how many there were
     // rather than leaving a reader to find the difference.
     (() => {
-      const legs = (d.bd && d.bd.orders != null)
+      // Guarded, because the two counts come from different feeds at
+      // different freshness: on a live day ShopifyQL lags the order
+      // feed and the subtraction goes NEGATIVE, which rendered as
+      // "-11 Return Prime return legs excluded". A lag is not a leg
+      // count, so it says nothing rather than something false.
+      const legs = (d.bd && d.bd.orders != null && d.bd.orders > liveOrders)
         ? d.bd.orders - liveOrders : null;
       // `dir` because one of these tiles is a COST. On revenue per
       // order a rise is good; on ad spend per order it is the bad
       // direction, and painting it green would be a lie in colour.
-      const stat = (k, v, note, was, dir) =>
+      // `fmt` because not every tile is money. Units per order is a
+      // count and rendering it through inr() put a rupee sign on a
+      // basket size.
+      const stat = (k, v, note, was, dir, fmt) =>
         '<div class="led-stat"><span class="k">' + esc(k) + "</span>" +
-        '<div class="val"><strong>' + (v == null ? "\u2014" : inr(v)) + "</strong>" +
+        '<div class="val"><strong>' +
+        (v == null ? "\u2014" : (fmt ? fmt(v) : inr(v))) + "</strong>" +
         (was != null && v != null ? changeHTML(v, was, dir || "up") : "") + "</div>" +
         "<em>" + note + "</em></div>";
       return '<div class="led-cap" style="padding-top:14px">Per order</div>' +
@@ -4422,8 +4479,21 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
              "realisable sales \u00f7 " + num(liveOrders) + " orders" +
              (legs ? ", " + num(legs) + " Return Prime return legs excluded" : ""),
              c ? c.aov : null) +
+        // Already out of the headline, so it carries no minus and sits
+        // among the per-order figures rather than among the
+        // deductions. Read "down": reversals rising is the bad way.
+        (d.bd && d.bd.revPerOrder != null
+          ? stat("Sales reversals / order", d.bd.revPerOrder,
+                 "\u00f7 " + num(d.bd.orders) + " orders \u00b7 already out of " +
+                 "Total sales, shown not deducted",
+                 c && c.bd ? c.bd.revPerOrder : null, "down")
+          : "") +
         stat("Realisable / unit", d.asp,
              "\u00f7 " + num(liveUnits) + " units", c ? c.asp : null) +
+        stat("Units / order", liveOrders ? liveUnits / liveOrders : null,
+             num(liveUnits) + " units \u00f7 " + num(liveOrders) + " orders",
+             c && c.liveOrders ? c.liveUnits / c.liveOrders : null, "up",
+             v => "\u00d7 " + v.toFixed(2)) +
         // What one order cost to buy, against what one order is worth
         // -- the two tiles beside it. Read with "down" because a
         // RISING cost per order is the bad direction, which is the
@@ -4444,13 +4514,20 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     'style="padding-top:14px">Contribution margin breakdown \u2014 ' +
     'modelled from the assumptions beside this</div>' +
     ded.map(x => bar(x.label, x.note, d[x.key], x.segs,
-                     c ? c[x.key] : null) +
+                     c ? c[x.key] : null, x.key) +
                  (x.key === "adSpend" ? (adSplit.split || "") : "")).join("") +
     '<div class="led-row led-sep" style="margin-top:4px">' +
     '<span class="l" style="font-weight:600;color:var(--text)">Total deductions</span>' +
     '<span class="v" style="font-weight:600;color:var(--bad)">' +
     (c ? '<span class="was">\u2212 ' + inr(c.totalDed, 0) + "</span>" : "") +
-    "\u2212 " + inr(totalDed, 0) + chg(totalDed, c ? c.totalDed : null) +
+    // The change BEFORE the per-order line, not after. The sub-line is
+    // a block, so anything following it is pushed onto a third row --
+    // which left the arrow stranded under the figure it describes.
+    "\u2212 " + inr(totalDed, 0) +
+    chg(totalDed, c ? c.totalDed : null) +
+    (liveOrders && sales
+      ? "<em>" + inr(totalDed / liveOrders, 0) +
+        " / order \u00b7 " + pc(totalDed / sales, 1) + "</em>" : "") +
     "</span></div></div>" +
 
     '<div class="led-step result led-sep" style="margin-top:4px">' +
@@ -4460,10 +4537,22 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     (cm < 0 ? "var(--bad)" : "var(--good)") + '">' + pc(cmPct, 1) + "</span>" +
     '<span class="led-big huge" style="color:' +
     (cm < 0 ? "var(--bad)" : "var(--good)") + '">' + inr(cm, 0) + "</span></span></div>" +
-    (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " at the same hour <strong>" +
+    '<div class="led-sub">' +
+    // Contribution PER ORDER. The whole contribution model this
+    // section was checked against is built on this one figure, and it
+    // was the only thing on the page that still had to be divided by
+    // hand.
+    (liveOrders
+      ? "<span>\u00f7 " + num(liveOrders) + " orders = <strong>" +
+        inr(cm / liveOrders) + "</strong> contribution / order" +
+        (c && c.liveOrders
+          ? " " + changeHTML(cm / liveOrders, c.cm / c.liveOrders, "up") : "") +
+        "</span>"
+      : "") +
+    (c ? "<span>" + esc(cmpDay || "") + " at the same hour <strong>" +
          inr(c.cm, 0) + "</strong> \u00b7 " + pc(c.cmPct, 1) + " " +
-         changeHTML(cm, c.cm, "up") + "</span></div>" : "") +
-    "</div>";
+         changeHTML(cm, c.cm, "up") + "</span>" : "") +
+    "</div></div>";
 
   // The rail: the figures that are NOT part of the chain but are read
   // against it. Kept out of the spine so the spine stays one argument.
@@ -4487,6 +4576,13 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     "</span></div>";
 
   $("pnl-rail").innerHTML = "<h4>Where the line sits</h4>" +
+    // Achieved first, then the two bars it is being held to -- the
+    // order a reader asks the questions in.
+    roasRow("ROAS achieved", d.roas,
+            d.roas == null ? "no spend to divide by"
+              : (d.beRoas != null
+                  ? (d.roas >= d.beRoas ? "above break-even" : "below break-even")
+                  : "")) +
     roasRow("Break-even ROAS", d.beRoas,
             d.beRoas == null ? "no contribution before ads" : "") +
     roasRow("ROAS at " + pc(a.minMargin, 0), d.targetRoas,
