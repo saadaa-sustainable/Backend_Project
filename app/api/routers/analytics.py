@@ -13785,7 +13785,8 @@ SELECT hour, day_ist, hour_of_day,
        sessions_by_source,
        revenue, orders, orders_paid, orders_direct,
        orders_excluded, revenue_excluded,
-       pnl_sales, pnl_orders, pnl_qty, silver_coin_orders, silver_coin_qty,
+       pnl_sales, pnl_orders, pnl_exchange_orders, pnl_qty,
+       silver_coin_orders, silver_coin_qty,
        pnl_cancelled_orders, pnl_cancelled_sales, pnl_cancelled_qty,
        pnl_refunds, pnl_cancelled_refunded,
        revenue_shopifyql, shopify_total_sales, shopify_returns,
@@ -13857,6 +13858,14 @@ class HourlyRow(BaseModel):
     #: counts by the day a refund was ISSUED rather than the day the
     #: order was placed.
     pnl_refunds: float | None = None
+    #: Orders in the P&L population carrying an `Exchange` tag -- the
+    #: second leg of a sale already paid for. Not orders the
+    #: advertising bought, so ad spend per order divides by
+    #: `pnl_orders` LESS these. Every other per-order cost keeps the
+    #: whole population, because an exchange ships and its logistics
+    #: are real. The tag lands days late, so a live day reports nearly
+    #: none and the count fills in behind it.
+    pnl_exchange_orders: int | None = None
     #: How much of the cancelled value Shopify has ALREADY refunded and
     #: therefore already removed from Total sales. The P&L deducts only
     #: `pnl_cancelled_sales - pnl_cancelled_refunded`, or it would take
@@ -14092,6 +14101,7 @@ class HourlyTotals(BaseModel):
     pnl_cancelled_qty: int
     pnl_refunds: float
     pnl_cancelled_refunded: float
+    pnl_exchange_orders: int | None = None
     spend: float
     meta_impressions: int
     meta_spend: float
@@ -14287,6 +14297,8 @@ def _totals(day: date, rows: list[HourlyRow],
         pnl_cancelled_qty=s("pnl_cancelled_qty"),
         pnl_refunds=s("pnl_refunds"),
         pnl_cancelled_refunded=s("pnl_cancelled_refunded"),
+        pnl_exchange_orders=(s("pnl_exchange_orders")
+                             if have("pnl_exchange_orders") else None),
         spend=spend, meta_impressions=s("meta_impressions"),
         meta_spend=s("meta_spend"), kwikchat_spend=s("kwikchat_spend"),
         google_spend=s("google_spend"),

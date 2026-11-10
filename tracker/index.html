@@ -2338,8 +2338,25 @@ function computePnl(r, a) {
   // with genuinely no spend already reports zero on its own, and an
   // override that could not be switched off would be a trap.
   const measuredAd = r.spend || 0;
+  // THE DENOMINATOR FOR AD SPEND IS NOT THE ORDER COUNT.
+  //
+  // An exchange leg is the second half of a sale already paid for, so
+  // no advertising bought it; dividing spend by a count that includes
+  // them makes acquisition look cheaper than it was. Influencer and
+  // daily-report orders (`inf`) are out already -- goods that went out
+  // with no sale behind them -- so they never reach this count.
+  //
+  // Every OTHER per-order cost keeps the whole population: an exchange
+  // ships, so its logistics are real, and netting it out there would
+  // be hiding a cost rather than attributing one.
+  //
+  // Null, not zero, where no hour reported the column -- a day
+  // ingested before it existed has an unknown number of exchanges, not
+  // none, and subtracting zero would quietly claim otherwise.
+  const exchangeOrders = r.pnl_exchange_orders;
+  const adOrders = Math.max(0, orders - (exchangeOrders || 0));
   const adAssumed = a.adPerOrder != null && isFinite(a.adPerOrder);
-  const adSpend = adAssumed ? a.adPerOrder * orders : measuredAd;
+  const adSpend = adAssumed ? a.adPerOrder * adOrders : measuredAd;
   // The three platforms behind that one figure. Kept separate rather
   // than re-summed: `spend` is what the API computed and is the number
   // the rest of the P&L is built on, so a component that goes missing
@@ -2520,11 +2537,11 @@ function computePnl(r, a) {
              aov: qo ? (ns - rev) / qo : null };
   })();
 
-  return { bd, adAssumed, measuredAd,
+  return { bd, adAssumed, measuredAd, adOrders, exchangeOrders,
            //: What one order cost to buy. Measured unless overridden,
            //: and null rather than zero where there are no orders to
            //: divide by -- a cost per order of nothing is not zero.
-           adPerOrder: orders ? adSpend / orders : null,
+           adPerOrder: adOrders ? adSpend / adOrders : null,
            sales, orders, units, coinOrders, coinQty, adSpend,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, rto, incReturns,
@@ -4139,7 +4156,11 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
         "margin there <b>" + inr(base.cm, 0) + "</b> (" + pc(base.cmPct, 1) +
         "), here <b>" + inr(d.cm, 0) + "</b> (" + pc(d.cmPct, 1) + ")"
       : "measured \u00b7 <b>" + inr(d.adSpend, 0) + "</b> of spend across <b>" +
-        num(d.orders) + "</b> orders. Edit to model a different one.",
+        num(d.adOrders) + "</b> orders" +
+        (d.exchangeOrders
+          ? " (<b>" + num(d.exchangeOrders) + "</b> exchange legs and any " +
+            "influencer orders excluded)" : "") +
+        ". Edit to model a different one.",
   };
 
   $("pnl-assump").innerHTML = PNL_FIELDS.map(([key, label, isPct, signed]) => {
@@ -4408,9 +4429,12 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
         // RISING cost per order is the bad direction, which is the
         // opposite of every other tile here.
         stat("Ad spend / order", d.adPerOrder,
-             d.adAssumed
+             (d.adAssumed
                ? "assumed \u2014 overriding " + inr(d.measuredAd, 0) + " measured"
-               : "measured spend \u00f7 " + num(liveOrders) + " orders",
+               : "measured spend \u00f7 " + num(d.adOrders) + " orders") +
+             (d.exchangeOrders
+               ? ", " + num(d.exchangeOrders) + " exchange legs excluded"
+               : ""),
              c ? c.adPerOrder : null, "down") +
         "</div>";
     })() +

@@ -222,6 +222,12 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     -- instead of a number that has already quietly had it taken out.
     pnl_sales               numeric,
     pnl_orders              integer,
+    -- Orders in the P&L population carrying an `Exchange` tag. The
+    -- second leg of a sale already paid for, so they are not orders
+    -- the advertising bought -- the ad-spend-per-order figure divides
+    -- by `pnl_orders` LESS these. Everything else keeps the whole
+    -- population: an exchange ships, so its logistics are real.
+    pnl_exchange_orders     integer,
     -- Units sold, with the Saadaa Silver Coin taken out: it is a gift
     -- line, not an item sold, and counting it would deflate ASP.
     pnl_qty                 integer,
@@ -331,6 +337,7 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS google_spend_as_of timestamptz",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_orders integer",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_exchange_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_qty integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_orders integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS silver_coin_qty integer",
@@ -384,7 +391,8 @@ COLUMNS = [
     "revenue_meta", "revenue_google",
     "revenue_paid", "orders_meta", "orders_paid", "orders_direct",
     "orders_excluded", "revenue_excluded",
-    "pnl_sales", "pnl_orders", "pnl_qty", "silver_coin_orders", "silver_coin_qty",
+    "pnl_sales", "pnl_orders", "pnl_exchange_orders", "pnl_qty",
+    "silver_coin_orders", "silver_coin_qty",
     "coin_only_orders", "coin_shipped_orders", "coin_ship_now_orders",
     "coin_call_list_orders", "coin_address_bad_orders", "coin_prepaid_orders",
     "coin_partial_orders", "coin_cod_orders", "bundle_no_coin_orders",
@@ -1193,6 +1201,7 @@ async def fetch_orders(client, store, day: date,
                                           orders_excluded=0, revenue_excluded=0.0,
                                           new_customers=0, new_customer_revenue=0.0,
                                           pnl_sales=0.0, pnl_orders=0, pnl_qty=0,
+                                          pnl_exchange_orders=0,
                                           silver_coin_orders=0, silver_coin_qty=0,
                                           coin_only_orders=0, coin_shipped_orders=0,
                                           coin_prepaid_orders=0, coin_partial_orders=0,
@@ -1210,6 +1219,21 @@ async def fetch_orders(client, store, day: date,
                 b["pnl_sales"] += price
                 b["pnl_orders"] += 1
                 b["pnl_qty"] += units
+                # An exchange leg is not an order advertising won. It
+                # is the second half of a sale already paid for, so
+                # counting it among the orders the spend bought makes
+                # acquisition look cheaper than it was. Counted here
+                # rather than deducted, because the P&L's other
+                # per-order costs -- logistics above all -- are real on
+                # an exchange and must keep the whole population.
+                #
+                # The tag lands DAYS after the order, so a live day
+                # reports nearly none of these and the count fills in
+                # behind it. That is the same lateness every tag-based
+                # figure on this page carries.
+                if "exchange" in {str(x).strip().lower()
+                                  for x in (n.get("tags") or [])}:
+                    b["pnl_exchange_orders"] += 1
                 # The coin count runs its own exclusions; see
                 # is_coin_excluded for why they are stricter than the
                 # P&L's. Units and sales above are unaffected.
