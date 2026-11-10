@@ -165,6 +165,31 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     shopify_total_sales     numeric,
     -- Negative, as ShopifyQL reports it.
     shopify_returns         numeric,
+    -- The lines Shopify's own Total sales breakdown is built from, so
+    -- the dashboard can show the same eight rows the admin shows
+    -- rather than one number nobody can take apart:
+    --
+    --   gross - discounts - returns          = net sales
+    --   net + shipping + return fees + taxes
+    --       + duties + additional fees       = total sales
+    --
+    -- `discounts` arrives NEGATIVE, like `returns`, and is stored that
+    -- way: flipping the sign here would leave two conventions in one
+    -- table and a subtraction somewhere that adds.
+    --
+    -- Net sales is NOT stored again -- `ql_net_sales` above is already
+    -- Shopify's own `net_sales` for the hour, and a second copy is a
+    -- second chance to disagree.
+    shopify_gross_sales     numeric,
+    shopify_discounts       numeric,
+    shopify_shipping        numeric,
+    shopify_return_fees     numeric,
+    shopify_taxes           numeric,
+    -- Both nil on this store today, and kept anyway: without them the
+    -- breakdown stops adding up the first time either is charged, and
+    -- a breakdown that does not reconcile is worse than none.
+    shopify_duties          numeric,
+    shopify_additional_fees numeric,
     revenue_meta            numeric,
     revenue_google          numeric,
     revenue_paid            numeric,
@@ -313,6 +338,13 @@ MIGRATIONS = [
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS pnl_refunds numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_total_sales numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_returns numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_gross_sales numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_discounts numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_shipping numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_return_fees numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_taxes numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_duties numeric",
+    f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS shopify_additional_fees numeric",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS qty_ordered integer",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS basket_mix jsonb",
     f"ALTER TABLE IF EXISTS {TABLE} ADD COLUMN IF NOT EXISTS ql_orders integer",
@@ -331,6 +363,9 @@ COLUMNS = [
     "sessions_by_source",
     "revenue", "orders", "revenue_shopifyql",
     "shopify_total_sales", "shopify_returns", "qty_ordered", "basket_mix",
+    "shopify_gross_sales", "shopify_discounts", "shopify_shipping",
+    "shopify_return_fees", "shopify_taxes", "shopify_duties",
+    "shopify_additional_fees",
     "ql_orders", "ql_net_sales", "ql_customers", "ql_new_customers", "ql_returning_customers",
     "ql_sales_returning", "ql_sales_first_time",
     "revenue_meta", "revenue_google",
@@ -878,6 +913,13 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
     from shopify_client import graphql_request  # noqa: PLC0415
 
     q = (f"FROM sales SHOW total_sales, returns, gross_sales, net_sales, "
+         # The rest of Shopify's own Total sales breakdown. `duties` and
+         # `additional_fees` are nil on this store and fetched anyway:
+         # the point of storing the breakdown is that it reconciles to
+         # the headline, and it stops doing that the first time either
+         # is charged.
+         f"discounts, shipping_charges, return_fees, taxes, "
+         f"duties, additional_fees, "
          f"orders, quantity_ordered, "
          f"customers, new_customers, returning_customers, "
          f"total_sales_returning, total_sales_first_time "
@@ -902,9 +944,27 @@ async def fetch_sales(client, store, day: date) -> dict[datetime, dict]:
         # back, which is the like-for-like comparison against the
         # order-derived figure -- that one has no returns in it either.
         rets = float(row.get("returns") or 0)
+        f = lambda k: float(row.get(k) or 0)  # noqa: E731
         out[hour] = {
             "shopify_total_sales": total,
             "shopify_returns": rets,
+            # Shopify's breakdown, stored as it arrives -- `discounts`
+            # comes back NEGATIVE like `returns`, and normalising it to
+            # positive here would leave the sign convention split across
+            # two columns of the same table.
+            #
+            #   gross + discounts + returns                   = net
+            #   net + shipping + return_fees + taxes
+            #       + duties + additional_fees                = total
+            #
+            # Both identities checked against a live day to the paisa.
+            "shopify_gross_sales": f("gross_sales"),
+            "shopify_discounts": f("discounts"),
+            "shopify_shipping": f("shipping_charges"),
+            "shopify_return_fees": f("return_fees"),
+            "shopify_taxes": f("taxes"),
+            "shopify_duties": f("duties"),
+            "shopify_additional_fees": f("additional_fees"),
             "revenue_shopifyql": total - rets,
             # Shopify's own units count. Deliberately kept apart from
             # pnl_qty, which is derived from the orders and excludes

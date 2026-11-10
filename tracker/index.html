@@ -341,6 +341,23 @@
   .led-row .v { font-size: 13px; font-variant-numeric: tabular-nums; }
   .led-row .was { font-size: 10.5px; color: var(--text-3); margin-right: 8px;
                   font-variant-numeric: tabular-nums; }
+  /* Shopify's own Total sales breakdown. Banded like its admin card,
+     because eight lines of near-identical shape are hard to read
+     across; the banding is what keeps a label with its own figure.
+     The padding is on the row so the band reaches the edges of the
+     block rather than stopping at the text. */
+  .led-break { margin-top: 12px; padding-top: 11px;
+               border-top: 1px dashed var(--border-soft); }
+  .led-break .led-row { padding: 7px 10px; border-radius: 6px; }
+  .led-break .led-row:nth-of-type(even) { background: var(--muted); }
+  /* Net sales and Total sales are not lines, they are where the lines
+     arrive. Marked, or a reader has to re-add the column to find out
+     which two rows the other six resolve into. */
+  .led-break .led-row.sum .l,
+  .led-break .led-row.sum .v { font-weight: 650; color: var(--text); }
+  .led-break .led-row.sum { border-top: 1px solid var(--border-soft);
+                            border-radius: 0 0 6px 6px; }
+  .led-break .led-row .v { font-size: 12.5px; }
   /* A deduction is a length, not just a figure: ad spend and COGS
      being the whole story is the one thing to see at a glance. */
   .led-bar { display: flex; align-items: center; gap: 11px; padding: 6px 0; }
@@ -1220,7 +1237,12 @@
     <div id="pnl-hourly"></div>
     <p class="note" style="border-top:1px solid var(--border-soft);padding-top:8px">
       The top line is <strong>Shopify's own Total sales</strong>, stored verbatim, so it equals
-      what the Shopify admin shows. It still contains cancellations Shopify has not refunded — a
+      what the Shopify admin shows, and the breakdown under it is Shopify’s own eight lines:
+      gross less discounts less reversals is net sales, and plus shipping, return fees and taxes
+      is the total. It is drawn only when both of those sums reach the headline exactly, so a
+      window reaching back past the day those lines were first stored shows the headline alone
+      rather than a breakdown that does not add up.
+      Total sales still contains cancellations Shopify has not refunded — a
       COD order cancelled before payment produces no refund — and only that unrefunded part is
       deducted below, never the whole cancelled value. Everything under the Realisable sales line
       is a model built from the rates above, and the day is still running, so a margin here is an
@@ -1405,6 +1427,16 @@ function csvField(v) {
   if (/^[=+\-@\t\r]/.test(t) && !/^[-+]?\d+(\.\d+)?%?$/.test(t)) t = "'" + t;
   return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
 }
+
+//: How a sub-line is marked in an exported file.
+//:
+//: NOT whitespace, which is what this used to be: `csvField` collapses
+//: runs of space and trims the ends -- correctly, since a stray newline
+//: out of the DOM would otherwise break the row -- and a figure-space
+//: indent is whitespace to that regex, so it was being eaten before it
+//: ever reached the file. A visible glyph survives, and still reads as
+//: "this hangs off the line above" rather than as a line of its own.
+const CSV_SUB = "\u00B7 ";
 
 const csvText = (head, rows) =>
   [head.map(csvField).join(",")]
@@ -2218,7 +2250,46 @@ function computePnl(r, a) {
   const cogs = net * a.cogsRate;
   const totalDed = adSpend + adGst + logistics + pgFees + coins + exchangeCost + cogs;
   const cm = net - totalDed;
-  return { sales, orders, units, coinOrders, coinQty, adSpend, cancellation,
+
+  // HOW SHOPIFY GETS TO THAT HEADLINE.
+  //
+  // The eight lines its admin shows under Total sales, carried through
+  // verbatim rather than rebuilt here. Two identities hold to the
+  // paisa on every day measured:
+  //
+  //   gross + discounts + returns                 = net sales
+  //   net + shipping + return fees + taxes
+  //       + duties + additional fees              = total sales
+  //
+  // `discounts` and `returns` arrive NEGATIVE and are kept that way,
+  // so both are additions and no line flips sign between the API and
+  // the page.
+  //
+  // `ok` is the gate, and it is deliberately strict: an hour ingested
+  // before these columns existed reports null, and a window that mixes
+  // such hours with filled ones would produce a breakdown whose lines
+  // do not reach the headline above them. Better to show the headline
+  // alone than a block that quietly does not add up.
+  const bd = (() => {
+    const g = r.shopify_gross_sales, disc = r.shopify_discounts;
+    const rev = r.shopify_returns, ns = r.ql_net_sales;
+    const ship = r.shopify_shipping, rfee = r.shopify_return_fees;
+    const tax = r.shopify_taxes;
+    // Nil on this store today. Summed into one line rather than given
+    // two of their own, so the block does not carry two permanent
+    // zeroes -- but still present, or it stops reconciling the first
+    // time either is charged.
+    const other = (r.shopify_duties || 0) + (r.shopify_additional_fees || 0);
+    if ([g, disc, rev, ns, ship, rfee, tax].some(v => v == null)) return null;
+    const ok = Math.abs((g + disc + rev) - ns) < 1
+            && Math.abs((ns + ship + rfee + tax + other) - sales) < 1;
+    return { gross: g, discounts: disc, reversals: rev, netSales: ns,
+             shipping: ship, returnFees: rfee, taxes: tax, other: other,
+             total: sales, ok: ok };
+  })();
+
+  return { bd,
+           sales, orders, units, coinOrders, coinQty, adSpend, cancellation,
            metaSpend, googleSpend, kwikSpend,
            cancelledOrders, refunds, extraCancellation, liveOrders, liveUnits, net,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
@@ -3293,7 +3364,7 @@ $("x-pnl").onclick = () => {
       // changeHTML writes its own good/bad/flat span rather than a
       // .chg, so it is pulled out by tone here.
       const ch = r.querySelector(".good, .bad, .flat");
-      return ["\u2007\u2007" + partsText(r, "strong, em, i, .good, .bad, .flat"),
+      return [CSV_SUB + partsText(r, "strong, em, i, .good, .bad, .flat"),
               share ? partsText(share) : "",
               amt ? unformat(partsText(amt)) : "", "",
               ch ? unformat(partsText(ch)) : ""];
@@ -3301,13 +3372,21 @@ $("x-pnl").onclick = () => {
     const l = r.querySelector(".l") || r.querySelector(".lbl");
     const v = r.querySelector(".v") || r.querySelector(".led-big");
     const note = l && l.querySelector("em");
+    // The Total sales breakdown is a THIRD kind of sub-line: Shopify's
+    // own eight lines taking the headline apart, not eight more
+    // deductions from it. Indented like the other two, because the
+    // Value column already carries Total sales at the top and summing
+    // it with these would count the same day's sales three times over
+    // -- once as the headline, once as gross, once again as the
+    // breakdown's own Total sales row.
+    const inset = r.closest(".led-break") ? CSV_SUB : "";
     // A deduction bar keeps its comparison in a column of its own; a
     // ledger row keeps it inside the value. Both land in the same file
     // column, or the file would disagree with the page about which day
     // a number belongs to.
     const was = (v && v.querySelector(".was")) || r.querySelector(".wasc");
     const change = r.querySelector(".chg");
-    return [partsText(l, "em"),
+    return [inset + partsText(l, "em"),
             note ? partsText(note) : "",
             unformat(partsText(v, ".was, .chg")),
             was ? unformat(partsText(was)) : "",
@@ -3798,11 +3877,15 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
     c && nowN != null && wasN != null && wasN
       ? '<span class="chg">' + changeHTML(nowN, wasN, dir || "down") + "</span>" : "";
 
-  const row = (label, note, value, was, nowN, wasN) =>
-    '<div class="led-row"><span class="l">' + esc(label) +
+  // `dir` because this helper draws both kinds of line. On a deduction
+  // a rise is bad, which is the default; on Gross sales or Net sales a
+  // rise is the good news, and painting it red would be a lie told in
+  // colour.
+  const row = (label, note, value, was, nowN, wasN, dir, cls) =>
+    '<div class="led-row' + (cls ? " " + cls : "") + '"><span class="l">' + esc(label) +
     (note ? "<em>" + esc(note) + "</em>" : "") + "</span>" +
     '<span class="v">' + (was ? '<span class="was">' + was + "</span>" : "") +
-    value + chg(nowN, wasN) + "</span></div>";
+    value + chg(nowN, wasN, dir) + "</span></div>";
 
   // Bars are scaled to the LARGEST deduction, not to realisable sales:
   // against revenue every bar but ad spend would be a sliver, and the
@@ -3835,12 +3918,72 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
 
   const vs = cmpDay ? " vs " + esc(cmpDay) : "";
 
+  // ---- how Shopify reaches that headline ---------------------------
+  // The same eight lines the Shopify admin shows under Total sales,
+  // in its order. This does not model anything and nothing below it
+  // depends on it: it exists so the one number the whole page is built
+  // on can be taken apart -- a headline that moved because discounts
+  // widened is a different day from one that moved because gross fell.
+  //
+  // Drawn only when the lines reconcile to the headline. `bd.ok` is
+  // checked on BOTH days: a window that half-predates these columns
+  // would otherwise show a comparison column against nothing.
+  //
+  // Discounts and reversals arrive negative, so they are written with
+  // their own minus and read with dir "down" -- a wider discount is
+  // bad news however the sign is carried.
+  const breakdown = (() => {
+    const b = d.bd;
+    if (!b || !b.ok) return "";
+    const cb = c && c.bd && c.bd.ok ? c.bd : null;
+    // Against the comparison's own breakdown, not against `c` -- if
+    // the baseline day predates these columns there is nothing to
+    // compare a line to, and an empty change column is honest where a
+    // zero would not be.
+    const line = (label, note, key, dir, cls) => {
+      const now = b[key], was = cb ? cb[key] : null;
+      // Discounts and reversals are STORED negative. Two consequences,
+      // both of which bit on the first draw:
+      //
+      //  * written raw they came out "-31,246" against the ledger's
+      //    own "\u2212 \u20B9" a few rows below, so the column read as
+      //    two different conventions;
+      //  * compared signed, a discount of 31k against yesterday's 34k
+      //    is a RISE -- less negative -- and a line that narrowed got
+      //    an up arrow painted red. The change is taken on magnitude,
+      //    which is what "discounts grew" means to anyone reading it.
+      const neg = now < 0 || (was != null && was < 0);
+      const fmt = v => v == null ? null
+                     : (neg ? "\u2212 " + inr(-v, 0) : inr(v, 0));
+      const mag = v => v == null ? null : (neg ? -v : v);
+      return row(label, note, fmt(now), cb ? fmt(was) : null,
+                 mag(now), mag(was), dir, cls);
+    };
+    return '<div class="led-break">' +
+      '<div class="led-cap">Total sales breakdown \u2014 Shopify\u2019s own lines</div>' +
+      line("Gross sales", "", "gross", "up") +
+      line("Discounts", "", "discounts", "down") +
+      line("Sales reversals", "returns, dated by the refund", "reversals", "down") +
+      line("Net sales", "", "netSales", "up", "sum") +
+      line("Shipping charges", "", "shipping", "up") +
+      line("Return fees", "", "returnFees", "up") +
+      line("Taxes", "", "taxes", "up") +
+      // Nil on this store, so it is drawn only when there is something
+      // to draw -- on either day, or the comparison column would have
+      // a line on one side and not the other.
+      (b.other || (cb && cb.other)
+        ? line("Duties & additional fees", "", "other", "up") : "") +
+      line("Total sales", "", "total", "up", "sum") +
+      "</div>";
+  })();
+
   $("pnl-lines").innerHTML =
     step("measured", "Measured \u2014 Shopify's own figure, stored verbatim",
          "Total sales", inr(sales, 0)) +
     (c ? '<div class="led-sub"><span>' + esc(cmpDay || "") + " <strong>" +
          inr(c.sales, 0) + "</strong> " + changeHTML(sales, c.sales, "up") +
          "</span></div>" : "") +
+    breakdown +
     "</div>" +
 
     '<div class="led-step">' +
