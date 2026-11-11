@@ -47,12 +47,19 @@ export interface Group {
 
 export const GROUPS: Group[] = [
   { key: "overview", label: "Overview",
-    tabs: ["dashboard", "hourly-tracker", "live-pnl", "comparative", "blended-mer"] },
+    // Hourly Tracker leads because it is the section the page opens on.
+    tabs: ["hourly-tracker", "dashboard", "live-pnl", "comparative", "blended-mer"] },
   { key: "creative", label: "Creative", tabs: ["creative-testing", "asset-analysis", "untested-assets", "campaign-tracker", "instagram"] },
   { key: "attribution", label: "Attribution", tabs: ["last-click-utm", "first-click", "customer-journey", "landing-page"] },
   { key: "product", label: "Product", tabs: ["ads-analyse", "cpis", "meta-hypothesis"] },
   { key: "explore", label: "Explore", tabs: ["shopify-analytics", "shopify-explorer", "meta-explorer"] },
 ];
+
+/** Where the page opens when the URL names no section. The Hourly
+ *  Tracker, because it is one small request and is on screen at once;
+ *  Dashboard fires five heavier ones and left the page blank while they
+ *  ran. A link with a #section still opens that section. */
+export const DEFAULT_TAB: Tab = "hourly-tracker";
 
 /** Help sits outside the groups -- it is not a question about the data. */
 export const HELP_TAB: Tab = "help";

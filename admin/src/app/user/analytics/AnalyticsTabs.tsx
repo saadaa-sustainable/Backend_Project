@@ -3,7 +3,7 @@
 import { memo, useMemo, useState, useSyncExternalStore } from "react";
 import dynamic from "next/dynamic";
 import { AnalyticsSectionVisibility } from "@/lib/analyticsSectionVisibility";
-import { GROUPS, HELP_TAB, ALL_TABS, groupOf, type Tab, type GroupKey } from "./sectionGroups";
+import { GROUPS, HELP_TAB, ALL_TABS, DEFAULT_TAB, groupOf, type Tab, type GroupKey } from "./sectionGroups";
 
 function TabLoading() {
   return <div role="status" className="min-h-40 py-8 text-sm text-text-secondary">Loading analytics…</div>;
@@ -89,7 +89,7 @@ function subscribeToHash(onChange: () => void) {
 
 function getCurrentTab(): Tab {
   const hash = window.location.hash.replace(/^#/, "");
-  return (ALL_TABS as readonly string[]).includes(hash) ? hash as Tab : "dashboard";
+  return (ALL_TABS as readonly string[]).includes(hash) ? hash as Tab : DEFAULT_TAB;
 }
 
 function getServerTab(): null {
@@ -112,7 +112,7 @@ export function AnalyticsTabs() {
   // unload the section you are reading -- clicking "Attribution" while
   // on CPIS should not throw CPIS's table away before you have chosen.
   const [openGroup, setOpenGroup] = useState<GroupKey | null>(null);
-  const activeGroup = groupOf(tab ?? "dashboard");
+  const activeGroup = groupOf(tab ?? DEFAULT_TAB);
   const shownGroup = openGroup ?? activeGroup;
   const siblings = useMemo(
     () => GROUPS.find((g) => g.key === shownGroup)?.tabs ?? [],
