@@ -117,3 +117,7 @@ admin/public/docs/
 # revenue, order counts and ad-level rows. outputs/ was 2.7 MB of
 # first-click validation JSON sitting untracked and committable.
 outputs/
+
+# Raw Return Prime exports carry customer details.
+returns.jsonl
+returns.db

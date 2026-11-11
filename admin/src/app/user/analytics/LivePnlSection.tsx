@@ -33,13 +33,18 @@ export function LivePnlSection() {
    *  default may roll forward at midnight. */
   const [dayPinned, setDayPinned] = useState(false);
   const [compareTo, setCompareTo] = useState("");
+  /** Off means the endpoint is asked for no baseline at all, which is
+   *  not the same as leaving the date empty: empty is "the day before". */
+  const [noCompare, setNoCompare] = useState(false);
   const [data, setData] = useState<HourlyTrackerResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
   const params = useMemo(
-    () => ({ day, compare_to: compareTo || undefined }), [day, compareTo]);
+    () => (noCompare ? { day, compare: false }
+                     : { day, compare_to: compareTo || undefined }),
+    [day, compareTo, noCompare]);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,9 +86,18 @@ export function LivePnlSection() {
         </FilterCell>
         <FilterCell label="Compare to" className="w-48" htmlFor="pnl-cmp">
           <input id="pnl-cmp" type="date" value={compareTo} max={istToday()}
+                 disabled={noCompare}
                  onChange={(e) => setCompareTo(e.target.value)}
-                 className={filterControlClass} />
+                 className={`${filterControlClass} disabled:opacity-50`} />
         </FilterCell>
+        <button type="button" aria-pressed={noCompare}
+                onClick={() => setNoCompare((v) => !v)}
+                className={`rounded-md border px-3 py-1.5 text-[12.5px] ${
+                  noCompare
+                    ? "border-text-primary bg-text-primary text-bg-white"
+                    : "border-border-primary text-text-primary hover:bg-bg-muted"}`}>
+          No comparison
+        </button>
         <button type="button" onClick={refresh}
                 className="rounded-md border border-border-primary px-3 py-1.5 text-[12.5px] text-text-primary hover:bg-bg-muted">
           Refresh

@@ -241,6 +241,9 @@ jobs:
           DATABASE_URL:                     ${{ secrets.DATABASE_URL }}
           DATABASE_SERVICE_KEY:             ${{ secrets.DATABASE_SERVICE_KEY }}
 
+          # --- Return Prime (returns behind the Live P&L) ---
+          RP_TOKEN:                         ${{ secrets.RP_TOKEN }}
+
           # --- Meta ads (required for Phase 1 Meta ingest) ---
           META_ACCESS_TOKEN:                ${{ secrets.META_ACCESS_TOKEN }}
           META_API_VERSION:                 ${{ secrets.META_API_VERSION }}
