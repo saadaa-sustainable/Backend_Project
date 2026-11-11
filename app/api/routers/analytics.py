@@ -13804,6 +13804,31 @@ SELECT hour, day_ist, hour_of_day,
 """
 
 
+#: Returns from Return Prime, on the hour the ORDER was placed.
+#:
+#: Dated by the order and not by the request, for the reason refunds
+#: are: a return on a three-week-old order must not land on this
+#: afternoon's hour and make a good hour read badly. Rejected and
+#: archived requests are not returns. One order can file two requests,
+#: so orders are counted distinct.
+#:
+#: The range is a half-open pair of instants on the indexed column, not
+#: a date cast of it, so the index is usable.
+_RETURN_PRIME_HOURLY_SQL = """
+SELECT (order_created_at AT TIME ZONE 'Asia/Kolkata')::date AS day_ist,
+       EXTRACT(HOUR FROM order_created_at AT TIME ZONE 'Asia/Kolkata')::int AS hour_of_day,
+       COUNT(DISTINCT order_name) AS rp_return_orders,
+       COALESCE(SUM(total_qty), 0) AS rp_return_qty,
+       COALESCE(SUM(return_value), 0)::float AS rp_return_value
+  FROM public.return_prime_requests
+ WHERE request_type = 'return'
+   AND stage NOT IN ('rejected', 'archived')
+   AND order_created_at >= (CAST(:lo AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+   AND order_created_at <  ((CAST(:hi AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+ GROUP BY 1, 2
+"""
+
+
 class HourlyRow(BaseModel):
     hour: datetime
     day_ist: date
@@ -13858,6 +13883,16 @@ class HourlyRow(BaseModel):
     #: counts by the day a refund was ISSUED rather than the day the
     #: order was placed.
     pnl_refunds: float | None = None
+    #: Returns filed through Return Prime against orders this hour
+    #: placed: value (discount out, tax in), orders and units. NULL
+    #: where the returns table has not been loaded, which is a different
+    #: answer from an hour nobody returned anything from.
+    #:
+    #: These GROW for weeks after the day: a return is filed days after
+    #: the order, so a recent day always reads low.
+    rp_return_value: float | None = None
+    rp_return_orders: int | None = None
+    rp_return_qty: int | None = None
     #: Orders in the P&L population carrying an `Exchange` tag -- the
     #: second leg of a sale already paid for. Not orders the
     #: advertising bought, so ad spend per order divides by
@@ -14101,6 +14136,9 @@ class HourlyTotals(BaseModel):
     pnl_cancelled_qty: int
     pnl_refunds: float
     pnl_cancelled_refunded: float
+    rp_return_value: float | None = None
+    rp_return_orders: int | None = None
+    rp_return_qty: int | None = None
     pnl_exchange_orders: int | None = None
     spend: float
     meta_impressions: int
@@ -14297,6 +14335,8 @@ def _totals(day: date, rows: list[HourlyRow],
         pnl_cancelled_qty=s("pnl_cancelled_qty"),
         pnl_refunds=s("pnl_refunds"),
         pnl_cancelled_refunded=s("pnl_cancelled_refunded"),
+        **{k: (s(k) if have(k) else None) for k in (
+            "rp_return_value", "rp_return_orders", "rp_return_qty")},
         pnl_exchange_orders=(s("pnl_exchange_orders")
                              if have("pnl_exchange_orders") else None),
         spend=spend, meta_impressions=s("meta_impressions"),
@@ -14434,9 +14474,25 @@ async def get_hourly_tracker(
     # operation is in progress") and 500'd every call. Both queries
     # ride the day_ist index: 9 blocks for this one.
     span_row = (await session.execute(text(
-        "SELECT MIN(day_ist) AS first_day, MAX(day_ist) AS last_day "
+        "SELECT MIN(day_ist) AS first_day, MAX(day_ist) AS last_day, "
+        # Asked here so a deploy that has not loaded returns yet costs
+        # no extra round trip and raises nothing.
+        "to_regclass('public.return_prime_requests') IS NOT NULL AS has_returns "
         "FROM public.hourly_campaign_tracker"))).mappings().first() or {}
     raw = [dict(r) for r in result]
+    if span_row.get("has_returns") and raw:
+        returned = {
+            (r["day_ist"], r["hour_of_day"]): r
+            for r in (await session.execute(
+                text(_RETURN_PRIME_HOURLY_SQL),
+                {"lo": min(days), "hi": max(days)})).mappings().all()}
+        for m in raw:
+            hit = returned.get((m["day_ist"], m["hour_of_day"]))
+            # Zero, not NULL, for an hour with none: the table is
+            # loaded, so "nothing came back" is a measurement.
+            m["rp_return_value"] = hit["rp_return_value"] if hit else 0.0
+            m["rp_return_orders"] = hit["rp_return_orders"] if hit else 0
+            m["rp_return_qty"] = hit["rp_return_qty"] if hit else 0
     win, base = set(window), set(base_window)
     # The days that ACTUALLY produced rows, not the days asked for. A
     # "last 90 days" against a table holding fifty would otherwise

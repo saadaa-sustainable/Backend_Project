@@ -3693,6 +3693,30 @@ export interface HourlyRow {
   conversion_rate_direct: number | null;
   amer: number | null;
   ga4_arpu: number | null;
+  /** Coins shipped, as distinct from the orders carrying them. */
+  silver_coin_qty?: number | null;
+  /** Exchange legs: orders no advertising bought. */
+  pnl_exchange_orders?: number | null;
+  /** The lines Shopify's admin shows under Total sales, verbatim.
+   *  Discounts and returns arrive negative. */
+  shopify_gross_sales?: number | null;
+  shopify_discounts?: number | null;
+  shopify_shipping?: number | null;
+  shopify_return_fees?: number | null;
+  shopify_taxes?: number | null;
+  shopify_duties?: number | null;
+  shopify_additional_fees?: number | null;
+  ql_net_sales?: number | null;
+  /** Shopify's own order count, filtered and unfiltered. */
+  ql_orders?: number | null;
+  ql_orders_all?: number | null;
+  revenue_attributed?: number | null;
+  /** Returns filed through Return Prime against the orders placed
+   *  here: value (discount out, tax in), orders and units. Null where
+   *  returns have not been loaded. Grows for weeks after the day. */
+  rp_return_value?: number | null;
+  rp_return_orders?: number | null;
+  rp_return_qty?: number | null;
 }
 
 export interface HourlyTotals {
@@ -3742,6 +3766,35 @@ export interface HourlyTotals {
   conversion_rate_direct: number | null;
   amer: number | null;
   ga4_arpu: number | null;
+  /** Coins shipped, as distinct from the orders carrying them. */
+  silver_coin_qty?: number | null;
+  /** Exchange legs: orders no advertising bought. */
+  pnl_exchange_orders?: number | null;
+  /** The lines Shopify's admin shows under Total sales, verbatim.
+   *  Discounts and returns arrive negative. */
+  shopify_gross_sales?: number | null;
+  shopify_discounts?: number | null;
+  shopify_shipping?: number | null;
+  shopify_return_fees?: number | null;
+  shopify_taxes?: number | null;
+  shopify_duties?: number | null;
+  shopify_additional_fees?: number | null;
+  ql_net_sales?: number | null;
+  /** Shopify's own order count, filtered and unfiltered. */
+  ql_orders?: number | null;
+  ql_orders_all?: number | null;
+  revenue_attributed?: number | null;
+  shopify_total_sales?: number | null;
+  shopify_returns?: number | null;
+  /** Days folded into this window. */
+  day_count?: number;
+  first_day?: string | null;
+  /** Returns filed through Return Prime against the orders placed
+   *  here: value (discount out, tax in), orders and units. Null where
+   *  returns have not been loaded. Grows for weeks after the day. */
+  rp_return_value?: number | null;
+  rp_return_orders?: number | null;
+  rp_return_qty?: number | null;
 }
 
 export interface SourceSlice {
@@ -3773,11 +3826,14 @@ export interface HourlyTrackerResponse {
 }
 
 export function fetchHourlyTracker(
-  params: { day?: string; compare_to?: string } = {},
+  params: { day?: string; compare_to?: string;
+            /** false asks for NO comparison. Absent means the default one. */
+            compare?: boolean } = {},
 ): Promise<HourlyTrackerResponse> {
   const qs = new URLSearchParams();
   if (params.day) qs.set("day", params.day);
   if (params.compare_to) qs.set("compare_to", params.compare_to);
+  if (params.compare === false) qs.set("compare", "false");
   const q = qs.toString();
   return request<HourlyTrackerResponse>(
     `/admin/analytics/hourly-tracker${q ? `?${q}` : ""}`,
