@@ -341,6 +341,13 @@ PHASE_INGEST = [
     # that is itself an estimate, so a real figure landing for a day is
     # never undone by the placeholder.
     ("kwikchat_spend",        ["scripts/seed_kwikchat_spend.py"],            300),
+    # Returns, from Return Prime -- the only measure of them anywhere,
+    # since they are settled outside Shopify. The hourly job re-reads a
+    # week; this re-reads sixty days, because a request filed weeks ago
+    # can still move from approved to inspected or be rejected, and a
+    # rejected request has to come back out of the P&L.
+    ("return_prime",          ["scripts/fetch_return_prime.py",
+                               "--days", "60"],                              900),
     # The SAME table, from Google's own API, and it runs AFTER MapleMonk
     # on purpose: the API is the authority and must have the last word.
     #

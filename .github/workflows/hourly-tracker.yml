@@ -160,6 +160,23 @@ jobs:
           echo "Running: scripts/fetch_hourly_tracker.py $ARGS"
           python scripts/fetch_hourly_tracker.py $ARGS
 
+      # Returns are settled in Return Prime, outside Shopify, so this is
+      # the only place the P&L's Returns line comes from. Seven days is
+      # enough for an hourly pass: it catches every new request and the
+      # stage moves that follow within the week. The nightly re-reads a
+      # longer window for the slow ones.
+      - name: Refresh returns (Return Prime)
+        # continue-on-error for the same reason as inventory below: the
+        # tracker row is already written, and a returns outage must not
+        # turn the hour red. The P&L keeps the last good reading.
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          RP_TOKEN: ${{ secrets.RP_TOKEN }}
+        run: |
+          python scripts/fetch_return_prime.py --days 7
+
       # AFTER the tracker, deliberately. The tracker does not read
       # inventory, so nothing here can change its row -- and putting a
       # ~3 minute Shopify products fetch in front of it would delay the
