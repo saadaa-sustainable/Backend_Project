@@ -31,7 +31,7 @@ export function fromKpis(kpis: DashboardKpis | null | undefined): AcquisitionFig
 
   // `new_customers` is optional on the type for a reason that bites at
   // runtime: `request()` casts JSON without validating it, and
-  // useCachedFetch serves sessionStorage for five minutes, so a tab
+  // useCachedFetch serves sessionStorage for an hour, so a tab
   // opened before this field shipped -- or one talking to an older
   // server mid-deploy -- yields a KPI object without it.
   //

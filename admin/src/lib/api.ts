@@ -1993,11 +1993,6 @@ export interface CpisSpendTrendResponse {
   spend_trend_prev_total: number | null;
 }
 
-export function fetchCpisSpendTrend(masterSku: string, window: CpisUtmWindow): Promise<CpisSpendTrendResponse> {
-  const qs = new URLSearchParams({ master_sku: masterSku, window });
-  return request<CpisSpendTrendResponse>(`/admin/analytics/cpis-utm/spend-trend?${qs.toString()}`);
-}
-
 export function fetchCpisSpendTrends(
   masterSkus: string[], window: CpisUtmWindow, fromDate?: string, toDate?: string,
 ): Promise<{ rows: CpisSpendTrendResponse[] }> {
@@ -2186,34 +2181,6 @@ export interface TopCpisSku {
   master_sku: string;
   ad_spend: number;
   cost_per_ncp: number | null;
-}
-
-export interface OverviewSummaryResponse {
-  total_spend: number;
-  total_impressions: number;
-  total_shopify_revenue: number;
-  total_shopify_orders: number;
-  /** The Meta-driven slice of the two above, selected by the same
-   *  utm_source rule that builds `total_sessions` (meta_sessions).
-   *  The session band divides by Meta sessions, so it must use these
-   *  and not the all-traffic totals. */
-  meta_shopify_revenue?: number;
-  meta_shopify_orders?: number;
-  /** Meta + Google Ads + Kwikchat. The all-traffic tabs divide by
-   *  this; only the Meta tab divides by `total_spend` alone. */
-  google_spend?: number;
-  kwikchat_spend?: number;
-  blended_spend?: number;
-  /** Days of the window whose Kwikchat figure is the flat estimate. */
-  kwikchat_estimated_days?: number;
-  category_breakdown: BreakdownItem[];
-  channel_breakdown: BreakdownItem[];
-  top_landing_pages: TopLandingPage[];
-  top_cpis_skus: TopCpisSku[];
-}
-
-export function fetchOverviewSummary(): Promise<OverviewSummaryResponse> {
-  return request<OverviewSummaryResponse>(`/admin/analytics/overview-summary`);
 }
 
 // Silver-table refresh cascade -- fires the 3 CPIS refresh scripts in

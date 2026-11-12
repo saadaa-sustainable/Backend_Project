@@ -1822,12 +1822,6 @@ export function AdsAnalyse() {
     [account, debouncedSearch, categoryFilter, thresholdsChanged, adStatus, onlyWithOrders, assetFilter, budgetType, multiFilter, winFrom, winTo, dateField],
   );
 
-  // sessionStorage cache -- /ads-analyse takes several seconds cold,
-  // so tab-switching / hard-refresh needs to skip the fetch when the
-  // filter set is unchanged. 5-min TTL matches Dashboard.tsx's
-  // useCachedFetch default. Filter-scoped key so a filter change
-  // always misses the cache and fetches fresh. Version 3 invalidates
-  // cached rows from before the API included the restored timeline data.
   const resolvedAdsQuery = useRef<string | null>(null);
   useEffect(() => {
     // Resolve preset dates first: a clock-based request immediately followed
@@ -1835,8 +1829,7 @@ export function AdsAnalyse() {
     if (!freshnessReady && datePreset !== "custom") return;
     if (levelToggle !== "ad") return;
     let cancelled = false;
-    const cacheKey = "ae-ads-analyse-v3|" + JSON.stringify(filters);
-    const queryKey = `${cacheKey}|retry:${retryCount}`;
+    const queryKey = `${JSON.stringify(filters)}|retry:${retryCount}`;
     // Returning from Campaigns/Ad Sets keeps all loaded pages in memory.
     // Only changed filters or an explicit retry should replace those rows.
     if (resolvedAdsQuery.current === queryKey) {
@@ -1845,40 +1838,6 @@ export function AdsAnalyse() {
       setLoading(false);
       setError(null);
       return;
-    }
-    const TTL_MS = 5 * 60 * 1000;
-    type Cached = {
-      rows: AdsAnalyseRow[];
-      total: number;
-      totals: AdsAnalyseTotals | null;
-      category_counts: Record<string, number>;
-      customer_mix_unavailable?: boolean;
-      ts: number;
-    };
-    if (typeof window !== "undefined") {
-      try {
-        const raw = window.sessionStorage.getItem(cacheKey);
-        if (raw) {
-          const c = JSON.parse(raw) as Cached;
-          if (Date.now() - c.ts < TTL_MS) {
-            resolvedAdsQuery.current = queryKey;
-            setError(null);
-            setFailedLoadMore(false);
-            setRows(c.rows);
-            setTotal(c.total);
-            setCategoryCountsFromApi(c.category_counts);
-            setTotals(c.totals);
-            setCustomerMixUnavailable(c.customer_mix_unavailable ?? false);
-            setPage(0);
-            setLoading(false);
-            return () => {
-              cancelled = true;
-            };
-          }
-        }
-      } catch {
-        // Ignore quota / parse errors; fall through to network.
-      }
     }
     setLoading(true);
     setError(null);
@@ -1905,23 +1864,6 @@ export function AdsAnalyse() {
           return next;
         });
         setPage(0);
-        if (typeof window !== "undefined") {
-          try {
-            window.sessionStorage.setItem(
-              cacheKey,
-              JSON.stringify({
-                rows: res.rows,
-                total: res.total,
-                totals: res.totals ?? null,
-                category_counts: res.category_counts ?? {},
-                customer_mix_unavailable: res.customer_mix_unavailable ?? false,
-                ts: Date.now(),
-              } satisfies Cached),
-            );
-          } catch {
-            // Quota exceeded -- skip caching this response.
-          }
-        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;

@@ -1439,43 +1439,6 @@ async def warm_ads_analyse_cache() -> None:
     except Exception:
         logging.getLogger(__name__).exception("cpis_warmer_failed")
 
-    # Also warm /last-click-utm's default filter (no filters, sort by
-    # created_at). The tab loads without a preset, so the very first hit
-    # is what breaks -- that's exactly what this pre-populates.
-    try:
-        async with session_scope() as session:
-            await get_last_click_utm(
-                session=session,
-                channel=None, tier=None,
-                utm_source=None, utm_medium=None, utm_campaign=None,
-                utm_content=None, utm_term=None,
-                matched_value=None, only_matched=False, only_unmatched=False,
-                search=None, from_date=None, to_date=None,
-                sort="created_at", limit=100, offset=0,
-            )
-    except Exception:
-        import logging as _logging
-        _logging.getLogger(__name__).exception("last_click_utm_warmer_failed")
-
-    # And /landing-pages default (no filters, sort by sessions).
-    #
-    # "ga4_sessions", not "sessions" -- the latter has never been a key
-    # in _LANDING_PAGE_SORT_COLUMNS, so from 2026-09-15 this warmer threw
-    # 400 on every run and the except below swallowed it. The endpoint
-    # cached nothing and the first real reader paid the full query, while
-    # the nightly reported success. Warming a key the UI does not send is
-    # just as useless, so this tracks LandingPageAnalysis.tsx's own
-    # default sort, which is also the endpoint's.
-    try:
-        async with session_scope() as session:
-            await get_landing_pages(
-                session=session,
-                search=None, sort="ga4_sessions", limit=50, offset=0,
-            )
-    except Exception:
-        import logging as _logging
-        _logging.getLogger(__name__).exception("landing_pages_warmer_failed")
-
 
 @router.get("/ads-analyse", response_model=AdsAnalyseResponse)
 @cached_analytics(ttl=300.0)
@@ -3315,50 +3278,13 @@ async def get_first_click_daily(
     )
 
 
-@router.get("/last-click-utm", response_model=UtmOrderResponse)
 @cached_analytics(ttl=900.0)
-async def get_last_click_utm(
-    session: SessionDep,
-    channel: Literal[
-        "Meta", "Google", "Retention", "Organic (IG)", "Brand Collab",
-        "AI", "Organic (Direct)", "Loyalty", "Other",
-    ] | None = Query(default=None),
-    tier: str | None = Query(default=None),
-    attribution_setting: str | None = Query(
-        default=None,
-        description=(
-            "Meta attribution window code -- 7d_click, 7d_click_1d_ev, 1d_click, "
-            "1d_view_7d_click, 1d_view_7d_click_1d_ev, incrementality. "
-            "Pass '(none)' for orders whose matched ad has no setting recorded."
-        ),
-    ),
-    utm_source: str | None = Query(
-        default=None,
-        description="Comma-separated list of utm_source values to include (CTD's multi-select popover pattern).",
-    ),
-    utm_medium: str | None = Query(default=None),
-    utm_campaign: str | None = Query(
-        default=None,
-        description=(
-            "Comma-separated terms; prefix a term with '!' to exclude. "
-            "Includes OR-joined, excludes AND-NOT joined -- matches CTD's IN/EX pills."
-        ),
-    ),
-    utm_content: str | None = Query(default=None, description="Same IN/EX comma format as utm_campaign."),
-    utm_term: str | None = Query(default=None, description="Same IN/EX comma format as utm_campaign."),
-    matched_value: str | None = Query(
-        default=None,
-        description="Same IN/EX comma format -- matches against matched_ad_name.",
-    ),
-    only_matched: bool = Query(default=False, description="Only rows where has_match=true."),
-    only_unmatched: bool = Query(default=False, description="Only rows where has_match=false."),
-    search: str | None = Query(default=None, description="Case-insensitive substring over order name, utm_content, utm_term and matched ad name; exact match on matched_ad_id."),
-    from_date: date | None = Query(default=None, description="Only orders with created_at >= this date."),
-    to_date: date | None = Query(default=None, description="Only orders with created_at <= this date (inclusive)."),
-    sort: Literal["created_at", "total_price", "customer_num_orders"] = Query(default="created_at"),
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
-) -> UtmOrderResponse:
+async def _last_click_tiles(session: AsyncSession, from_date: date | None, to_date: date | None):
+    """The tiles and per-source drill-down for one date window.
+
+    They ignore every filter but the dates, so they are cached on the
+    dates alone: changing a filter, the sort or the page reuses them.
+    """
     # ── tile counts + per-source breakdown (windowed only, ignores every
     # non-date filter) so the tiles represent "everything in this period"
     # and the per-source drill-down works even after row filters change.
@@ -3437,12 +3363,89 @@ async def get_last_click_utm(
             )
             for k, v in ordered
         ]
+    return channel_counts, tier_summary, tier_by_channel, channel_sources
+
+
+@cached_analytics(ttl=900.0)
+async def _last_click_counts(
+    session: AsyncSession, where_sql: str, params: dict[str, object],
+    facet_sql: str, facet_params: dict[str, object],
+):
+    """Row total and per-tab counts for one filter set.
+
+    Cached apart from the page: they do not depend on sort, limit or
+    offset, so "load more" and a re-sort do not count the table again.
+    """
+    total = (
+        await session.execute(
+            text(f"SELECT COUNT(*) {_UTM_ORDER_FROM} {where_sql}"), params
+        )
+    ).scalar_one()
+
+    facet_rows = (await session.execute(text(
+        "SELECT COALESCE(al.attribution_setting, '(none)') AS setting, "
+        "       COUNT(*) AS n, COALESCE(SUM(soa.total_price), 0) AS sales "
+        f"{_UTM_ORDER_FROM} {facet_sql} GROUP BY 1"), facet_params)).mappings().all()
+    attribution_counts = {
+        r["setting"]: ChannelSummary(count=int(r["n"]), sales=float(r["sales"]))
+        for r in facet_rows
+    }
+    return total, attribution_counts
+
+
+@router.get("/last-click-utm", response_model=UtmOrderResponse)
+@cached_analytics(ttl=900.0)
+async def get_last_click_utm(
+    session: SessionDep,
+    channel: Literal[
+        "Meta", "Google", "Retention", "Organic (IG)", "Brand Collab",
+        "AI", "Organic (Direct)", "Loyalty", "Other",
+    ] | None = Query(default=None),
+    tier: str | None = Query(default=None),
+    attribution_setting: str | None = Query(
+        default=None,
+        description=(
+            "Meta attribution window code -- 7d_click, 7d_click_1d_ev, 1d_click, "
+            "1d_view_7d_click, 1d_view_7d_click_1d_ev, incrementality. "
+            "Pass '(none)' for orders whose matched ad has no setting recorded."
+        ),
+    ),
+    utm_source: str | None = Query(
+        default=None,
+        description="Comma-separated list of utm_source values to include (CTD's multi-select popover pattern).",
+    ),
+    utm_medium: str | None = Query(default=None),
+    utm_campaign: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated terms; prefix a term with '!' to exclude. "
+            "Includes OR-joined, excludes AND-NOT joined -- matches CTD's IN/EX pills."
+        ),
+    ),
+    utm_content: str | None = Query(default=None, description="Same IN/EX comma format as utm_campaign."),
+    utm_term: str | None = Query(default=None, description="Same IN/EX comma format as utm_campaign."),
+    matched_value: str | None = Query(
+        default=None,
+        description="Same IN/EX comma format -- matches against matched_ad_name.",
+    ),
+    only_matched: bool = Query(default=False, description="Only rows where has_match=true."),
+    only_unmatched: bool = Query(default=False, description="Only rows where has_match=false."),
+    search: str | None = Query(default=None, description="Case-insensitive substring over order name, utm_content, utm_term and matched ad name; exact match on matched_ad_id."),
+    from_date: date | None = Query(default=None, description="Only orders with created_at >= this date."),
+    to_date: date | None = Query(default=None, description="Only orders with created_at <= this date (inclusive)."),
+    sort: Literal["created_at", "total_price", "customer_num_orders"] = Query(default="created_at"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> UtmOrderResponse:
+    channel_counts, tier_summary, tier_by_channel, channel_sources = await _last_click_tiles(
+        session=session, from_date=from_date, to_date=to_date)
 
     # ── row query filters ─────────────────────────────────────────
     # Note: prefixes all column refs with soa. because of the LEFT JOINs.
     where_clauses = [f"soa.{c}" for c in [] ]  # placeholder — real clauses below use full expressions
     where_clauses = []
-    params: dict[str, object] = dict(tile_params)
+    params: dict[str, object] = {
+        k: v for k, v in (("from_date", from_date), ("to_date", to_date)) if v}
     # apply date bounds on the joined row query too
     if from_date:
         where_clauses.append("soa.created_at >= :from_date")
@@ -3558,12 +3561,6 @@ async def get_last_click_utm(
             )
         )
 
-    total = (
-        await session.execute(
-            text(f"SELECT COUNT(*) {_UTM_ORDER_FROM} {where_sql}"), params
-        )
-    ).scalar_one()
-
     # Every tab's count, under every filter EXCEPT the attribution one.
     # Counting under its own filter would leave each tab showing only
     # itself and zeroes beside it, which is useless for choosing a tab.
@@ -3571,14 +3568,9 @@ async def get_last_click_utm(
                    if "al.attribution_setting" not in c]
     facet_sql = f"WHERE {' AND '.join(facet_where)}" if facet_where else ""
     facet_params = {k: v for k, v in params.items() if k != "attribution_setting"}
-    facet_rows = (await session.execute(text(
-        "SELECT COALESCE(al.attribution_setting, '(none)') AS setting, "
-        "       COUNT(*) AS n, COALESCE(SUM(soa.total_price), 0) AS sales "
-        f"{_UTM_ORDER_FROM} {facet_sql} GROUP BY 1"), facet_params)).mappings().all()
-    attribution_counts = {
-        r["setting"]: ChannelSummary(count=int(r["n"]), sales=float(r["sales"]))
-        for r in facet_rows
-    }
+    total, attribution_counts = await _last_click_counts(
+        session=session, where_sql=where_sql, params=params,
+        facet_sql=facet_sql, facet_params=facet_params)
 
     return UtmOrderResponse(
         rows=rows,
@@ -3823,6 +3815,25 @@ class CustomerJourneyResponse(BaseModel):
     rfm_counts: dict[str, int]
 
 
+@cached_analytics(ttl=300.0)
+async def _customer_journey_counts(
+    session: AsyncSession, where_sql: str, params: dict[str, object],
+) -> tuple[int, dict[str, int]]:
+    """Total and per-group counts for one filter set.
+
+    Cached apart from the page: they do not depend on sort, limit or
+    offset, so "load more" and a re-sort reuse them instead of running
+    both whole-table counts again for every page.
+    """
+    total = (
+        await session.execute(text(f"SELECT COUNT(*) {_JOURNEY_JOIN} {where_sql}"), params)
+    ).scalar_one()
+    rfm_result = await session.execute(
+        text(f"SELECT COALESCE(ca.rfm_group, 'Unknown'), COUNT(*) {_JOURNEY_JOIN} {where_sql} GROUP BY 1"), params
+    )
+    return total, {row[0]: row[1] for row in rfm_result}
+
+
 @router.get("/customer-journey", response_model=CustomerJourneyResponse)
 @cached_analytics(ttl=300.0)
 async def get_customer_journey(
@@ -3864,15 +3875,8 @@ async def get_customer_journey(
     )
     rows = [CustomerJourneyOrderRow(**dict(r._mapping)) for r in rows_result]
 
-    total = (
-        await session.execute(text(f"SELECT COUNT(*) {_JOURNEY_JOIN} {where_sql}"), params)
-    ).scalar_one()
-
-    rfm_result = await session.execute(
-        text(f"SELECT COALESCE(ca.rfm_group, 'Unknown'), COUNT(*) {_JOURNEY_JOIN} {where_sql} GROUP BY 1"), params
-    )
-    rfm_counts = {row[0]: row[1] for row in rfm_result}
-
+    total, rfm_counts = await _customer_journey_counts(
+        session=session, where_sql=where_sql, params=params)
     return CustomerJourneyResponse(rows=rows, total=total, rfm_counts=rfm_counts)
 
 
@@ -6547,7 +6551,7 @@ async def get_cpis_utm(
       window_days AS (
         SELECT (hi - lo + 1) AS n_days FROM bounds
       ),
-      -- Sparkline is served lazily via /cpis-utm/spend-trend so the main
+      -- Sparkline is served lazily via /cpis-utm/spend-trends so the main
       -- table stays fast (< 2s). This CTE returns NULLs from the join
       -- so the schema stays stable; the client fetches the actual daily
       -- series per visible row in parallel after mount.
@@ -7211,103 +7215,6 @@ async def get_cpis_utm_data_freshness(session: SessionDep) -> CpisDataFreshnessR
         max_daily_day=row.max_daily,
         distinct_skus=int(row.n_sku or 0),
         computed_at=datetime.now(timezone.utc),
-    )
-
-
-@router.get("/cpis-utm/spend-trend", response_model=CpisSpendTrendResponse)
-async def get_cpis_utm_spend_trend(
-    session: SessionDep,
-    master_sku: str = Query(...),
-    window: Literal["7d", "30d", "90d"] = Query(default="30d"),
-) -> CpisSpendTrendResponse:
-    """Daily spend series for one master SKU in the picked window +
-    previous-period total for the sparkline column on /cpis-utm.
-
-    Split out from the main /cpis-utm endpoint to keep that endpoint's
-    latency < 2s. Computing the daily series requires scanning
-    raw_dump_meta insights, which at 50 rows × ~200 name-matched ads
-    per row explodes into a 60+s query. Per-SKU this query is fast
-    because the raw_dump_meta scan is filtered to a small set of
-    ad_ids up front.
-    """
-    if not _SKU_ALLOWED_PATTERN.match(master_sku):
-        raise HTTPException(status_code=400, detail="Invalid master_sku")
-    # Bounded on non-alphanumerics, NOT \y..\y: `_` is a word
-    # character in Postgres, so the word-boundary form missed every
-    # ad named `<SKU>_...`. Must stay identical to the predicate in
-    # get_cpis_utm, or this list disagrees with the row it opened.
-    regex = (r"(^|[^A-Za-z0-9])" + _re.escape(master_sku)
-             + r"[A-Z]?[A-Z]?([^A-Za-z0-9]|$)")
-
-    # Window bounds -- reuse cpis_by_sku_utm's stored dates so the range
-    # matches what the main endpoint's row values were computed over.
-    bounds_row = (
-        await session.execute(
-            text(
-                "SELECT window_from AS lo, window_to AS hi "
-                "FROM cpis_by_sku_utm WHERE window_key = :window LIMIT 1"
-            ),
-            {"window": window},
-        )
-    ).first()
-    if bounds_row is None:
-        raise HTTPException(status_code=404, detail="Window not found in cpis_by_sku_utm; run refresh_cpis_utm.py first.")
-    lo, hi = bounds_row.lo, bounds_row.hi
-    prev_lo = date.fromordinal(lo.toordinal() - (hi - lo).days - 1)
-
-    sql = """
-    WITH cand AS (
-      SELECT ad_id, ad_name FROM ad_lifecycle WHERE ad_name ~* :regex
-    ),
-    losers AS (
-      -- See get_cpis_matched_ads: the longest SKU of a nested family wins.
-      SELECT DISTINCT c.ad_id
-        FROM cand c
-        JOIN public.cpis_sku_context o
-          ON length(o.master_sku) > length(:sku)
-         AND position(:sku in o.master_sku) > 0
-         AND c.ad_name ~* ('(^|[^A-Za-z0-9])' || o.master_sku
-                           || '[A-Z]?[A-Z]?([^A-Za-z0-9]|$)')
-    ),
-    ads AS (
-      SELECT ad_id FROM cand
-       WHERE ad_id NOT IN (SELECT ad_id FROM losers)
-    ),
-    daily AS (
-      SELECT
-        idba.day,
-        SUM(idba.spend) AS spend
-      FROM public.insights_daily_by_ad idba
-      JOIN ads a ON a.ad_id = idba.ad_id
-      WHERE idba.day BETWEEN :prev_lo AND :hi
-      GROUP BY idba.day
-    )
-    SELECT
-      COALESCE(
-        (SELECT jsonb_agg(spend::float8 ORDER BY day) FROM daily WHERE day BETWEEN :lo AND :hi),
-        '[]'::jsonb
-      ) AS current_series,
-      (SELECT COALESCE(SUM(spend), 0) FROM daily WHERE day < :lo)::float8 AS prev_total
-    """
-    row = (
-        await session.execute(
-            text(sql), {"regex": regex, "sku": master_sku, "lo": lo, "hi": hi, "prev_lo": prev_lo}
-        )
-    ).first()
-    if row is None:
-        return CpisSpendTrendResponse(
-            master_sku=master_sku, window_key=window, window_from=lo, window_to=hi,
-            spend_trend_current=[], spend_trend_prev_total=0.0,
-        )
-    import json as _json
-    raw = row.current_series
-    arr = _json.loads(raw) if isinstance(raw, str) else (list(raw) if raw else [])
-    series = [float(v) if v is not None else 0.0 for v in arr]
-    return CpisSpendTrendResponse(
-        master_sku=master_sku, window_key=window,
-        window_from=lo, window_to=hi,
-        spend_trend_current=series,
-        spend_trend_prev_total=row.prev_total,
     )
 
 
@@ -8330,17 +8237,6 @@ class TopCpisSku(BaseModel):
     cost_per_ncp: float | None
 
 
-class OverviewSummaryResponse(BaseModel):
-    total_spend: float
-    total_impressions: float
-    total_shopify_revenue: float
-    total_shopify_orders: int
-    category_breakdown: list[BreakdownItem]
-    channel_breakdown: list[BreakdownItem]
-    top_landing_pages: list[TopLandingPage]
-    top_cpis_skus: list[TopCpisSku]
-
-
 #: Kwikchat's flat daily figure, the same one `kwikchat_spend_daily`
 #: carries on every row it has -- all 292 of them are is_estimate at
 #: exactly this number. Used to fill days the table has not reached
@@ -9176,9 +9072,6 @@ async def get_dashboard_sessions(
 # classifying channels there (~27s alone). Splitting lets the
 # frontend fire all 5 in parallel AND render each tile as its own
 # data arrives (progressive loading, no head-of-line blocking).
-#
-# /overview-summary is kept for backward compat -- new callers
-# should fan out to these instead.
 # ------------------------------------------------------------------
 @router.get("/dashboard/kpis", response_model=KpisResponse)
 @cached_analytics(ttl=60.0)
@@ -9952,35 +9845,6 @@ async def get_dashboard_top_cpis_skus(
         result.append(TopCpisSku(master_sku=sku, ad_spend=float(spend),
                                  cost_per_ncp=float(spend / ncp) if ncp > 0 else None))
     return sorted(result, key=lambda row: (-row.ad_spend, row.master_sku))[:5]
-
-
-@router.get("/overview-summary", response_model=OverviewSummaryResponse, deprecated=True)
-async def get_overview_summary(session: SessionDep) -> OverviewSummaryResponse:
-    """Deprecated -- fan out to /dashboard/{kpis,category-breakdown,
-    channel-breakdown,top-landing-pages,top-cpis-skus} instead. Kept
-    for backward compat only.
-    """
-    # Sequential, not asyncio.gather. One AsyncSession cannot run two
-    # statements at once -- gathering five of them on this session
-    # raised InterfaceError ("another operation is in progress") and
-    # this endpoint returned 500 for every call. The five parts are
-    # individually cached, so the fan-out that replaced this endpoint
-    # is where the parallelism belongs.
-    kpis = await get_dashboard_kpis(session)
-    cat = await get_dashboard_category_breakdown(session)
-    chan = await get_dashboard_channel_breakdown(session)
-    lp = await get_dashboard_top_landing_pages(session)
-    cpis = await get_dashboard_top_cpis_skus(session)
-    return OverviewSummaryResponse(
-        total_spend=kpis.total_spend,
-        total_impressions=kpis.total_impressions,
-        total_shopify_revenue=kpis.total_shopify_revenue,
-        total_shopify_orders=kpis.total_shopify_orders,
-        category_breakdown=cat,
-        channel_breakdown=chan,
-        top_landing_pages=lp,
-        top_cpis_skus=cpis,
-    )
 
 
 # ══════════════════════════════════════════════════════════════════════

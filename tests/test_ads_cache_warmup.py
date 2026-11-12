@@ -27,7 +27,7 @@ async def test_warmup_is_reused_by_the_first_browser_page(monkeypatch):
     monkeypatch.setattr(analytics, "get_cpis_utm_data_freshness", AsyncMock(
         return_value=SimpleNamespace(max_meta_day=source_day),
     ))
-    for name in ("get_creative_testing", "get_cpis_utm", "get_last_click_utm", "get_landing_pages"):
+    for name in ("get_creative_testing", "get_cpis_utm"):
         monkeypatch.setattr(analytics, name, AsyncMock())
 
     await analytics.warm_ads_analyse_cache()

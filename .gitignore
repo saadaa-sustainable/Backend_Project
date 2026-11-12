@@ -7,7 +7,7 @@ venv/
 env/
 .env
 .env.*
-!.env.example
+.env.example
 
 # Testing / coverage
 .pytest_cache/
@@ -36,6 +36,7 @@ alembic/versions/__pycache__/
 # Kept out of the repo -- these files churn every session and have
 # no long-term value. If a file needs to be preserved, rename it and
 # move it under docs/ or exports/.
+/*.jsonl
 /*.json
 /*.html
 /scripts/_probe_*.py
@@ -121,3 +122,6 @@ outputs/
 # Raw Return Prime exports carry customer details.
 returns.jsonl
 returns.db
+
+# Supabase CLI scratch files -- rewritten by every CLI command.
+supabase/.temp/

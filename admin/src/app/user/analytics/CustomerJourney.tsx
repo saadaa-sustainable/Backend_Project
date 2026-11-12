@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import { SectionHeader, FilterRule, FilterCell, FieldLabel, VerdictBand, filterControlClass } from "./SectionChrome";
 import { MarkClose } from "./Pictograms";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 
 const PAGE_SIZE = 50;
 
@@ -311,7 +312,8 @@ export function CustomerJourney() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const filters = useMemo(
+  // Debounced so typing sends one request, not one per keystroke.
+  const filters = useDebouncedValue(useMemo(
     () => ({
       rfm_group: rfmGroup || undefined,
       only_matched: onlyMatched,
@@ -319,7 +321,7 @@ export function CustomerJourney() {
       search: search || undefined,
     }),
     [rfmGroup, onlyMatched, search],
-  );
+  ));
 
   useEffect(() => {
     let cancelled = false;

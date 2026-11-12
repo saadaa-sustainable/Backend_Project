@@ -19,6 +19,8 @@ from app.api.routers import analytics
 def clear_caches():
     caches = [
         analytics.get_last_click_utm.analytics_cache,
+        analytics._last_click_tiles.analytics_cache,
+        analytics._last_click_counts.analytics_cache,
         analytics.get_landing_pages.analytics_cache,
     ]
     for cache in caches:
@@ -196,19 +198,21 @@ async def test_last_click_http_response_serializes_rows_summaries_and_reuses_cac
     {"only_matched": "true"},
 ])
 async def test_last_click_filter_changes_have_separate_cache_entries(client, session, filters):
-    session.execute.side_effect = last_click_results(total=2) + last_click_results(total=1)
+    # The tiles depend on the dates alone, so only a new date window
+    # runs their summary query again; any other filter reuses them.
+    new_window = "from_date" in filters
+    session.execute.side_effect = (
+        last_click_results(total=2) + last_click_results(total=1)[0 if new_window else 1:])
 
     first = await client.get("/admin/analytics/last-click-utm")
     filtered = await client.get("/admin/analytics/last-click-utm", params=filters)
     assert first.status_code == filtered.status_code == 200
     assert first.json()["total"] == 2
     assert filtered.json()["total"] == 1
-    # Four per uncached request now, not three: the attribution facet
-    # runs after the count.
-    assert session.execute.await_count == 8
+    # Four for the first request: summary, rows, count, attribution facet.
+    assert session.execute.await_count == (8 if new_window else 7)
 
-    # Index 5, not 4: the second request's rows sit one further along.
-    row_query, row_params = session.execute.await_args_list[5].args
+    row_query, row_params = session.execute.await_args_list[5 if new_window else 4].args
     if "from_date" in filters:
         assert row_params["from_date"] == date(2026, 9, 18)
         assert row_params["to_date"] == date(2026, 9, 19)
@@ -223,7 +227,7 @@ async def test_last_click_filter_changes_have_separate_cache_entries(client, ses
     assert original_again.json()["total"] == 2
     # Still 8: the unfiltered request is served from its own cache entry,
     # which the filtered one in between did not evict.
-    assert session.execute.await_count == 8
+    assert session.execute.await_count == (8 if new_window else 7)
 
 
 async def test_landing_pages_http_response_and_cache(client, session):
