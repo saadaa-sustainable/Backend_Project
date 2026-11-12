@@ -2570,8 +2570,24 @@ function computePnl(r, a) {
            cancelledOrders, refunds, extraCancellation, rto, incReturns,
            liveOrders, liveUnits, net, preAd, preAdMargin, roas, beRoas, targetRoas,
            adGst, logistics, pgFees, coins, exchanges, exchangeCost, cogs, totalDed, cm,
-           asp: liveUnits ? net / liveUnits : null,
-           aov: liveOrders ? net / liveOrders : null,
+           // NET SALES per unit and per order, not realisable per.
+           //
+           // Realisable starts at Total sales, which carries TAX --
+           // collected for the government, never ours -- so dividing it
+           // read a few per cent high as revenue. Net sales is gross
+           // less discounts less reversals, no tax: the line to divide
+           // when the question is what an order is worth.
+           //
+           // Defined ONCE, here, because the Per order tiles and the
+           // hour-by-hour table both show it and two definitions of
+           // "per order" in one section is how the ad-spend figure came
+           // to disagree with itself.
+           //
+           // Null where the breakdown is not stored for the window --
+           // an hour older than those columns has no net sales to
+           // divide, which is not the same as zero.
+           asp: (bd && liveUnits) ? bd.netSales / liveUnits : null,
+           aov: (bd && liveOrders) ? bd.netSales / liveOrders : null,
            cancelPct: orders ? cancelledOrders / orders : null,
            // Over ALL orders in the P&L population, which is the same
            // denominator the coin COST uses -- the gift ships with the
@@ -2611,7 +2627,7 @@ function drawPnlHourly(rows, cmpRows, cmpDay, a, liveHour) {
     // way. Scrolling the table alone is the behaviour every other wide
     // table here already has.
     '<div class="pnl-hrs-wrap"><table class="pnl-hrs"><thead><tr>' +
-    ["Hour","Sales","Orders","ASP","AOV","Realisable","Spend","CM","CM %"]
+    ["Hour","Sales","Orders","Net / unit","Net / order","Realisable","Spend","CM","CM %"]
       .concat(cmpRows && cmpRows.length ? ["vs"] : []).concat([""])
       .map(h => "<th>" + esc(h) + "</th>").join("") +
     "</tr></thead><tbody>" +
@@ -4475,10 +4491,30 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
                  " orders \u2014 the figure Shopify\u2019s admin shows",
                  c && c.bd && c.bd.aov != null ? c.bd.aov : null)
           : "") +
-        stat("Realisable / order", d.aov,
-             "realisable sales \u00f7 " + num(liveOrders) + " orders" +
-             (legs ? ", " + num(legs) + " Return Prime return legs excluded" : ""),
-             c ? c.aov : null) +
+        // NET SALES over net orders, not realisable sales over them.
+        //
+        // Realisable starts at Total sales, which carries TAX -- money
+        // collected for the government and never ours -- so a per-order
+        // figure built on it reads a few per cent high as revenue. Net
+        // sales is gross less discounts less reversals and no tax,
+        // which is the line to divide when the question is what an
+        // order is worth.
+        //
+        // It also makes this row consistent: every tile here is now a
+        // MEASURED figure. The modelled per-order number, after the
+        // allowances and every cost, is the contribution / order line
+        // under Contribution margin, where it belongs.
+        //
+        // Divided by OUR order count, not Shopify's. Net sales is
+        // money, Return Prime's return legs carry none, so dividing by
+        // a count that includes them would spread real money over
+        // orders that contributed nothing.
+        (d.aov != null
+          ? stat("Net sales / order", d.aov,
+                 "net sales \u00f7 " + num(liveOrders) + " orders" +
+                 (legs ? ", " + num(legs) + " Return Prime return legs excluded" : ""),
+                 c ? c.aov : null)
+          : "") +
         // Already out of the headline, so it carries no minus and sits
         // among the per-order figures rather than among the
         // deductions. Read "down": reversals rising is the bad way.
@@ -4488,8 +4524,11 @@ function drawPnl(t, rows, liveHour, cmp, cmpRows, cmpDay) {
                  "Total sales, shown not deducted",
                  c && c.bd ? c.bd.revPerOrder : null, "down")
           : "") +
-        stat("Realisable / unit", d.asp,
-             "\u00f7 " + num(liveUnits) + " units", c ? c.asp : null) +
+        (d.asp != null
+          ? stat("Net sales / unit", d.asp,
+                 "net sales \u00f7 " + num(liveUnits) + " units",
+                 c ? c.asp : null)
+          : "") +
         stat("Units / order", liveOrders ? liveUnits / liveOrders : null,
              num(liveUnits) + " units \u00f7 " + num(liveOrders) + " orders",
              c && c.liveOrders ? c.liveUnits / c.liveOrders : null, "up",
