@@ -15898,6 +15898,14 @@ async def post_kwikchat_upload(
                "n_all": len(KWIKCHAT_ACCOUNTS)})).scalars().all()
         held = sorted(set(r[1] for r in to_write) - set(rebuilt))
     await session.commit()
+    if to_write:
+        # Every reader of blended spend is holding an answer from before
+        # this write, for up to five minutes. An upload whose figures do
+        # not move reads as an upload that failed, so the three that show
+        # Kwikchat are dropped now rather than left to expire.
+        for reader in (get_dashboard_blended_mer, get_dashboard_mer_by_period,
+                       get_hourly_tracker):
+            reader.analytics_cache.invalidate()
 
     status = await _kwikchat_status(session)
     mine = next((a for a in status.accounts if a.account == account), None)
