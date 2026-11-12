@@ -134,17 +134,13 @@ pip install -r requirements.txt
 ### 3. Create the PostgreSQL database
 
 ```bash
-createuser meta_ingest --pwprompt   # set password to "meta_ingest" to match .env.example, or customize
+createuser meta_ingest --pwprompt
 createdb meta_ingest --owner=meta_ingest
 ```
 
 ### 4. Configure environment variables
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set at minimum:
+Create a `.env` file and set at minimum:
 
 - `META_ACCESS_TOKEN` — your long-lived Meta access token
 - `META_ACCOUNT_1_ID` (and `_NAME`) — your first ad account id (with or
@@ -155,14 +151,11 @@ Edit `.env` and set at minimum:
 - `META_API_VERSION` — e.g. `v21.0`
 - `DATABASE_URL` / `DATABASE_URL_SYNC` — if you changed the DB user/password/name above
 
-### 5. Run database migrations
+### 5. Database tables
 
-```bash
-alembic upgrade head
-```
-
-This creates every Bronze table plus the `sync_batches` / `failed_jobs`
-operational tables (see `alembic/versions/0001_initial_bronze_schema.py`).
+The repo no longer carries migrations. The service runs against the
+existing Supabase database, where the tables already exist. The Bronze
+table definitions are in `scripts/sql/`.
 
 ### 6. Start the API
 

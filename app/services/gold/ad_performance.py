@@ -6,7 +6,7 @@ Shopify orders to a `matched_ad_id`. This table joins that onto
 `ad_lifecycle` (Silver) so a dashboard can read Meta-reported performance
 and real Shopify revenue for the same ad in one row, without recomputing
 either upstream table's business logic here -- matches this project's
-Gold design principle (Context.md): "pre-aggregated for specific dashboard
+Gold design principle: "pre-aggregated for specific dashboard
 queries... every RPC/read the frontend needs should be a thin wrapper over
 a gold table."
 
