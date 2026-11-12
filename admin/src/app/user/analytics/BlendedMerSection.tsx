@@ -11,6 +11,7 @@ import {
 import { useCachedFetch } from "@/lib/useCachedFetch";
 import { DateRangePicker } from "@/components/DateRangePicker";
 import { BlendedMer } from "./BlendedMer";
+import { KwikchatImport } from "./KwikchatImport";
 import { MerMonthly } from "./MerMonthly";
 import { FilterCell, FilterRule, SectionHeader } from "./SectionChrome";
 
@@ -66,6 +67,11 @@ export function BlendedMerSection() {
   return (
     <div className="flex flex-col gap-5">
       <SectionHeader title="Blended MER" />
+
+      {/* Kwikchat is a third of blended spend's channels and the only
+          one loaded by hand. Both views below divide by it, so both are
+          refetched the moment an upload lands. */}
+      <KwikchatImport onUploaded={() => { current.refetch(); monthly.refetch(); }} />
 
       {/* The picker drives the band only; the table below is fixed to
           calendar months, and the footer under it says so. */}

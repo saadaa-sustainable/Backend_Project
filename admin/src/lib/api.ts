@@ -3839,3 +3839,78 @@ export function fetchHourlyTracker(
     `/admin/analytics/hourly-tracker${q ? `?${q}` : ""}`,
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Kwikchat spend import                                              *
+ * ------------------------------------------------------------------ */
+
+/** One workspace, and how far its real spend reaches. */
+export interface KwikchatAccount {
+  account: string;
+  /** Newest day with measured spend. Null: never uploaded. */
+  updated_to: string | null;
+  first_day: string | null;
+  days: number;
+  total: number;
+  last_upload: string | null;
+}
+
+export interface KwikchatStatus {
+  accounts: KwikchatAccount[];
+  /** The newest day EVERY workspace has reached. Past it the day total
+   *  is short by whoever has not reported. */
+  covered_to: string | null;
+  partial_days: string[];
+}
+
+export interface KwikchatDayResult {
+  day: string;
+  spend: number;
+  /** written | skipped */
+  status: string;
+  was: number | null;
+}
+
+export interface KwikchatUploadResult {
+  account: string;
+  files: string[];
+  written: number;
+  skipped: number;
+  days: KwikchatDayResult[];
+  updated_to: string | null;
+  rebuilt_days: number;
+  /** Written for this workspace but left alone in the day total. */
+  held_days: string[];
+  message: string;
+}
+
+/** Always from the server: the panel is only useful if it shows what
+ *  the last upload actually left behind. */
+export const fetchKwikchatStatus = () =>
+  request<KwikchatStatus>("/admin/analytics/kwikchat/status", { cache: "reload" });
+
+/** One workspace's daily-spend exports. Several files are summed per
+ *  day by the server, which is why they go up together.
+ *
+ *  Not through `request`: that helper stamps a JSON content type on
+ *  every call, and a multipart body has to let the browser write its
+ *  own boundary into the header. */
+export async function uploadKwikchatSpend(
+  account: string, files: File[], overwrite: boolean,
+): Promise<KwikchatUploadResult> {
+  const body = new FormData();
+  body.append("account", account);
+  body.append("overwrite", overwrite ? "true" : "false");
+  for (const f of files) body.append("files", f);
+  const res = await fetch(`${API_BASE_URL}/admin/analytics/kwikchat/upload`,
+                          { method: "POST", body, cache: "no-store" });
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = payload?.detail ?? payload?.message;
+    throw new ApiError(
+      typeof detail === "string" ? detail : `Upload failed (${res.status}).`, res.status);
+  }
+  // Spend moved, so every analytics answer held in this tab is stale.
+  clearAnalyticsCache();
+  return payload as KwikchatUploadResult;
+}
