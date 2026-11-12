@@ -5,13 +5,10 @@ sqlalchemy==2.0.35
 greenlet==3.5.4
 asyncpg==0.29.0
 psycopg2-binary==2.9.12
-alembic==1.13.3
 pydantic==2.11.10
 pydantic-settings==2.5.2
 apscheduler==3.10.4
 python-dotenv==1.0.1
-tenacity==9.0.0
-orjson==3.10.7
 structlog==24.4.0
 python-pptx==1.0.2
 python-multipart==0.0.12
@@ -46,7 +43,6 @@ pytest-cov==5.0.0
 respx==0.21.1
 ruff==0.6.9
 mypy==1.11.2
-aiosqlite==0.20.0
 # Offline PostgreSQL parser -- used by scripts/check_sql_syntax.py to
 # parse every SQL constant in CI. No database connection involved.
 pglast>=7

@@ -47,6 +47,7 @@ import { ExportButton } from "@/components/ExportButton";
 import { theme } from "@/lib/theme";
 import { FieldLabel, SectionHeader } from "./SectionChrome";
 import { fetchAllPages } from "@/lib/fetchAllPages";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 
 // ─────────────────────────────────────────────────────────────────────
 // Channel + tier catalog
@@ -518,7 +519,8 @@ export function LastClickUtm() {
   const [mediumOptions, setMediumOptions] = useState<Set<string>>(new Set());
   const [sourceOptions, setSourceOptions] = useState<Set<string>>(new Set());
 
-  const filters: LastClickUtmParams = useMemo(
+  // Debounced so typing sends one request, not one per keystroke.
+  const filters: LastClickUtmParams = useDebouncedValue(useMemo(
     () => ({
       channel: channel || undefined,
       tier: tier || undefined,
@@ -536,7 +538,7 @@ export function LastClickUtm() {
       sort: sortKey === "total_price" ? "total_price" : sortKey === "customer_num_orders" ? "customer_num_orders" : "created_at",
     }),
     [channel, tier, utmSources, utmMedium, utmCampaign, utmContent, utmTerm, matchedValue, onlyMatched, onlyUnmatched, search, fromDate, toDate, sortKey],
-  );
+  ));
 
   useEffect(() => {
     let cancelled = false;

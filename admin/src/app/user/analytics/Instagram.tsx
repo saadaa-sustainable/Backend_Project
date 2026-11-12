@@ -38,6 +38,7 @@ import {
   filterControlClass,
 } from "./SectionChrome";
 import { fetchAllPages } from "@/lib/fetchAllPages";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 
 const PAGE_SIZE = 60;
 
@@ -102,7 +103,8 @@ export function Instagram() {
   const [sort, setSort] = useState<InstagramSort>("posted_at");
   const [selected, setSelected] = useState<InstagramPostRow | null>(null);
 
-  const filters = useMemo(
+  // Debounced so typing sends one request, not one per keystroke.
+  const filters = useDebouncedValue(useMemo(
     () => ({
       username: username || undefined,
       media_type: mediaType || undefined,
@@ -111,7 +113,7 @@ export function Instagram() {
       sort,
     }),
     [username, mediaType, mediaProductType, search, sort],
-  );
+  ));
 
   useEffect(() => {
     let cancelled = false;

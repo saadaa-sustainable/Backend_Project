@@ -18,12 +18,13 @@ import { useAnalyticsSectionVisible } from "./analyticsSectionVisibility";
  *   4. User calls `refetch()`                -> force fresh fetch, update cache
  *   5. Visible section reaches expiry       -> refresh without hiding its data
  *
- * TTL defaults to 5 minutes -- long enough that browsing between
- * tabs feels instant, short enough that a merchant checking numbers
- * after a data refresh gets fresh values within one work-break.
+ * TTL defaults to one hour. Every reader of this hook shows tables the
+ * nightly rebuilds once a day, so a 5-minute expiry re-ran each open
+ * section's queries twelve times an hour for the same answer. An
+ * upload that does change them calls `refetch()`.
  */
 
-const DEFAULT_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_TTL_MS = 60 * 60 * 1000;
 const inFlight = new Map<string, Promise<unknown>>();
 
 interface CacheEntry<T> {
@@ -92,7 +93,7 @@ export interface UseCachedFetchResult<T> {
  *                  Example: `dashboard/kpis` or `cpis-utm|window=30d|sort=roas`.
  * @param fetcher   Fetch function that returns the payload. Called only on
  *                  cache miss / expiry / explicit refetch.
- * @param ttlMs     TTL for cache entry in ms (default 5 minutes).
+ * @param ttlMs     TTL for cache entry in ms (default one hour).
  */
 export function useCachedFetch<T>(
   key: string,

@@ -16,6 +16,7 @@ import {
   TableFrame,
   filterControlClass,
 } from "./SectionChrome";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 
 /**
  * Is each campaign still being given new creative?
@@ -63,7 +64,8 @@ export function CampaignTracker() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const filters = useMemo(
+  // Debounced so typing sends one request, not one per keystroke.
+  const filters = useDebouncedValue(useMemo(
     () => ({
       status,
       search: search.trim() || undefined,
@@ -74,7 +76,7 @@ export function CampaignTracker() {
       limit,
     }),
     [status, search, staleDays, onlyStale, sort, direction, limit],
-  );
+  ));
 
   useEffect(() => {
     let cancelled = false;

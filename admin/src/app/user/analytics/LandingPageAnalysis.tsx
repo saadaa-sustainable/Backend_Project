@@ -17,6 +17,7 @@ import {
 import { ExportButton } from "@/components/ExportButton";
 import { SectionHeader, FilterRule, FilterCell, FieldLabel, Segmented, filterControlClass } from "./SectionChrome";
 import { MarkClose } from "./Pictograms";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 
 const PAGE_SIZE = 50;
 
@@ -570,7 +571,8 @@ export function LandingPageAnalysis() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const filters = useMemo(
+  // Debounced so typing sends one request, not one per keystroke.
+  const filters = useDebouncedValue(useMemo(
     () => ({
       search: search || undefined,
       page_type: pageType || undefined,
@@ -581,7 +583,7 @@ export function LandingPageAnalysis() {
       to_date: toDate,
     }),
     [search, pageType, gender, source, sort, fromDate, toDate],
-  );
+  ));
 
   useEffect(() => {
     let cancelled = false;
