@@ -48,8 +48,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # visitors share the same cache fill and its database work.
     import asyncio as _asyncio
 
-    from app.api.routers.analytics import warm_ads_analyse_cache
-    warmup = _asyncio.create_task(warm_ads_analyse_cache())
+    from app.api.routers.analytics import watch_refresh_runs
+    warmup = _asyncio.create_task(watch_refresh_runs())
     try:
         async with app.state.analytics_mcp.manager.run():
             yield

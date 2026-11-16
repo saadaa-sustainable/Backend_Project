@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging.setup import get_logger
+from app.services.analytics_cache import invalidate_nightly
 from app.services.silver.registry import FLATTEN_REGISTRY, FlattenJob
 
 logger = get_logger(__name__)
@@ -197,6 +198,8 @@ async def check_and_maybe_run(
     )
     await session.commit()
     logger.info("flatten_job_succeeded", job_key=job.key, **rows_written)
+    # The dashboard keeps answers until a refresh ends; this was one.
+    invalidate_nightly()
 
     return await get_job_state(session, job)
 

@@ -158,6 +158,80 @@ Not verified: the changes were not clicked through in a running browser.
 | Landing Pages totals per filter (finding 13) | Its totals and its page come from one SQL statement, so separating them means changing the query. Out of scope for this round. Customer Journey and Last Click UTM were done (changes 9 and 10). |
 | The 5-minute cache in `api.ts` | Shared by Hourly Tracker and Live P&L, which change every hour. |
 
+## Phase 2 — 16 Nov 2026: keep answers until the data changes
+
+The big tables change once a day, when the nightly ends. Before this
+round the backend still recomputed every answer after 1 to 15 minutes.
+The plan is in `docs/optimization-phase2-plan.md`. No SQL statement
+that serves a page was rewritten.
+
+### Changes
+
+| # | Change | Files |
+| --- | --- | --- |
+| 1 | New cache option `until_nightly=True`: the answer is kept for up to 24 hours and dropped when a refresh run ends. | `app/services/analytics_cache.py` |
+| 2 | 30 endpoints and helpers switched to it: Ads Analyse (all levels), Last Click UTM, First Click, Customer Journey, Landing Pages, CPIS, Creative Testing, Asset Analysis, Untested Assets, Instagram, Campaign Tracker, Shopify Analytics. | `app/api/routers/analytics.py` |
+| 3 | A watcher reads the newest run in `cron_run_log` once a minute. When a run ends it clears those answers and warms the default views. A run with no end time counts as ended 250 minutes after its start, because a run killed at the 240-minute limit never records its end. | `app/api/routers/analytics.py`, `app/main.py` |
+| 4 | The warmer now also loads Ad Sets, Campaigns, and Last Click UTM with its name-miss panel. It runs at startup, when a run ends, and when the IST day changes. | `app/api/routers/analytics.py` |
+| 5 | The manual Google refresh writes one run-log row when at least one step succeeded, so the watcher sees it. | `scripts/refresh_google.py` |
+| 6 | "Flatten now" (and the automatic flatten) clears the answers when a job succeeds. | `app/services/silver/runner.py` |
+
+Kept on their short lifetime, because the hourly job or an upload
+changes their tables: Hourly Tracker, Live P&L, coins, inventory,
+quantity, Blended MER, MER by period, the Dashboard tiles, Comparative
+Analysis and Meta Hypothesis.
+
+### Before and after
+
+The same twelve default requests were sent to the deployed API (old
+code) and to a local API running this branch, against the same
+database. Each was sent twice, 16 minutes apart, which is longer than
+the longest old cache lifetime (15 minutes). The local API had finished
+its startup warm before the first request.
+
+| View | Before, 1st | Before, 16 min later | After, 1st | After, 16 min later |
+| --- | --- | --- | --- | --- |
+| Ads Analyse: opening view | 20.5 s | 14.5 s | 0.01 s (warmed) | 0.02 s |
+| Ads Analyse: Ad Sets | 33.9 s | 24.6 s | 0.01 s (warmed) | 0.01 s |
+| Ads Analyse: Campaigns | 22.3 s | 19.7 s | 0.01 s (warmed) | 0.01 s |
+| Last Click UTM: table | 2.0 s | 1.9 s | under 0.01 s (warmed) | under 0.01 s |
+| Last Click UTM: name-miss panel | 2.8 s | 2.4 s | under 0.01 s (warmed) | under 0.01 s |
+| CPIS: table | 4.0 s | 3.8 s | under 0.01 s (warmed) | under 0.01 s |
+| CPIS: data freshness | 0.8 s | 1.0 s | under 0.01 s (warmed) | under 0.01 s |
+| First Click: by Ad set | 15.5 s | 15.1 s | 21.5 s (not warmed) | under 0.01 s |
+| Instagram: @saadaadesigns | 2.2 s | 2.0 s | 6.0 s (not warmed) | under 0.01 s |
+| Shopify Analytics | 5.0 s | 5.2 s | 13.3 s (not warmed) | under 0.01 s |
+| Customer Journey | 3.7 s | 3.5 s | 5.3 s (not warmed) | under 0.01 s |
+| Landing Pages | 4.6 s | 4.2 s | 8.3 s (not warmed) | under 0.01 s |
+
+How to read it:
+
+- "Before, 16 min later" is as slow as the first request: the old
+  cache had expired, so the database did the work again.
+- "After, 16 min later" is the cached answer. It stays until the next
+  refresh run ends.
+- The "after" times are the server's own time on a local machine. On
+  the deployed site add the network and download time, about 0.2 to
+  1 second.
+- The five "not warmed" first requests were slower than "before". They
+  ran from a laptop, further from the database than the deployed API,
+  while the "before" requests were hitting the same database. On the
+  deployed site a first request costs what it costs today.
+
+### Verified
+
+| Check | Result |
+| --- | --- |
+| Backend tests | 1044 passed, 11 skipped; 3 are new (cache mode, watcher on run end, watcher on day change) |
+| Local run of this branch | Started, warmed, and logged no warmer or watcher error |
+
+### Not done
+
+- First Click still opens on "Ad", which does not load. Opening it on
+  "Ad set" is one line and waits for a decision.
+- The Dashboard tiles are unchanged (5 to 6 seconds).
+- Not measured on the deployed site yet; that follows the merge.
+
 ## Next rounds (not started)
 
 1. Query round: Landing Pages totals, the name-miss panel, date filters as ranges, the date bound on `/dashboard/mer-by-period`.

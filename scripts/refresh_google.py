@@ -164,6 +164,16 @@ def main() -> int:
           f"{len(skipped)} skipped in {total / 60:.1f} min")
     for name in failed:
         print(f"\n--- {name} ---\n{results[name][2]}")
+    if len(failed) + len(skipped) < len(results):
+        # One run-log row, so the API sees that data changed and drops
+        # the answers it keeps until the next refresh ends.
+        try:
+            sys.path.insert(0, str(ROOT))
+            from utils.cron_log import CronRun
+            with CronRun(project="google_refresh"):
+                pass
+        except Exception as exc:  # the refresh itself succeeded; say so and move on
+            print(f"\ncould not record the run in cron_run_log: {exc}")
     return 1 if failed or skipped else 0
 
 

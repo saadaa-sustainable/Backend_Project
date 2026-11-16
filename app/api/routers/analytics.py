@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import SessionDep
 from app.services.ad_customer_mix import read_ad_customer_mix
 from app.services.ad_efficiency import calculate_efficiency_scores, get_efficiency_anchors
-from app.services.analytics_cache import cached_analytics
+from app.services.analytics_cache import cached_analytics, invalidate_nightly
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
 from app.services.dashboard_sessions import META_SOURCE_SQL
 from app.services.gold.cpis import match_ads_to_sku
@@ -94,7 +94,7 @@ class AdLifecycleResponse(BaseModel):
 
 
 @router.get("/ad-lifecycle", response_model=AdLifecycleResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_ad_lifecycle(
     session: SessionDep,
     account_name: str | None = Query(default=None),
@@ -1139,7 +1139,7 @@ def _ads_analyse_summary_sql(row_where: str, base_where: str, *, windowed: bool)
     )
 
 
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def _get_ads_analyse_summary(
     session: AsyncSession, row_where: str, base_where: str, params: dict[str, Any], windowed: bool,
 ) -> dict[str, Any]:
@@ -1398,30 +1398,47 @@ class AdsAnalyseResponse(BaseModel):
 
 
 async def warm_ads_analyse_cache() -> None:
-    """Warm the default ad page and the current asset-based testing page.
+    """Fill the caches of the views people open first.
 
     Uses the same parameters and response caches as browser requests.
     Concurrent visitors share these fills instead of repeating the SQL.
+    Each fill is on its own so one failure does not stop the rest.
     """
     from datetime import timedelta as _timedelta
+    from zoneinfo import ZoneInfo
 
     from app.database.session import session_scope
 
     import logging
-    today = date.today()
+    log = logging.getLogger(__name__)
+    # The browser's "today": readers are in India, the server runs in UTC.
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    month_ago = today - _timedelta(days=29)
+    meta_through = today
     try:
         async with session_scope() as session:
             freshness = await get_cpis_utm_data_freshness(session)
+            meta_through = freshness.max_meta_day or today
             # Match AdsAnalyse's Lifetime preset (DateRangePicker.DATA_FLOOR),
             # delivery mode and first-page size. Warming an unbounded request
             # misses the browser's cache key and repeats all of its SQL.
             # The decorator resolves Query defaults exactly as FastAPI does.
             await get_ads_analyse(
                 session=session, limit=100, from_date=date(2026, 1, 1),
-                to_date=freshness.max_meta_day or today, date_field="delivery",
+                to_date=meta_through, date_field="delivery",
             )
     except Exception:
-        logging.getLogger(__name__).exception("ads_analyse_warmer_failed")
+        log.exception("ads_analyse_warmer_failed")
+    # The Ad Sets and Campaigns views: the two slowest reads on the site.
+    for level in ("adset", "campaign"):
+        try:
+            async with session_scope() as session:
+                await get_ads_analyse_rollup(
+                    session=session, level=level, sort="spend", limit=500,
+                    from_date=date(2026, 1, 1), to_date=meta_through,
+                )
+        except Exception:
+            log.exception("ads_analyse_rollup_warmer_failed")
     for days in (30, 7):
         try:
             async with session_scope() as session:
@@ -1429,7 +1446,7 @@ async def warm_ads_analyse_cache() -> None:
                     session=session, from_date=today - _timedelta(days=days - 1), to_date=today,
                 )
         except Exception:
-            logging.getLogger(__name__).exception("creative_testing_warmer_failed")
+            log.exception("creative_testing_warmer_failed")
 
     try:
         async with session_scope() as session:
@@ -1437,11 +1454,74 @@ async def warm_ads_analyse_cache() -> None:
             # SKU catalogue locally. Match the browser's response-cache key.
             await get_cpis_utm(session=session, window="30d", limit=250)
     except Exception:
-        logging.getLogger(__name__).exception("cpis_warmer_failed")
+        log.exception("cpis_warmer_failed")
+
+    # Last Click UTM as LastClickUtm.tsx opens it: the last 30 days,
+    # newest first, BATCH_SIZE rows, and the name-miss panel beside it.
+    try:
+        async with session_scope() as session:
+            await get_last_click_utm(
+                session=session, from_date=month_ago, to_date=today,
+                sort="created_at", limit=500,
+            )
+        async with session_scope() as session:
+            await get_name_misses(
+                session=session, from_date=month_ago, to_date=today, limit=200)
+    except Exception:
+        log.exception("last_click_utm_warmer_failed")
+
+
+#: When the newest refresh run ended. A run killed at the workflow's
+#: 240-minute limit never records its end, so one with no end counts as
+#: over 250 minutes after it started -- otherwise the caches would hold
+#: the previous day's answers until the following run.
+_REFRESH_MARKER_SQL = """
+SELECT max(coalesce(run_finished,
+                    CASE WHEN run_started < now() - interval '250 minutes'
+                         THEN run_started END))
+  FROM public.cron_run_log
+"""
+
+
+async def watch_refresh_runs(poll_seconds: float = 60.0) -> None:
+    """Warm at startup; then drop the until_nightly answers and warm again
+    whenever a refresh run ends.
+
+    Also warms when the IST day changes: views that default to "the last
+    30 days ending today" ask a new question at midnight, which the
+    previous day's cached answer does not match.
+    """
+    import asyncio
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from app.database.session import session_scope
+
+    ist = ZoneInfo("Asia/Kolkata")
+    await warm_ads_analyse_cache()
+    seen = None
+    day = datetime.now(ist).date()
+    while True:
+        await asyncio.sleep(poll_seconds)
+        try:
+            async with session_scope() as session:
+                marker = (await session.execute(text(_REFRESH_MARKER_SQL))).scalar()
+        except Exception:
+            logging.getLogger(__name__).exception("refresh_watch_failed")
+            continue
+        today = datetime.now(ist).date()
+        # `seen is None` is the first poll: nothing to compare against yet,
+        # and the startup fill above is already current.
+        if seen is not None and marker != seen:
+            invalidate_nightly()
+            await warm_ads_analyse_cache()
+        elif today != day:
+            await warm_ads_analyse_cache()
+        seen, day = marker, today
 
 
 @router.get("/ads-analyse", response_model=AdsAnalyseResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_ads_analyse(
     session: SessionDep,
     account_name: str | None = Query(default=None),
@@ -2963,7 +3043,7 @@ _FIRST_CLICK_SORTS = {
 
 
 @router.get("/first-click", response_model=FirstClickResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_first_click(
     session: SessionDep,
     from_date: date | None = Query(default=None, description="Start of the window (defaults to 30 days back)."),
@@ -3157,7 +3237,7 @@ class FirstClickDailyResponse(BaseModel):
 
 
 @router.get("/first-click/daily", response_model=FirstClickDailyResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_first_click_daily(
     session: SessionDep,
     from_date: date | None = Query(default=None),
@@ -3278,7 +3358,7 @@ async def get_first_click_daily(
     )
 
 
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def _last_click_tiles(session: AsyncSession, from_date: date | None, to_date: date | None):
     """The tiles and per-source drill-down for one date window.
 
@@ -3366,7 +3446,7 @@ async def _last_click_tiles(session: AsyncSession, from_date: date | None, to_da
     return channel_counts, tier_summary, tier_by_channel, channel_sources
 
 
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def _last_click_counts(
     session: AsyncSession, where_sql: str, params: dict[str, object],
     facet_sql: str, facet_params: dict[str, object],
@@ -3394,7 +3474,7 @@ async def _last_click_counts(
 
 
 @router.get("/last-click-utm", response_model=UtmOrderResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_last_click_utm(
     session: SessionDep,
     channel: Literal[
@@ -3699,7 +3779,7 @@ _NAME_MISS_SUMMARY_SQL = (
 
 
 @router.get("/last-click-utm/name-misses", response_model=NameMissResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_name_misses(
     session: SessionDep,
     from_date: date | None = Query(default=None),
@@ -3815,7 +3895,7 @@ class CustomerJourneyResponse(BaseModel):
     rfm_counts: dict[str, int]
 
 
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def _customer_journey_counts(
     session: AsyncSession, where_sql: str, params: dict[str, object],
 ) -> tuple[int, dict[str, int]]:
@@ -3835,7 +3915,7 @@ async def _customer_journey_counts(
 
 
 @router.get("/customer-journey", response_model=CustomerJourneyResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_customer_journey(
     session: SessionDep,
     rfm_group: str | None = Query(default=None),
@@ -4424,7 +4504,7 @@ SELECT * FROM joined
 
 
 @router.get("/landing-pages", response_model=LandingPageResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_landing_pages(
     session: SessionDep,
     search: str | None = Query(default=None, description="Matches landing_page_path, case-insensitive substring."),
@@ -5154,7 +5234,7 @@ class CpisResponse(BaseModel):
 
 
 @router.get("/cpis", response_model=CpisResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_cpis(
     session: SessionDep,
     window: Literal["1d", "7d", "30d"] = Query(default="7d"),
@@ -5937,7 +6017,7 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
     )
 
 
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def _get_cpis_reconciliation(
     session: AsyncSession, wf: date, wt: date, window: str, custom: bool,
 ) -> dict[str, Any]:
@@ -5992,7 +6072,7 @@ class CpisUtmResponse(BaseModel):
 
 
 @router.get("/cpis-utm", response_model=CpisUtmResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_cpis_utm(
     session: SessionDep,
     window: Literal["7d", "30d", "90d"] = Query(default="30d"),
@@ -7011,7 +7091,7 @@ class CpisSpendTrendsResponse(BaseModel):
 
 
 @router.post("/cpis-utm/spend-trends", response_model=CpisSpendTrendsResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_cpis_utm_spend_trends(
     session: SessionDep, body: CpisSpendTrendsRequest,
 ) -> CpisSpendTrendsResponse:
@@ -7069,7 +7149,7 @@ class CpisDailySeriesResponse(BaseModel):
 
 
 @router.get("/cpis-utm/daily-series", response_model=CpisDailySeriesResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_cpis_utm_daily_series(
     session: SessionDep,
     window: str = Query(default="30d"),
@@ -7180,7 +7260,7 @@ async def get_cpis_utm_daily_series(
 
 
 @router.get("/cpis-utm/data-freshness", response_model=CpisDataFreshnessResponse)
-@cached_analytics(ttl=60.0)
+@cached_analytics(until_nightly=True)
 async def get_cpis_utm_data_freshness(session: SessionDep) -> CpisDataFreshnessResponse:
     """Cheap freshness probe. Frontend calls this once on mount to set
     the default to_date on the date-range picker to whatever's actually
@@ -7612,7 +7692,7 @@ _UNTESTED_SQL: dict[str, str] = {
 
 
 @router.get("/untested", response_model=UntestedAssetsResponse)
-@cached_analytics(ttl=300.0, max_entries=12)
+@cached_analytics(until_nightly=True, max_entries=12)
 async def get_untested_assets(
     session: SessionDep,
     media: UntestedMedia = Query(default="video", description="Which asset media type -- video / graphic / influencer"),
@@ -7992,7 +8072,7 @@ class InstagramPostsResponse(BaseModel):
 
 
 @router.get("/instagram", response_model=InstagramPostsResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_instagram_posts(
     session: SessionDep,
     username: str | None = Query(default=None, description="Filter to one IG account username."),
@@ -8152,7 +8232,7 @@ def _fit_power_law(xs: list[float], ys: list[float]) -> tuple[float, float, floa
 
 
 @router.get("/saturation-curve", response_model=SaturationCurveResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_saturation_curve(
     session: SessionDep,
     y_metric: Literal["ncp_count", "purchases", "ftewv_count"] = Query(default="ncp_count"),
@@ -10370,7 +10450,7 @@ _CT_SORT_COLUMNS: dict[str, str] = {
 
 
 @router.get("/creative-testing", response_model=CreativeTestingResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_creative_testing(
     session: SessionDep,
     from_date: date = Query(..., description="Window start (required)."),
@@ -10712,7 +10792,7 @@ _CT_ADS_SQL = (
 
 
 @router.get("/creative-testing/{asset_id}/ads", response_model=CreativeTestingAdsResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_creative_testing_ads(
     session: SessionDep,
     asset_id: str,
@@ -11401,7 +11481,7 @@ def _is_new_entity_sql(level: str, id_col: str) -> str:
 
 
 @router.get("/ads-analyse/rollup", response_model=RollupResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_ads_analyse_rollup(
     session: SessionDep,
     level: Literal["adset", "campaign"] = Query(...),
@@ -11931,7 +12011,7 @@ class ScalableCreativesResponse(BaseModel):
 
 @router.get("/ads-analyse/rollup/scalable-creatives",
             response_model=ScalableCreativesResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_scalable_creatives(
     session: SessionDep,
     level: Literal["adset", "campaign"] = Query(...),
@@ -12055,7 +12135,7 @@ class LaunchesResponse(BaseModel):
 
 
 @router.get("/ads-analyse/launches", response_model=LaunchesResponse)
-@cached_analytics(ttl=900.0)
+@cached_analytics(until_nightly=True)
 async def get_ads_analyse_launches(
     session: SessionDep,
     from_date: date = Query(...),
@@ -12519,7 +12599,7 @@ def _shopify_totals(
 
 
 @router.get("/shopify-analytics", response_model=ShopifyAnalyticsResponse)
-@cached_analytics(ttl=120.0)
+@cached_analytics(until_nightly=True)
 async def get_shopify_analytics(
     session: SessionDep,
     from_date: date = Query(..., description="Window start (inclusive)."),
@@ -12878,7 +12958,7 @@ def _asset_params(
 
 
 @router.get("/asset-analysis", response_model=AssetAnalysisResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_asset_analysis(
     session: SessionDep,
     from_date: date | None = Query(default=None, description="Only iterations created on or after this date."),
@@ -13009,7 +13089,7 @@ async def get_asset_analysis(
 
 
 @router.get("/asset-analysis/{asset_id}/iterations", response_model=AssetIterationsResponse)
-@cached_analytics(ttl=300.0)
+@cached_analytics(until_nightly=True)
 async def get_asset_iterations(
     session: SessionDep,
     asset_id: str,
@@ -13169,7 +13249,7 @@ class CampaignTrackerResponse(BaseModel):
 
 
 @router.get("/campaign-tracker", response_model=CampaignTrackerResponse)
-@cached_analytics(ttl=600.0)
+@cached_analytics(until_nightly=True)
 async def get_campaign_tracker(
     session: SessionDep,
     status: str = Query(default="ACTIVE",
