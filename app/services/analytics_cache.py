@@ -48,6 +48,18 @@ class _Fill:
 _DEFAULT_MAX_ENTRIES = 4
 
 
+#: Caches of answers that change only when a refresh run ends. They are
+#: kept for a day and dropped together by invalidate_nightly().
+_NIGHTLY_TTL = 24 * 3600.0
+_NIGHTLY_CACHES: list["AnalyticsCache"] = []
+
+
+def invalidate_nightly() -> None:
+    """Drop every until_nightly answer. Called when a refresh run ends."""
+    for cache in _NIGHTLY_CACHES:
+        cache.invalidate()
+
+
 class AnalyticsCache:
     def __init__(self, ttl: float = 60.0,
                  max_entries: int = _DEFAULT_MAX_ENTRIES) -> None:
@@ -92,13 +104,20 @@ class AnalyticsCache:
 
 
 def cached_analytics(*, ttl: float = 60.0,
-                     max_entries: int = _DEFAULT_MAX_ENTRIES):
-    """Cache an internal analytics read, excluding its DB session from the key."""
+                     max_entries: int = _DEFAULT_MAX_ENTRIES,
+                     until_nightly: bool = False):
+    """Cache an internal analytics read, excluding its DB session from the key.
+
+    `until_nightly` is for reads whose tables only a refresh run rewrites:
+    the answer is kept until the next run ends instead of for `ttl`.
+    """
     def decorate(fn):
         # Resolve postponed annotations in the endpoint's own module so
         # FastAPI still sees its real request models through this wrapper.
         signature = inspect.signature(fn, eval_str=True)
-        cache = AnalyticsCache(ttl, max_entries)
+        cache = AnalyticsCache(_NIGHTLY_TTL if until_nightly else ttl, max_entries)
+        if until_nightly:
+            _NIGHTLY_CACHES.append(cache)
 
         @wraps(fn)
         async def wrapped(*args, **kwargs):
