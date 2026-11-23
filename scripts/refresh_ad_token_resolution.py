@@ -57,13 +57,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.dbq import connect  # noqa: E402
 
 VIEW = """
-CREATE OR REPLACE VIEW public.ad_token_resolution AS
+CREATE MATERIALIZED VIEW public.ad_token_resolution AS
 WITH tokens AS (
-    SELECT first_ad_id AS token FROM public.ga4_order_attribution
+    -- FIRST click only, because that is all GA4 carries. There was a
+    -- `last_ad_id` arm here and the column does not exist: last click
+    -- is derived from our own order data, never from GA4, so the
+    -- UNION was reading a column that was dropped when that became
+    -- clear. It failed the step outright -- UndefinedColumn, every
+    -- night -- rather than quietly returning less.
+    --
+    -- DISTINCT: one row per token. Without it this returned one row per
+    -- ORDER, and every reader that joins on `token` multiplied its
+    -- orders by the number of orders sharing that token.
+    SELECT DISTINCT first_ad_id AS token FROM public.ga4_order_attribution
      WHERE first_ad_id IS NOT NULL
-    UNION
-    SELECT last_ad_id FROM public.ga4_order_attribution
-     WHERE last_ad_id IS NOT NULL
 ),
 by_name AS (
     SELECT t.token,
@@ -119,8 +126,20 @@ def main() -> int:
     t0 = time.time()
     with connect(autocommit=False, statement_timeout="600s") as conn:
         with conn.cursor() as cur:
-            cur.execute("DROP VIEW IF EXISTS public.ad_token_resolution CASCADE")
+            # Stored, not a plain view: building it reads a few hundred
+            # thousand blocks, and First Click joins it up to six times
+            # per request. Rebuilt here; a token that arrives in between
+            # falls back to its raw id until the next run.
+            cur.execute("SELECT relkind FROM pg_class "
+                        "WHERE oid = to_regclass('public.ad_token_resolution')")
+            kind = cur.fetchone()
+            if kind:
+                what = "MATERIALIZED VIEW" if kind[0] == "m" else "VIEW"
+                cur.execute(f"DROP {what} public.ad_token_resolution CASCADE")
             cur.execute(VIEW)
+            # Unique, so a duplicate token can never fan a join out again.
+            cur.execute("CREATE UNIQUE INDEX ad_token_resolution_token "
+                        "ON public.ad_token_resolution (token)")
             cur.execute("""
                 SELECT method, COUNT(*) FROM public.ad_token_resolution
                 GROUP BY method ORDER BY 2 DESC

@@ -524,6 +524,12 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--resume-from-db", action="store_true",
+        help=("Resume from what the target table already holds instead of the local checkpoint "
+              "file. For CI: a fresh runner has no checkpoint file, so without this every run "
+              "restarts from the oldest post and times out."),
+    )
+    parser.add_argument(
         "--include-insights", action="store_true",
         help=(
             "Also fetch /insights for OWN media (ig_reels_avg_watch_time, "
@@ -571,7 +577,8 @@ def main() -> int:
     print("  " + ", ".join(describe_ig_account_safely(a) for a in accounts))
     base_url = f"https://graph.facebook.com/{api_version}"
 
-    return asyncio.run(_run(args, accounts, base_url, access_token, database_url))
+    return asyncio.run(_run(args, accounts, base_url, access_token, database_url,
+                            use_checkpoint_file=not args.resume_from_db))
 
 
 async def _run(
