@@ -287,9 +287,11 @@ def _credentials():
     A scheduled run should use the service account: ADC is a developer's
     personal login and is not present on a CI runner.
     """
+    import json
     import google.auth
     sa = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if sa and Path(sa).exists():
+    # a gcloud login (authorized_user) here goes through google.auth.default below
+    if sa and Path(sa).exists() and json.loads(Path(sa).read_text()).get("type") == "service_account":
         from google.oauth2 import service_account
         return service_account.Credentials.from_service_account_file(
             sa, scopes=["https://www.googleapis.com/auth/cloud-platform"])
