@@ -77,6 +77,24 @@ def parse_master_sku(variant_sku: str | None) -> str | None:
     return master_sku
 
 
+_PRODUCT_IN_COLLECTION_RE = re.compile(r"^/collections/[^/]+(/products/)")
+
+
+def page_path(url: str | None) -> str | None:
+    """Landing URL -> the page it names, so an ad's URL and an order's
+    Shopify full_url compare equal: no host, query, fragment or end
+    slash, and /collections/x/products/y read as /products/y. A URL off
+    the store gives 'OFFSITE'; no URL gives None."""
+    if not url:
+        return None
+    url = url.split("?")[0].split("#")[0]
+    if "://" in url:
+        host, _, url = url.split("://", 1)[1].partition("/")
+        if "saadaa" not in host.lower():  # saadaa.in and saadaa-design.myshopify.com
+            return "OFFSITE"
+    return _PRODUCT_IN_COLLECTION_RE.sub(r"/products/", "/" + url.strip("/"))
+
+
 def match_ads_to_sku(master_sku: str, ad_names: dict[str, str]) -> list[str]:
     """Every ad_id whose ad_name contains `master_sku` (case-insensitive
     substring, legacy's own approach) -- guarded against short SKUs that
