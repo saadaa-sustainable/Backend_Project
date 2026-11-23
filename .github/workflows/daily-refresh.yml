@@ -92,9 +92,9 @@ jobs:
     # above the sum of the steps that actually run long.
     #
     # This is a safety net, not an expectation: a healthy run is still
-    # ~45-60 min. GitHub's own hard ceiling is 6h. The refresh step itself
-    # stops at 300 so the steps after it still run and close the log row;
-    # 330 for the job leaves them that room.
+    # ~45-60 min. GitHub's own hard ceiling is 6h; 330 leaves room for a
+    # slow Meta or Shopify night. Keep analytics.py's _REFRESH_MARKER_SQL
+    # fallback just above it.
     timeout-minutes: 330
 
     # actions:read is what the duplicate guard below needs to see this
@@ -254,9 +254,6 @@ jobs:
 
       - name: Run daily refresh
         if: steps.guard.outputs.skip != 'true'
-        # Killed at this limit, the run cannot write its own end to
-        # cron_run_log; "Close the run log row" below does it instead.
-        timeout-minutes: 300
         env:
           # --- Supabase Postgres (required) ---
           DATABASE_URL_SYNC:                ${{ secrets.DATABASE_URL_SYNC }}
@@ -326,16 +323,6 @@ jobs:
             FLAGS="$FLAGS --only-silver"
           fi
           python scripts/refresh_all_daily.py $FLAGS
-
-      - name: Close the run log row
-        # A refresh killed by its timeout leaves its cron_run_log row
-        # 'running' with no end, and the dashboard keeps yesterday's
-        # cached answers until it notices. Only touches a row still open.
-        if: always() && steps.guard.outputs.skip != 'true'
-        env:
-          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
-        run: |
-          python scripts/dbq.py --write "UPDATE cron_run_log SET status = 'timeout', run_finished = now(), duration_s = extract(epoch FROM now() - run_started) WHERE workflow_run = '${GITHUB_RUN_ID}' AND status = 'running'" || true
 
       - name: Report Shopify freshness
         # The single quickest way to tell a 7am run that actually landed
