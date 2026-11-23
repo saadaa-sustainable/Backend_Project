@@ -111,7 +111,9 @@ class _Step:
         def _pump() -> None:
             # proc.stdout is not None because stdout=PIPE above.
             for line in proc.stdout:          # type: ignore[union-attr]
-                print(line, end="", flush=True)
+                # Prefixed: steps can run in parallel lanes, and their
+                # output interleaves in the one job log.
+                print(f"[{self.name}] {line}", end="", flush=True)
                 captured.append(line)
 
         pump = threading.Thread(target=_pump, name=f"{self.name}-stdout", daemon=True)
@@ -157,6 +159,9 @@ class CronRun:
         self._t0 = 0.0
         self._conn: psycopg2.extensions.connection | None = None
         self._id: int | None = None
+        # Steps may finish concurrently (parallel lanes); serialise the
+        # shared dict and the one connection.
+        self._lock = threading.Lock()
 
     def __enter__(self) -> "CronRun":
         self._t0 = time.time()
@@ -191,15 +196,16 @@ class CronRun:
             if s.status == "pending":
                 s.status = "ok"
             s.dur_s = round(time.time() - s._t0, 2)
-            self.steps[name] = {
-                "status":     s.status,
-                "duration_s": s.dur_s,
-                "error":      s.error,
-            }
             print(f"[{name}] {s.status} in {s.dur_s:.1f}s", flush=True)
-            # Persist progress after every step so a mid-run crash still
-            # leaves partial state visible in Supabase.
-            self._flush_progress()
+            with self._lock:
+                self.steps[name] = {
+                    "status":     s.status,
+                    "duration_s": s.dur_s,
+                    "error":      s.error,
+                }
+                # Persist progress after every step so a mid-run crash still
+                # leaves partial state visible in Supabase.
+                self._flush_progress()
 
     def _flush_progress(self) -> None:
         assert self._conn is not None and self._id is not None

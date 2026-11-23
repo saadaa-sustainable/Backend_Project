@@ -87,15 +87,15 @@ def test_the_match_is_window_free():
     assert ":from_date" not in VIEW and ":to_date" not in VIEW
 
 
-def test_both_journey_ends_are_collected():
+def test_one_row_per_token():
     from scripts.refresh_ad_token_resolution import VIEW
 
-    # A token can appear as a last click without ever being a first
-    # click. Building the universe from first_ad_id alone would leave
-    # the last-click column resolving against a shorter list.
-    assert "SELECT first_ad_id AS token" in VIEW
-    assert "SELECT last_ad_id FROM public.ga4_order_attribution" in VIEW
-    assert re.search(r"UNION\s+SELECT last_ad_id", VIEW)
+    # GA4 carries the first click only; the last click is our own
+    # matched ad id and needs no resolving. One row per token, or every
+    # join on `token` multiplies its orders.
+    assert "SELECT DISTINCT first_ad_id AS token" in VIEW
+    assert "last_ad_id" not in VIEW.split("by_name")[0].split("SELECT DISTINCT")[1]
+    assert "CREATE MATERIALIZED VIEW" in VIEW
 
 
 def test_the_unexpanded_macro_is_named_not_silently_dropped():

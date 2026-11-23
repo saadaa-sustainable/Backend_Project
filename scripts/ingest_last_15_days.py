@@ -890,6 +890,9 @@ def main() -> int:
                              "yesterday. Pass today to include a PARTIAL "
                              "day -- what a live tracker wants, and what a "
                              "reconciliation does not.")
+    parser.add_argument("--skip-ad-roster", action="store_true",
+                        help="With --roster-only, fetch campaigns and ad sets only. The nightly "
+                             "refreshes ads by id instead (scripts/fetch_ads_by_id.py --recent).")
     parser.add_argument("--roster-only", action="store_true",
                         help="Fetch ONLY the campaign/adset/ad rosters and no insights at all. "
                              "Implies --include-roster. This is the nightly entity refresh: "
@@ -973,8 +976,8 @@ def main() -> int:
     # roster (creative expansion, 50 per page) can outrun the step's
     # timeout, and when all three were gathered together that took the
     # campaign and ad set statuses down with it -- nothing was written.
-    passes = ([("campaign", "adset"), ("ad",)] if args.roster_only
-              else [("campaign", "adset", "ad")])
+    passes = ([("campaign", "adset")] + ([] if args.skip_ad_roster else [("ad",)])
+              if args.roster_only else [("campaign", "adset", "ad")])
     work = [(w, p) for w in windows for p in passes]
     for i, ((w_since, w_until), roster_types) in enumerate(work, 1):
         label = f"[{i}/{len(work)}] {w_since} .. {w_until}"

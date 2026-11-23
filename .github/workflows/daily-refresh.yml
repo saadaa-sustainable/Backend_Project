@@ -226,7 +226,9 @@ jobs:
           # -c, not a heredoc: inside a YAML block scalar the terminator
           # and the body both carry indentation, which breaks the shell's
           # delimiter match and Python's own parser.
-          python3 -c 'import json,sys; k=json.load(open(sys.argv[1])); m=[f for f in ("type","project_id","private_key","client_email") if not k.get(f)]; sys.exit("::error::service-account key missing "+",".join(m)) if m else print("service account", k["client_email"], "on", k["project_id"])' "$RUNNER_TEMP/gcp.json"
+          # Either a service-account key or an authorized_user credential
+          # (gcloud auth application-default login) -- google.auth reads both.
+          python3 -c 'import json,sys; k=json.load(open(sys.argv[1])); need={"authorized_user":("client_id","client_secret","refresh_token")}.get(k.get("type"),("type","project_id","private_key","client_email")); m=[f for f in need if not k.get(f)]; sys.exit("::error::GOOGLE_CREDS_JSON missing "+",".join(m)) if m else print("google credential type:", k["type"])' "$RUNNER_TEMP/gcp.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
 
       - name: Run daily refresh
@@ -282,6 +284,14 @@ jobs:
 
           # --- BigQuery (optional; empty skips fetch_bq_inventory) ---
           BQ_INVENTORY_TABLE:               ${{ secrets.BQ_INVENTORY_TABLE }}
+          # Read by google_ads_api/google_ads_entities, ad_edit_log and
+          # asset_sources; those steps failed every night without them.
+          GOOGLE_ADS_API:                   ${{ secrets.GOOGLE_ADS_API }}
+          SUPABASE_DB_URL:                  ${{ secrets.SUPABASE_DB_URL }}
+          CREATORHUB_REST_URL:              ${{ secrets.CREATORHUB_REST_URL }}
+          CREATORHUB_ANON_KEY:              ${{ secrets.CREATORHUB_ANON_KEY }}
+          ITERATED_SHEET_ID:                ${{ secrets.ITERATED_SHEET_ID }}
+          GRAPHICS_SHEET_ID:                ${{ secrets.GRAPHICS_SHEET_ID }}
 
         run: |
           FLAGS=""

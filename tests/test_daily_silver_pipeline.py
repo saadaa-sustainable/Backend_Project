@@ -101,3 +101,21 @@ def test_source_failure_preserves_weighted_snapshot(monkeypatch, source):
     monkeypatch.setattr(sys, "argv", ["refresh_all_daily.py", "--only-silver"])
     assert daily.main() == 1
     assert run.steps["cpis_value_weighted"]["status"] == "skipped"
+
+
+def test_full_run_fetches_in_lanes_and_runs_every_step_once(monkeypatch):
+    run = FakeRun()
+    monkeypatch.setattr(daily, "CronRun", lambda **kwargs: run)
+    monkeypatch.setattr(sys, "argv", ["refresh_all_daily.py"])
+    assert daily.main() == 0
+    ran = [name for name, _, _ in run.commands]
+    expected = [label for label, _, _ in daily.PHASE_INGEST + daily.PHASE_SILVER]
+    assert sorted(ran) == sorted(expected)
+    # One Meta token: its steps keep their declared order.
+    meta = [label for label in expected if daily._lane_of(label) == 0]
+    assert [n for n in ran if n in meta] == meta
+    # Every fetch lane finishes before the silver phase starts.
+    first_silver = ran.index("silver_raw_dump_meta")
+    assert all(ran.index(label) < first_silver
+               for label, _, _ in daily.PHASE_INGEST)
+    assert ran.index("shopify_daily") < ran.index("silver_shopify") < first_silver
