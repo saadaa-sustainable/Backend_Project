@@ -231,6 +231,20 @@ jobs:
           python3 -c 'import json,sys; k=json.load(open(sys.argv[1])); need={"authorized_user":("client_id","client_secret","refresh_token")}.get(k.get("type"),("type","project_id","private_key","client_email")); m=[f for f in need if not k.get(f)]; sys.exit("::error::GOOGLE_CREDS_JSON missing "+",".join(m)) if m else print("google credential type:", k["type"])' "$RUNNER_TEMP/gcp.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
 
+      - name: Write Google Ads OAuth token
+        if: steps.guard.outputs.skip != 'true'
+        # scripts/google_ads_auth.py reads secrets/google_oauth_token_*.json
+        # (the adwords-scoped login). Missing, the two google_ads_* steps fail.
+        env:
+          GOOGLE_ADS_OAUTH_TOKEN: ${{ secrets.GOOGLE_ADS_OAUTH_TOKEN }}
+        run: |
+          if [ -z "$GOOGLE_ADS_OAUTH_TOKEN" ]; then
+            echo "::warning::GOOGLE_ADS_OAUTH_TOKEN is not set -- google_ads_api and google_ads_entities will fail."
+            exit 0
+          fi
+          mkdir -p secrets
+          printf '%s' "$GOOGLE_ADS_OAUTH_TOKEN" > secrets/google_oauth_token_ads.json
+
       - name: Run daily refresh
         if: steps.guard.outputs.skip != 'true'
         env:
