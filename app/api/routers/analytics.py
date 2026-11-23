@@ -11480,6 +11480,27 @@ def _is_new_entity_sql(level: str, id_col: str) -> str:
             f"         > CAST(:last_date AS date) - {_NEW_ENTITY_DAYS}, false)")
 
 
+def _delivery_status_sql(level: str, id_ref: str) -> str:
+    """Meta's effective status, corrected for what it never cascades UP:
+    an ad set reads ACTIVE with every ad paused, a campaign ACTIVE with
+    every ad set off. Ads Manager calls those "Not delivering"; here they
+    are NO_ACTIVE_ADS / NO_ACTIVE_ADSETS. Only when children are known --
+    a new ad set whose ads the roster has not fetched yet stays ACTIVE."""
+    parent, pkey, pcol, child, ccol, label = (
+        ("public.meta_adsets", "adset_id", "adset_effective_status",
+         "public.meta_ads", "ad_effective_status", "NO_ACTIVE_ADS")
+        if level == "adset" else
+        ("public.meta_campaigns", "campaign_id", "campaign_effective_status",
+         "public.meta_adsets", "adset_effective_status", "NO_ACTIVE_ADSETS"))
+    return (
+        f"(SELECT CASE WHEN p.{pcol} = 'ACTIVE'"
+        f"   AND EXISTS (SELECT 1 FROM {child} k WHERE k.{pkey} = p.{pkey})"
+        f"   AND NOT EXISTS (SELECT 1 FROM {child} k WHERE k.{pkey} = p.{pkey}"
+        f"                    AND k.{ccol} = 'ACTIVE')"
+        f"  THEN '{label}' ELSE p.{pcol} END"
+        f"  FROM {parent} p WHERE p.{pkey} = {id_ref})")
+
+
 @router.get("/ads-analyse/rollup", response_model=RollupResponse)
 @cached_analytics(until_nightly=True)
 async def get_ads_analyse_rollup(
@@ -11594,12 +11615,8 @@ async def get_ads_analyse_rollup(
             # Correlated rather than joined, for the same reason the
             # budget predicate above is: the count and summary queries
             # build their own FROM and would not see a join.
-            src, key, col = (
-                ("public.meta_adsets", "adset_id", "adset_effective_status")
-                if level == "adset" else
-                ("public.meta_campaigns", "campaign_id", "campaign_effective_status"))
             where.append(
-                f"COALESCE((SELECT {col} FROM {src} WHERE {key} = i.{id_col}), "
+                f"COALESCE({_delivery_status_sql(level, f'i.{id_col}')}, "
                 f"         'UNKNOWN') = ANY(:status)")
             params["status"] = wanted_s
 
@@ -11693,9 +11710,7 @@ async def get_ads_analyse_rollup(
         # so the column read empty exactly where it mattered. account_id
         # is always present, so fall back to resolving the name from it.
         f"SELECT i.{id_col} AS entity_id, i.{name_col} AS entity_name, "
-        f"       (SELECT {'s.adset_effective_status' if level == 'adset' else 'c.campaign_effective_status'} "
-        f"          FROM {'public.meta_adsets s WHERE s.adset_id' if level == 'adset' else 'public.meta_campaigns c WHERE c.campaign_id'}"
-        f"             = i.{id_col}) AS effective_status, "
+        f"       {_delivery_status_sql(level, f'i.{id_col}')} AS effective_status, "
         # Entity creation date, and whether that is recent enough to
         # mean "not judged yet". Both read the same subquery so the
         # badge and the date can never disagree.

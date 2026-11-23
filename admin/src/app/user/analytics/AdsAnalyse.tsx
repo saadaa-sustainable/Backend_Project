@@ -632,15 +632,21 @@ function StatusBadge({ v }: { v: string | null }) {
     ACTIVE: "bg-success-bg text-success-text",
     PAUSED: "bg-bg-muted text-text-secondary",
     CAMPAIGN_PAUSED: "bg-warning-bg text-warning-text",
+    NO_ACTIVE_ADS: "bg-warning-bg text-warning-text",
+    NO_ACTIVE_ADSETS: "bg-warning-bg text-warning-text",
     WITH_ISSUES: "bg-error-bg text-error-text",
     ARCHIVED: "bg-bg-muted text-text-secondary",
   };
-  const label = v === "CAMPAIGN_PAUSED" ? "CAMP. PAUSED" : v;
+  const label = ({ CAMPAIGN_PAUSED: "CAMP. PAUSED", NO_ACTIVE_ADS: "NO ACTIVE ADS",
+                   NO_ACTIVE_ADSETS: "NO ACTIVE AD SETS" } as Record<string, string>)[v] ?? v;
+  const title = ({
+    CAMPAIGN_PAUSED: "Switched on, but its campaign is paused — it is not delivering.",
+    NO_ACTIVE_ADS: "Switched on, but every ad in it is off — it is not delivering. Meta still reports it ACTIVE.",
+    NO_ACTIVE_ADSETS: "Switched on, but every ad set in it is off — it is not delivering. Meta still reports it ACTIVE.",
+  } as Record<string, string>)[v];
   return (
     <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${cls[v] ?? "bg-bg-muted text-text-secondary"}`}
-          title={v === "CAMPAIGN_PAUSED"
-            ? "Switched on, but its campaign is paused — it is not delivering."
-            : undefined}>
+          title={title}>
       {label}
     </span>
   );
@@ -2236,6 +2242,9 @@ export function AdsAnalyse() {
                 {levelToggle === "adset" && (
                   <option value="CAMPAIGN_PAUSED">Campaign paused — on, but not running</option>
                 )}
+                {levelToggle === "adset"
+                  ? <option value="NO_ACTIVE_ADS">No active ads — on, but not running</option>
+                  : <option value="NO_ACTIVE_ADSETS">No active ad sets — on, but not running</option>}
                 {levelToggle === "adset" && (
                   <option value="WITH_ISSUES">With issues</option>
                 )}
