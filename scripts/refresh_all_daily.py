@@ -317,7 +317,8 @@ PHASE_INGEST = [
     # reminder, where a step nobody wrote down is invisible.
     #
     # ga4_landing feeds the Landing Page Analysis GA4 columns.
-    ("ga4_landing",           ["scripts/fetch_ga4_daily.py", "--days", "10"], 1200),
+    ("ga4_landing",           ["scripts/fetch_ga4_daily.py", "--days", "10",
+                               "--property", "383126449"], 1200),  # same property as fetch_ga4_arpu.py
     # ga4_attribution feeds the last-click order/revenue columns. The
     # 90-day session lookback makes this the expensive one -- ~91 GiB
     # scanned, about $0.56 a run -- so it takes a short order window.

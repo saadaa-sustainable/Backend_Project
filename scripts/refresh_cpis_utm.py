@@ -145,24 +145,18 @@ tagged AS (
   -- add units at no cost and pull every cost per item down.
   SELECT * FROM parsed
   WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$' AND unit_price > 0
-),
-order_totals AS (
-  SELECT order_id,
-         SUM(line_revenue) AS order_total_revenue,
-         SUM(qty)          AS order_total_qty
-  FROM tagged
-  GROUP BY order_id
 )
+-- Basket totals by window function, not a join back to a per-order
+-- aggregate: the planner guessed 1 row for each side and nested-looped
+-- them, which grew with the square of the window and timed out on 90d.
 SELECT
-  t.full_url, t.ad_id, t.order_id, t.master_sku,
-  SUM(t.qty)::int          AS qty,
-  SUM(t.line_revenue)      AS line_revenue,
-  ot.order_total_revenue,
-  ot.order_total_qty
-FROM tagged t
-JOIN order_totals ot USING (order_id)
-GROUP BY t.full_url, t.ad_id, t.order_id, t.master_sku,
-         ot.order_total_revenue, ot.order_total_qty
+  full_url, ad_id, order_id, master_sku,
+  SUM(qty)::int                                       AS qty,
+  SUM(line_revenue)                                   AS line_revenue,
+  SUM(SUM(line_revenue)) OVER (PARTITION BY order_id) AS order_total_revenue,
+  SUM(SUM(qty))          OVER (PARTITION BY order_id) AS order_total_qty
+FROM tagged
+GROUP BY full_url, ad_id, order_id, master_sku
 """
 
 
