@@ -13359,6 +13359,173 @@ async def get_campaign_tracker(
 #: the name column is hand-typed and drifts from Meta. That is reported
 #: rather than hidden: an unmatched test is still a real test, and
 #: dropping it would make the register look smaller than it is.
+#: The campaign being analysed plus the ones it is compared with.
+_CAMPAIGN_ANALYSIS_MAX = 5
+
+#: Each query returns rows at (campaign, ad set, day) grain; Python folds
+#: them into totals, a daily series and an ad set table. Last click uses
+#: shopify_order_attribution.matched_campaign_id, the mapping Ads Analyse
+#: uses, so the two pages agree. First click is GA4's first ad, so it only
+#: covers orders GA4 saw.
+_CAMPAIGN_ANALYSIS_SQL = {
+    "meta": """
+SELECT a.campaign_id, a.adset_id, i.day,
+       SUM(i.spend)::float AS spend, SUM(i.impressions)::float AS impressions,
+       -- Link clicks, as Ads Analyse counts them; `clicks` alone is empty.
+       SUM(COALESCE(i.outbound_clicks, i.clicks))::float AS clicks,
+       SUM(i.purchases)::float AS purchases,
+       SUM(i.conv_value)::float AS conv_value, SUM(i.ncp_count)::float AS ncp
+  FROM public.insights_daily_by_ad i
+  JOIN public.meta_ads a ON a.ad_id = i.ad_id
+ WHERE a.campaign_id = ANY(:ids) AND i.day BETWEEN :wf AND :wt
+ GROUP BY 1, 2, 3""",
+    "lc": """
+SELECT o.matched_campaign_id AS campaign_id, a.adset_id,
+       (o.created_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
+       COUNT(*)::float AS lc_orders, SUM(o.total_price)::float AS lc_revenue,
+       COUNT(*) FILTER (WHERE oct.is_new_customer)::float AS lc_new_orders,
+       COALESCE(SUM(o.total_price) FILTER (WHERE oct.is_new_customer), 0)::float
+         AS lc_new_revenue
+  FROM public.shopify_order_attribution o
+  LEFT JOIN public.meta_ads a ON a.ad_id = o.matched_ad_id
+  LEFT JOIN public.order_customer_type oct ON oct.order_id = o.order_id
+ WHERE o.matched_campaign_id = ANY(:ids)
+   AND o.created_at >= (CAST(:wf AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+   AND o.created_at <  ((CAST(:wt AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+ GROUP BY 1, 2, 3""",
+    # The tables behind shopify_order_clicks; the view scans every order.
+    # Per-ad lookups into GA4 (OFFSET 0 keeps the planner from turning them
+    # into a merge join over GA4's whole first-ad index), then the window's
+    # orders from shopify_order_attribution, which carries Shopify's revenue
+    # and time for every order and is far narrower than shopify_orders.
+    "fc": """
+WITH fc AS MATERIALIZED (
+  SELECT g.transaction_id, a.campaign_id, a.adset_id
+    FROM public.meta_ads a
+    CROSS JOIN LATERAL (SELECT transaction_id FROM public.ga4_order_attribution
+                         WHERE first_ad_id = a.ad_id OFFSET 0) g
+   WHERE a.campaign_id = ANY(:ids)
+), w AS MATERIALIZED (
+  SELECT name, created_at, total_price FROM public.shopify_order_attribution
+   WHERE created_at >= (CAST(:wf AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+     AND created_at <  ((CAST(:wt AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+)
+SELECT fc.campaign_id, fc.adset_id, (w.created_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
+       COUNT(*)::float AS fc_orders, SUM(w.total_price)::float AS fc_revenue
+  FROM fc JOIN w ON w.name = fc.transaction_id
+ GROUP BY 1, 2, 3""",
+}
+
+
+class CampaignMetrics(BaseModel):
+    """Additive counts only; the page derives ROAS, CTR, CPM and the rest."""
+    spend: float = 0
+    impressions: float = 0
+    clicks: float = 0
+    purchases: float = 0
+    conv_value: float = 0
+    ncp: float = 0
+    lc_orders: float = 0
+    lc_revenue: float = 0
+    lc_new_orders: float = 0
+    lc_new_revenue: float = 0
+    fc_orders: float = 0
+    fc_revenue: float = 0
+
+
+class CampaignDay(CampaignMetrics):
+    day: date
+
+
+class CampaignAdset(CampaignMetrics):
+    adset_id: str | None
+    adset_name: str | None = None
+    status: str | None = None
+
+
+class CampaignAnalysis(BaseModel):
+    campaign_id: str
+    campaign_name: str | None = None
+    status: str | None = None
+    objective: str | None = None
+    account_name: str | None = None
+    bid_strategy: str | None = None
+    daily_budget: float | None = None
+    lifetime_budget: float | None = None
+    created: date | None = None
+    totals: CampaignMetrics
+    daily: list[CampaignDay]
+    adsets: list[CampaignAdset]
+
+
+class CampaignAnalysisResponse(BaseModel):
+    from_date: date
+    to_date: date
+    campaigns: list[CampaignAnalysis]
+
+
+@router.get("/campaign-tracker/analysis", response_model=CampaignAnalysisResponse)
+@cached_analytics(until_nightly=True)
+async def get_campaign_analysis(
+    session: SessionDep,
+    campaign_ids: str = Query(..., description="Comma-separated campaign ids; the first "
+                                                "is the one analysed, the rest compared."),
+    from_date: date | None = Query(default=None, description="Defaults to 29 days before to_date."),
+    to_date: date | None = Query(default=None, description="Defaults to yesterday (IST): "
+                                                            "Meta lands a day in arrears."),
+) -> CampaignAnalysisResponse:
+    """Meta, last-click and first-click figures for up to five campaigns,
+    as totals, by day and by ad set, over one window."""
+    ids = list(dict.fromkeys(x.strip() for x in campaign_ids.split(",") if x.strip().isdigit()))
+    if not ids or len(ids) > _CAMPAIGN_ANALYSIS_MAX:
+        raise HTTPException(400, f"campaign_ids takes 1 to {_CAMPAIGN_ANALYSIS_MAX} numeric ids")
+    if to_date is None:
+        to_date = datetime.now(timezone(timedelta(hours=5, minutes=30))).date() - timedelta(days=1)
+    if from_date is None:
+        from_date = to_date - timedelta(days=29)
+    if from_date > to_date:
+        raise HTTPException(400, "from_date is after to_date")
+    params = {"ids": ids, "wf": from_date, "wt": to_date}
+
+    info = {r["campaign_id"]: r for r in (await session.execute(text("""
+        SELECT campaign_id, campaign_name, campaign_effective_status AS status, objective,
+               account_name, bid_strategy, daily_budget::float AS daily_budget,
+               lifetime_budget::float AS lifetime_budget, created_time::date AS created
+          FROM public.meta_campaigns WHERE campaign_id = ANY(:ids)"""), params)).mappings()}
+    adset_info = {r["adset_id"]: r for r in (await session.execute(text("""
+        SELECT adset_id, adset_name, adset_effective_status AS status
+          FROM public.meta_adsets WHERE campaign_id = ANY(:ids)"""), params)).mappings()}
+
+    metric_names = tuple(CampaignMetrics.model_fields)
+    totals: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    daily: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+    adsets: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+    for sql in _CAMPAIGN_ANALYSIS_SQL.values():
+        for r in (await session.execute(text(sql), params)).mappings():
+            c = r["campaign_id"]
+            for bucket in (totals[c], daily[c][r["day"]], adsets[c][r["adset_id"]]):
+                for m in metric_names:
+                    if m in r:
+                        bucket[m] += r[m] or 0
+
+    campaigns = []
+    for c in ids:
+        meta = info.get(c, {})
+        campaigns.append(CampaignAnalysis(
+            campaign_id=c,
+            **{k: meta.get(k) for k in ("campaign_name", "status", "objective", "account_name",
+                                        "bid_strategy", "daily_budget", "lifetime_budget", "created")},
+            totals=CampaignMetrics(**totals[c]),
+            daily=[CampaignDay(day=d, **v) for d, v in sorted(daily[c].items())],
+            adsets=sorted(
+                (CampaignAdset(adset_id=a, adset_name=adset_info.get(a, {}).get("adset_name"),
+                               status=adset_info.get(a, {}).get("status"), **v)
+                 for a, v in adsets[c].items()),
+                key=lambda x: -x.spend),
+        ))
+    return CampaignAnalysisResponse(from_date=from_date, to_date=to_date, campaigns=campaigns)
+
+
 _HYPOTHESIS_SQL = """
 SELECT id, source, row_index, test_date, test_date_parsed, month_of_testing, test_category,
        hypothesis_code, hypothesis, test_status, primary_kpi, success_criteria,

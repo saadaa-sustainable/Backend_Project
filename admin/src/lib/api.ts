@@ -3418,6 +3418,55 @@ export function fetchCampaignTracker(
   );
 }
 
+/** Additive counts; ratios are derived on the page. */
+export interface CampaignMetrics {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  purchases: number;
+  conv_value: number;
+  ncp: number;
+  lc_orders: number;
+  lc_revenue: number;
+  lc_new_orders: number;
+  lc_new_revenue: number;
+  fc_orders: number;
+  fc_revenue: number;
+}
+
+export interface CampaignAnalysis {
+  campaign_id: string;
+  campaign_name: string | null;
+  status: string | null;
+  objective: string | null;
+  account_name: string | null;
+  bid_strategy: string | null;
+  daily_budget: number | null;
+  lifetime_budget: number | null;
+  created: string | null;
+  totals: CampaignMetrics;
+  daily: (CampaignMetrics & { day: string })[];
+  adsets: (CampaignMetrics & { adset_id: string | null; adset_name: string | null; status: string | null })[];
+}
+
+export interface CampaignAnalysisResponse {
+  from_date: string;
+  to_date: string;
+  campaigns: CampaignAnalysis[];
+}
+
+/** First id is the campaign analysed; the rest are compared with it. */
+export function fetchCampaignAnalysis(
+  campaignIds: string[],
+  fromDate?: string,
+  toDate?: string,
+): Promise<CampaignAnalysisResponse> {
+  const qs = new URLSearchParams({ campaign_ids: campaignIds.join(",") });
+  if (fromDate) qs.set("from_date", fromDate);
+  if (toDate) qs.set("to_date", toDate);
+  return request<CampaignAnalysisResponse>(`/admin/analytics/campaign-tracker/analysis?${qs}`);
+}
+
 
 /* ---------------------------------------------------------------- *
  * Meta Hypothesis                                                    *

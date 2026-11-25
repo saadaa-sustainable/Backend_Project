@@ -17,6 +17,7 @@ import {
   filterControlClass,
 } from "./SectionChrome";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { CampaignAnalysis } from "./CampaignAnalysis";
 
 /**
  * Is each campaign still being given new creative?
@@ -31,6 +32,9 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
  */
 
 const STATUS_OPTIONS = ["ACTIVE", "PAUSED", "ARCHIVED", "all"];
+
+/** The analysed campaign plus up to four compared with it. */
+const MAX_SELECTED = 5;
 
 const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: "days_since_new_ad", label: "Days since new ad" },
@@ -59,6 +63,8 @@ export function CampaignTracker() {
   const [sort, setSort] = useState("days_since_new_ad");
   const [direction, setDirection] = useState<"asc" | "desc">("desc");
   const [limit, setLimit] = useState(200);
+  // First id is the campaign analysed; the rest are compared with it.
+  const [selected, setSelected] = useState<string[]>([]);
 
   const [data, setData] = useState<CampaignTrackerResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -131,6 +137,14 @@ export function CampaignTracker() {
           },
         ]}
       />
+
+      {selected.length > 0 && (
+        <CampaignAnalysis
+          ids={selected}
+          onRemove={(id) => setSelected((s) => s.filter((x) => x !== id))}
+          onClose={() => setSelected([])}
+        />
+      )}
 
       <div className="flex flex-wrap items-end gap-3">
         <FilterCell label="Status" className="w-40" htmlFor="ct-status">
@@ -263,8 +277,11 @@ export function CampaignTracker() {
           <table className="w-full border-collapse text-[12.5px]">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wide text-text-tertiary">
+                <th className="border-b border-border-primary px-2 py-2 font-medium" title="Tick to compare with the campaign being analysed.">
+                  Compare
+                </th>
                 {[
-                  ["Campaign", "The campaign's name as Meta holds it."],
+                  ["Campaign", "The campaign's name as Meta holds it. Click to analyse it."],
                   ["Status", "Effective status, which reflects parent state too."],
                   ["Account", ""],
                   ["Ad sets", "Total ad sets, with active in brackets."],
@@ -294,11 +311,32 @@ export function CampaignTracker() {
                 const stale = isStale(r);
                 return (
                   <tr key={r.campaign_id} className={stale ? "bg-warning-bg/40" : undefined}>
+                    <td className="border-b border-border-soft px-2 py-1.5 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label={`Compare ${r.campaign_name}`}
+                        checked={selected.includes(r.campaign_id)}
+                        disabled={!selected.includes(r.campaign_id) && selected.length >= MAX_SELECTED}
+                        onChange={(e) =>
+                          setSelected((s) =>
+                            e.target.checked ? [...s, r.campaign_id] : s.filter((x) => x !== r.campaign_id),
+                          )
+                        }
+                      />
+                    </td>
                     <td
-                      className="max-w-[320px] truncate border-b border-border-soft px-3 py-1.5 text-text-primary"
+                      className="max-w-[320px] truncate border-b border-border-soft px-3 py-1.5"
                       title={`${r.campaign_name} · ${r.campaign_id}`}
                     >
-                      {r.campaign_name}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelected((s) => [r.campaign_id, ...s.filter((x) => x !== r.campaign_id)].slice(0, MAX_SELECTED))
+                        }
+                        className="max-w-full truncate text-left text-text-primary underline-offset-2 hover:underline"
+                      >
+                        {r.campaign_name}
+                      </button>
                     </td>
                     <td className="border-b border-border-soft px-3 py-1.5 text-text-secondary">
                       {r.status ?? "—"}
