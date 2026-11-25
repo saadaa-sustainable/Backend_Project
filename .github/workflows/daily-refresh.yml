@@ -92,10 +92,10 @@ jobs:
     # above the sum of the steps that actually run long.
     #
     # This is a safety net, not an expectation: a healthy run is still
-    # ~45-60 min. GitHub's own hard ceiling is 6h; 240 leaves room for a
-    # Meta-throttle day without letting a wedged run burn the whole
-    # allowance.
-    timeout-minutes: 240
+    # ~45-60 min. GitHub's own hard ceiling is 6h; 330 leaves room for a
+    # slow Meta or Shopify night. Keep analytics.py's _REFRESH_MARKER_SQL
+    # fallback just above it.
+    timeout-minutes: 330
 
     # actions:read is what the duplicate guard below needs to see this
     # workflow's own run history. Nothing here writes to the repo.
