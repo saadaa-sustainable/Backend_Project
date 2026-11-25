@@ -1890,6 +1890,8 @@ export interface CpisUtmResponse {
   //   attributed_spend   slice attributed to a catalog SKU (across ALL SKUs)
   //   untethered_spend   meta_total_spend - attributed_spend
   meta_total_spend: number | null;
+  /** Meta's NCP for the window. Per-SKU NCP double-counts across SKUs. */
+  meta_total_ncp?: number | null;
   attributed_spend: number | null;
   untethered_spend: number | null;
   //   untethered_*       why the untethered slice is untethered. The

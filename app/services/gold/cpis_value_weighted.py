@@ -161,6 +161,8 @@ SELECT COALESCE(SUM(orders), 0)::integer AS attributed_orders_distinct,
        COALESCE(SUM(allocated), 0) AS attributed_spend,
        (SELECT COALESCE(SUM(spend), 0) FROM public.insights_daily_by_ad
         WHERE day BETWEEN :wf AND :wt) AS meta_total_spend,
+       (SELECT COALESCE(SUM(ncp_count), 0) FROM public.insights_daily_by_ad
+        WHERE day BETWEEN :wf AND :wt) AS meta_total_ncp,
        (SELECT MAX(day) FROM public.insights_daily_by_ad
         WHERE day BETWEEN :wf AND :wt) AS spend_through
 FROM entities

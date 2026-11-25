@@ -406,6 +406,7 @@ function CpisView() {
   // strip so the fractional "Ad spend" tile can show the honest Meta
   // total (not just the paginated row sum).
   const [metaTotalSpend, setMetaTotalSpend] = useState<number | null>(null);
+  const [metaTotalNcp, setMetaTotalNcp] = useState<number | null>(null);
   const [attributedSpend, setAttributedSpend] = useState<number | null>(null);
   const [spendThrough, setSpendThrough] = useState<string | null>(null);
   const [attributedOrders, setAttributedOrders] = useState<number | null>(null);
@@ -453,6 +454,7 @@ function CpisView() {
         setLoadedRangeKey(rangeKey);
         setRequestError(null);
         setMetaTotalSpend(res.meta_total_spend);
+        setMetaTotalNcp(res.meta_total_ncp ?? null);
         setAttributedSpend(res.attributed_spend);
         // Its own request: the series is one row per day for the whole
         // account, not per SKU, so it does not belong in the paginated
@@ -721,6 +723,7 @@ function CpisView() {
             rows={rows}
             spendMatchMode={spendMatchMode}
             metaTotalSpend={metaTotalSpend}
+            metaTotalNcp={metaTotalNcp}
             attributedSpend={attributedSpend}
             untetheredSpend={untetheredSpend}
             untetheredParts={untetheredParts}
@@ -1731,6 +1734,7 @@ function CpisKpiStrip({
   windowLabel,
   spendMatchMode,
   metaTotalSpend,
+  metaTotalNcp,
   attributedSpend,
   untetheredSpend,
   untetheredParts,
@@ -1748,6 +1752,7 @@ function CpisKpiStrip({
   dayMatched: boolean;
   spendMatchMode: "ad_name" | "utm_id";
   metaTotalSpend: number | null;
+  metaTotalNcp: number | null;
   attributedSpend: number | null;
   untetheredSpend: number | null;
   untetheredParts: { adUnknown: number | null; lag: number | null; noConversion: number | null };
@@ -1772,8 +1777,10 @@ function CpisKpiStrip({
   const totalCount = isFractional
     ? attributedOrders ?? rows.reduce((s, r) => s + (r.attributed_orders ?? 0), 0)
     : rows.reduce((s, r) => s + (r.name_matched_ads ?? 0), 0);
+  // Meta's own NCP for the window. Summing utm_matched_ncp counted each
+  // ad's NCP once per SKU it sold -- about 5x the real figure.
   const totalNcp = isFractional
-    ? rows.reduce((s, r) => s + (r.utm_matched_ncp ?? 0), 0)
+    ? (metaTotalNcp ?? 0)
     : rows.reduce((s, r) => s + (r.name_matched_ncp ?? 0), 0);
 
   // Ad-spend tile: TOTAL on the headline, attributed underneath.
@@ -1816,11 +1823,8 @@ function CpisKpiStrip({
       ? null
       : d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
   })();
-  // Both sides from the attributed set. Dividing the Meta TOTAL by the
-  // attributed NCP count would mix two populations and understate the
-  // cost of an NCP by whatever share of spend never tied to an order.
-  const costBasis = isFractional ? (attributedSpend ?? 0) : totalSpend;
-  const blendedCostPerNcp = totalNcp > 0 && costBasis > 0 ? costBasis / totalNcp : null;
+  // Both sides are Meta's window totals, so spend and NCP cover the same ads.
+  const blendedCostPerNcp = totalNcp > 0 && totalSpend > 0 ? totalSpend / totalNcp : null;
 
   // "60% attributed" reads as "40% of the budget did nothing" unless the
   // tile says otherwise, so spell out the three reasons the API measured.
