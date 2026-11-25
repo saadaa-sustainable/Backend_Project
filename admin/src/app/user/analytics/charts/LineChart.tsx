@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { CATEGORICAL_PALETTE, theme } from "@/lib/theme";
 
 export interface LineSeries {
@@ -13,6 +13,10 @@ interface Props {
   series: LineSeries[];
   height?: number;
   valueFormat?: (n: number) => string;
+  /** Fill the container's width instead of a width set by the day count. */
+  fluid?: boolean;
+  /** Shade the area under each line. */
+  area?: boolean;
 }
 
 const MARGIN = { top: 16, right: 16, bottom: 36, left: 56 };
@@ -20,9 +24,19 @@ const MARGIN = { top: 16, right: 16, bottom: 36, left: 56 };
 /** Line chart -- 2px stroke, rounded caps, crosshair + tooltip on hover
  * (single axis only, per the skill's "never dual-axis" rule -- multiple
  * series share one y scale). */
-export function LineChart({ categories, series, height = 280, valueFormat }: Props) {
+export function LineChart({ categories, series, height = 280, valueFormat, fluid, area }: Props) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const width = Math.max(480, categories.length * 24 + MARGIN.left + MARGIN.right);
+  const [boxW, setBoxW] = useState(0);
+  const box = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (!el || !fluid) return;
+      const ro = new ResizeObserver(([e]) => setBoxW(e.contentRect.width));
+      ro.observe(el);
+      return () => ro.disconnect();
+    },
+    [fluid],
+  );
+  const width = fluid && boxW ? Math.max(320, boxW) : Math.max(480, categories.length * 24 + MARGIN.left + MARGIN.right);
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
 
@@ -54,7 +68,7 @@ export function LineChart({ categories, series, height = 280, valueFormat }: Pro
   const labelStride = Math.max(1, Math.ceil(categories.length / 10));
 
   return (
-    <div className="overflow-x-auto">
+    <div ref={box} className="overflow-x-auto">
       <svg width={width} height={height} role="img" aria-label="Line chart">
         <g transform={`translate(${MARGIN.left},${MARGIN.top})`}>
           {gridValues.map((v, i) => (
@@ -75,6 +89,18 @@ export function LineChart({ categories, series, height = 280, valueFormat }: Pro
               ),
           )}
 
+          {area &&
+            series.map((s, si) =>
+              // A gap would close the shape across it, so only unbroken series are shaded.
+              s.values.length > 1 && s.values.every((v) => v !== null) ? (
+                <path
+                  key={`area-${s.name}`}
+                  d={`${pathFor(s.values)} L${x(s.values.length - 1)},${plotH} L${x(0)},${plotH} Z`}
+                  fill={CATEGORICAL_PALETTE[si % CATEGORICAL_PALETTE.length]}
+                  fillOpacity={series.length > 1 ? 0.08 : 0.14}
+                />
+              ) : null,
+            )}
           {series.map((s, si) => (
             <path
               key={s.name}
