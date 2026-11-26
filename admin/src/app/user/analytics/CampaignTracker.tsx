@@ -59,7 +59,7 @@ export function CampaignTracker() {
   const [search, setSearch] = useState("");
   const [staleDays, setStaleDays] = useState(14);
   const [onlyStale, setOnlyStale] = useState(false);
-  const [sort, setSort] = useState("days_since_new_ad");
+  const [sort, setSort] = useState("spend_7d");
   const [direction, setDirection] = useState<"asc" | "desc">("desc");
   const [limit, setLimit] = useState(200);
   // First id is the campaign analysed; the rest are compared with it.
@@ -211,8 +211,15 @@ export function CampaignTracker() {
         />
       )}
 
-      <div className="flex flex-wrap items-end gap-3">
-        <FilterCell label="Status" className="w-40" htmlFor="ct-status">
+      <div className="flex flex-col gap-3 rounded-xl border border-border-primary bg-bg-white p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h4 className="text-[13px] font-semibold text-text-primary">Filter the campaign cards</h4>
+        <span className="text-[11.5px] text-text-tertiary">
+          The main use: find campaigns that keep spending on old creative and need new ads.
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <FilterCell label="Campaign status" className="w-52" htmlFor="ct-status">
           <select
             id="ct-status"
             value={status}
@@ -221,23 +228,23 @@ export function CampaignTracker() {
           >
             {STATUS_OPTIONS.map((s) => (
               <option key={s} value={s}>
-                {s === "all" ? "All" : s}
+                {s === "all" ? "All" : s[0] + s.slice(1).toLowerCase()}
               </option>
             ))}
           </select>
         </FilterCell>
 
-        <FilterCell label="Search campaign" className="w-64" htmlFor="ct-search">
+        <FilterCell label="Find" className="w-64" htmlFor="ct-search">
           <input
             id="ct-search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="name contains…"
+            placeholder="part of a campaign name…"
             className={filterControlClass}
           />
         </FilterCell>
 
-        <FilterCell label="Stale after" className="w-36" htmlFor="ct-stale">
+        <FilterCell label="Flag stale after" className="w-48" htmlFor="ct-stale">
           <select
             id="ct-stale"
             value={staleDays}
@@ -252,7 +259,7 @@ export function CampaignTracker() {
           </select>
         </FilterCell>
 
-        <FilterCell label="Sort by" className="w-48" htmlFor="ct-sort">
+        <FilterCell label="Order by" className="w-60" htmlFor="ct-sort">
           <select
             id="ct-sort"
             value={sort}
@@ -270,19 +277,20 @@ export function CampaignTracker() {
           </select>
         </FilterCell>
 
-        <FilterCell label="Direction" className="w-32" htmlFor="ct-dir">
+        <FilterCell label="" className="w-36" htmlFor="ct-dir">
           <select
             id="ct-dir"
+            aria-label="Order direction"
             value={direction}
             onChange={(e) => setDirection(e.target.value as "asc" | "desc")}
             className={filterControlClass}
           >
-            <option value="desc">High → low</option>
-            <option value="asc">Low → high</option>
+            <option value="desc">Highest first</option>
+            <option value="asc">Lowest first</option>
           </select>
         </FilterCell>
 
-        <FilterCell label="Rows" className="w-28" htmlFor="ct-limit">
+        <FilterCell label="Show" className="w-36" htmlFor="ct-limit">
           <select
             id="ct-limit"
             value={limit}
@@ -291,28 +299,44 @@ export function CampaignTracker() {
           >
             {[50, 200, 500, 2000].map((n) => (
               <option key={n} value={n}>
-                {n}
+                {n} cards
               </option>
             ))}
           </select>
         </FilterCell>
 
-        <label className="flex items-center gap-2 pb-1.5 text-[13px] text-text-secondary">
+        <label className="flex items-center gap-2 text-[13px] text-text-secondary">
           <input
             type="checkbox"
             checked={onlyStale}
             onChange={(e) => setOnlyStale(e.target.checked)}
           />
-          Only spending without new ads
+          Only stale campaigns
         </label>
 
-        <div className="ml-auto pb-1">
+        <div className="ml-auto">
           <ExportButton
             rows={rows as unknown as Record<string, unknown>[]}
             filename="campaign_tracker"
             disabled={loading || !rows.length}
           />
         </div>
+      </div>
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-1 border-t border-border-soft pt-3 text-[11.5px] text-text-tertiary md:grid-cols-2 xl:grid-cols-3">
+        {[
+          ["Campaign status", "Meta's delivery status. Active is what is running now."],
+          ["Find", "Keep only campaigns whose name contains this text."],
+          ["Flag stale after", `A campaign that spent in the last 7 days but whose newest ad is older than this gets an amber card.`],
+          ["Only stale campaigns", "Hide everything except those amber cards."],
+          ["Order by", "Days since new ad puts the stalest first; Spend (7d) puts the biggest spenders first."],
+          ["Show", "How many cards to load. The count under the cards says if more matched."],
+        ].map(([k, v]) => (
+          <div key={k}>
+            <dt className="inline font-semibold text-text-secondary">{k}: </dt>
+            <dd className="inline">{v}</dd>
+          </div>
+        ))}
+      </dl>
       </div>
 
       {error && (
