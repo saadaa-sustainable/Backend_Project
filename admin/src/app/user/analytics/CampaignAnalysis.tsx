@@ -10,6 +10,7 @@ import {
   fetchCampaignAnalysis,
 } from "@/lib/api";
 import { CATEGORICAL_PALETTE } from "@/lib/theme";
+import { DateRange, DateRangePicker, resolvePreset } from "@/components/DateRangePicker";
 import { LineChart } from "./charts/LineChart";
 import { TableFrame } from "./SectionChrome";
 import { StatTile } from "./StatTile";
@@ -119,7 +120,6 @@ function daysBetween(from: string, to: string): string[] {
   return out;
 }
 
-const WINDOWS = [7, 14, 30, 60, 90];
 
 type Kpi = { label: string; value: (m: CampaignMetrics) => number | null; fmt: Fmt; better: "high" | "low" };
 
@@ -237,7 +237,16 @@ export function CampaignAnalysis({
   onRemove: (id: string) => void;
   onClose: () => void;
 }) {
-  const [days, setDays] = useState(30);
+  // Presets end yesterday: Meta lands a day in arrears, so today would read as a drop.
+  const anchor = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return isoDay(d);
+  }, []);
+  const [win, setWin] = useState<{ range: DateRange; preset: string }>(() => ({
+    range: resolvePreset("last30", anchor),
+    preset: "last30",
+  }));
   const [chartMetric, setChartMetric] = useState(0);
   // Each answer is kept with the request it answers; "loading" is simply an
   // answer for some other request. The last answer stays on screen meanwhile.
@@ -248,19 +257,16 @@ export function CampaignAnalysis({
     error?: string;
   } | null>(null);
 
-  // Yesterday: Meta lands a day in arrears, so today would read as a drop.
   // The window before it, of the same length, feeds the cards' change figures.
   const range = useMemo(() => {
-    const to = new Date();
-    to.setDate(to.getDate() - 1);
-    const from = new Date(to);
-    from.setDate(from.getDate() - (days - 1));
-    const prevTo = new Date(from);
+    const { from, to } = win.range;
+    const days = daysBetween(from, to).length;
+    const prevTo = new Date(`${from}T00:00:00`);
     prevTo.setDate(prevTo.getDate() - 1);
     const prevFrom = new Date(prevTo);
     prevFrom.setDate(prevFrom.getDate() - (days - 1));
-    return { from: isoDay(from), to: isoDay(to), prevFrom: isoDay(prevFrom), prevTo: isoDay(prevTo) };
-  }, [days]);
+    return { from, to, days, prevFrom: isoDay(prevFrom), prevTo: isoDay(prevTo) };
+  }, [win]);
 
   const ids = compare ? allIds : allIds.slice(0, 1);
   const key = ids.join(",");
@@ -336,7 +342,7 @@ export function CampaignAnalysis({
             {data && primary
               ? fullPrev(primary)
                 ? `, change vs ${range.prevFrom} to ${range.prevTo}`
-                : ` · no change shown: it started ${primary.created?.slice(0, 10)}, inside the earlier ${days} days`
+                : ` · no change shown: it did not run for the whole of the ${range.days} days before (${range.prevFrom} to ${range.prevTo})`
               : ""}
             {loading && data ? " · updating…" : ""}
           </p>
@@ -356,12 +362,18 @@ export function CampaignAnalysis({
             Comparison{allIds.length > 1 ? ` (${allIds.length - 1})` : ""}
           </button>
         </div>
-        <div className="flex items-center gap-1 rounded-lg border border-border-primary bg-bg-white p-1" role="group" aria-label="Window">
-          {WINDOWS.map((d) => (
-            <button key={d} type="button" aria-pressed={days === d} onClick={() => setDays(d)} className={pill(days === d)}>
-              {d}d
-            </button>
-          ))}
+        <div className="rounded-lg border border-border-primary bg-bg-white px-3 py-1.5">
+          <DateRangePicker
+            value={win.range}
+            preset={win.preset}
+            anchor={anchor}
+            bare
+            onApply={(r, preset) => {
+              // "Lifetime" and an open-ended custom range need both ends to ask for data.
+              const to = r.to && r.to <= anchor ? r.to : anchor;
+              setWin({ range: { from: r.from && r.from <= to ? r.from : to, to }, preset });
+            }}
+          />
         </div>
         <button
           type="button"
@@ -401,6 +413,30 @@ export function CampaignAnalysis({
         <p className="rounded-md border border-warning-border bg-warning-bg px-4 py-3 text-sm text-warning-text">{error}</p>
       )}
       {loading && !data && <p className="py-6 text-sm text-text-secondary">Loading analysis…</p>}
+
+      {data && campaigns.length > 0 && (
+        <div className="flex flex-col gap-1 rounded-lg border border-border-primary bg-bg-white px-4 py-2.5 text-[12px] text-text-secondary">
+          {campaigns.map((c, i) => {
+            const created = c.created?.slice(0, 10);
+            const start = created && created > data.from_date ? created : data.from_date;
+            return (
+              <p key={c.campaign_id} className="flex flex-wrap items-baseline gap-x-1.5">
+                {campaigns.length > 1 && (
+                  <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: CATEGORICAL_PALETTE[i % CATEGORICAL_PALETTE.length] }} />
+                )}
+                <span className="font-semibold text-text-primary">{i === 0 ? "This campaign" : c.campaign_name ?? c.campaign_id}</span>
+                <span>
+                  was created on <b className="text-text-primary">{created ?? "an unknown date"}</b>. Data shown is from{" "}
+                  <b className="text-text-primary">{start}</b> to <b className="text-text-primary">{data.to_date}</b>
+                  {start > data.from_date
+                    ? ` — the range you picked starts ${data.from_date}, but there is nothing before the campaign existed.`
+                    : "."}
+                </span>
+              </p>
+            );
+          })}
+        </div>
+      )}
 
       {primary && (
         <>
