@@ -65,6 +65,30 @@ export function CampaignTracker() {
   const [limit, setLimit] = useState(200);
   // First id is the campaign analysed; the rest are compared with it.
   const [selected, setSelected] = useState<string[]>([]);
+  // Every campaign, by spend, for the pickers -- not just what the table's filters show.
+  const [all, setAll] = useState<CampaignTrackerRow[]>([]);
+  const [primaryText, setPrimaryText] = useState("");
+  const [compareText, setCompareText] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    fetchCampaignTracker({ status: "all", sort: "spend_7d", direction: "desc", limit: 2000 })
+      .then((r) => !cancelled && setAll(r.rows))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // A name shared by two campaigns gets its id appended, so each choice is unambiguous.
+  const choices = useMemo(() => {
+    const seen = new Map<string, number>();
+    all.forEach((r) => seen.set(r.campaign_name, (seen.get(r.campaign_name) ?? 0) + 1));
+    return all.map((r) => ({
+      id: r.campaign_id,
+      value: (seen.get(r.campaign_name) ?? 0) > 1 ? `${r.campaign_name} · ${r.campaign_id}` : r.campaign_name,
+      label: `${r.status ?? ""} · ${num(r.spend_7d)} spend in 7d`,
+    }));
+  }, [all]);
+  const idFor = (text: string) => choices.find((c) => c.value === text.trim())?.id;
 
   const [data, setData] = useState<CampaignTrackerResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -138,11 +162,53 @@ export function CampaignTracker() {
         ]}
       />
 
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border-primary bg-bg-white p-4">
+        <FilterCell label="Analyse campaign" className="min-w-[280px] flex-[2]" htmlFor="ct-pick">
+          <input
+            id="ct-pick"
+            list="ct-campaigns"
+            value={primaryText}
+            placeholder={all.length ? `Search ${all.length} campaigns…` : "Loading campaigns…"}
+            onChange={(e) => {
+              setPrimaryText(e.target.value);
+              const id = idFor(e.target.value);
+              if (id) setSelected((s) => [id, ...s.filter((x) => x !== id)].slice(0, MAX_SELECTED));
+            }}
+            className={filterControlClass}
+          />
+        </FilterCell>
+        <FilterCell label={`Compare with (up to ${MAX_SELECTED - 1})`} className="min-w-[240px] flex-[2]" htmlFor="ct-compare">
+          <input
+            id="ct-compare"
+            list="ct-campaigns"
+            value={compareText}
+            disabled={!selected.length || selected.length >= MAX_SELECTED}
+            placeholder={!selected.length ? "Pick a campaign first" : selected.length >= MAX_SELECTED ? "Comparison is full" : "Add a campaign…"}
+            onChange={(e) => {
+              const id = idFor(e.target.value);
+              if (id) {
+                setSelected((s) => (s.includes(id) ? s : [...s, id]));
+                setCompareText("");
+              } else setCompareText(e.target.value);
+            }}
+            className={filterControlClass}
+          />
+        </FilterCell>
+        <datalist id="ct-campaigns">
+          {choices.map((c) => (
+            <option key={c.id} value={c.value} label={c.label} />
+          ))}
+        </datalist>
+      </div>
+
       {selected.length > 0 && (
         <CampaignAnalysis
           ids={selected}
           onRemove={(id) => setSelected((s) => s.filter((x) => x !== id))}
-          onClose={() => setSelected([])}
+          onClose={() => {
+            setSelected([]);
+            setPrimaryText("");
+          }}
         />
       )}
 
@@ -277,11 +343,8 @@ export function CampaignTracker() {
           <table className="w-full border-collapse text-[12.5px]">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wide text-text-tertiary">
-                <th className="border-b border-border-primary px-2 py-2 font-medium" title="Tick to compare with the campaign being analysed.">
-                  Compare
-                </th>
                 {[
-                  ["Campaign", "The campaign's name as Meta holds it. Click to analyse it."],
+                  ["Campaign", "The campaign's name as Meta holds it."],
                   ["Status", "Effective status, which reflects parent state too."],
                   ["Account", ""],
                   ["Ad sets", "Total ad sets, with active in brackets."],
@@ -311,32 +374,11 @@ export function CampaignTracker() {
                 const stale = isStale(r);
                 return (
                   <tr key={r.campaign_id} className={stale ? "bg-warning-bg/40" : undefined}>
-                    <td className="border-b border-border-soft px-2 py-1.5 text-center">
-                      <input
-                        type="checkbox"
-                        aria-label={`Compare ${r.campaign_name}`}
-                        checked={selected.includes(r.campaign_id)}
-                        disabled={!selected.includes(r.campaign_id) && selected.length >= MAX_SELECTED}
-                        onChange={(e) =>
-                          setSelected((s) =>
-                            e.target.checked ? [...s, r.campaign_id] : s.filter((x) => x !== r.campaign_id),
-                          )
-                        }
-                      />
-                    </td>
                     <td
                       className="max-w-[320px] truncate border-b border-border-soft px-3 py-1.5"
                       title={`${r.campaign_name} · ${r.campaign_id}`}
                     >
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setSelected((s) => [r.campaign_id, ...s.filter((x) => x !== r.campaign_id)].slice(0, MAX_SELECTED))
-                        }
-                        className="max-w-full truncate text-left text-text-primary underline-offset-2 hover:underline"
-                      >
-                        {r.campaign_name}
-                      </button>
+                      {r.campaign_name}
                     </td>
                     <td className="border-b border-border-soft px-3 py-1.5 text-text-secondary">
                       {r.status ?? "—"}
