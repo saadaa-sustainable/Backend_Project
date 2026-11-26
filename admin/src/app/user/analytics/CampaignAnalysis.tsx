@@ -149,7 +149,7 @@ const change = (cur: number | null, prev: number | null) =>
   cur === null || prev === null || prev === 0 ? null : (cur - prev) / Math.abs(prev);
 
 function Delta({ d, better, onColor }: { d: number | null; better: "high" | "low"; onColor?: boolean }) {
-  if (d === null) return <span>no earlier data</span>;
+  if (d === null) return <span>no full earlier period</span>;
   const good = d === 0 ? null : (d > 0) === (better === "high");
   const tone = onColor ? "" : good === null ? "" : good ? "text-success-text" : "text-error-text";
   return (
@@ -286,7 +286,13 @@ export function CampaignAnalysis({
 
   const campaigns: Campaign[] = data?.campaigns ?? [];
   const primary = campaigns[0];
-  const prevOf = (id: string) => result?.prev?.campaigns.find((c) => c.campaign_id === id)?.totals;
+  // A campaign that began inside the earlier window ran for only part of it, so a
+  // change against it would compare (say) 6 days with 30. No change is shown then.
+  const fullPrev = (c?: Campaign) => !!c && (!c.created || c.created.slice(0, 10) <= range.prevFrom);
+  const prevOf = (id: string) =>
+    fullPrev(campaigns.find((c) => c.campaign_id === id))
+      ? result?.prev?.campaigns.find((c) => c.campaign_id === id)?.totals
+      : undefined;
   const categories = data ? daysBetween(data.from_date, data.to_date) : [];
   const byDay = (c: Campaign) => new Map(c.daily.map((d) => [d.day, d]));
   /** One metric for every day of the window; ratios stay empty on a day with nothing to divide. */
@@ -326,7 +332,12 @@ export function CampaignAnalysis({
             {primary?.created ? ` · since ${primary.created}` : ""}
           </p>
           <p className="text-[11.5px] text-text-tertiary">
-            {data ? `${data.from_date} to ${data.to_date}, change vs ${range.prevFrom} to ${range.prevTo}` : ""}
+            {data ? `${data.from_date} to ${data.to_date}` : ""}
+            {data && primary
+              ? fullPrev(primary)
+                ? `, change vs ${range.prevFrom} to ${range.prevTo}`
+                : ` · no change shown: it started ${primary.created?.slice(0, 10)}, inside the earlier ${days} days`
+              : ""}
             {loading && data ? " · updating…" : ""}
           </p>
         </div>
