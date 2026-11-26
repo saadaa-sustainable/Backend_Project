@@ -10,13 +10,14 @@ import {
 } from "@/lib/api";
 import { ExportButton } from "@/components/ExportButton";
 import {
-  FigureBand,
   FilterCell,
   SectionHeader,
   filterControlClass,
 } from "./SectionChrome";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { CampaignAnalysis } from "./CampaignAnalysis";
+import { StatTile } from "./StatTile";
+import { CATEGORICAL_PALETTE, theme } from "@/lib/theme";
 import { CampaignPicker, PickerOption } from "./CampaignPicker";
 
 /**
@@ -140,20 +141,35 @@ export function CampaignTracker() {
         </span>
       </SectionHeader>
 
-      <FigureBand
-        compact
-        figures={[
-          { label: "Campaigns", value: num(data?.campaigns) },
-          { label: "Ads added, 7d", value: num(data?.ads_added_7d) },
-          { label: "Ads added, 30d", value: num(data?.ads_added_30d) },
-          {
-            label: `Spending, no new ad in ${data?.stale_days ?? staleDays}d`,
-            value: num(data?.stale_spending),
-            title:
-              "Campaigns that spent in the last 7 days whose newest ad is older than the staleness window. These are running on creative nobody has refreshed.",
-          },
-        ]}
-      />
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatTile
+          label={`${status === "all" ? "All" : status[0] + status.slice(1).toLowerCase()} campaigns`}
+          value={num(data?.campaigns)}
+          color={CATEGORICAL_PALETTE[0]}
+          sub="Matching the filters below"
+        />
+        <StatTile
+          label="Ads added, 7d"
+          value={num(data?.ads_added_7d)}
+          color={CATEGORICAL_PALETTE[1]}
+          sub="New ads created in those campaigns"
+        />
+        <StatTile
+          label="Ads added, 30d"
+          value={num(data?.ads_added_30d)}
+          color={CATEGORICAL_PALETTE[5]}
+          sub="New ads created in those campaigns"
+        />
+        <StatTile
+          label={`Spending, no new ad in ${data?.stale_days ?? staleDays}d`}
+          value={num(data?.stale_spending)}
+          color={theme.warningText}
+          selected={onlyStale}
+          onClick={() => setOnlyStale((v) => !v)}
+          title="Campaigns that spent in the last 7 days whose newest ad is older than the stale window. Click to show only these."
+          sub={onlyStale ? "Showing only these · click to show all" : "Need fresh creative · click to show only these"}
+        />
+      </div>
 
       <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border-primary bg-bg-white p-4">
         <CampaignPicker
