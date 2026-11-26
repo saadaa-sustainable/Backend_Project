@@ -449,8 +449,26 @@ export function CampaignAnalysis({
             </div>
           </div>
 
+          {campaigns.length === 1 ? (
+            // One campaign: a one-column table is mostly empty space, so each section is a card.
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+              {SECTIONS.map((sec) => (
+                <div key={sec.title} className={`${card} flex flex-col gap-3`}>
+                  <h4 className="text-[12px] font-semibold uppercase tracking-wide text-text-secondary">{sec.title}</h4>
+                  <div className="grid grid-cols-2 gap-2">
+                    {sec.rows.map((r) => (
+                      <div key={r.label} className="rounded-lg bg-bg-base px-3 py-2" title={r.title}>
+                        <div className="truncate text-[11px] text-text-tertiary">{r.label}</div>
+                        <div className="font-mono text-[15px] font-semibold tabular-nums text-text-primary">{fmt(r.value(primary.totals), r.fmt)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
           <div className={`${card} flex flex-col gap-2`}>
-            <h4 className="text-[14px] font-semibold text-text-primary">All metrics{campaigns.length > 1 ? ", side by side" : ""}</h4>
+            <h4 className="text-[14px] font-semibold text-text-primary">All metrics, side by side</h4>
             <TableFrame>
               <table className="w-full border-collapse text-[12.5px]">
                 <thead>
@@ -478,6 +496,7 @@ export function CampaignAnalysis({
               </table>
             </TableFrame>
           </div>
+          )}
 
           <div className={card}>
             <AdsetTable campaign={primary} />
