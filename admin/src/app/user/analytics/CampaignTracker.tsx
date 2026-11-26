@@ -66,6 +66,7 @@ export function CampaignTracker() {
   const [limit, setLimit] = useState(200);
   // First id is the campaign analysed; the rest are compared with it.
   const [selected, setSelected] = useState<string[]>([]);
+  const [compare, setCompare] = useState(true);
   // Every campaign, by spend, for the pickers -- not just what the table's filters show.
   const [all, setAll] = useState<CampaignTrackerRow[]>([]);
   const [primaryText, setPrimaryText] = useState("");
@@ -192,6 +193,7 @@ export function CampaignTracker() {
           disabled={!selected.length || selected.length >= MAX_SELECTED}
           onPick={(o) => {
             setSelected((s) => (s.includes(o.id) ? s : [...s, o.id]));
+            setCompare(true);
             setCompareText("");
           }}
         />
@@ -200,6 +202,8 @@ export function CampaignTracker() {
       {selected.length > 0 && (
         <CampaignAnalysis
           ids={selected}
+          compare={compare}
+          onCompare={setCompare}
           onRemove={(id) => setSelected((s) => s.filter((x) => x !== id))}
           onClose={() => {
             setSelected([]);

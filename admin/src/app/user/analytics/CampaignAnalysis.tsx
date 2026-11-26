@@ -224,11 +224,16 @@ function ShareBars({ title, rows, overlapping }: { title: string; rows: { label:
 const card = "rounded-xl border border-border-primary bg-bg-white p-4 shadow-sm";
 
 export function CampaignAnalysis({
-  ids,
+  ids: allIds,
+  compare,
+  onCompare,
   onRemove,
   onClose,
 }: {
   ids: string[];
+  /** Off shows the analysed campaign alone; the compared ones are kept for when it is back on. */
+  compare: boolean;
+  onCompare: (on: boolean) => void;
   onRemove: (id: string) => void;
   onClose: () => void;
 }) {
@@ -257,6 +262,7 @@ export function CampaignAnalysis({
     return { from: isoDay(from), to: isoDay(to), prevFrom: isoDay(prevFrom), prevTo: isoDay(prevTo) };
   }, [days]);
 
+  const ids = compare ? allIds : allIds.slice(0, 1);
   const key = ids.join(",");
   const req = `${key}|${range.from}|${range.to}`;
   useEffect(() => {
@@ -324,6 +330,21 @@ export function CampaignAnalysis({
             {loading && data ? " · updating…" : ""}
           </p>
         </div>
+        <div className="flex items-center gap-1 rounded-lg border border-border-primary bg-bg-white p-1" role="group" aria-label="Comparison">
+          <button type="button" aria-pressed={!compare} onClick={() => onCompare(false)} className={pill(!compare)}>
+            No comparison
+          </button>
+          <button
+            type="button"
+            aria-pressed={compare}
+            disabled={allIds.length < 2}
+            title={allIds.length < 2 ? "Add campaigns in the Compare box first" : undefined}
+            onClick={() => onCompare(true)}
+            className={`${pill(compare && allIds.length > 1)} disabled:cursor-not-allowed disabled:opacity-50`}
+          >
+            Comparison{allIds.length > 1 ? ` (${allIds.length - 1})` : ""}
+          </button>
+        </div>
         <div className="flex items-center gap-1 rounded-lg border border-border-primary bg-bg-white p-1" role="group" aria-label="Window">
           {WINDOWS.map((d) => (
             <button key={d} type="button" aria-pressed={days === d} onClick={() => setDays(d)} className={pill(days === d)}>
@@ -342,7 +363,7 @@ export function CampaignAnalysis({
 
       {campaigns.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-[12px]">
-          <span className="text-text-tertiary">{campaigns.length > 1 ? "Comparing" : "Add campaigns to compare in the box above"}</span>
+          <span className="text-text-tertiary">{campaigns.length > 1 ? "Comparing" : !compare && allIds.length > 1 ? `Comparison off · ${allIds.length - 1} campaign${allIds.length > 2 ? "s" : ""} kept for when you turn it on` : "Add campaigns to compare in the box above"}</span>
           {campaigns.length > 1 &&
             campaigns.map((c, i) => (
               <span key={c.campaign_id} className="flex max-w-[280px] items-center gap-1.5 rounded-full border border-border-primary bg-bg-white px-2.5 py-1">
