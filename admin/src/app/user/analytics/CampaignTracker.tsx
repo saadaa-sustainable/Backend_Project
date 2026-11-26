@@ -13,7 +13,6 @@ import {
   FigureBand,
   FilterCell,
   SectionHeader,
-  TableFrame,
   filterControlClass,
 } from "./SectionChrome";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
@@ -327,109 +326,80 @@ export function CampaignTracker() {
       ) : !rows.length ? (
         <p className="py-8 text-sm text-text-secondary">No campaigns match these filters.</p>
       ) : (
-        <TableFrame
-          footer={
-            <>
-              <span className="text-[11.5px] text-text-tertiary">
-                Showing {num(rows.length)} of {num(data?.matched)} campaigns
-                {data && data.matched > rows.length ? " — raise Rows to see the rest" : ""}
-              </span>
-              <span className="text-[11.5px] text-text-tertiary">
-                A tinted row is spending with no new ad in {data?.stale_days ?? staleDays} days
-              </span>
-            </>
-          }
-        >
-          <table className="w-full border-collapse text-[12.5px]">
-            <thead>
-              <tr className="text-left text-[11px] uppercase tracking-wide text-text-tertiary">
-                {[
-                  ["Campaign", "The campaign's name as Meta holds it."],
-                  ["Status", "Effective status, which reflects parent state too."],
-                  ["Account", ""],
-                  ["Ad sets", "Total ad sets, with active in brackets."],
-                  ["Ads", "Total ads, with active in brackets."],
-                  ["New 7d", "Ads CREATED in the last 7 days. A creation count, not a delivery count."],
-                  ["New 30d", "Ads created in the last 30 days."],
-                  ["Newest ad", "Created date of the most recent ad. A dash means the campaign has no ads."],
-                  ["Days since", "Days since that newest ad was created."],
-                  ["Spend 7d", "Meta spend over the last 7 days, summed from its ads."],
-                ].map(([label, title]) => (
-                  <th
-                    key={label}
-                    title={title || undefined}
-                    className={`border-b border-border-primary px-3 py-2 font-medium ${
-                      label === "Campaign" || label === "Status" || label === "Account"
-                        ? "text-left"
-                        : "text-right"
-                    }`}
-                  >
-                    {label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => {
-                const stale = isStale(r);
-                return (
-                  <tr key={r.campaign_id} className={stale ? "bg-warning-bg/40" : undefined}>
-                    <td
-                      className="max-w-[320px] truncate border-b border-border-soft px-3 py-1.5"
-                      title={`${r.campaign_name} · ${r.campaign_id}`}
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {rows.map((r) => {
+              const stale = isStale(r);
+              const on = selected[0] === r.campaign_id;
+              const stat = (label: string, value: React.ReactNode, title?: string, tone = "text-text-primary") => (
+                <div title={title}>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">{label}</div>
+                  <div className={`font-mono text-[13px] tabular-nums ${tone}`}>{value}</div>
+                </div>
+              );
+              return (
+                <button
+                  key={r.campaign_id}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => {
+                    setSelected((s) => [r.campaign_id, ...s.filter((x) => x !== r.campaign_id)].slice(0, MAX_SELECTED));
+                    setPrimaryText(r.campaign_name);
+                  }}
+                  className={`flex flex-col gap-3 rounded-xl border p-4 text-left shadow-sm transition-shadow hover:shadow-md ${
+                    on ? "border-accent-yellow ring-1 ring-accent-yellow" : "border-border-primary"
+                  } ${stale ? "bg-warning-bg/40" : "bg-bg-white"}`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-[13.5px] font-semibold text-text-primary" title={`${r.campaign_name} · ${r.campaign_id}`}>
+                        {r.campaign_name}
+                      </div>
+                      <div className="truncate text-[11.5px] text-text-tertiary" title={r.account_name ?? ""}>
+                        {r.account_name ?? "—"}
+                      </div>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
+                        r.status === "ACTIVE" ? "bg-success-bg text-success-text" : "bg-bg-muted text-text-secondary"
+                      }`}
                     >
-                      {r.campaign_name}
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-text-secondary">
                       {r.status ?? "—"}
-                    </td>
-                    <td
-                      className="max-w-[140px] truncate border-b border-border-soft px-3 py-1.5 text-text-secondary"
-                      title={r.account_name ?? ""}
-                    >
-                      {r.account_name ?? "—"}
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
-                      {num(r.adsets)}{" "}
-                      <span className="text-text-tertiary">({num(r.adsets_active)})</span>
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
-                      {num(r.ads)} <span className="text-text-tertiary">({num(r.ads_active)})</span>
-                    </td>
-                    <td
-                      className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${
-                        r.ads_added_7d > 0 ? "font-semibold text-success-text" : "text-text-primary"
-                      }`}
-                    >
-                      {num(r.ads_added_7d)}
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
-                      {num(r.ads_added_30d)}
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-secondary">
-                      {r.newest_ad ?? "—"}
-                    </td>
-                    <td
-                      className={`border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] ${
-                        stale ? "font-semibold text-warning-text" : "text-text-primary"
-                      }`}
-                      title={
-                        stale
-                          ? `Spending ₹${num(r.spend_7d)} over 7 days on creative last refreshed ${r.days_since_new_ad} days ago`
-                          : undefined
-                      }
-                    >
-                      {num(r.days_since_new_ad)}
-                    </td>
-                    <td className="border-b border-border-soft px-3 py-1.5 text-right font-mono text-[11px] text-text-primary">
-                      {num(r.spend_7d)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </TableFrame>
+                    </span>
+                  </div>
+                  <div className="flex items-end justify-between gap-2 border-y border-border-soft py-2">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">Spend, 7d</div>
+                      <div className="text-[20px] font-semibold leading-tight tabular-nums text-text-primary">₹{num(r.spend_7d)}</div>
+                    </div>
+                    {stale && (
+                      <span
+                        className="rounded-md bg-warning-bg px-2 py-1 text-[11px] font-semibold text-warning-text"
+                        title={`Spending ₹${num(r.spend_7d)} over 7 days on creative last refreshed ${r.days_since_new_ad ?? "never"} days ago`}
+                      >
+                        No new ad in {r.days_since_new_ad ?? "—"}d
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 gap-x-3 gap-y-2">
+                    {stat("Ad sets", <>{num(r.adsets)} <span className="text-text-tertiary">({num(r.adsets_active)})</span></>, "Total ad sets, with active in brackets.")}
+                    {stat("Ads", <>{num(r.ads)} <span className="text-text-tertiary">({num(r.ads_active)})</span></>, "Total ads, with active in brackets.")}
+                    {stat("New 7d / 30d", <>{num(r.ads_added_7d)} / {num(r.ads_added_30d)}</>, "Ads CREATED in the last 7 and 30 days.", r.ads_added_7d > 0 ? "font-semibold text-success-text" : "text-text-primary")}
+                    {stat("Newest ad", r.newest_ad ?? "—", "Created date of the most recent ad.")}
+                    {stat("Days since", num(r.days_since_new_ad), "Days since that newest ad was created.", stale ? "font-semibold text-warning-text" : "text-text-primary")}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap justify-between gap-2 text-[11.5px] text-text-tertiary">
+            <span>
+              Showing {num(rows.length)} of {num(data?.matched)} campaigns
+              {data && data.matched > rows.length ? " — raise Rows to see the rest" : ""} · click a card to analyse it
+            </span>
+            <span>A tinted card is spending with no new ad in {data?.stale_days ?? staleDays} days</span>
+          </div>
+        </div>
       )}
 
       <p className="text-[11.5px] text-text-tertiary">
