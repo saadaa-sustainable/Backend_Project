@@ -17,6 +17,7 @@ import {
 } from "./SectionChrome";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { CampaignAnalysis } from "./CampaignAnalysis";
+import { CampaignPicker, PickerOption } from "./CampaignPicker";
 
 /**
  * Is each campaign still being given new creative?
@@ -77,17 +78,10 @@ export function CampaignTracker() {
       cancelled = true;
     };
   }, []);
-  // A name shared by two campaigns gets its id appended, so each choice is unambiguous.
-  const choices = useMemo(() => {
-    const seen = new Map<string, number>();
-    all.forEach((r) => seen.set(r.campaign_name, (seen.get(r.campaign_name) ?? 0) + 1));
-    return all.map((r) => ({
-      id: r.campaign_id,
-      value: (seen.get(r.campaign_name) ?? 0) > 1 ? `${r.campaign_name} · ${r.campaign_id}` : r.campaign_name,
-      label: `${r.status ?? ""} · ${num(r.spend_7d)} spend in 7d`,
-    }));
-  }, [all]);
-  const idFor = (text: string) => choices.find((c) => c.value === text.trim())?.id;
+  const choices: PickerOption[] = useMemo(
+    () => all.map((r) => ({ id: r.campaign_id, name: r.campaign_name, hint: `${r.status ?? ""} · ₹${num(r.spend_7d)} in 7d` })),
+    [all],
+  );
 
   const [data, setData] = useState<CampaignTrackerResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -162,42 +156,29 @@ export function CampaignTracker() {
       />
 
       <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border-primary bg-bg-white p-4">
-        <FilterCell label="Analyse campaign" className="min-w-[280px] flex-[2]" htmlFor="ct-pick">
-          <input
-            id="ct-pick"
-            list="ct-campaigns"
-            value={primaryText}
-            placeholder={all.length ? `Search ${all.length} campaigns…` : "Loading campaigns…"}
-            onChange={(e) => {
-              setPrimaryText(e.target.value);
-              const id = idFor(e.target.value);
-              if (id) setSelected((s) => [id, ...s.filter((x) => x !== id)].slice(0, MAX_SELECTED));
-            }}
-            className={filterControlClass}
-          />
-        </FilterCell>
-        <FilterCell label={`Compare with (up to ${MAX_SELECTED - 1})`} className="min-w-[240px] flex-[2]" htmlFor="ct-compare">
-          <input
-            id="ct-compare"
-            list="ct-campaigns"
-            value={compareText}
-            disabled={!selected.length || selected.length >= MAX_SELECTED}
-            placeholder={!selected.length ? "Pick a campaign first" : selected.length >= MAX_SELECTED ? "Comparison is full" : "Add a campaign…"}
-            onChange={(e) => {
-              const id = idFor(e.target.value);
-              if (id) {
-                setSelected((s) => (s.includes(id) ? s : [...s, id]));
-                setCompareText("");
-              } else setCompareText(e.target.value);
-            }}
-            className={filterControlClass}
-          />
-        </FilterCell>
-        <datalist id="ct-campaigns">
-          {choices.map((c) => (
-            <option key={c.id} value={c.value} label={c.label} />
-          ))}
-        </datalist>
+        <CampaignPicker
+          label="Analyse campaign"
+          placeholder={all.length ? `Type any words from ${all.length} campaign names…` : "Loading campaigns…"}
+          text={primaryText}
+          onText={setPrimaryText}
+          options={choices}
+          onPick={(o) => {
+            setPrimaryText(o.name);
+            setSelected((s) => [o.id, ...s.filter((x) => x !== o.id)].slice(0, MAX_SELECTED));
+          }}
+        />
+        <CampaignPicker
+          label={`Compare with (up to ${MAX_SELECTED - 1})`}
+          placeholder={!selected.length ? "Pick a campaign first" : selected.length >= MAX_SELECTED ? "Comparison is full" : "Type any words…"}
+          text={compareText}
+          onText={setCompareText}
+          options={choices.filter((o) => !selected.includes(o.id))}
+          disabled={!selected.length || selected.length >= MAX_SELECTED}
+          onPick={(o) => {
+            setSelected((s) => (s.includes(o.id) ? s : [...s, o.id]));
+            setCompareText("");
+          }}
+        />
       </div>
 
       {selected.length > 0 && (

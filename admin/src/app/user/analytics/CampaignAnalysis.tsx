@@ -342,7 +342,7 @@ export function CampaignAnalysis({
 
       {campaigns.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-[12px]">
-          <span className="text-text-tertiary">{campaigns.length > 1 ? "Comparing" : "Tick other campaigns below to compare"}</span>
+          <span className="text-text-tertiary">{campaigns.length > 1 ? "Comparing" : "Add campaigns to compare in the box above"}</span>
           {campaigns.length > 1 &&
             campaigns.map((c, i) => (
               <span key={c.campaign_id} className="flex max-w-[280px] items-center gap-1.5 rounded-full border border-border-primary bg-bg-white px-2.5 py-1">
