@@ -522,8 +522,28 @@ _VIEW_NAMES = (
 
 def _rebuild_views(cur) -> None:
     # Reverse order: compare and summary read daily, so they go first.
+    #
+    # DROP VIEW cannot drop a MATERIALIZED view -- Postgres raises
+    # "is not a view" rather than ignoring it, so the IF EXISTS does
+    # not save you. `other_page_compare` is materialised in this
+    # database while this script creates it as a plain view, and the
+    # mismatch failed the whole step every night.
+    #
+    # The relkind is read rather than guessed, because which of these
+    # is materialised has changed before and a hardcoded list would
+    # drift the same way again.
     for name in reversed(_VIEW_NAMES):
-        cur.execute(f"DROP VIEW IF EXISTS {name} CASCADE")
+        schema, _, bare = name.partition(".")
+        cur.execute(
+            "SELECT c.relkind FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s",
+            (schema, bare))
+        row = cur.fetchone()
+        kind = row[0] if row else None
+        if kind == "m":
+            cur.execute(f"DROP MATERIALIZED VIEW IF EXISTS {name} CASCADE")
+        else:
+            cur.execute(f"DROP VIEW IF EXISTS {name} CASCADE")
     for name, sql in (("daily", DAILY_VIEW), ("compare", COMPARE_VIEW),
                       ("summary", SUMMARY_VIEW), ("pages", PAGES_VIEW),
                       ("sku_page_compare", PAGE_COMPARE_VIEW),

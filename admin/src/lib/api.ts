@@ -3857,6 +3857,120 @@ export function fetchHourlyTracker(
 }
 
 /* ------------------------------------------------------------------ *
+ * Hourly landing-page tracker                                        *
+ * ------------------------------------------------------------------ */
+
+/** One landing page, totalled over the window.
+ *
+ *  meta_* are what Meta reports for the ads POINTING at this page;
+ *  revenue/orders are what the store booked from people who LANDED on
+ *  it. They answer different questions and will not agree. */
+export interface LandingHourlyPage {
+  landing_page_path: string;
+  /** Traffic that LANDED here (ShopifyQL). A session is a visit, a
+   *  visitor a person, so one shopper returning after lunch is two
+   *  sessions and one visitor. */
+  sessions: number;
+  visitors: number;
+  bounces: number;
+  cart_additions: number;
+  reached_checkout: number;
+  /** Rates over sessions, so numerator and denominator are the same
+   *  population. There is deliberately no conversion rate: `orders`
+   *  below counts orders PLACED here, which for 94% of ad-driven
+   *  orders is a different page from the one the session landed on. */
+  bounce_rate: number | null;
+  atc_rate: number | null;
+  checkout_rate: number | null;
+  /** Orders PLACED on this page, keyed on the order's own URL. */
+  orders: number;
+  revenue: number;
+  new_customer_orders: number;
+  new_customer_sales: number;
+  repeat_customer_orders: number;
+  repeat_customer_sales: number;
+  meta_spend: number;
+  meta_impressions: number;
+  meta_conv_value: number;
+  meta_purchases: number;
+  ncp: number;
+  meta_roas: number | null;
+  shopify_roas: number | null;
+}
+
+export interface LandingHourlyHour {
+  hour_of_day: number;
+  sessions: number;
+  bounces: number;
+  cart_additions: number;
+  orders: number;
+  revenue: number;
+  new_customer_sales: number;
+  repeat_customer_sales: number;
+  meta_spend: number;
+  meta_conv_value: number;
+  ncp: number;
+}
+
+/** Freshness, and how much spend reached a page.
+ *
+ *  Orders and sessions are now pulled live from Shopify every hour, so
+ *  order_share can exceed 1: this table can be AHEAD of the hourly
+ *  campaign tracker it is compared against, which runs on its own
+ *  cadence. The share that still matters is spend_share -- an ad whose
+ *  creative has no readable landing URL cannot be placed on any page. */
+export interface LandingHourlyCoverage {
+  all_orders: number;
+  all_revenue: number;
+  placed_orders: number;
+  placed_revenue: number;
+  order_share: number | null;
+  revenue_share: number | null;
+  /** Spend that reached a page row, over ALL Meta spend in these hours.
+   *  Low when the creative tables have not yet seen the ads that spent --
+   *  typically today's launches. Every page's meta_roas is only as
+   *  complete as this. */
+  placed_spend: number;
+  all_spend: number;
+  spend_share: number | null;
+  /** Newest order the ingest has reached in this window. */
+  data_through: string | null;
+  /** Orders stop before the window does: a day still in progress whose
+   *  later hours are missing, not empty. Every order-level table is
+   *  rebuilt once a day by the 07:00 IST run. */
+  /** The hourly pull has stopped; hours since data_through read zero
+   *  because nothing fetched them, not because nothing happened. */
+  stale: boolean;
+}
+
+export interface LandingHourlyResponse {
+  pages: LandingHourlyPage[];
+  hours: LandingHourlyHour[];
+  totals: LandingHourlyPage | null;
+  coverage: LandingHourlyCoverage | null;
+  from_day: string;
+  to_day: string;
+  /** The window has no rows at all -- not collected yet, as opposed to
+   *  collected and zero. */
+  empty: boolean;
+  refreshed_at: string | null;
+}
+
+export function fetchLandingHourly(
+  params: { day?: string; from_day?: string; path?: string; limit?: number } = {},
+): Promise<LandingHourlyResponse> {
+  const qs = new URLSearchParams();
+  if (params.day) qs.set("day", params.day);
+  if (params.from_day) qs.set("from_day", params.from_day);
+  if (params.path) qs.set("path", params.path);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return request<LandingHourlyResponse>(
+    `/admin/analytics/landing-hourly${q ? `?${q}` : ""}`,
+  );
+}
+
+/* ------------------------------------------------------------------ *
  * Kwikchat spend import                                              *
  * ------------------------------------------------------------------ */
 

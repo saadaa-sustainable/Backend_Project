@@ -232,6 +232,80 @@ How to read it:
 - The Dashboard tiles are unchanged (5 to 6 seconds).
 - Not measured on the deployed site yet; that follows the merge.
 
+## Query round 1 — 16 Nov 2026: First Click
+
+### What was wrong
+
+First Click by Ad never answered. Two faults in the token map it joins
+(`ad_token_resolution`, which turns a `utm_content` token into an ad id):
+
+1. **One row per order, not per token.** The map held 246,469 rows for
+   8,637 tokens. Every order joined to every other order sharing its
+   token, so the planner expected billions of rows and the request ran
+   until it timed out.
+2. **Rebuilt on every read.** It was a plain view costing about 272,000
+   blocks, and one First Click request reads it up to six times.
+
+### Changes
+
+| # | Change | Where |
+| --- | --- | --- |
+| 1 | The map has one row per token (`DISTINCT`), with a unique index so it cannot fan out again | `scripts/refresh_ad_token_resolution.py` |
+| 2 | The map is stored (materialized view) and rebuilt by the nightly step and by the manual Google refresh, right after the GA4 attribution step | same script, `scripts/refresh_google.py` |
+| 3 | The nightly step no longer reads the dropped `last_ad_id` column, which failed it every night | same script |
+| 4 | First Click sorts and cuts rows in Python over one stored aggregate per grain, basis and window. Sort and row-limit clicks no longer reach the database | `app/api/routers/analytics.py` |
+| 5 | The warmer loads First Click for all three grains | `warm_ads_analyse_cache` |
+
+### Before and after
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Token map: rows | 246,469 | 8,637 |
+| Token map: blocks per read | about 272,000 | under 200 |
+| First Click by Ad, deployed | no answer in 170 s | 12.9 s (map fix alone, before this code deploys) |
+| First Click by Ad: blocks | did not finish | about 398,000 |
+| A sort or row-limit click | the full query again | 0 blocks |
+
+### Verified
+
+| Check | Result |
+| --- | --- |
+| Same answer as the old code | Same entity count, order count, revenue totals and top 200 rows in the same order (new code locally against old code deployed, same window) |
+| Second and third sort | 0.003 s and 0.004 s; ascending sort keeps empty values last |
+| Backend tests | Pass, with a new test for sorting and one for one-row-per-token |
+
+### Not done
+
+- The First Click aggregate itself still reads about 400,000 blocks.
+  Nearly half is the lifetime columns, which scan all orders. It now
+  runs once per grain and window per day, at warm time.
+- Between midnight and 05:30 IST the page's default dates (UTC) differ
+  from the warmer's (IST), so the first visitor in those hours waits.
+- A token first seen after the last rebuild shows under its raw id until
+  the next rebuild.
+
+## CPIS Spend/Day fix — 20 Nov 2026
+
+Spend/Day took 30 days of spend on ads active **today** and divided by
+30. It read high for a product whose spend had fallen (SDPL six times
+its real rate) and left out every ad paused since.
+
+It is now the current burn: spend on the product's name-matched ads over
+the last seven days with data, divided by seven (or by the window's
+length when shorter). Paused ads count for the days they ran.
+
+| Product | Before | After (= last 7 days ÷ 7) |
+| --- | --- | --- |
+| SMCP | 1,12,173 | 79,633 |
+| SDCP | 33,112 | 18,281 |
+| SMFSK | 10,893 | 17,573 |
+| SMANJ | 18,972 | 15,829 |
+
+Checked against an independent query on `insights_daily_by_ad`: equal
+for every product listed, and for a 3-day custom range (divides by 3).
+Ads with no product code in their name are still in no product's
+Spend/Day; they were 31% of spend in the window.
+
 ## Next rounds (not started)
 
 1. Query round: Landing Pages totals, the name-miss panel, date filters as ranges, the date bound on `/dashboard/mer-by-period`.

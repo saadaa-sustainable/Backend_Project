@@ -1470,6 +1470,16 @@ async def warm_ads_analyse_cache() -> None:
     except Exception:
         log.exception("last_click_utm_warmer_failed")
 
+    # First Click, all three grains over the page's opening window. The
+    # rows are kept unsorted, so every sort and row limit reuses them.
+    for grain in _FIRST_CLICK_GRAINS:
+        try:
+            async with session_scope() as session:
+                await _first_click_rows(session, grain, "order", month_ago, today)
+                await _first_click_head(session, grain, month_ago, today)
+        except Exception:
+            log.exception("first_click_warmer_failed")
+
 
 #: When the newest refresh run ended. A run killed at the workflow's
 #: 330-minute limit may not record its end, so one with no end counts as
@@ -3042,6 +3052,54 @@ _FIRST_CLICK_SORTS = {
 }
 
 
+@cached_analytics(until_nightly=True)
+async def _first_click_rows(session, grain: str, basis: str,
+                            from_d: date, to_d: date) -> list[dict]:
+    """Every entity at this grain for the window, unsorted."""
+    result = await session.execute(
+        text(_first_click_sql(grain, basis)),
+        {"from_date": from_d, "to_date": to_d},
+    )
+    return [dict(r._mapping) for r in result]
+
+
+@cached_analytics(until_nightly=True)
+async def _first_click_head(session, grain: str, from_d: date, to_d: date):
+    """The window's headline counts and what the paired rule left out.
+
+    One statement for the counts AND the exclusion, so the page cannot
+    report a total it did not also measure the gap for.
+    """
+    first_k, last_k = _FIRST_CLICK_GRAINS[grain]
+    return (await session.execute(text(f"""
+        SELECT COUNT(*)::int AS orders_total,
+               COUNT(*) FILTER (WHERE COALESCE(NULLIF(btrim(first_source),''),'(none)')
+                             IS DISTINCT FROM
+                                COALESCE(NULLIF(btrim(last_source),''),'(none)'))::int
+                 AS orders_reattributed,
+               COUNT(*) FILTER (
+                   WHERE ({first_k} IS NULL) <> ({last_k} IS NULL))::int
+                 AS orders_unpaired,
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE ({first_k} IS NULL) <> ({last_k} IS NULL)), 0)
+                 AS revenue_unpaired,
+               -- Over every entity, on the same paired rule the table
+               -- uses, so the cards describe the window rather than
+               -- whatever slice the row limit happened to return.
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
+                 AS first_click_revenue_total,
+               COALESCE(SUM(revenue) FILTER (
+                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
+                 AS last_click_revenue_total
+          FROM public.shopify_order_clicks
+          {"LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id" if grain == "ad" else ""}
+          {"LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id" if grain == "ad" else ""}
+         WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
+           AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+    """), {"from_date": from_d, "to_date": to_d})).one()
+
+
 @router.get("/first-click", response_model=FirstClickResponse)
 @cached_analytics(until_nightly=True)
 async def get_first_click(
@@ -3084,65 +3142,21 @@ async def get_first_click(
         raise HTTPException(400, f"grain must be one of {sorted(_FIRST_CLICK_GRAINS)}")
     to_d = to_date or date.today()
     from_d = from_date or (to_d - timedelta(days=29))
-    params: dict[str, object] = {"from_date": from_d, "to_date": to_d}
 
-    # COUNT(*) OVER () rather than a second round trip: the window runs
-    # over the already-aggregated rows, so the true entity count comes
-    # back with the page for free. Without it `total` could only ever
-    # report the page size, which is what hid 2,283 of 2,333 ads behind
-    # a limit of 50 and read as "these are all the ads there are".
-    # NULLS LAST on BOTH directions, not just DESC. Ascending puts the
-    # weakest rows first, which is the point of reversing -- but the
-    # column is full of honest NULLs (source grain, ads Meta never
-    # billed, ROAS under the spend floor), and Postgres sorts NULLs
-    # first on ASC by default. That would hand the page to rows with
-    # no number at all and bury the answer under dashes.
-    order_by = (f"{_FIRST_CLICK_SORTS[sort]} "
-                f"{'ASC' if direction == 'asc' else 'DESC'} NULLS LAST")
-
-    rows_result = await session.execute(
-        text(f"SELECT *, COUNT(*) OVER ()::int AS _total "
-             f"FROM ({_first_click_sql(grain, basis)}) t "
-             f"ORDER BY {order_by} LIMIT :limit"),
-        {**params, "limit": limit},
-    )
-    raw = [dict(r._mapping) for r in rows_result]
-    matched = raw[0]["_total"] if raw else 0
-    rows = [FirstClickRow(**{k: v for k, v in r.items() if k != "_total"}) for r in raw]
-
-    # One statement for both headline numbers: a second round trip to
-    # count the same rows twice over is what the landing-page endpoint
-    # was just corrected for.
-    # One statement for the headline counts AND the exclusion, so the
-    # page cannot report a total it did not also measure the gap for.
-    first_k, last_k = _FIRST_CLICK_GRAINS[grain]
-    head = (await session.execute(text(f"""
-        SELECT COUNT(*)::int AS orders_total,
-               COUNT(*) FILTER (WHERE COALESCE(NULLIF(btrim(first_source),''),'(none)')
-                             IS DISTINCT FROM
-                                COALESCE(NULLIF(btrim(last_source),''),'(none)'))::int
-                 AS orders_reattributed,
-               COUNT(*) FILTER (
-                   WHERE ({first_k} IS NULL) <> ({last_k} IS NULL))::int
-                 AS orders_unpaired,
-               COALESCE(SUM(revenue) FILTER (
-                   WHERE ({first_k} IS NULL) <> ({last_k} IS NULL)), 0)
-                 AS revenue_unpaired,
-               -- Over every entity, on the same paired rule the table
-               -- uses, so the cards describe the window rather than
-               -- whatever slice the row limit happened to return.
-               COALESCE(SUM(revenue) FILTER (
-                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
-                 AS first_click_revenue_total,
-               COALESCE(SUM(revenue) FILTER (
-                   WHERE {first_k} IS NOT NULL AND {last_k} IS NOT NULL), 0)
-                 AS last_click_revenue_total
-          FROM public.shopify_order_clicks
-          {"LEFT JOIN public.ad_token_resolution rf ON rf.token = first_ad_id" if grain == "ad" else ""}
-          {"LEFT JOIN public.ad_token_resolution rl ON rl.token = last_ad_id" if grain == "ad" else ""}
-         WHERE order_at >= (CAST(:from_date AS date)::timestamp AT TIME ZONE 'Asia/Kolkata')
-           AND order_at <  ((CAST(:to_date AS date) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata')
-    """), params)).one()
+    # Sorted and cut here, not in SQL. The aggregate is the same for
+    # every sort and row limit, so it is computed once per grain, basis
+    # and window; a header click then costs nothing at the database.
+    every = await _first_click_rows(session, grain, basis, from_d, to_d)
+    key = _FIRST_CLICK_SORTS[sort]
+    # NULLs last in BOTH directions: the column is full of honest NULLs
+    # (source grain, ads Meta never billed, ROAS under the spend floor)
+    # and a page that opens on dashes buries the answer.
+    known = sorted((r for r in every if r[key] is not None),
+                   key=lambda r: r[key], reverse=direction == "desc")
+    ordered = known + [r for r in every if r[key] is None]
+    matched = len(every)
+    rows = [FirstClickRow(**r) for r in ordered[:limit]]
+    head = await _first_click_head(session, grain, from_d, to_d)
 
     return FirstClickResponse(
         rows=rows, total=len(rows), matched=matched, basis=basis,
@@ -5611,8 +5625,8 @@ class CpisUtmRow(BaseModel):
     # not just what spent but what's still spending.
     active_creative_count: int | None
     winning_creative_count: int | None
-    # Active-ad spend divided by window_days -- average daily burn on
-    # ads still running for this SKU family.
+    # Current daily burn: spend on this SKU's name-matched ads over the
+    # last seven days with data, divided by seven.
     active_spend_per_day: float | None
     # Last-click UTM aggregates (surfaced explicitly for the Last Click
     # column group -- these are already in cpis_by_sku_utm; renaming
@@ -6361,12 +6375,23 @@ async def get_cpis_utm(
       -- table (see scripts/refresh_insights_daily_by_ad.py). This
       -- replaces the earlier raw_dump_meta JSONB scan that took 60+s
       -- at 50-row pagination.
+      -- The newest day Meta spend has landed for, inside the window.
+      -- The window can end today, before today's spend arrives, and a
+      -- seven-day rate over six days of data would read a seventh low.
+      recent AS (
+        SELECT MAX(day) AS last_day
+          FROM public.insights_daily_by_ad
+         WHERE day >= (SELECT lo FROM bounds)
+           AND day <= (SELECT hi FROM bounds)
+      ),
       insights_windowed AS (
         SELECT
           ad_id,
           SUM(spend)      AS spend,
           SUM(conv_value) AS conv_value,
-          SUM(ncp_count)  AS ncp_count
+          SUM(ncp_count)  AS ncp_count,
+          -- The last seven days with spend data, for Spend/Day.
+          SUM(spend) FILTER (WHERE day > (SELECT last_day FROM recent) - 7) AS spend_7d
         FROM public.insights_daily_by_ad
         WHERE day >= (SELECT lo FROM bounds)
           AND day <= (SELECT hi FROM bounds)
@@ -6491,9 +6516,10 @@ async def get_cpis_utm(
                  WHERE al.ad_effective_status = 'ACTIVE'
                    AND al.category IN ('Winner', 'Incremental Winner')
                )                                                 AS winning_creative_count,
-               COALESCE(SUM(iw.spend) FILTER (
-                 WHERE al.ad_effective_status = 'ACTIVE'
-               ), 0)                                             AS active_windowed_spend
+               -- Every named ad, paused or not: an ad paused yesterday
+               -- still spent this week, and one active now may have
+               -- started this week.
+               COALESCE(SUM(iw.spend_7d), 0)                     AS recent_spend_7d
         FROM page p
         LEFT JOIN name_match nm ON nm.master_sku = p.master_sku
         LEFT JOIN ad_lifecycle al ON al.ad_id = nm.ad_id
@@ -6740,9 +6766,13 @@ async def get_cpis_utm(
              END AS name_matched_nc_roas,
              na.active_creative_count::integer,
              na.winning_creative_count::integer,
-             CASE WHEN wd.n_days > 0
-                  THEN na.active_windowed_spend / wd.n_days
-                  ELSE NULL END           AS active_spend_per_day,
+             -- Current burn: the last seven days of spend over seven,
+             -- or over the window's length when it is shorter. It was
+             -- 30 days of spend on ads active TODAY over 30, which read
+             -- six times high for a product whose spend had fallen and
+             -- dropped every ad paused since.
+             na.recent_spend_7d / NULLIF(LEAST(7, wd.n_days), 0)
+                                          AS active_spend_per_day,
              -- Last-click AOV: BASKET value per attributed order.
              --
              -- This divided attributed_revenue, which is only this
@@ -14531,6 +14561,480 @@ def _rank_sources(rows: list[HourlyRow]) -> list[SourceSlice]:
     if tail:
         out.append(SourceSlice(source="other", sessions=tail, share=tail / grand))
     return out
+
+
+# ----------------------------------------------------------------------
+# Hourly landing-page tracker
+# ----------------------------------------------------------------------
+#
+# hourly_landing_tracker is written by scripts/refresh_hourly_landing.py.
+# Read that file for where each column comes from; the part that matters
+# to a caller is that the ORDER side only covers orders GA4 saw -- about
+# 71% of orders and 84% of revenue -- so `coverage` below is returned
+# alongside the totals rather than left for the reader to discover.
+
+_LANDING_HOURLY_PAGES_SQL = """
+SELECT landing_page_path,
+       SUM(sessions)                AS sessions,
+       SUM(visitors)                AS visitors,
+       SUM(bounces)                 AS bounces,
+       SUM(cart_additions)          AS cart_additions,
+       SUM(reached_checkout)        AS reached_checkout,
+       SUM(orders)                  AS orders,
+       SUM(revenue)                 AS revenue,
+       SUM(new_customer_orders)     AS new_customer_orders,
+       SUM(new_customer_sales)      AS new_customer_sales,
+       SUM(repeat_customer_orders)  AS repeat_customer_orders,
+       SUM(repeat_customer_sales)   AS repeat_customer_sales,
+       SUM(meta_spend)              AS meta_spend,
+       SUM(order_spend)             AS order_spend,
+       SUM(meta_impressions)        AS meta_impressions,
+       SUM(meta_conv_value)         AS meta_conv_value,
+       SUM(meta_purchases)          AS meta_purchases,
+       SUM(ncp)                     AS ncp
+  FROM public.hourly_landing_tracker
+ WHERE hour >= :lo AND hour < :hi
+   AND (CAST(:source AS text) IS NULL OR source = CAST(:source AS text))
+ GROUP BY landing_page_path
+ ORDER BY SUM(revenue) DESC NULLS LAST, SUM(sessions) DESC, SUM(meta_spend) DESC
+ LIMIT :limit
+"""
+
+#: Folded onto 24 rows, one per hour of the IST day, the same way
+#: /hourly-tracker folds a multi-day window. Keeps the payload one size
+#: whether the caller asks for a day or a month.
+_LANDING_HOURLY_HOURS_SQL = """
+SELECT EXTRACT(HOUR FROM hour AT TIME ZONE 'Asia/Kolkata')::int AS hour_of_day,
+       SUM(sessions)                AS sessions,
+       SUM(bounces)                 AS bounces,
+       SUM(cart_additions)          AS cart_additions,
+       SUM(orders)                  AS orders,
+       SUM(revenue)                 AS revenue,
+       SUM(new_customer_sales)      AS new_customer_sales,
+       SUM(repeat_customer_sales)   AS repeat_customer_sales,
+       SUM(meta_spend)              AS meta_spend,
+       SUM(order_spend)             AS order_spend,
+       SUM(meta_conv_value)         AS meta_conv_value,
+       SUM(ncp)                     AS ncp
+  FROM public.hourly_landing_tracker
+ WHERE hour >= :lo AND hour < :hi
+   AND (CAST(:path AS text) IS NULL OR landing_page_path = CAST(:path AS text))
+   AND (CAST(:source AS text) IS NULL OR source = CAST(:source AS text))
+ GROUP BY 1 ORDER BY 1
+"""
+
+#: The window's own totals, NOT the sum of the returned pages: with a
+#: limit in play those are the top N, and labelling their sum "all pages"
+#: would under-report the window by however many pages fell off the end.
+#: The same measures grouped by source instead of page: "how much of
+#: this came from Meta, from Google, from direct". Ordered by sessions
+#: so the traffic sources lead, not whichever happened to convert.
+_LANDING_HOURLY_SOURCES_SQL = """
+SELECT source,
+       SUM(sessions)                AS sessions,
+       SUM(visitors)                AS visitors,
+       SUM(bounces)                 AS bounces,
+       SUM(cart_additions)          AS cart_additions,
+       SUM(reached_checkout)        AS reached_checkout,
+       SUM(orders)                  AS orders,
+       SUM(revenue)                 AS revenue,
+       SUM(new_customer_orders)     AS new_customer_orders,
+       SUM(new_customer_sales)      AS new_customer_sales,
+       SUM(repeat_customer_orders)  AS repeat_customer_orders,
+       SUM(repeat_customer_sales)   AS repeat_customer_sales,
+       SUM(meta_spend)              AS meta_spend,
+       SUM(order_spend)             AS order_spend,
+       SUM(meta_impressions)        AS meta_impressions,
+       SUM(meta_conv_value)         AS meta_conv_value,
+       SUM(meta_purchases)          AS meta_purchases,
+       SUM(ncp)                     AS ncp
+  FROM public.hourly_landing_tracker
+ WHERE hour >= :lo AND hour < :hi
+   AND (CAST(:path AS text) IS NULL OR landing_page_path = CAST(:path AS text))
+ GROUP BY source
+ ORDER BY SUM(sessions) DESC NULLS LAST, SUM(revenue) DESC
+"""
+
+_LANDING_HOURLY_TOTAL_SQL = """
+SELECT SUM(sessions)                AS sessions,
+       SUM(visitors)                AS visitors,
+       SUM(bounces)                 AS bounces,
+       SUM(cart_additions)          AS cart_additions,
+       SUM(reached_checkout)        AS reached_checkout,
+       SUM(orders)                  AS orders,
+       SUM(revenue)                 AS revenue,
+       SUM(new_customer_orders)     AS new_customer_orders,
+       SUM(new_customer_sales)      AS new_customer_sales,
+       SUM(repeat_customer_orders)  AS repeat_customer_orders,
+       SUM(repeat_customer_sales)   AS repeat_customer_sales,
+       SUM(meta_spend)              AS meta_spend,
+       SUM(order_spend)             AS order_spend,
+       SUM(meta_impressions)        AS meta_impressions,
+       SUM(meta_conv_value)         AS meta_conv_value,
+       SUM(meta_purchases)          AS meta_purchases,
+       SUM(ncp)                     AS ncp
+  FROM public.hourly_landing_tracker
+ WHERE hour >= :lo AND hour < :hi
+   AND (CAST(:source AS text) IS NULL OR source = CAST(:source AS text))
+"""
+
+#: What share of the store the page table could actually place.
+#:
+#: The denominator is hourly_campaign_tracker, NOT order_customer_type.
+#: That matters more than it looks. Every order-level table in the
+#: warehouse -- shopify_orders, order_customer_type and
+#: ga4_order_attribution alike -- is rebuilt once a day by the 01:30 UTC
+#: nightly, so from 07:00 IST onwards they are all frozen at that
+#: morning's snapshot. Measured 2026-11-27 at 13:47 IST: all three
+#: stopped at 07:07, holding 285 orders, while the store had actually
+#: taken several times that.
+#:
+#: Dividing one stale table by another hid that completely -- it read
+#: "82% of orders covered" while the page table was missing six hours of
+#: trade. hourly_campaign_tracker is written every hour straight from
+#: Shopify, so it is the only honest denominator for a day in progress.
+_LANDING_COVERAGE_SQL = """
+SELECT COALESCE(SUM(orders), 0)  AS all_orders,
+       COALESCE(SUM(revenue), 0) AS all_revenue
+  FROM public.hourly_campaign_tracker
+ WHERE hour >= :lo AND hour < :hi
+"""
+
+#: When the order and session writers last ran for this window.
+#:
+#: This used to read order_customer_type, back when the orders came from
+#: there. They no longer do: the writers now pull orders and sessions
+#: live from Shopify every hour, so what matters is not how far a daily
+#: rebuild reached but whether the hourly job is still running. A table
+#: last written two hours ago is a dead cron, and the hours since it
+#: will read zero.
+#: What the STORE took over the window, from Shopify's own `sales`
+#: dataset via landing_store_totals. This is the figure that reconciles
+#: with Shopify admin; hourly_campaign_tracker is our own order fetch
+#: and lands close but is not the same thing.
+_LANDING_STORE_SQL = """
+SELECT COALESCE(SUM(gross_sales), 0) AS store_gross,
+       COALESCE(SUM(total_sales), 0) AS store_total,
+       COALESCE(SUM(orders), 0)      AS store_orders,
+       MAX(refreshed_at)             AS store_at
+  FROM public.landing_store_totals
+ WHERE day >= :lo_day AND day <= :hi_day
+"""
+
+_LANDING_FRESHNESS_SQL = """
+SELECT MAX(orders_refreshed_at)   AS orders_at,
+       MAX(sessions_refreshed_at) AS sessions_at
+  FROM public.hourly_landing_tracker
+ WHERE hour >= :lo AND hour < :hi
+"""
+
+
+_LANDING_SPEND_ALL_SQL = """
+SELECT COALESCE(SUM(meta_spend), 0) AS meta_spend_all
+  FROM public.hourly_campaign_tracker
+ WHERE hour >= :lo AND hour < :hi
+"""
+
+
+class LandingHourlyPageRow(BaseModel):
+    landing_page_path: str
+    #: Traffic, from ShopifyQL at hour x landing-page grain.
+    sessions: int = 0
+    visitors: int = 0
+    bounces: int = 0
+    cart_additions: int = 0
+    reached_checkout: int = 0
+    orders: int = 0
+    revenue: float = 0.0
+    new_customer_orders: int = 0
+    new_customer_sales: float = 0.0
+    repeat_customer_orders: int = 0
+    repeat_customer_sales: float = 0.0
+    meta_spend: float = 0.0
+    #: Spend on ads that EARNED an order on this page, not spend on ads
+    #: that point at it. The order carries both its own URL and the Meta
+    #: ad id in utm_content, so each ad's spend follows its own orders,
+    #: split by order share (see scripts/refresh_hourly_landing.py).
+    #:
+    #: This is the figure to compare with `revenue`: both are keyed on
+    #: the order's full_url, so page_roas below is a like-for-like
+    #: ratio, which meta_spend / revenue is not. It also covers far more
+    #: spend -- 97.5% of account spend against 23.2% on 2026-11-27 --
+    #: because an ad created today has no ad_media row yet but still
+    #: takes orders within the hour.
+    order_spend: float = 0.0
+    meta_impressions: int = 0
+    #: Meta's own reported conversion value for the ads pointing here.
+    meta_conv_value: float = 0.0
+    #: Meta's purchase count -- "conversions" on the dashboard.
+    meta_purchases: float = 0.0
+    ncp: float = 0.0
+    #: Meta's number divided by Meta's spend: what the ad platform claims.
+    meta_roas: float | None = None
+    #: The store's own revenue from people who landed here, over the same
+    #: spend. Different question from meta_roas; both are kept.
+    shopify_roas: float | None = None
+    #: revenue / order_spend -- the only one of these ratios whose
+    #: numerator and denominator share a key.
+    page_roas: float | None = None
+    #: Rates over SESSIONS, so they answer "of the people who LANDED
+    #: here, how many...". None rather than 0 when the page had no
+    #: sessions: a page nobody visited has no bounce rate, and 0% would
+    #: read as a perfect one.
+    #:
+    #: There is deliberately NO conversion rate and no revenue per
+    #: session. `sessions` counts visits that LANDED on this page;
+    #: `orders` counts orders PLACED on it, keyed on the order's own
+    #: full_url. Measured 2026-11-27 those are different pages for 94%
+    #: of ad-driven orders (714 of 756) -- buyers land on a collection
+    #: and order from a product. Dividing one by the other invents a
+    #: rate from two different populations: it understates collections
+    #: and produced a 54.76% "CVR" on a product page with 84 sessions.
+    #:
+    #: Shopify's own sessions_that_completed_checkout would be the
+    #: same-population answer, but GoKwik owns this store's checkout, so
+    #: Shopify books 5 completions against 11,146 sessions on the
+    #: biggest collection. GA4 sees the real figure and lands daily --
+    #: see the note on hourly freshness.
+    bounce_rate: float | None = None
+    atc_rate: float | None = None
+    checkout_rate: float | None = None
+
+
+class LandingHourRow(BaseModel):
+    hour_of_day: int
+    sessions: int = 0
+    bounces: int = 0
+    cart_additions: int = 0
+    orders: int = 0
+    revenue: float = 0.0
+    new_customer_sales: float = 0.0
+    repeat_customer_sales: float = 0.0
+    meta_spend: float = 0.0
+    meta_conv_value: float = 0.0
+    ncp: float = 0.0
+
+
+class LandingCoverage(BaseModel):
+    #: The store's own orders and revenue for these hours, from
+    #: hourly_campaign_tracker -- refreshed hourly, so current.
+    #: Shopify's own figures for the window: gross is before discounts
+    #: and returns, total is the headline Shopify admin shows. Zero when
+    #: the store writer has not run for these days.
+    store_gross_sales: float = 0.0
+    store_total_sales: float = 0.0
+    store_orders: int = 0
+    all_orders: int
+    all_revenue: float
+    #: What the page table could place, which is bounded by the daily
+    #: order ingest and will trail `all_*` for any day in progress.
+    placed_orders: int
+    placed_revenue: float
+    order_share: float | None = None
+    revenue_share: float | None = None
+    #: Spend that reached a page row, over all Meta spend in these hours.
+    #: `placed_spend` follows the ad creative's URL; `placed_order_spend`
+    #: follows the ads' own orders and covers far more of the account.
+    placed_spend: float = 0.0
+    placed_order_spend: float = 0.0
+    all_spend: float = 0.0
+    spend_share: float | None = None
+    order_spend_share: float | None = None
+    #: When the hourly writers last pulled orders / sessions for this
+    #: window (UTC). Null when nothing has been written at all.
+    data_through: datetime | None = None
+    #: True when that pull is too old to trust for a day in progress --
+    #: the hours since it will read zero because nothing fetched them,
+    #: not because nothing happened.
+    stale: bool = False
+
+
+class LandingSourceRow(LandingHourlyPageRow):
+    """One traffic source over the window -- same measures as a page.
+
+    Inherits the page row rather than repeating seventeen fields, so a
+    column added to one is never missing from the other.
+    """
+    source: str = "direct"
+    landing_page_path: str = ""
+
+
+class LandingHourlyResponse(BaseModel):
+    pages: list[LandingHourlyPageRow]
+    #: The same window split by traffic source instead of by page.
+    sources: list[LandingSourceRow] = []
+    hours: list[LandingHourRow]
+    totals: LandingHourlyPageRow | None
+    coverage: LandingCoverage | None
+    from_day: date
+    to_day: date
+    #: Set when the table has never been written for this window, so the
+    #: UI can say "not collected yet" instead of showing convincing zeros.
+    empty: bool = False
+    refreshed_at: datetime | None = None
+
+
+def _rate_fields(out) -> None:
+    """Fill the session-based rates in place.
+
+    Shared by pages, sources and the window total so a page's bounce
+    rate and Meta's bounce rate can never be computed two different
+    ways. Rates are recomputed from the summed counts, never averaged
+    down a column: averaging would weight a page with 3 sessions the
+    same as one with 30,000.
+    """
+    sess = out.sessions
+    if sess > 0:
+        out.bounce_rate = out.bounces / sess
+        out.atc_rate = out.cart_additions / sess
+        out.checkout_rate = out.reached_checkout / sess
+
+
+def _with_rates(row: dict) -> LandingHourlyPageRow:
+    """Every ratio recomputed from the summed counts, never averaged.
+
+    Averaging a rate down a column weights a page with 3 sessions the
+    same as one with 30,000 and is the classic way a table of
+    percentages stops adding up.
+    """
+    spend = float(row.get("meta_spend") or 0)
+    out = LandingHourlyPageRow(**{k: (v or 0) for k, v in row.items()
+                                  if k in LandingHourlyPageRow.model_fields})
+    if spend > 0:
+        out.meta_roas = float(row.get("meta_conv_value") or 0) / spend
+        out.shopify_roas = float(row.get("revenue") or 0) / spend
+    # The like-for-like one: revenue and order_spend share the order's
+    # own URL as their key, so this ratio compares one population.
+    order_spend = float(row.get("order_spend") or 0)
+    if order_spend > 0:
+        out.page_roas = float(row.get("revenue") or 0) / order_spend
+    _rate_fields(out)
+    return out
+
+
+@router.get("/landing-hourly", response_model=LandingHourlyResponse)
+@cached_analytics(ttl=120.0)
+async def get_landing_hourly(
+    session: SessionDep,
+    day: date | None = Query(default=None,
+                             description="IST day, or the LAST day of the window. "
+                                         "Default: today."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the window. Default: `day`."),
+    path: str | None = Query(default=None,
+                             description="Restrict the hourly series to one landing page. "
+                                         "The page table always covers every page."),
+    source: str | None = Query(default=None,
+                               description="Restrict everything to one traffic source "
+                                           "(meta, google, direct, kwikchat...). The "
+                                           "`sources` rollup always covers all of them."),
+    limit: int = Query(default=100, ge=1, le=500,
+                       description="How many pages to return, biggest revenue first."),
+) -> LandingHourlyResponse:
+    """Revenue, orders and Meta cost per landing page, by the hour.
+
+    Two shapes in one answer: `pages` is the window totalled per landing
+    page, `hours` is the window folded onto 24 hour-of-day rows. A
+    dashboard needs both and they come from one table, so one round trip
+    serves them rather than two.
+    """
+    ist = timezone(timedelta(hours=5, minutes=30))
+    target = day or datetime.now(ist).date()
+    lo_day = from_day or target
+    if lo_day > target:
+        lo_day = target
+    lo = datetime.combine(lo_day, datetime.min.time(), ist)
+    hi = datetime.combine(target + timedelta(days=1), datetime.min.time(), ist)
+
+    # Sequential, not gathered: one AsyncSession cannot run two
+    # statements at once -- see the note on get_dashboard_all.
+    pages = (await session.execute(text(_LANDING_HOURLY_PAGES_SQL),
+                                   {"lo": lo, "hi": hi, "limit": limit,
+                                    "source": source})).mappings().all()
+    hours = (await session.execute(text(_LANDING_HOURLY_HOURS_SQL),
+                                   {"lo": lo, "hi": hi, "path": path,
+                                    "source": source})).mappings().all()
+    cov = (await session.execute(text(_LANDING_COVERAGE_SQL),
+                                 {"lo": lo, "hi": hi})).mappings().first()
+    fresh = (await session.execute(text(_LANDING_FRESHNESS_SQL),
+                                   {"lo": lo, "hi": hi})).mappings().first()
+    stamp = (await session.execute(text(
+        "SELECT MAX(GREATEST(COALESCE(orders_refreshed_at, meta_refreshed_at), "
+        "                    COALESCE(meta_refreshed_at, orders_refreshed_at))) AS at "
+        "  FROM public.hourly_landing_tracker WHERE hour >= :lo AND hour < :hi"),
+        {"lo": lo, "hi": hi})).scalar()
+
+    spend_all = float((await session.execute(
+        text(_LANDING_SPEND_ALL_SQL), {"lo": lo, "hi": hi})).scalar() or 0)
+    st = (await session.execute(text(_LANDING_STORE_SQL),
+                                {"lo_day": lo_day, "hi_day": target})).mappings().first()
+    # The window's own totals, NOT the sum of the returned pages: with a
+    # limit in play those are the top N.
+    grand = (await session.execute(text(_LANDING_HOURLY_TOTAL_SQL),
+                                   {"lo": lo, "hi": hi,
+                                    "source": source})).mappings().first()
+    src_rows = (await session.execute(text(_LANDING_HOURLY_SOURCES_SQL),
+                                      {"lo": lo, "hi": hi, "path": path})).mappings().all()
+
+    page_rows = [_with_rates(dict(r)) for r in pages]
+
+    def _source_row(r: dict) -> LandingSourceRow:
+        row = LandingSourceRow(**{k: (v or 0) for k, v in r.items()
+                                  if k in LandingSourceRow.model_fields})
+        row.source = r.get("source") or "direct"
+        spend = float(r.get("meta_spend") or 0)
+        if spend > 0:
+            row.meta_roas = float(r.get("meta_conv_value") or 0) / spend
+            row.shopify_roas = float(r.get("revenue") or 0) / spend
+        _rate_fields(row)
+        return row
+
+    source_rows = [_source_row(dict(r)) for r in src_rows]
+    total = {k: (v or 0) for k, v in dict(grand or {}).items()}
+    total["landing_page_path"] = "ALL PAGES"
+    placed_spend = float(total.get("meta_spend") or 0)
+    placed_order_spend = float(total.get("order_spend") or 0)
+
+    all_orders = int(cov["all_orders"] or 0) if cov else 0
+    all_revenue = float(cov["all_revenue"] or 0) if cov else 0.0
+    placed_orders = int(total.get("orders") or 0)
+    placed_revenue = float(total.get("revenue") or 0)
+
+    # Orders now come from Shopify directly, so this window can hold
+    # MORE of them than hourly_campaign_tracker, which was written on
+    # its own hourly cadence and may be up to an hour behind. The two
+    # are a freshness cross-check, not a numerator over a denominator,
+    # and a share above 1 means this table is ahead rather than wrong.
+    orders_at = (fresh or {}).get("orders_at")
+    now_utc = datetime.now(timezone.utc)
+    stale = bool(orders_at and (now_utc - orders_at) > timedelta(minutes=95)
+                 and hi > now_utc)
+
+    coverage = LandingCoverage(
+        store_gross_sales=float((st or {}).get("store_gross") or 0),
+        store_total_sales=float((st or {}).get("store_total") or 0),
+        store_orders=int((st or {}).get("store_orders") or 0),
+        all_orders=all_orders, all_revenue=all_revenue,
+        placed_orders=placed_orders, placed_revenue=placed_revenue,
+        order_share=(placed_orders / all_orders) if all_orders else None,
+        revenue_share=(placed_revenue / all_revenue) if all_revenue else None,
+        placed_spend=placed_spend, placed_order_spend=placed_order_spend,
+        all_spend=spend_all,
+        spend_share=(placed_spend / spend_all) if spend_all else None,
+        order_spend_share=((placed_order_spend / spend_all) if spend_all else None),
+        data_through=orders_at, stale=stale)
+
+    return LandingHourlyResponse(
+        pages=page_rows,
+        sources=source_rows,
+        hours=[LandingHourRow(**{k: (v or 0) for k, v in dict(r).items()
+                                 if k in LandingHourRow.model_fields}) for r in hours],
+        totals=_with_rates(total) if page_rows else None,
+        coverage=coverage,
+        from_day=lo_day, to_day=target,
+        empty=not page_rows,
+        refreshed_at=stamp,
+    )
 
 
 @router.get("/hourly-tracker", response_model=HourlyTrackerResponse)

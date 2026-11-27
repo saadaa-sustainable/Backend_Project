@@ -901,7 +901,7 @@ function CpisView() {
                     title="Creative-testing cadence rule: 1 new creative per week per 1L of weekly ad spend. So a SKU burning 5L / week needs 5 fresh tests. Derived from windowed name-matched spend normalised to a 7-day rate. Compare against the two Untested columns to the left to see if the backlog covers next week's requirement.">
                   Req.<br />Creatives/wk
                 </th>
-                <th className="px-3 py-3 text-right" title="Active-ad spend in the picked window, divided by window length in days. Average daily burn on ads still running.">Spend/Day</th>
+                <th className="px-3 py-3 text-right" title="Current daily burn: spend on ads named for this product over the last 7 days with data, divided by 7. Paused ads count for the days they ran. Ads with no product code in their name are not included.">Spend/Day</th>
                 <th className="px-3 py-3 text-right" title="Daily spend sparkline for the picked window + % change vs. the previous same-length period. Green ≥ +5%, amber ±5%, red ≤ -5%.">Spend Trend</th>
                 {/* Named-ad spend only. In utm_id mode this cell used to
                     render `ad_spend` -- the very same number as LC Ad

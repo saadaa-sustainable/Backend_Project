@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Landing Pages</title>
+<!--
+  The hourly landing-page tracker, standalone.
+
+  ONE file, no build, no framework -- the same bargain index.html makes
+  beside it. The admin app's analytics section answers the same question
+  but has to boot Next, hydrate a dozen lazy tabs and wait on the slowest
+  of them; this is a single GET and a table, so it is on screen before
+  that finishes compiling.
+
+  It reads /admin/analytics/landing-hourly, the endpoint the admin tab
+  reads, so the two can never disagree about a number.
+
+  The API base is NOT baked in: ?api=... , remembered in the same
+  localStorage key index.html uses, so configuring one configures both.
+
+  COLOR. Revenue green and spend blue, in steps validated with the
+  dataviz palette checker for each theme against that theme's surface
+  (light #0f8a4d/#1f5fd0 on #ffffff; dark #2fa862/#5f93e0 on #161a20 --
+  the dark band is L 0.48-0.67, which is why these are not the brighter
+  pair the eye reaches for first). They never share a chart: revenue and
+  spend are different scales, and one axis is the rule, so they sit in
+  two charts side by side rather than one with two y-axes.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --surface: #ffffff; --muted: #f6f7f9;
+    --border: #e3e6ea; --border-soft: #eef0f3;
+    --text: #15181c; --text-2: #5b6470; --text-3: #8b94a1;
+    --good: #0f7b3f; --bad: #b4341f;
+    --rev: #0f8a4d; --cost: #1f5fd0;
+    --grid: #eef0f3;
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --bg: #0f1115; --surface: #161a20; --muted: #1b2027;
+      --border: #272d36; --border-soft: #1f252d;
+      --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
+      --good: #4ade80; --bad: #f87171;
+      --rev: #2fa862; --cost: #5f93e0;
+      --grid: #1f252d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --surface: #161a20; --muted: #1b2027;
+    --border: #272d36; --border-soft: #1f252d;
+    --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
+    --good: #4ade80; --bad: #f87171;
+    --rev: #2fa862; --cost: #5f93e0;
+    --grid: #1f252d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1600px; margin: 0 auto; padding: 20px 16px 64px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; }
+  h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--text-3); font-size: 12px; }
+  .spacer { flex: 1 1 auto; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+          color: var(--text-2); border: 1px solid var(--border); border-radius: 999px;
+          padding: 3px 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .dot.stale { background: var(--bad); }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 14px; }
+  label.f[hidden] { display: none; }
+  label.f { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2);
+            border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--surface); }
+  select, input[type=search], input[type=url] {
+    background: transparent; border: 0; color: var(--text); font: inherit; font-size: 13px; outline: none;
+  }
+  input[type=search] { min-width: 190px; }
+  input[type=url] { min-width: 260px; }
+  button { font: inherit; font-size: 13px; cursor: pointer; background: var(--surface);
+           color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; }
+  button:hover { background: var(--muted); }
+  button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .note { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+  /* A day whose orders stop early is not a quiet day, and the ordinary
+     coverage line is too quiet to say so. Carries the word "Partial"
+     as well as the colour: status is never colour alone. */
+  .warn { border-color: color-mix(in oklab, var(--bad) 45%, var(--border));
+          background: color-mix(in oklab, var(--bad) 8%, transparent); }
+  .warn .tag { display: inline-block; font-size: 10.5px; font-weight: 700;
+               letter-spacing: .05em; text-transform: uppercase; color: var(--bad);
+               border: 1px solid color-mix(in oklab, var(--bad) 45%, var(--border));
+               border-radius: 5px; padding: 1px 6px; margin-right: 8px; }
+  .note b { color: var(--text); font-weight: 600; }
+
+  /* KPI row. Numbers, not charts: a single figure with no shape to it
+     is a stat tile, and drawing one bar for it would be decoration. */
+  .heroes { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0,1fr)); margin: 14px 0; }
+  @media (min-width: 700px)  { .heroes { grid-template-columns: repeat(4, minmax(0,1fr)); } }
+  @media (min-width: 1200px) { .heroes { grid-template-columns: repeat(8, minmax(0,1fr)); } }
+  .hero { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 13px; }
+  .h-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
+  .h-value { font-size: 19px; font-weight: 640; letter-spacing: -0.015em; margin-top: 5px;
+             font-variant-numeric: tabular-nums; }
+  .h-sub { font-size: 11px; color: var(--text-3); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+  .charts { display: grid; gap: 12px; grid-template-columns: 1fr; margin-bottom: 14px; }
+  @media (min-width: 1000px) { .charts { grid-template-columns: 1fr 1fr; } }
+  .c-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .c-title { font-size: 13px; font-weight: 600; }
+  .c-note { font-size: 11px; color: var(--text-3); }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .axis-text { fill: var(--text-3); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+  .bar-label { fill: var(--text-2); font-size: 9.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hit { fill: transparent; cursor: default; }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { padding: 7px 10px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+  th { position: sticky; top: 0; z-index: 2; background: var(--surface); text-align: right;
+       font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-3);
+       font-weight: 600; cursor: pointer; user-select: none; }
+  th:first-child, td:first-child { text-align: left; position: sticky; left: 0; z-index: 1; background: var(--surface); }
+  th:first-child { z-index: 3; }
+  th:hover { color: var(--text); }
+  th .arrow { opacity: .55; font-size: 9px; }
+  /* The band row names the basis; a hairline in the body carries it
+     down the table so a wide row still shows where one ends. */
+  tr.bandrow th { font-size: 9.5px; letter-spacing: .08em; cursor: default;
+                  padding-bottom: 2px; color: var(--text-3); text-align: left;
+                  border-bottom: 0; }
+  tr.bandrow th.band-traffic { color: var(--text-2); }
+  tr.bandrow th.band-orders  { color: var(--rev); }
+  tr.bandrow th.band-ads     { color: var(--cost); }
+  .bandstart { border-left: 1px solid var(--border); }
+  td { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:hover td { background: var(--muted); }
+  tr.total td { font-weight: 650; background: var(--muted); border-bottom: 1px solid var(--border); }
+  tr.total td:first-child { background: var(--muted); }
+  /* The page cell carries its own share-of-revenue bar: the reader is
+     scanning for "which pages matter", and a number alone makes that a
+     reading task instead of a looking one. Sequential, one hue, behind
+     the text rather than beside it so no column is spent on it. */
+  .pagecell { position: relative; max-width: 330px; overflow: hidden; text-overflow: ellipsis; }
+  /* A share cell: a thin track with the bar inside and the number
+     beside it, so the eye ranks on the bar and reads the exact value
+     without a tooltip. */
+  .sharebar { display: inline-block; width: 68px; height: 7px; border-radius: 4px;
+              background: var(--border-soft); overflow: hidden; vertical-align: middle; }
+  .sharebar > span { display: block; height: 100%; border-radius: 4px; }
+  .sharenum { display: inline-block; min-width: 34px; margin-left: 7px;
+              color: var(--text-2); font-variant-numeric: tabular-nums; }
+  tr.othrow td { color: var(--text-2); font-style: italic; }
+  .pagebar { position: absolute; left: 0; top: 3px; bottom: 3px; border-radius: 3px;
+             background: color-mix(in oklab, var(--rev) 17%, transparent); z-index: 0; }
+  .pagetext { position: relative; z-index: 1; }
+
+  #tip { position: fixed; z-index: 40; pointer-events: none; opacity: 0; transition: opacity .09s;
+         background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+         padding: 7px 10px; font-size: 11.5px; line-height: 1.5; box-shadow: 0 6px 22px rgba(0,0,0,.18);
+         font-variant-numeric: tabular-nums; max-width: 260px; }
+  #tip b { font-weight: 650; }
+  #tip .k { color: var(--text-3); }
+
+  .msg { padding: 28px 10px; text-align: center; color: var(--text-3); font-size: 13px; }
+  .err { color: var(--bad); }
+  .embed header h1, .embed #cfgbtn, .embed #themebtn { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Landing Pages</h1>
+    <span class="pill"><span class="dot" id="livedot"></span><span id="livetext">loading</span></span>
+    <span class="sub" id="span"></span>
+    <span class="spacer"></span>
+    <button id="cfgbtn" title="Backend URL">API</button>
+    <button id="themebtn" title="Light / dark">Theme</button>
+  </header>
+
+  <div class="controls">
+    <label class="f">Window
+      <select id="window">
+        <option value="0">Today</option>
+        <option value="1" selected>2 days</option>
+        <option value="6">7 days</option>
+        <option value="29">30 days</option>
+      </select>
+    </label>
+    <label class="f">Source
+      <select id="source"><option value="">All sources</option></select>
+    </label>
+    <label class="f">Page contains
+      <input type="search" id="search" placeholder="/collections/short-kurtas" autocomplete="off">
+    </label>
+    <label class="f" id="cfg" hidden>API
+      <input type="url" id="api" placeholder="https://...">
+    </label>
+    <button id="reload">Reload</button>
+    <button id="csv">Export CSV</button>
+    <span class="sub" id="stamp"></span>
+  </div>
+
+  <div class="card note warn" id="apiwarn" hidden style="margin-bottom:10px"></div>
+  <div class="card note warn" id="partial" hidden style="margin-bottom:10px"></div>
+  <div class="card note" id="coverage" hidden></div>
+
+  <div class="heroes" id="heroes"></div>
+
+  <div class="charts">
+    <div class="card">
+      <div class="c-head">
+        <span class="c-title">Shopify sales by hour</span>
+        <span class="c-note" id="rev-note">IST &middot; summed over the window</span>
+      </div>
+      <div id="chart-rev"></div>
+    </div>
+    <div class="card">
+      <div class="c-head">
+        <span class="c-title">Meta spend by hour</span>
+        <span class="c-note">its own scale, never shared with revenue</span>
+      </div>
+      <div id="chart-spend"></div>
+    </div>
+  </div>
+
+  <div class="card" id="srcwrap" hidden style="padding:0;margin-bottom:12px">
+    <div class="c-head" style="padding:12px 14px 0">
+      <span class="c-title">By source</span>
+      <span class="sub" style="margin-left:8px">utm_source &middot; click a row to filter</span>
+      <span class="c-note" id="srcnote"></span>
+    </div>
+    <div class="tablewrap">
+      <table id="srctable">
+        <thead id="srchead"></thead>
+        <tbody id="srcbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="padding:0">
+    <div class="tablewrap">
+      <table id="table">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="msg" id="msg">Loading…</div>
+  </div>
+
+</div>
+<div id="tip"></div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ *
+ * config                                                             *
+ * ------------------------------------------------------------------ */
+const qs = new URLSearchParams(location.search);
+// Inside the Hourly Tracker the host page already has the title, the
+// backend field and the theme toggle.
+if (qs.get("embed")) document.documentElement.classList.add("embed");
+function apiBase() {
+  const fromUrl = qs.get("api");
+  if (fromUrl) { try { localStorage.setItem("tracker_api", fromUrl); } catch {} return fromUrl.replace(/\/+$/, ""); }
+  try { const v = localStorage.getItem("tracker_api"); if (v) return v.replace(/\/+$/, ""); } catch {}
+  // Same fallback as index.html: on localhost the dev API, anywhere
+  // else this site's own backend. Returning "" here is what once made a
+  // fresh browser render "no backend configured" and look like an outage.
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  return local ? "http://localhost:8002" : "https://backend-project-mlk9.onrender.com";
+}
+
+const IST_MIN = 330;
+function istToday() {
+  // getTime() is already an instant, so the browser's own offset must
+  // not be added again -- doing so pins an IST browser to yesterday
+  // between midnight and 05:30.
+  return new Date(Date.now() + IST_MIN * 60000).toISOString().slice(0, 10);
+}
+function daysAgo(iso, n) {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+const $ = id => document.getElementById(id);
+const inr0 = n => (n === null || n === undefined) ? "—"
+  : "₹" + Math.round(n).toLocaleString("en-IN");
+const num = n => (n === null || n === undefined) ? "—" : Math.round(n).toLocaleString("en-IN");
+const xx  = n => (n === null || n === undefined) ? "—" : n.toFixed(2) + "×";
+// The house floor below which a ROAS quotient is noise rather than
+// performance -- _ROAS_MIN_SPEND in app/api/routers/analytics.py. One
+// page here showed a three-digit ROAS off a trivial spend, which is a rounding
+// artefact wearing the costume of a winner.
+const ROAS_MIN_SPEND = 1000;
+const roas = (v, spend) => (spend || 0) < ROAS_MIN_SPEND ? "—" : xx(v);
+const pc  = n => (n === null || n === undefined) ? "—" : Math.round(n * 100) + "%";
+const pc1 = n => (n === null || n === undefined) ? "—" : (n * 100).toFixed(1) + "%";
+const pc2 = n => (n === null || n === undefined) ? "—" : (n * 100).toFixed(2) + "%";
+/** Compact money for an axis: a bar chart labelled ₹1,21,740 is a wall
+ *  of digits, and the axis only has to say the order of magnitude. */
+function inrK(n) {
+  if (!n) return "0";
+  if (n >= 1e7) return "₹" + (n / 1e7).toFixed(n >= 1e8 ? 0 : 1) + "Cr";
+  if (n >= 1e5) return "₹" + (n / 1e5).toFixed(n >= 1e6 ? 0 : 1) + "L";
+  if (n >= 1e3) return "₹" + Math.round(n / 1e3) + "k";
+  return "₹" + Math.round(n);
+}
+const ist = v => {
+  if (!v) return "";
+  const d = new Date(v);
+  if (isNaN(d)) return String(v).replace("T", " ").slice(0, 16);
+  return d.toLocaleString("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit",
+    month: "short", hour: "2-digit", minute: "2-digit", hour12: false }).replace(",", "");
+};
+/** A landing path is a URL GA4 recorded, so it is text from outside.
+ *  Nothing from the API reaches innerHTML without passing through here. */
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+/* ------------------------------------------------------------------ *
+ * columns                                                            *
+ * ------------------------------------------------------------------ */
+// Order follows the question: what the page earned, who from, what it
+// cost, then the platform's own version of the same.
+// Three bases, and the table says so in its own header rather than
+// leaving it to the note above.
+//
+//   TRAFFIC   what LANDED on the page        (ShopifyQL sessions)
+//   ORDERS    what was PLACED on the page    (the order's own URL)
+//   META ADS  what was AIMED at the page     (the ad creative's URL)
+//
+// They are three different populations measured on one key. Keeping
+// them in named bands is what stops a reader sliding from "10,794
+// sessions" to "71 orders" and calling the difference a funnel.
+const GROUPS = [
+  { g: "traffic", label: "Traffic — landed here" },
+  { g: "orders",  label: "Orders — placed here" },
+  { g: "ads",     label: "Meta ads — aimed here" },
+];
+
+const COLS = [
+  // Sessions and visitors are NOT the same number: one person who comes
+  // back after lunch is two sessions and one visitor. Both are shown
+  // because the gap between them is repeat interest.
+  { g: "traffic", k: "sessions",               label: "Sessions",         f: num  },
+  { g: "traffic", k: "visitors",               label: "Visitors",         f: num  },
+  { g: "traffic", k: "bounce_rate",            label: "Bounce %",         f: pc1  },
+  { g: "traffic", k: "atc_rate",               label: "ATC %",            f: pc1  },
+  { g: "traffic", k: "checkout_rate",          label: "Checkout %",       f: pc1  },
+  { g: "orders",  k: "revenue",                label: "Shopify sales",    f: inr0 },
+  { g: "orders",  k: "orders",                 label: "Orders",           f: num  },
+  { g: "orders",  k: "new_customer_sales",     label: "New cust. sales",  f: inr0 },
+  { g: "orders",  k: "repeat_customer_sales",  label: "Repeat sales",     f: inr0 },
+  { g: "orders",  k: "new_customer_orders",    label: "New orders",       f: num  },
+  { g: "orders",  k: "repeat_customer_orders", label: "Repeat orders",    f: num  },
+  { g: "ads",     k: "meta_spend",             label: "Meta spend",       f: inr0 },
+  { g: "ads",     k: "ncp",                    label: "NCP",              f: num  },
+  { g: "ads",     k: "meta_purchases",         label: "Conversions",      f: num  },
+  { g: "ads",     k: "meta_conv_value",        label: "Meta sales",       f: inr0 },
+  { g: "ads",     k: "meta_roas",              label: "Meta ROAS",        f: (v, r) => roas(v, r.meta_spend) },
+  { g: "ads",     k: "shopify_roas",           label: "Shopify ROAS",     f: (v, r) => roas(v, r.meta_spend) },
+  { g: "ads",     k: "meta_impressions",       label: "Impressions",      f: num  },
+];
+
+// A band's first column carries the divider, so the bands stay legible
+// once the table is wider than the screen and the header has scrolled.
+const isBandStart = i => i > 0 && COLS[i].g !== COLS[i - 1].g;
+
+const COL_HELP = {
+  sessions: "Visits that landed on this page. One person returning later counts twice.",
+  visitors: "Distinct people who landed here. Always <= sessions.",
+  bounce_rate: "Of sessions that landed here, the share that left without a second page.",
+  atc_rate: "Of sessions that landed here, the share that added something to a cart.",
+  checkout_rate: "Of sessions that landed here, the share that reached checkout.",
+  revenue: "Value of orders PLACED on this page -- not of orders by people who landed here.",
+  orders: "Orders placed on this page, keyed on the order's own URL.",
+  meta_spend: "Spend on ads whose creative POINTS at this page.",
+  meta_conv_value: "Conversion value Meta reports for those ads.",
+  meta_roas: "Meta's own sales over Meta's own spend, for ads aimed here.",
+  shopify_roas: "Store sales booked ON this page over spend AIMED at it -- two bases, read with care.",
+  ncp: "New customer purchases, Meta's custom conversion.",
+};
+
+let DATA = null;
+let sortKey = "revenue";
+let sortDir = -1;
+
+/* ------------------------------------------------------------------ *
+ * load                                                               *
+ * ------------------------------------------------------------------ */
+async function load() {
+  const base = apiBase();
+  const today = istToday();
+  const from = daysAgo(today, Number($("window").value));
+  $("span").textContent = from + " → " + today + " (IST)";
+  $("msg").hidden = false;
+  $("msg").className = "msg";
+  $("msg").textContent = "Loading…";
+
+  const url = base + "/admin/analytics/landing-hourly"
+    + "?day=" + encodeURIComponent(today)
+    + "&from_day=" + encodeURIComponent(from)
+    + "&limit=300"
+    + ($("source").value ? "&source=" + encodeURIComponent($("source").value) : "");
+  try {
+    const res = await fetch(url, { headers: { "Content-Type": "application/json" } });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    DATA = await res.json();
+  } catch (e) {
+    DATA = null;
+    $("msg").className = "msg err";
+    $("msg").textContent = "Could not reach " + base + " — " + e.message
+      + ". Set the backend with the API button.";
+    $("livedot").className = "dot stale";
+    $("livetext").textContent = "offline";
+    render();
+    return;
+  }
+  $("livedot").className = "dot";
+  $("livetext").textContent = DATA.empty ? "no data" : "live";
+  $("stamp").textContent = DATA.refreshed_at ? "refreshed " + ist(DATA.refreshed_at) : "";
+  render();
+}
+
+/* ------------------------------------------------------------------ *
+ * render                                                             *
+ * ------------------------------------------------------------------ */
+function visiblePages() {
+  if (!DATA) return [];
+  const q = $("search").value.trim().toLowerCase();
+  const rows = q ? DATA.pages.filter(p => p.landing_page_path.toLowerCase().includes(q)) : DATA.pages;
+  return rows.slice().sort((a, b) => {
+    const x = a[sortKey], y = b[sortKey];
+    // Nulls last whichever way the column is pointing: a page with no
+    // spend has no ROAS, and floating those to the top of a descending
+    // sort would bury every page that does.
+    if (x === null || x === undefined) return 1;
+    if (y === null || y === undefined) return -1;
+    if (typeof x === "string") return sortDir * x.localeCompare(y);
+    return sortDir * (x - y);
+  });
+}
+
+function render() {
+  checkApiShape();
+  renderSources();
+  renderCoverage();
+  renderHeroes();
+  renderCharts();
+  renderTable();
+}
+
+// An API built before the traffic columns existed answers without
+// them, and every rate then renders as an em dash while orders and
+// spend look perfectly fine -- the page appears broken rather than
+// mispointed. Say which backend is answering and what it is missing.
+function checkApiShape() {
+  const el = $("apiwarn");
+  const t = DATA && DATA.totals;
+  const missing = t && !("sessions" in t);
+  el.hidden = !missing;
+  if (missing) {
+    el.innerHTML = '<span class="tag">Old API</span>' +
+      "The backend at <b>" + esc(apiBase()) + "</b> is answering from the same " +
+      "database but does not return the traffic columns, so Sessions, Visitors, " +
+      "Bounce, ATC and Checkout are blank. Point the page at a backend built from " +
+      "this branch — add <b>?api=http://127.0.0.1:8019</b> to the URL, or use the " +
+      "API button above.";
+  }
+}
+
+// A source table is a ranking, so it is built as one: share of the
+// window encoded as a bar, a comparative metric that does not favour
+// big channels, and the tail folded away.
+//
+// The flat version listed 19 rows of which 13 had under 50 sessions and
+// nothing but zeros -- rcs, fealtyx, "nca int_ dec22-test2" -- which
+// pushed meta, direct and google off the top of the eye's path.
+const SRC_TAIL_SHARE = 0.01;   // under 1% of both sessions and revenue
+let srcShowAll = false;
+
+const revPerSession = r => (r.sessions > 0 ? r.revenue / r.sessions : null);
+
+/** Fold the negligible sources into one row, keeping every total exact. */
+function foldSources(rows) {
+  const tS = rows.reduce((a, r) => a + (r.sessions || 0), 0) || 1;
+  const tR = rows.reduce((a, r) => a + (r.revenue || 0), 0) || 1;
+  if (srcShowAll) return { shown: rows, folded: null };
+
+  const keep = [], tail = [];
+  for (const r of rows) {
+    const big = (r.sessions || 0) / tS >= SRC_TAIL_SHARE
+             || (r.revenue || 0) / tR >= SRC_TAIL_SHARE
+             || (r.meta_spend || 0) > 0;
+    (big ? keep : tail).push(r);
+  }
+  if (tail.length < 2) return { shown: rows, folded: null };
+
+  // Summed, not dropped: the bars below are shares of the window and
+  // would not add up if the tail simply vanished.
+  const sum = k => tail.reduce((a, r) => a + (r[k] || 0), 0);
+  const other = {
+    source: "Other (" + tail.length + " sources)", _other: true,
+    sessions: sum("sessions"), visitors: sum("visitors"),
+    bounces: sum("bounces"), cart_additions: sum("cart_additions"),
+    orders: sum("orders"), revenue: sum("revenue"),
+    new_customer_sales: sum("new_customer_sales"),
+    repeat_customer_sales: sum("repeat_customer_sales"),
+    meta_spend: sum("meta_spend"),
+  };
+  other.bounce_rate = other.sessions ? other.bounces / other.sessions : null;
+  other.atc_rate = other.sessions ? other.cart_additions / other.sessions : null;
+  return { shown: keep.concat([other]), folded: tail.length };
+}
+
+function renderSources() {
+  const all = (DATA && DATA.sources) || [];
+  $("srcwrap").hidden = all.length === 0;
+  if (!all.length) return;
+
+  // The picker lists every source, including ones folded out of view.
+  const sel = $("source"), want = sel.value;
+  sel.innerHTML = '<option value="">All sources</option>' +
+    all.map(r => '<option value="' + esc(r.source) + '"' +
+                 (r.source === want ? " selected" : "") + ">" +
+                 esc(r.source) + "</option>").join("");
+
+  const { shown, folded } = foldSources(all);
+  const tS = all.reduce((a, r) => a + (r.sessions || 0), 0) || 1;
+  const tR = all.reduce((a, r) => a + (r.revenue || 0), 0) || 1;
+  const lead = all[0];
+
+  $("srcnote").innerHTML = lead
+    ? "<b>" + esc(lead.source) + "</b> carries " +
+      Math.round(100 * (lead.sessions || 0) / tS) + "% of sessions and " +
+      Math.round(100 * (lead.revenue || 0) / tR) + "% of revenue" +
+      (folded ? " &middot; " + folded + " small sources folded into Other" : "")
+    : "";
+
+  $("srchead").innerHTML =
+    "<tr><th>Source</th><th>Sessions</th><th>Share</th><th>Bounce %</th>" +
+    "<th>ATC %</th><th>Orders</th><th>Shopify sales</th><th>Share</th>" +
+    "<th>Rev / session</th><th>Meta spend</th></tr>";
+
+  const bar = (frac, color) =>
+    '<span class="sharebar"><span style="width:' +
+    (100 * frac).toFixed(1) + '%;background:' + color + '"></span></span>' +
+    '<span class="sharenum">' + Math.round(100 * frac) + "%</span>";
+
+  $("srcbody").innerHTML = shown.map(r => {
+    const rps = revPerSession(r);
+    return '<tr class="srcrow' + (r._other ? " othrow" : "") + '" data-src="' +
+      esc(r._other ? "" : r.source) + '">' +
+      "<td>" + esc(r.source) + "</td>" +
+      "<td>" + num(r.sessions) + "</td>" +
+      "<td>" + bar((r.sessions || 0) / tS, "var(--text-3)") + "</td>" +
+      "<td>" + pc1(r.bounce_rate) + "</td>" +
+      "<td>" + pc1(r.atc_rate) + "</td>" +
+      "<td>" + num(r.orders) + "</td>" +
+      "<td>" + inr0(r.revenue) + "</td>" +
+      "<td>" + bar((r.revenue || 0) / tR, "var(--rev)") + "</td>" +
+      "<td>" + (rps === null ? "—" : inr0(rps)) + "</td>" +
+      // Meta spend is Meta-only by construction. A dash says "we do not
+      // measure spend for this channel here"; a zero would claim Google
+      // and email cost nothing, which is a different and false thing.
+      "<td>" + (r.meta_spend > 0 ? inr0(r.meta_spend) : "—") + "</td>" +
+      "</tr>";
+  }).join("");
+
+  for (const tr of document.querySelectorAll(".srcrow")) {
+    tr.style.cursor = "pointer";
+    tr.onclick = () => {
+      if (!tr.dataset.src) { srcShowAll = !srcShowAll; renderSources(); return; }
+      sel.value = sel.value === tr.dataset.src ? "" : tr.dataset.src;
+      load();
+    };
+  }
+}
+
+function renderCoverage() {
+  const c = DATA && DATA.coverage;
+  const el = $("coverage"), warn = $("partial");
+  if (!c || c.order_share === null) { el.hidden = true; warn.hidden = true; return; }
+
+  // The loud one first, because every figure below it is short by
+  // whatever the ingest has not reached yet.
+  warn.hidden = !c.stale;
+  if (c.stale) {
+    warn.innerHTML = '<span class="tag">Stale</span>' +
+      "Orders and sessions were last pulled <b>" + esc(ist(c.data_through)) + " IST</b>, " +
+      "which is over an hour ago — the hourly refresh is not running. Every hour since " +
+      "then reads zero because nothing fetched it, not because nothing sold.";
+  }
+
+  el.hidden = false;
+  el.innerHTML =
+    "<b>Sessions</b> are visits that LANDED on a page; <b>orders</b> are orders PLACED " +
+    "on it, keyed on the order's own URL. Those are different pages for 94% of " +
+    "ad-driven orders — people land on a collection and buy from a product — so the " +
+    "two columns are facts about the same page, not a funnel, and there is " +
+    "deliberately no conversion rate dividing one by the other. Bounce, ATC and " +
+    "Checkout % are all session-based and safe to read as rates. " +
+    "<b>Meta spend</b>: " + pc(c.spend_share) + " of " + inr0(c.all_spend) +
+    " reaches a page — the rest is ads whose creative has no readable landing URL. " +
+    "Cross-check: the hourly campaign tracker has " + num(c.all_orders) + " orders / " +
+    inr0(c.all_revenue) + " for this window on its own cadence.";
+}
+
+function renderHeroes() {
+  const t = DATA && DATA.totals;
+  if (!t) { $("heroes").innerHTML = ""; return; }
+  // The headline is the WHOLE -- the store's takings, the account's
+  // spend -- and the line under it is how much of that whole this table
+  // could place on a landing page. That way the big number is the one
+  // that reconciles with Shopify and Ads Manager, and the attribution
+  // gap is stated instead of silently shrinking the total.
+  //
+  // Falls back to the attributed figure when the cross-check is
+  // missing, rather than printing a dash over real data.
+  const c = (DATA && DATA.coverage) || {};
+  const pctOf = (part, whole) => Math.round(100 * part / whole) + "%";
+  // A share over 100% is not an error to hide: our order revenue is the
+  // order total, taken at the moment of sale, while Shopify's total
+  // sales is net of returns. Over a window with returns in it the first
+  // is legitimately the larger, so say which basis rather than print a
+  // percentage that reads as a bug.
+  const headline = (whole, part, fmt) => {
+    if (!whole) return [fmt(part), "attributed only"];
+    if (part > whole) return [fmt(whole), fmt(part) + " attributed, before returns"];
+    return [fmt(whole), fmt(part) + " attributed (" + pctOf(part, whole) + ")"];
+  };
+
+  // Shopify's own total sales when we have it, our order fetch only as
+  // a fallback: the headline has to be the number that reconciles with
+  // Shopify admin, not a near-miss from a different source.
+  const storeSales = c.store_total_sales || c.all_revenue;
+  const storeOrders = c.store_orders || c.all_orders;
+  const [salesTop, salesSub] = headline(storeSales, t.revenue, inr0);
+  const [ordersTop, ordersSub] = headline(storeOrders, t.orders, num);
+  const [spendTop, spendSub] = headline(c.all_spend, t.meta_spend, inr0);
+
+  const tiles = [
+    ["Sessions",      num(t.sessions), num(t.visitors) + " visitors"],
+    // Total sales only -- Shopify admin's headline, after discounts and
+    // returns. Gross was shown beside it for a while and simply made
+    // the tile ambiguous about which of the two the big number was.
+    ["Total sales", salesTop, salesSub],
+    ["Shopify orders", ordersTop, ordersSub],
+    ["Meta spend",    spendTop, spendSub],
+    ["New customer",  inr0(t.new_customer_sales), num(t.new_customer_orders) + " orders, attributed"],
+    ["Repeat customer", inr0(t.repeat_customer_sales), num(t.repeat_customer_orders) + " orders, attributed"],
+    ["Bounce / ATC",  pc1(t.bounce_rate) + " / " + pc1(t.atc_rate), "of sessions"],
+    ["NCP",           num(t.ncp), t.ncp ? inr0(t.meta_spend / t.ncp) + " each, attributed" : ""],
+    ["Meta ROAS",     roas(t.meta_roas, t.meta_spend), "Meta sales ÷ attributed spend"],
+    // Both sides account-level, so this is the quotient that matches
+    // Ads Manager. Attributed revenue over attributed spend would mix
+    // ~95% of one with ~37% of the other and read 10.07x against 3.96x.
+    ["Store ROAS",
+      (c.all_spend ? (storeSales / c.all_spend).toFixed(2) : "—") + "\u00d7",
+      "store sales ÷ account spend"],
+  ];
+  $("heroes").innerHTML = tiles.map(([l, v, s]) =>
+    '<div class="hero"><div class="h-label">' + esc(l) + '</div>' +
+    '<div class="h-value">' + esc(v) + '</div>' +
+    '<div class="h-sub">' + esc(s) + '</div></div>').join("");
+}
+
+/* --- the hour charts ------------------------------------------------
+ *
+ * Two charts, one measure each, because revenue and spend are different
+ * scales and a second y-axis is the one chart mistake never worth
+ * making. Each is a single series, so there is nothing for a legend to
+ * disambiguate and the title names it.
+ *
+ * Bars, not a line: an hour is a bucket, and a line between buckets
+ * claims a value at 13:30 that was never measured.
+ */
+function barChart(hostId, rows, key, colorVar, fmt) {
+  const host = $(hostId);
+  if (!rows || !rows.length) { host.innerHTML = '<div class="msg">No hours in this window.</div>'; return; }
+  const W = 560, H = 170, L = 40, R = 8, T = 14, B = 20;
+  const iw = W - L - R, ih = H - T - B;
+  const max = Math.max(...rows.map(r => r[key] || 0), 1);
+  const slot = iw / 24;
+  const bw = Math.max(3, slot - 2);          // a 2px gap between bars
+  const peak = rows.reduce((a, b) => ((b[key] || 0) > (a[key] || 0) ? b : a), rows[0]);
+
+  // Four recessive gridlines; the axis says the magnitude, the bars say
+  // the shape, and the exact figure is a hover away.
+  let g = "";
+  for (let i = 0; i <= 3; i++) {
+    const v = max * i / 3, y = T + ih - (v / max) * ih;
+    g += '<line class="grid-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'
+       + '<text class="axis-text" x="' + (L - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
+  }
+
+  let bars = "";
+  rows.forEach(r => {
+    const v = r[key] || 0;
+    const h = (v / max) * ih;
+    const x = L + r.hour_of_day * slot + (slot - bw) / 2;
+    const y = T + ih - h;
+    // 4px rounded data-end, square against the baseline: the rounding
+    // marks where the value ENDS, so rounding the foot too would round
+    // the axis.
+    const rad = Math.min(4, bw / 2, h);
+    bars += h <= 0.5 ? "" :
+      '<path d="M' + x.toFixed(1) + ' ' + (T + ih).toFixed(1) +
+      ' V' + (y + rad).toFixed(1) +
+      ' a' + rad + ' ' + rad + ' 0 0 1 ' + rad + ' -' + rad +
+      ' h' + (bw - 2 * rad).toFixed(1) +
+      ' a' + rad + ' ' + rad + ' 0 0 1 ' + rad + ' ' + rad +
+      ' V' + (T + ih).toFixed(1) + ' Z" fill="var(' + colorVar + ')"/>';
+    // One direct label, on the peak only. A number over every bar is
+    // the table again, printed smaller.
+    if (r === peak && v > 0) {
+      bars += '<text class="bar-label" x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 4).toFixed(1) +
+              '" text-anchor="middle">' + esc(fmt(v)) + '</text>';
+    }
+    // The hit area is the whole column, not the bar: a 3px-tall 04:00
+    // is otherwise unhoverable.
+    bars += '<rect class="hit" x="' + (L + r.hour_of_day * slot).toFixed(1) + '" y="' + T +
+            '" width="' + slot.toFixed(1) + '" height="' + ih + '"' +
+            ' data-h="' + r.hour_of_day + '" data-k="' + esc(key) + '"/>';
+  });
+
+  let ax = "";
+  for (let h = 0; h < 24; h += 3) {
+    ax += '<text class="axis-text" x="' + (L + h * slot + slot / 2).toFixed(1) + '" y="' + (H - 6) +
+          '" text-anchor="middle">' + String(h).padStart(2, "0") + '</text>';
+  }
+
+  host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' +
+    esc(key.replace(/_/g, " ")) + ' by hour of day">' + g + bars + ax + '</svg>';
+}
+
+function renderCharts() {
+  const hours = (DATA && DATA.hours) || [];
+  const c = DATA && DATA.coverage;
+  $("rev-note").textContent = (c && c.stale)
+    ? "IST · last pulled " + ist(c.data_through)
+    : "IST · summed over the window";
+  barChart("chart-rev",   hours, "revenue",    "--rev",  inrK);
+  barChart("chart-spend", hours, "meta_spend", "--cost", inrK);
+}
+
+function renderTable() {
+  const rows = visiblePages();
+  const band = GROUPS.map(g => {
+    const n = COLS.filter(c => c.g === g.g).length;
+    return n ? '<th class="band band-' + g.g + '" colspan="' + n + '">' +
+               esc(g.label) + "</th>" : "";
+  }).join("");
+  $("thead").innerHTML =
+    '<tr class="bandrow"><th class="band"></th>' + band + "</tr>" +
+    "<tr>" +
+    '<th data-k="landing_page_path">Landing page' + arrow("landing_page_path") + "</th>" +
+    COLS.map((c, i) => '<th class="' + (isBandStart(i) ? "bandstart " : "") +
+                  'col-' + c.g + '" data-k="' + c.k + '" title="' +
+                  esc(COL_HELP[c.k] || "") + '">' + esc(c.label) + arrow(c.k) +
+                  "</th>").join("") +
+    "</tr>";
+
+  const t = DATA && DATA.totals;
+  const q = $("search").value.trim();
+  // The total is the WINDOW's, computed server-side over every page --
+  // so it is hidden while a search narrows the rows, because showing a
+  // whole-window total above a filtered list invites subtraction that
+  // does not work.
+  const totalRow = (t && !q) ? '<tr class="total"><td>All pages</td>' +
+    COLS.map(c => "<td>" + esc(c.f(t[c.k], t)) + "</td>").join("") + "</tr>" : "";
+
+  const max = rows.length ? Math.max(...rows.map(r => r.revenue || 0), 1) : 1;
+  $("tbody").innerHTML = totalRow + rows.map(r => {
+    const share = Math.max(0, Math.min(1, (r.revenue || 0) / max));
+    return '<tr><td class="pagecell" title="' + esc(r.landing_page_path) + '">' +
+      '<span class="pagebar" style="width:' + (share * 100).toFixed(1) + '%"></span>' +
+      '<span class="pagetext">' + esc(r.landing_page_path) + "</span></td>" +
+      COLS.map(c => "<td>" + esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
+  }).join("");
+
+  const m = $("msg");
+  if (!DATA)              { /* the error message is already in place */ }
+  else if (DATA.empty)    { m.hidden = false; m.className = "msg";
+                            m.textContent = "Nothing collected for this window yet. Run scripts/refresh_hourly_landing.py."; }
+  else if (!rows.length)  { m.hidden = false; m.className = "msg"; m.textContent = "No page matches “" + q + "”."; }
+  else                    { m.hidden = true; }
+}
+
+function arrow(k) {
+  return sortKey === k ? ' <span class="arrow">' + (sortDir < 0 ? "▼" : "▲") + "</span>" : "";
+}
+
+/* ------------------------------------------------------------------ *
+ * interaction                                                        *
+ * ------------------------------------------------------------------ */
+const tip = $("tip");
+function showTip(html, x, y) {
+  tip.innerHTML = html;
+  tip.style.opacity = "1";
+  const r = tip.getBoundingClientRect();
+  // Flip rather than overflow: near the right edge the tooltip would
+  // otherwise be cut off by the viewport.
+  tip.style.left = Math.min(x + 14, innerWidth - r.width - 8) + "px";
+  tip.style.top  = Math.max(8, y - r.height - 12) + "px";
+}
+function hideTip() { tip.style.opacity = "0"; }
+
+document.addEventListener("mousemove", e => {
+  const hit = e.target.closest ? e.target.closest("rect.hit") : null;
+  if (!hit || !DATA) { hideTip(); return; }
+  const h = Number(hit.dataset.h);
+  const row = DATA.hours.find(r => r.hour_of_day === h);
+  if (!row) { hideTip(); return; }
+  showTip(
+    "<b>" + String(h).padStart(2, "0") + ":00–" + String(h).padStart(2, "0") + ":59 IST</b><br>" +
+    '<span class="k">Shopify sales</span> ' + esc(inr0(row.revenue)) + "<br>" +
+    '<span class="k">Orders</span> ' + esc(num(row.orders)) + "<br>" +
+    '<span class="k">New / repeat</span> ' + esc(inr0(row.new_customer_sales)) + " / " + esc(inr0(row.repeat_customer_sales)) + "<br>" +
+    '<span class="k">Meta spend</span> ' + esc(inr0(row.meta_spend)) + "<br>" +
+    '<span class="k">Meta sales</span> ' + esc(inr0(row.meta_conv_value)) + "<br>" +
+    '<span class="k">NCP</span> ' + esc(num(row.ncp)),
+    e.clientX, e.clientY);
+});
+
+$("thead").addEventListener("click", e => {
+  const th = e.target.closest("th");
+  if (!th) return;
+  const k = th.dataset.k;
+  // Same column flips direction; a new one starts descending, which is
+  // what "show me the biggest" means for every column here.
+  if (k === sortKey) sortDir = -sortDir;
+  else { sortKey = k; sortDir = k === "landing_page_path" ? 1 : -1; }
+  renderTable();
+});
+
+$("window").addEventListener("change", load);
+$("source").addEventListener("change", load);
+$("reload").addEventListener("click", load);
+$("search").addEventListener("input", renderTable);
+
+$("csv").addEventListener("click", () => {
+  const rows = visiblePages();
+  if (!rows.length) return;
+  const head = ["Landing page"].concat(COLS.map(c => c.label));
+  const body = rows.map(r => [r.landing_page_path].concat(COLS.map(c => r[c.k] ?? "")));
+  const cell = v => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v);
+  const csv = [head, ...body].map(r => r.map(cell).join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "landing-pages-" + istToday() + ".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+$("cfgbtn").addEventListener("click", () => {
+  const box = $("cfg");
+  box.hidden = !box.hidden;
+  if (!box.hidden) { $("api").value = apiBase(); $("api").focus(); }
+});
+$("api").addEventListener("change", () => {
+  try { localStorage.setItem("tracker_api", $("api").value.trim()); } catch {}
+  load();
+});
+$("themebtn").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("tracker_theme", next); } catch {}
+  renderCharts();   // the bars read their hue from a CSS var at draw time
+});
+try {
+  const th = localStorage.getItem("tracker_theme");
+  if (th) document.documentElement.dataset.theme = th;
+} catch {}
+
+load();
+// An hourly table is only as good as its last read; five minutes keeps
+// the current hour moving without making the page a load generator.
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

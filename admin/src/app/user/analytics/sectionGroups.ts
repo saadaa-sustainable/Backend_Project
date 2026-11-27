@@ -30,6 +30,7 @@ export type Tab =
   | "untested-assets"
   | "campaign-tracker"
   | "hourly-tracker"
+  | "hourly-landing"
   | "live-pnl"
   | "instagram"
   | "shopify-analytics"
@@ -48,7 +49,7 @@ export interface Group {
 export const GROUPS: Group[] = [
   { key: "overview", label: "Overview",
     // Hourly Tracker leads because it is the section the page opens on.
-    tabs: ["hourly-tracker", "dashboard", "live-pnl", "comparative", "blended-mer"] },
+    tabs: ["hourly-tracker", "hourly-landing", "dashboard", "live-pnl", "comparative", "blended-mer"] },
   { key: "creative", label: "Creative", tabs: ["creative-testing", "asset-analysis", "untested-assets", "campaign-tracker", "instagram"] },
   { key: "attribution", label: "Attribution", tabs: ["last-click-utm", "first-click", "customer-journey", "landing-page"] },
   { key: "product", label: "Product", tabs: ["ads-analyse", "cpis", "meta-hypothesis"] },
