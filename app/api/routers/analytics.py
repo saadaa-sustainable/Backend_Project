@@ -1482,12 +1482,12 @@ async def warm_ads_analyse_cache() -> None:
 
 
 #: When the newest refresh run ended. A run killed at the workflow's
-#: 240-minute limit never records its end, so one with no end counts as
-#: over 250 minutes after it started -- otherwise the caches would hold
+#: 330-minute limit may not record its end, so one with no end counts as
+#: over 340 minutes after it started -- otherwise the caches would hold
 #: the previous day's answers until the following run.
 _REFRESH_MARKER_SQL = """
 SELECT max(coalesce(run_finished,
-                    CASE WHEN run_started < now() - interval '250 minutes'
+                    CASE WHEN run_started < now() - interval '340 minutes'
                          THEN run_started END))
   FROM public.cron_run_log
 """

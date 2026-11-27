@@ -92,10 +92,10 @@ jobs:
     # above the sum of the steps that actually run long.
     #
     # This is a safety net, not an expectation: a healthy run is still
-    # ~45-60 min. GitHub's own hard ceiling is 6h; 240 leaves room for a
-    # Meta-throttle day without letting a wedged run burn the whole
-    # allowance.
-    timeout-minutes: 240
+    # ~45-60 min. GitHub's own hard ceiling is 6h; 330 leaves room for a
+    # slow Meta or Shopify night. Keep analytics.py's _REFRESH_MARKER_SQL
+    # fallback just above it.
+    timeout-minutes: 330
 
     # actions:read is what the duplicate guard below needs to see this
     # workflow's own run history. Nothing here writes to the repo.
@@ -230,6 +230,27 @@ jobs:
           # (gcloud auth application-default login) -- google.auth reads both.
           python3 -c 'import json,sys; k=json.load(open(sys.argv[1])); need={"authorized_user":("client_id","client_secret","refresh_token")}.get(k.get("type"),("type","project_id","private_key","client_email")); m=[f for f in need if not k.get(f)]; sys.exit("::error::GOOGLE_CREDS_JSON missing "+",".join(m)) if m else print("google credential type:", k["type"])' "$RUNNER_TEMP/gcp.json"
           echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
+
+      - name: Write Google OAuth tokens
+        if: steps.guard.outputs.skip != 'true'
+        # google_ads_auth.py reads secrets/google_oauth_token_*.json (adwords);
+        # fetch_ga4_daily.py reads secrets/ga4_token.json (GA4 Data API, also
+        # used by ga4_arpu). Google blocks gcloud's own login from the GA4 scope.
+        env:
+          GOOGLE_ADS_OAUTH_TOKEN: ${{ secrets.GOOGLE_ADS_OAUTH_TOKEN }}
+          GA4_OAUTH_TOKEN: ${{ secrets.GA4_OAUTH_TOKEN }}
+        run: |
+          mkdir -p secrets
+          if [ -n "$GA4_OAUTH_TOKEN" ]; then
+            printf '%s' "$GA4_OAUTH_TOKEN" > secrets/ga4_token.json
+          else
+            echo "::warning::GA4_OAUTH_TOKEN is not set -- ga4_landing and ga4_arpu will fail."
+          fi
+          if [ -z "$GOOGLE_ADS_OAUTH_TOKEN" ]; then
+            echo "::warning::GOOGLE_ADS_OAUTH_TOKEN is not set -- google_ads_api and google_ads_entities will fail."
+            exit 0
+          fi
+          printf '%s' "$GOOGLE_ADS_OAUTH_TOKEN" > secrets/google_oauth_token_ads.json
 
       - name: Run daily refresh
         if: steps.guard.outputs.skip != 'true'
