@@ -188,6 +188,17 @@ CREATE TABLE IF NOT EXISTS hourly_ad_tracker (
 );
 CREATE INDEX IF NOT EXISTS hourly_ad_tracker_hour_idx ON hourly_ad_tracker (hour DESC);
 
+-- Where each ad's sessions REALLY landed, per day, as Shopify saw it.
+-- The independent check on the ad map: the map says where an ad was
+-- meant to send people, this says where they arrived.
+CREATE TABLE IF NOT EXISTS ad_landing_seen (
+    day               date    NOT NULL,
+    ad_id             text    NOT NULL,
+    landing_page_path text    NOT NULL,
+    sessions          integer NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, ad_id, landing_page_path)
+);
+
 -- ad -> landing URL straight from Ads Manager exports
 -- (scripts/import_landing_urls_csv.py). Declared here too so the
 -- lookup below never meets a missing table on a fresh database.
@@ -495,8 +506,23 @@ async def fetch_store_totals(client, store, lo: date, hi: date) -> list[dict]:
     return out
 
 
-async def fetch_ad_sessions(client, store, day: date,
-                            ad_paths: dict[str, str]) -> list[dict]:
+def write_seen(day: date, seen: dict[tuple[str, str], int]) -> int:
+    """Replace the day's record of where each ad's sessions landed."""
+    from psycopg2.extras import execute_batch  # noqa: PLC0415
+
+    rows = [{"day": day, "ad_id": a, "path": p, "n": n} for (a, p), n in seen.items()]
+    with connect(autocommit=False, statement_timeout="600s") as conn, \
+            conn.cursor() as cur:
+        cur.execute("DELETE FROM ad_landing_seen WHERE day = %s", (day,))
+        execute_batch(cur, "INSERT INTO ad_landing_seen (day, ad_id, landing_page_path, "
+                           "sessions) VALUES (%(day)s, %(ad_id)s, %(path)s, %(n)s)",
+                      rows, page_size=500)
+        conn.commit()
+    return len(rows)
+
+
+async def fetch_ad_sessions(client, store, day: date, ad_paths: dict[str, str]
+                            ) -> tuple[list[dict], dict[tuple[str, str], int]]:
     """Traffic per AD per hour: ShopifyQL sessions grouped on utm_content.
 
     landing_page_path is in the grouping only to count how many of an
@@ -522,6 +548,7 @@ async def fetch_ad_sessions(client, store, day: date,
     acc: dict[tuple[datetime, str], dict] = defaultdict(
         lambda: dict(sessions=0, visitors=0, bounces=0, cart_additions=0,
                      duration_seconds=0.0, sessions_on_page=0))
+    seen: dict[tuple[str, str], int] = defaultdict(int)
     for row in raw:
         ad_id = (row.get("utm_content") or "").strip()
         if not AD_ID_RE.match(ad_id):
@@ -535,11 +562,14 @@ async def fetch_ad_sessions(client, store, day: date,
         b["cart_additions"] += int(float(row.get("sessions_with_cart_additions") or 0))
         # The row carries an average; weight it back to a sum.
         b["duration_seconds"] += float(row.get("average_session_duration") or 0) * n
+        landed = page_path(row.get("landing_page_path") or "")
+        if landed:
+            seen[(ad_id, landed)] += n
         mapped = ad_paths.get(ad_id)
-        if mapped and page_path(row.get("landing_page_path") or "") == mapped:
+        if mapped and landed == mapped:
             b["sessions_on_page"] += n
-    return [{"hour": h, "ad_id": a, **v, "duration_seconds": round(v["duration_seconds"], 1)}
-            for (h, a), v in acc.items()]
+    return ([{"hour": h, "ad_id": a, **v, "duration_seconds": round(v["duration_seconds"], 1)}
+             for (h, a), v in acc.items()], dict(seen))
 
 
 # ------------------------------------------------------------------ orders
@@ -906,7 +936,9 @@ async def run(days: list[date], only: set[str]) -> None:
             print(f"  sessions: {write('sessions', rows, lo, hi):,} (hour, page) rows")
             ad_paths, ad_rows = load_ad_paths(), []
             for day in days:
-                ad_rows += await fetch_ad_sessions(client, store, day, ad_paths)
+                r, seen = await fetch_ad_sessions(client, store, day, ad_paths)
+                ad_rows += r
+                write_seen(day, seen)
             print(f"            {write_ads('sessions', ad_rows, lo, hi):,} (hour, ad) rows")
 
         if "store" in only:

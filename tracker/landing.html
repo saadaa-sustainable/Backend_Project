@@ -171,6 +171,15 @@
   .msg { padding: 28px 10px; text-align: center; color: var(--text-3); font-size: 13px; }
   .err { color: var(--bad); }
   .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
+  /* Each view hides the other's parts; header and controls are shared. */
+  .view-pages #adwrap { display: none; }
+  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap) { display: none !important; }
+  .view-ads .controls > *:not(#f-window):not(#reload):not(#cfg) { display: none; }
+  .view-ads #adwrap .tablewrap { max-height: none !important; }
+  .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px;
+          border: 1px solid var(--border); color: var(--text-2); }
+  .chip.bad { color: var(--cost); border-color: var(--cost); }
+  .chip.ok { color: var(--rev); border-color: var(--rev); }
 </style>
 </head>
 <body>
@@ -247,11 +256,18 @@
 
   <div class="card" id="adwrap" style="padding:0;margin-bottom:12px">
     <div class="c-head" style="padding:12px 14px 0;flex-wrap:wrap">
-      <span><span class="c-title">By ad</span>
+      <span><span class="c-title">Landing Pages by Ads</span>
         <span class="sub" style="margin-left:8px">spend by ad id &middot; Shopify sessions
           and orders by utm_content &middot; landing page from the ad map</span></span>
       <span style="display:flex;gap:8px;align-items:center">
         <span class="c-note" id="adnote"></span>
+        <select id="adcheck" style="font:inherit;font-size:12px;padding:5px 8px;border-radius:8px;
+                border:1px solid var(--border);background:transparent;color:var(--text)">
+          <option value="">All ads</option>
+          <option value="mismatch">Page mismatch</option>
+          <option value="unmapped">Not in ad map</option>
+          <option value="match">Page matches</option>
+        </select>
         <input id="adfilter" placeholder="Filter: ad id, name or page"
                style="font:inherit;font-size:12px;padding:5px 8px;border-radius:8px;
                       border:1px solid var(--border);background:transparent;color:var(--text);width:210px">
@@ -290,6 +306,9 @@ const qs = new URLSearchParams(location.search);
 // Inside the Hourly Tracker the host page already has the title, the
 // backend field and the theme toggle.
 if (qs.get("embed")) document.documentElement.classList.add("embed");
+// One file, two views: the page view, and "Landing Pages by Ads".
+const VIEW_ADS = qs.get("view") === "ads";
+document.documentElement.classList.add(VIEW_ADS ? "view-ads" : "view-pages");
 function apiBase() {
   const fromUrl = qs.get("api");
   if (fromUrl) { try { localStorage.setItem("tracker_api", fromUrl); } catch {} return fromUrl.replace(/\/+$/, ""); }
@@ -441,6 +460,13 @@ const AD_GROUPS = [
 const AD_COLS = [
   { g: "ads",     k: "landing_page_path",   label: "Landing page",  f: v => v || "not in ad map", text: true },
   { g: "ads",     k: "spend",               label: "Ad spend",      f: inr0 },
+  { g: "traffic", k: "seen_page",           label: "Shopify landing page",
+    f: (v, r) => v ? v + " (" + pc1(r.seen_share) + ")" : "—", text: true },
+  { g: "traffic", k: "page_status",         label: "Check", html: true,
+    f: v => v === "match" ? '<span class="chip ok">match</span>'
+          : v === "mismatch" ? '<span class="chip bad">mismatch</span>'
+          : v === "unmapped" ? '<span class="chip">not in map</span>'
+          : v === "no_sessions" ? '<span class="chip">no sessions</span>' : "" },
   { g: "traffic", k: "sessions",            label: "Sessions",      f: num },
   { g: "traffic", k: "page_match",          label: "On mapped page", f: pc1 },
   { g: "traffic", k: "atc_rate",            label: "ATC %",         f: pc1 },
@@ -457,6 +483,8 @@ const AD_COLS = [
 ];
 const AD_HELP = {
   landing_page_path: "The page the ad map names for this ad -- from the Ads Manager export, not from the order.",
+  seen_page: "Where most of this ad's sessions really landed, per Shopify, and that page's share of them.",
+  page_status: "match: the ad map and Shopify name the same page. mismatch: they differ.",
   page_match: "Share of this ad's sessions that Shopify saw land on the mapped page. Low means the map is wrong for this ad.",
   cvr: "Orders with this ad id over sessions with this ad id.",
   roas: "Sales with this ad id over the ad's spend. Shown from Rs 1,000 of spend.",
@@ -475,15 +503,18 @@ async function loadAds(from, to) {
     ADS = null;
     $("adhead").innerHTML = $("adbody").innerHTML = "";
     $("admsg").className = "msg err";
-    $("admsg").textContent = "By ad: " + e.message + ".";
-    return;
+    $("admsg").textContent = "Landing Pages by Ads: " + e.message + ".";
+    return false;
   }
   renderAds();
+  return true;
 }
 
 function adRows() {
   const q = $("adfilter").value.trim().toLowerCase();
   let rows = ADS.ads;
+  const want = $("adcheck").value;
+  if (want) rows = rows.filter(r => r.page_status === want);
   if (q) rows = rows.filter(r => (r.ad_id + " " + (r.ad_name || "") + " " +
                                   (r.landing_page_path || "")).toLowerCase().includes(q));
   const k = adSortKey;
@@ -509,12 +540,13 @@ function renderAds() {
       ' data-ak="' + c.k + '" title="' +
       esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
   const cell = (c, i, r) => '<td class="' + (start(i) ? "bandstart" : "") + '"' +
-    (c.text ? ' style="text-align:left"' : "") + ">" + esc(c.f(r[c.k], r)) + "</td>";
+    (c.text ? ' style="text-align:left"' : "") + ">" +
+    (c.html ? c.f(r[c.k], r) : esc(c.f(r[c.k], r))) + "</td>";
   const rows = adRows();
   const t = ADS.totals;
   $("adbody").innerHTML =
     '<tr class="total"><td>All ads (' + num(ADS.ad_count) + ")</td>" +
-      AD_COLS.map((c, i) => c.text ? '<td class="' + (start(i) ? "bandstart" : "") + '"></td>'
+      AD_COLS.map((c, i) => (c.text || c.html) ? '<td class="' + (start(i) ? "bandstart" : "") + '"></td>'
                                    : cell(c, i, t)).join("") + "</tr>" +
     rows.map(r =>
       '<tr><td title="' + esc((r.ad_name || "") + (r.campaign_name ? " · " + r.campaign_name : "")) +
@@ -551,7 +583,12 @@ async function load() {
   const today = RANGE ? RANGE.to : istToday();
   const from = RANGE ? RANGE.from : daysAgo(today, Number($("window").value));
   $("span").textContent = from + " → " + today + " (IST)";
-  loadAds(from, today);          // its own request; never blocks the page table
+  if (VIEW_ADS) {
+    const ok = await loadAds(from, today);
+    $("livedot").className = ok ? "dot" : "dot stale";
+    $("livetext").textContent = ok ? "live" : "offline";
+    return;
+  }
   $("msg").hidden = false;
   $("msg").className = "msg";
   $("msg").textContent = "Loading…";
@@ -1024,10 +1061,12 @@ $("adhead").addEventListener("click", e => {
   renderAds();
 });
 $("adfilter").addEventListener("input", renderAds);
+$("adcheck").addEventListener("change", renderAds);
 $("adexport").addEventListener("click", () => {
   if (!ADS) return;
   const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
-  const keys = ["ad_id", "ad_name", "campaign_name", "landing_page_url", "spend", "impressions",
+  const keys = ["ad_id", "ad_name", "campaign_name", "landing_page_url", "landing_page_path",
+                "seen_page", "seen_share", "page_status", "spend", "impressions",
                 "sessions", "visitors", "page_match", "atc_rate", "bounce_rate",
                 "avg_session_seconds", "orders", "revenue", "new_sales", "rep_sales",
                 "new_orders", "rep_orders", "quantity", "cvr", "roas"];

@@ -15060,7 +15060,21 @@ _LANDING_ADS_MEASURES = """
 # corrected ad map corrects every past hour as well. ad_media first (a
 # URL read from the creative), then the Ads Manager export.
 _LANDING_ADS_SQL = f"""
+WITH seen AS (
+  -- The page most of each ad's sessions landed on, as Shopify saw it,
+  -- and what share of the ad's sessions that page took.
+  SELECT DISTINCT ON (ad_id) ad_id, landing_page_path AS seen_page,
+         s::float / NULLIF(tot, 0) AS seen_share
+    FROM (SELECT ad_id, landing_page_path, SUM(sessions) AS s,
+                 SUM(SUM(sessions)) OVER (PARTITION BY ad_id) AS tot
+            FROM public.ad_landing_seen
+           WHERE day >= :lo_day AND day <= :hi_day
+           GROUP BY ad_id, landing_page_path) x
+   ORDER BY ad_id, s DESC
+)
 SELECT t.ad_id,
+       MAX(sn.seen_page)                                       AS seen_page,
+       MAX(sn.seen_share)                                      AS seen_share,
        MAX(l.ad_name)                                          AS ad_name,
        MAX(l.campaign_name)                                    AS campaign_name,
        MAX(COALESCE(m.landing_page_url, g.landing_page_url))   AS landing_page_url,
@@ -15069,6 +15083,7 @@ SELECT t.ad_id,
   LEFT JOIN public.ad_lifecycle   l ON l.ad_id = t.ad_id
   LEFT JOIN public.ad_media       m ON m.ad_id = t.ad_id
   LEFT JOIN public.ad_landing_map g ON g.ad_id = t.ad_id
+  LEFT JOIN seen                 sn ON sn.ad_id = t.ad_id
  WHERE t.hour >= :lo AND t.hour < :hi
  GROUP BY t.ad_id
  ORDER BY SUM(t.spend) DESC, SUM(t.sessions) DESC, SUM(t.revenue) DESC
@@ -15103,6 +15118,14 @@ class LandingAdRow(BaseModel):
     #: Share of the ad's sessions that Shopify saw land on the mapped
     #: page -- the check on the map itself.
     page_match: float | None = None
+    #: Where most of the ad's sessions really landed, per Shopify, and
+    #: that page's share of them. Independent of the ad map.
+    seen_page: str | None = None
+    seen_share: float | None = None
+    #: match: the map and Shopify agree. mismatch: they name different
+    #: pages. unmapped: the ad is not in the map. no_sessions: Shopify
+    #: saw no session for the ad, so there is nothing to check against.
+    page_status: str | None = None
     #: Shopify orders whose utm_content is this ad.
     orders: int = 0
     revenue: float = 0.0
@@ -15141,6 +15164,12 @@ def _ad_row(row: dict) -> LandingAdRow:
             out.page_match = float(row.get("sessions_on_page") or 0) / sess
     if out.spend >= _ROAS_MIN_SPEND:
         out.roas = out.revenue / out.spend
+    if not out.landing_page_path:
+        out.page_status = "unmapped"
+    elif not out.seen_page:
+        out.page_status = "no_sessions"
+    else:
+        out.page_status = "match" if out.seen_page == out.landing_page_path else "mismatch"
     return out
 
 
@@ -15167,12 +15196,14 @@ async def get_landing_ads(
     lo_day = min(from_day or target, target)
     bounds = {"lo": datetime.combine(lo_day, datetime.min.time(), ist),
               "hi": datetime.combine(target + timedelta(days=1), datetime.min.time(), ist)}
-    rows = (await session.execute(text(_LANDING_ADS_SQL),
-                                  {**bounds, "limit": limit})).mappings().all()
+    rows = (await session.execute(
+        text(_LANDING_ADS_SQL),
+        {**bounds, "limit": limit, "lo_day": lo_day, "hi_day": target})).mappings().all()
     total = dict((await session.execute(text(_LANDING_ADS_TOTAL_SQL),
                                         bounds)).mappings().first() or {})
     totals = _ad_row(total)
     totals.ad_id = "All ads"
+    totals.page_status = None
     return LandingAdsResponse(
         from_day=lo_day, to_day=target,
         ads=[_ad_row(dict(r)) for r in rows],
