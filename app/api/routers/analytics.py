@@ -39,7 +39,7 @@ from app.services.ad_efficiency import calculate_efficiency_scores, get_efficien
 from app.services.analytics_cache import cached_analytics, invalidate_nightly
 from app.services.analytics_trends import SpendTrendWindowNotFound, get_cpis_spend_trends
 from app.services.dashboard_sessions import META_SOURCE_SQL
-from app.services.gold.cpis import match_ads_to_sku
+from app.services.gold.cpis import match_ads_to_sku, page_path
 from app.services.gold.cpis_value_weighted import RANGE_AGG_SQL, TOTALS_SQL
 from app.services.reach_anchors import window_anchors
 
@@ -15036,6 +15036,147 @@ async def get_landing_hourly(
         empty=not page_rows,
         refreshed_at=stamp,
     )
+
+
+_LANDING_ADS_MEASURES = """
+       COALESCE(SUM(t.spend), 0)            AS spend,
+       COALESCE(SUM(t.impressions), 0)      AS impressions,
+       COALESCE(SUM(t.sessions), 0)         AS sessions,
+       COALESCE(SUM(t.visitors), 0)         AS visitors,
+       COALESCE(SUM(t.bounces), 0)          AS bounces,
+       COALESCE(SUM(t.cart_additions), 0)   AS cart_additions,
+       COALESCE(SUM(t.duration_seconds), 0) AS duration_seconds,
+       COALESCE(SUM(t.sessions_on_page), 0) AS sessions_on_page,
+       COALESCE(SUM(t.orders), 0)           AS orders,
+       COALESCE(SUM(t.revenue), 0)          AS revenue,
+       COALESCE(SUM(t.new_orders), 0)       AS new_orders,
+       COALESCE(SUM(t.new_sales), 0)        AS new_sales,
+       COALESCE(SUM(t.rep_orders), 0)       AS rep_orders,
+       COALESCE(SUM(t.rep_sales), 0)        AS rep_sales,
+       COALESCE(SUM(t.quantity), 0)         AS quantity
+"""
+
+# The landing URL is joined at read time, never stored on the row, so a
+# corrected ad map corrects every past hour as well. ad_media first (a
+# URL read from the creative), then the Ads Manager export.
+_LANDING_ADS_SQL = f"""
+SELECT t.ad_id,
+       MAX(l.ad_name)                                          AS ad_name,
+       MAX(l.campaign_name)                                    AS campaign_name,
+       MAX(COALESCE(m.landing_page_url, g.landing_page_url))   AS landing_page_url,
+       {_LANDING_ADS_MEASURES}
+  FROM public.hourly_ad_tracker t
+  LEFT JOIN public.ad_lifecycle   l ON l.ad_id = t.ad_id
+  LEFT JOIN public.ad_media       m ON m.ad_id = t.ad_id
+  LEFT JOIN public.ad_landing_map g ON g.ad_id = t.ad_id
+ WHERE t.hour >= :lo AND t.hour < :hi
+ GROUP BY t.ad_id
+ ORDER BY SUM(t.spend) DESC, SUM(t.sessions) DESC, SUM(t.revenue) DESC
+ LIMIT :limit
+"""
+
+_LANDING_ADS_TOTAL_SQL = f"""
+SELECT COUNT(DISTINCT t.ad_id) AS ads, {_LANDING_ADS_MEASURES}
+  FROM public.hourly_ad_tracker t
+ WHERE t.hour >= :lo AND t.hour < :hi
+"""
+
+
+class LandingAdRow(BaseModel):
+    ad_id: str = ""
+    ad_name: str | None = None
+    campaign_name: str | None = None
+    #: From the ad map: the creative's own URL, else the Ads Manager
+    #: export. None when the ad is in neither.
+    landing_page_url: str | None = None
+    landing_page_path: str | None = None
+    spend: float = 0.0
+    impressions: int = 0
+    #: Shopify sessions whose utm_content is this ad.
+    sessions: int = 0
+    visitors: int = 0
+    bounces: int = 0
+    cart_additions: int = 0
+    bounce_rate: float | None = None
+    atc_rate: float | None = None
+    avg_session_seconds: float | None = None
+    #: Share of the ad's sessions that Shopify saw land on the mapped
+    #: page -- the check on the map itself.
+    page_match: float | None = None
+    #: Shopify orders whose utm_content is this ad.
+    orders: int = 0
+    revenue: float = 0.0
+    new_orders: int = 0
+    new_sales: float = 0.0
+    rep_orders: int = 0
+    rep_sales: float = 0.0
+    quantity: int = 0
+    #: Sessions, orders and spend all belong to the same ad here, so
+    #: unlike the page table these two ratios compare one population.
+    cvr: float | None = None
+    roas: float | None = None
+
+
+class LandingAdsResponse(BaseModel):
+    from_day: date
+    to_day: date
+    ads: list[LandingAdRow]
+    totals: LandingAdRow
+    ad_count: int = 0
+    empty: bool = False
+
+
+def _ad_row(row: dict) -> LandingAdRow:
+    out = LandingAdRow(**{k: (v if v is not None else LandingAdRow.model_fields[k].default)
+                          for k, v in row.items() if k in LandingAdRow.model_fields})
+    if out.landing_page_url:
+        out.landing_page_path = page_path(out.landing_page_url) or None
+    sess = out.sessions
+    if sess > 0:
+        out.bounce_rate = out.bounces / sess
+        out.atc_rate = out.cart_additions / sess
+        out.avg_session_seconds = float(row.get("duration_seconds") or 0) / sess
+        out.cvr = out.orders / sess
+        if out.landing_page_path:
+            out.page_match = float(row.get("sessions_on_page") or 0) / sess
+    if out.spend >= _ROAS_MIN_SPEND:
+        out.roas = out.revenue / out.spend
+    return out
+
+
+@router.get("/landing-ads", response_model=LandingAdsResponse)
+@cached_analytics(ttl=120.0)
+async def get_landing_ads(
+    session: SessionDep,
+    day: date | None = Query(default=None,
+                             description="IST day, or the LAST day of the window. "
+                                         "Default: today."),
+    from_day: date | None = Query(default=None,
+                                  description="First day of the window. Default: `day`."),
+    limit: int = Query(default=300, ge=1, le=2000,
+                       description="How many ads to return, biggest spend first."),
+) -> LandingAdsResponse:
+    """Spend, Shopify sessions and Shopify orders per Meta ad, for a window.
+
+    Everything is tied to the ad: spend by its id, sessions and orders by
+    utm_content. The landing page shown is the one the ad map names for
+    the ad, not the URL an order happened to be placed on.
+    """
+    ist = timezone(timedelta(hours=5, minutes=30))
+    target = day or datetime.now(ist).date()
+    lo_day = min(from_day or target, target)
+    bounds = {"lo": datetime.combine(lo_day, datetime.min.time(), ist),
+              "hi": datetime.combine(target + timedelta(days=1), datetime.min.time(), ist)}
+    rows = (await session.execute(text(_LANDING_ADS_SQL),
+                                  {**bounds, "limit": limit})).mappings().all()
+    total = dict((await session.execute(text(_LANDING_ADS_TOTAL_SQL),
+                                        bounds)).mappings().first() or {})
+    totals = _ad_row(total)
+    totals.ad_id = "All ads"
+    return LandingAdsResponse(
+        from_day=lo_day, to_day=target,
+        ads=[_ad_row(dict(r)) for r in rows],
+        totals=totals, ad_count=int(total.get("ads") or 0), empty=not rows)
 
 
 @router.get("/hourly-tracker", response_model=HourlyTrackerResponse)

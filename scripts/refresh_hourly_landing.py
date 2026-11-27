@@ -153,6 +153,41 @@ CREATE TABLE IF NOT EXISTS landing_ad_order_mix (
     PRIMARY KEY (day, ad_id, landing_page_path)
 );
 
+-- One row per ad per hour: the same three sources, pivoted on the ad
+-- instead of the page. Sessions and orders are tied to the ad by
+-- utm_content, spend by the ad id itself, so all three describe one
+-- population and a conversion rate between them is a fair one. The
+-- landing page is NOT stored: it is looked up from the ad map when
+-- read, so correcting the map corrects every past hour too.
+CREATE TABLE IF NOT EXISTS hourly_ad_tracker (
+    hour              timestamptz NOT NULL,
+    ad_id             text        NOT NULL,
+    -- sessions (ShopifyQL, utm_content = ad id)
+    sessions          integer NOT NULL DEFAULT 0,
+    visitors          integer NOT NULL DEFAULT 0,
+    bounces           integer NOT NULL DEFAULT 0,
+    cart_additions    integer NOT NULL DEFAULT 0,
+    -- seconds summed over sessions, so an average over any window is
+    -- duration_seconds / sessions rather than an average of averages
+    duration_seconds  numeric NOT NULL DEFAULT 0,
+    -- sessions whose Shopify landing page IS the page the map names
+    sessions_on_page  integer NOT NULL DEFAULT 0,
+    -- orders (Shopify GraphQL, utm_content = ad id)
+    orders            integer NOT NULL DEFAULT 0,
+    revenue           numeric NOT NULL DEFAULT 0,
+    new_orders        integer NOT NULL DEFAULT 0,
+    new_sales         numeric NOT NULL DEFAULT 0,
+    rep_orders        integer NOT NULL DEFAULT 0,
+    rep_sales         numeric NOT NULL DEFAULT 0,
+    quantity          integer NOT NULL DEFAULT 0,
+    -- cost (Meta)
+    spend             numeric NOT NULL DEFAULT 0,
+    impressions       bigint  NOT NULL DEFAULT 0,
+    refreshed_at      timestamptz,
+    PRIMARY KEY (hour, ad_id)
+);
+CREATE INDEX IF NOT EXISTS hourly_ad_tracker_hour_idx ON hourly_ad_tracker (hour DESC);
+
 -- ad -> landing URL straight from Ads Manager exports
 -- (scripts/import_landing_urls_csv.py). Declared here too so the
 -- lookup below never meets a missing table on a fresh database.
@@ -258,6 +293,38 @@ UPSERT = {
             meta_refreshed_at = EXCLUDED.meta_refreshed_at
     """,
 }
+
+#: Which columns of hourly_ad_tracker each pass owns.
+AD_COLS = {
+    "sessions": ["sessions", "visitors", "bounces", "cart_additions",
+                 "duration_seconds", "sessions_on_page"],
+    "orders":   ["orders", "revenue", "new_orders", "new_sales", "rep_orders",
+                 "rep_sales", "quantity"],
+    "meta":     ["spend", "impressions"],
+}
+
+
+def write_ads(kind: str, rows: list[dict], lo: date, hi: date) -> int:
+    """Per-ad counterpart of write(): clear this pass's columns, upsert."""
+    from psycopg2.extras import execute_batch  # noqa: PLC0415
+
+    cols = AD_COLS[kind]
+    upsert = (
+        f"INSERT INTO hourly_ad_tracker (hour, ad_id, {', '.join(cols)}, refreshed_at) "
+        f"VALUES (%(hour)s, %(ad_id)s, {', '.join(f'%({c})s' for c in cols)}, now()) "
+        "ON CONFLICT (hour, ad_id) DO UPDATE SET "
+        + ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
+        + ", refreshed_at = EXCLUDED.refreshed_at")
+    with connect(autocommit=False, statement_timeout="600s") as conn, conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE hourly_ad_tracker SET {', '.join(f'{c} = 0' for c in cols)} "
+            "WHERE hour >= %(from_ts)s AND hour < %(to_ts)s",
+            {"from_ts": ist_hour_utc(lo, 0),
+             "to_ts": ist_hour_utc(hi + timedelta(days=1), 0)})
+        execute_batch(cur, upsert, rows, page_size=500)
+        conn.commit()
+    return len(rows)
+
 
 DELETE_EMPTY = """
 DELETE FROM hourly_landing_tracker
@@ -412,6 +479,53 @@ async def fetch_store_totals(client, store, lo: date, hi: date) -> list[dict]:
     return out
 
 
+async def fetch_ad_sessions(client, store, day: date,
+                            ad_paths: dict[str, str]) -> list[dict]:
+    """Traffic per AD per hour: ShopifyQL sessions grouped on utm_content.
+
+    landing_page_path is in the grouping only to count how many of an
+    ad's sessions really landed on the page the ad map names -- the
+    check on the map itself.
+    """
+    from ingest_shopify import SHOPIFYQL_QUERY  # noqa: PLC0415
+    from shopify_client import graphql_request  # noqa: PLC0415
+
+    LIMIT = 100_000
+    q = ("FROM sessions SHOW sessions, online_store_visitors, bounces, "
+         "sessions_with_cart_additions, average_session_duration "
+         f"SINCE {day.isoformat()} UNTIL {day.isoformat()} "
+         f"GROUP BY hour, utm_content, landing_page_path ORDER BY hour LIMIT {LIMIT}")
+    resp = (await graphql_request(client, store, SHOPIFYQL_QUERY, {"q": q}))["shopifyqlQuery"]
+    if resp.get("parseErrors"):
+        raise RuntimeError(f"ad sessions parseErrors: {resp['parseErrors']}")
+    raw = (resp.get("tableData") or {}).get("rows", [])
+    if len(raw) >= LIMIT:
+        raise RuntimeError(f"{day}: ShopifyQL returned {len(raw)} ad-session rows, at "
+                           f"the limit of {LIMIT} -- the day is being truncated")
+
+    acc: dict[tuple[datetime, str], dict] = defaultdict(
+        lambda: dict(sessions=0, visitors=0, bounces=0, cart_additions=0,
+                     duration_seconds=0.0, sessions_on_page=0))
+    for row in raw:
+        ad_id = (row.get("utm_content") or "").strip()
+        if not AD_ID_RE.match(ad_id):
+            continue
+        n = int(float(row.get("sessions") or 0))
+        hour = to_ist_hour(datetime.fromisoformat(row["hour"].replace("Z", "+00:00")))
+        b = acc[(hour, ad_id)]
+        b["sessions"] += n
+        b["visitors"] += int(float(row.get("online_store_visitors") or 0))
+        b["bounces"] += int(float(row.get("bounces") or 0))
+        b["cart_additions"] += int(float(row.get("sessions_with_cart_additions") or 0))
+        # The row carries an average; weight it back to a sum.
+        b["duration_seconds"] += float(row.get("average_session_duration") or 0) * n
+        mapped = ad_paths.get(ad_id)
+        if mapped and page_path(row.get("landing_page_path") or "") == mapped:
+            b["sessions_on_page"] += n
+    return [{"hour": h, "ad_id": a, **v, "duration_seconds": round(v["duration_seconds"], 1)}
+            for (h, a), v in acc.items()]
+
+
 # ------------------------------------------------------------------ orders
 #: utm_content carries the Meta ad id -- but only sometimes. It is frozen
 #: at click time, so for some ads it holds the ad NAME instead. Only a
@@ -422,7 +536,7 @@ AD_ID_RE = re.compile(r"^[0-9]{10,20}$")
 
 
 async def fetch_orders(client, store, day: date
-                       ) -> tuple[list[dict], dict, dict[tuple[str, str], int]]:
+                       ) -> tuple[list[dict], dict, dict[tuple[str, str], int], list[dict]]:
     """Orders per landing page per hour, live, keyed on the order's own URL.
 
     Also returns the (ad_id, page) -> order count mix, which the META
@@ -443,6 +557,9 @@ async def fetch_orders(client, store, day: date
     stats = dict(seen=0, excluded=0, no_url=0, placed=0, lost_revenue=0.0,
                  with_ad_id=0)
     mix: dict[tuple[str, str], int] = defaultdict(int)
+    by_ad: dict[tuple[datetime, str], dict] = defaultdict(
+        lambda: dict(orders=0, revenue=0.0, new_orders=0, new_sales=0.0,
+                     rep_orders=0, rep_sales=0.0, quantity=0))
     after = None
     while True:
         data = await graphql_request(client, store, ORDERS_HOURLY_QUERY,
@@ -457,6 +574,21 @@ async def fetch_orders(client, store, day: date
             amount = float(((n.get("totalPriceSet") or {}).get("shopMoney") or {})
                            .get("amount") or 0)
             attrs = {a["key"]: a["value"] for a in (n.get("customAttributes") or [])}
+            # The per-ad table takes every order that names an ad,
+            # including the ones with no usable URL below: the ad, not
+            # the URL, is what ties this order to a landing page there.
+            ad_key = (attrs.get("utm_content") or "").strip()
+            if AD_ID_RE.match(ad_key):
+                made = datetime.fromisoformat(n["createdAt"].replace("Z", "+00:00"))
+                seen = (n.get("customer") or {}).get("numberOfOrders")
+                first = (int(seen) <= 1) if str(seen or "").isdigit() else True
+                a = by_ad[(to_ist_hour(made), ad_key)]
+                a["orders"] += 1
+                a["revenue"] += amount
+                a["new_orders" if first else "rep_orders"] += 1
+                a["new_sales" if first else "rep_sales"] += amount
+                a["quantity"] += sum(int(li["node"].get("quantity") or 0)
+                                     for li in (n.get("lineItems") or {}).get("edges", []))
             path = page_path(attrs.get("full_url") or "")
             if not path:
                 # The storefront recorded no landing URL -- a direct
@@ -495,7 +627,10 @@ async def fetch_orders(client, store, day: date
     rows = [{"hour": h, "path": p, "source": src,
              **{k: (round(v, 2) if isinstance(v, float) else v) for k, v in b.items()}}
             for (h, p, src), b in acc.items()]
-    return rows, stats, dict(mix)
+    ad_rows = [{"hour": h, "ad_id": a,
+                **{k: (round(v, 2) if isinstance(v, float) else v) for k, v in b.items()}}
+               for (h, a), b in by_ad.items()]
+    return rows, stats, dict(mix), ad_rows
 
 
 MIX_UPSERT = """
@@ -622,7 +757,9 @@ async def meta_get(client, url, params, attempt: int = 0):
     try:
         return await _get_with_retry(client, url, params)
     except RuntimeError as exc:
-        if "1504044" not in str(exc) or attempt >= 4:
+        # 1504038 is the same load-shedding under another name ("Your
+        # request timed out"), seen 2026-11-27 on the larger account.
+        if not any(c in str(exc) for c in ("1504044", "1504038")) or attempt >= 4:
             raise
         await asyncio.sleep(2 ** attempt * 3)
         return await meta_get(client, url, params, attempt + 1)
@@ -631,7 +768,7 @@ async def meta_get(client, url, params, attempt: int = 0):
 async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
                          ncp_types: set[str],
                          ad_mix: dict[str, dict[str, float]],
-                         ) -> tuple[list[dict], float, float]:
+                         ) -> tuple[list[dict], float, float, list[dict]]:
     from ingest_last_15_days import _discover_accounts  # noqa: PLC0415
 
     token = os.environ.get("META_ACCESS_TOKEN")
@@ -642,6 +779,8 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
         lambda: dict(spend=0.0, order_spend=0.0, impressions=0, conv_value=0.0,
                      purchases=0.0, ncp=0.0))
     unmapped = unplaced = 0.0
+    by_ad: dict[tuple[datetime, str], dict] = defaultdict(
+        lambda: dict(spend=0.0, impressions=0))
 
     for account in _discover_accounts().values():
         url = f"{base}/act_{account.account_id}/insights"
@@ -667,6 +806,11 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
                 ad_id = row.get("ad_id") or ""
                 # Already the advertiser's timezone, which is the store's.
                 hour = ist_hour_utc(day, int(label.split(":", 1)[0]))
+
+                if ad_id:
+                    a = by_ad[(hour, ad_id)]
+                    a["spend"] += spend
+                    a["impressions"] += int(float(row.get("impressions") or 0))
 
                 # (a) the page the ad POINTS AT, from its creative.
                 path = ad_paths.get(ad_id)
@@ -701,7 +845,9 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
              "impressions": b["impressions"], "conv_value": round(b["conv_value"], 2),
              "purchases": b["purchases"], "ncp": b["ncp"]}
             for (h, p), b in acc.items()]
-    return rows, unmapped, unplaced
+    ad_rows = [{"hour": h, "ad_id": a, "spend": round(b["spend"], 2),
+                "impressions": b["impressions"]} for (h, a), b in by_ad.items()]
+    return rows, unmapped, unplaced, ad_rows
 
 
 # -------------------------------------------------------------------- main
@@ -717,6 +863,10 @@ async def run(days: list[date], only: set[str]) -> None:
             for day in days:
                 rows += await fetch_sessions(client, store, day)
             print(f"  sessions: {write('sessions', rows, lo, hi):,} (hour, page) rows")
+            ad_paths, ad_rows = load_ad_paths(), []
+            for day in days:
+                ad_rows += await fetch_ad_sessions(client, store, day, ad_paths)
+            print(f"            {write_ads('sessions', ad_rows, lo, hi):,} (hour, ad) rows")
 
         if "store" in only:
             rows = await fetch_store_totals(client, store, lo, hi)
@@ -734,10 +884,11 @@ async def run(days: list[date], only: set[str]) -> None:
             rows, total = [], dict(seen=0, excluded=0, no_url=0, placed=0,
                                    lost_revenue=0.0)
             total["with_ad_id"] = 0
-            mixed = 0
+            mixed, ad_rows = 0, []
             for day in days:
-                r, st, mix = await fetch_orders(client, store, day)
+                r, st, mix, ar = await fetch_orders(client, store, day)
                 rows += r
+                ad_rows += ar
                 for k in total:
                     total[k] += st[k]
                 mixed += write_mix(day, mix)
@@ -745,6 +896,7 @@ async def run(days: list[date], only: set[str]) -> None:
                   f"| {total['placed']:,} of {total['seen']:,} orders placed "
                   f"({total['excluded']:,} excluded, {total['no_url']:,} with no landing "
                   f"URL worth Rs {total['lost_revenue']:,.0f})")
+            write_ads("orders", ad_rows, lo, hi)
             print(f"            {total['with_ad_id']:,} orders carry a Meta ad id "
                   f"-> {mixed:,} (ad, page) pairs for spend allocation")
 
@@ -752,15 +904,17 @@ async def run(days: list[date], only: set[str]) -> None:
             ad_paths, ncp_types = load_ad_paths(), ncp_action_types()
             print(f"  {len(ad_paths):,} ads carry a readable landing URL; "
                   f"{len(ncp_types)} NCP custom conversion(s)")
-            rows, unmapped, unplaced = [], 0.0, 0.0
+            rows, unmapped, unplaced, ad_rows = [], 0.0, 0.0, []
             for day in days:
                 ad_mix = load_ad_mix(day)
-                r, u, n = await fetch_meta_day(client, day, ad_paths, ncp_types,
-                                               ad_mix)
+                r, u, n, ar = await fetch_meta_day(client, day, ad_paths, ncp_types,
+                                                   ad_mix)
                 rows += r
+                ad_rows += ar
                 unmapped += u
                 unplaced += n
-            print(f"  meta:     {write('meta', rows, lo, hi):,} (hour, page) rows")
+            print(f"  meta:     {write('meta', rows, lo, hi):,} (hour, page) rows, "
+                  f"{write_ads('meta', ad_rows, lo, hi):,} (hour, ad) rows")
             print(f"            by creative URL: Rs {unmapped:,.0f} unplaced "
                   f"(ad has no readable landing URL)")
             print(f"            by order:        Rs {unplaced:,.0f} unplaced "
