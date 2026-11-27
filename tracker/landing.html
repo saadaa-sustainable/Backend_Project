@@ -302,6 +302,9 @@ const xx  = n => (n === null || n === undefined) ? "—" : n.toFixed(2) + "×";
 // page here showed a three-digit ROAS off a trivial spend, which is a rounding
 // artefact wearing the costume of a winner.
 const ROAS_MIN_SPEND = 1000;
+// Spend that followed the ads' own orders onto this row. An older
+// backend does not send it, so fall back to spend by creative URL.
+const spendOf = r => (r.order_spend ?? r.meta_spend) || 0;
 const roas = (v, spend) => (spend || 0) < ROAS_MIN_SPEND ? "—" : xx(v);
 const pc  = n => (n === null || n === undefined) ? "—" : Math.round(n * 100) + "%";
 const pc1 = n => (n === null || n === undefined) ? "—" : (n * 100).toFixed(1) + "%";
@@ -340,6 +343,11 @@ const esc = s => String(s == null ? "" : s)
 //   ORDERS    what was PLACED on the page    (the order's own URL)
 //   META ADS  what was AIMED at the page     (the ad creative's URL)
 //
+// Meta spend appears twice on purpose. In the ORDERS band it is spend
+// on ads that earned an order on this page, split by order share, so
+// it shares a key with the sales beside it and ROAS is a fair ratio.
+// In the META ADS band it is spend on ads whose creative points here.
+//
 // They are three different populations measured on one key. Keeping
 // them in named bands is what stops a reader sliding from "10,794
 // sessions" to "71 orders" and calling the difference a funnel.
@@ -360,16 +368,17 @@ const COLS = [
   { g: "traffic", k: "checkout_rate",          label: "Checkout %",       f: pc1  },
   { g: "orders",  k: "revenue",                label: "Shopify sales",    f: inr0 },
   { g: "orders",  k: "orders",                 label: "Orders",           f: num  },
+  { g: "orders",  k: "order_spend",            label: "Meta spend",       f: inr0 },
+  { g: "orders",  k: "page_roas",              label: "ROAS",             f: (v, r) => roas(v, r.order_spend) },
   { g: "orders",  k: "new_customer_sales",     label: "New cust. sales",  f: inr0 },
   { g: "orders",  k: "repeat_customer_sales",  label: "Repeat sales",     f: inr0 },
   { g: "orders",  k: "new_customer_orders",    label: "New orders",       f: num  },
   { g: "orders",  k: "repeat_customer_orders", label: "Repeat orders",    f: num  },
-  { g: "ads",     k: "meta_spend",             label: "Meta spend",       f: inr0 },
+  { g: "ads",     k: "meta_spend",             label: "Spend aimed here", f: inr0 },
   { g: "ads",     k: "ncp",                    label: "NCP",              f: num  },
   { g: "ads",     k: "meta_purchases",         label: "Conversions",      f: num  },
   { g: "ads",     k: "meta_conv_value",        label: "Meta sales",       f: inr0 },
   { g: "ads",     k: "meta_roas",              label: "Meta ROAS",        f: (v, r) => roas(v, r.meta_spend) },
-  { g: "ads",     k: "shopify_roas",           label: "Shopify ROAS",     f: (v, r) => roas(v, r.meta_spend) },
   { g: "ads",     k: "meta_impressions",       label: "Impressions",      f: num  },
 ];
 
@@ -385,10 +394,11 @@ const COL_HELP = {
   checkout_rate: "Of sessions that landed here, the share that reached checkout.",
   revenue: "Value of orders PLACED on this page -- not of orders by people who landed here.",
   orders: "Orders placed on this page, keyed on the order's own URL.",
-  meta_spend: "Spend on ads whose creative POINTS at this page.",
+  meta_spend: "Spend on ads whose creative POINTS at this page. Misses ads with no readable URL.",
   meta_conv_value: "Conversion value Meta reports for those ads.",
   meta_roas: "Meta's own sales over Meta's own spend, for ads aimed here.",
-  shopify_roas: "Store sales booked ON this page over spend AIMED at it -- two bases, read with care.",
+  order_spend: "Spend on Meta ads that earned an order on this page, split by each ad's share of orders.",
+  page_roas: "Sales placed on this page over the spend of the ads that earned them. Shown from Rs 1,000 of spend.",
   ncp: "New customer purchases, Meta's custom conversion.",
 };
 
@@ -502,7 +512,7 @@ function foldSources(rows) {
   for (const r of rows) {
     const big = (r.sessions || 0) / tS >= SRC_TAIL_SHARE
              || (r.revenue || 0) / tR >= SRC_TAIL_SHARE
-             || (r.meta_spend || 0) > 0;
+             || spendOf(r) > 0;
     (big ? keep : tail).push(r);
   }
   if (tail.length < 2) return { shown: rows, folded: null };
@@ -517,7 +527,7 @@ function foldSources(rows) {
     orders: sum("orders"), revenue: sum("revenue"),
     new_customer_sales: sum("new_customer_sales"),
     repeat_customer_sales: sum("repeat_customer_sales"),
-    meta_spend: sum("meta_spend"),
+    meta_spend: sum("meta_spend"), order_spend: sum("order_spend"),
   };
   other.bounce_rate = other.sessions ? other.bounces / other.sessions : null;
   other.atc_rate = other.sessions ? other.cart_additions / other.sessions : null;
@@ -574,7 +584,7 @@ function renderSources() {
       // Meta spend is Meta-only by construction. A dash says "we do not
       // measure spend for this channel here"; a zero would claim Google
       // and email cost nothing, which is a different and false thing.
-      "<td>" + (r.meta_spend > 0 ? inr0(r.meta_spend) : "—") + "</td>" +
+      "<td>" + (spendOf(r) > 0 ? inr0(spendOf(r)) : "—") + "</td>" +
       "</tr>";
   }).join("");
 
@@ -611,8 +621,10 @@ function renderCoverage() {
     "two columns are facts about the same page, not a funnel, and there is " +
     "deliberately no conversion rate dividing one by the other. Bounce, ATC and " +
     "Checkout % are all session-based and safe to read as rates. " +
-    "<b>Meta spend</b>: " + pc(c.spend_share) + " of " + inr0(c.all_spend) +
-    " reaches a page — the rest is ads whose creative has no readable landing URL. " +
+    "<b>Meta spend</b>: " + pc(c.order_spend_share ?? c.spend_share) + " of " +
+    inr0(c.all_spend) + " reaches a page, through the orders each ad earned — an " +
+    "order carries its page and its ad, so the ad's spend follows its orders. The " +
+    "rest is ads with no order yet in this window. " +
     "Cross-check: the hourly campaign tracker has " + num(c.all_orders) + " orders / " +
     inr0(c.all_revenue) + " for this window on its own cadence.";
 }
@@ -648,7 +660,7 @@ function renderHeroes() {
   const storeOrders = c.store_orders || c.all_orders;
   const [salesTop, salesSub] = headline(storeSales, t.revenue, inr0);
   const [ordersTop, ordersSub] = headline(storeOrders, t.orders, num);
-  const [spendTop, spendSub] = headline(c.all_spend, t.meta_spend, inr0);
+  const [spendTop, spendSub] = headline(c.all_spend, spendOf(t), inr0);
 
   const tiles = [
     ["Sessions",      num(t.sessions), num(t.visitors) + " visitors"],
@@ -752,7 +764,8 @@ function renderCharts() {
     ? "IST · last pulled " + ist(c.data_through)
     : "IST · summed over the window";
   barChart("chart-rev",   hours, "revenue",    "--rev",  inrK);
-  barChart("chart-spend", hours, "meta_spend", "--cost", inrK);
+  barChart("chart-spend", hours, hours.some(h => h.order_spend) ? "order_spend" : "meta_spend",
+           "--cost", inrK);
 }
 
 function renderTable() {
@@ -828,7 +841,7 @@ document.addEventListener("mousemove", e => {
     '<span class="k">Shopify sales</span> ' + esc(inr0(row.revenue)) + "<br>" +
     '<span class="k">Orders</span> ' + esc(num(row.orders)) + "<br>" +
     '<span class="k">New / repeat</span> ' + esc(inr0(row.new_customer_sales)) + " / " + esc(inr0(row.repeat_customer_sales)) + "<br>" +
-    '<span class="k">Meta spend</span> ' + esc(inr0(row.meta_spend)) + "<br>" +
+    '<span class="k">Meta spend</span> ' + esc(inr0(spendOf(row))) + "<br>" +
     '<span class="k">Meta sales</span> ' + esc(inr0(row.meta_conv_value)) + "<br>" +
     '<span class="k">NCP</span> ' + esc(num(row.ncp)),
     e.clientX, e.clientY);

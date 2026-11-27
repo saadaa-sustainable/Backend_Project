@@ -14811,6 +14811,7 @@ class LandingHourRow(BaseModel):
     new_customer_sales: float = 0.0
     repeat_customer_sales: float = 0.0
     meta_spend: float = 0.0
+    order_spend: float = 0.0
     meta_conv_value: float = 0.0
     ncp: float = 0.0
 
