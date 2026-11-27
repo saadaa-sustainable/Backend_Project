@@ -14588,6 +14588,7 @@ SELECT landing_page_path,
        SUM(repeat_customer_sales)   AS repeat_customer_sales,
        SUM(meta_spend)              AS meta_spend,
        SUM(order_spend)             AS order_spend,
+       SUM(quantity)                AS quantity,
        SUM(meta_impressions)        AS meta_impressions,
        SUM(meta_conv_value)         AS meta_conv_value,
        SUM(meta_purchases)          AS meta_purchases,
@@ -14614,6 +14615,7 @@ SELECT EXTRACT(HOUR FROM hour AT TIME ZONE 'Asia/Kolkata')::int AS hour_of_day,
        SUM(repeat_customer_sales)   AS repeat_customer_sales,
        SUM(meta_spend)              AS meta_spend,
        SUM(order_spend)             AS order_spend,
+       SUM(quantity)                AS quantity,
        SUM(meta_conv_value)         AS meta_conv_value,
        SUM(ncp)                     AS ncp
   FROM public.hourly_landing_tracker
@@ -14644,6 +14646,7 @@ SELECT source,
        SUM(repeat_customer_sales)   AS repeat_customer_sales,
        SUM(meta_spend)              AS meta_spend,
        SUM(order_spend)             AS order_spend,
+       SUM(quantity)                AS quantity,
        SUM(meta_impressions)        AS meta_impressions,
        SUM(meta_conv_value)         AS meta_conv_value,
        SUM(meta_purchases)          AS meta_purchases,
@@ -14669,6 +14672,7 @@ SELECT SUM(sessions)                AS sessions,
        SUM(repeat_customer_sales)   AS repeat_customer_sales,
        SUM(meta_spend)              AS meta_spend,
        SUM(order_spend)             AS order_spend,
+       SUM(quantity)                AS quantity,
        SUM(meta_impressions)        AS meta_impressions,
        SUM(meta_conv_value)         AS meta_conv_value,
        SUM(meta_purchases)          AS meta_purchases,
@@ -14750,6 +14754,8 @@ class LandingHourlyPageRow(BaseModel):
     new_customer_sales: float = 0.0
     repeat_customer_orders: int = 0
     repeat_customer_sales: float = 0.0
+    #: Units across the line items of the orders placed here.
+    quantity: int = 0
     meta_spend: float = 0.0
     #: Spend on ads that EARNED an order on this page, not spend on ads
     #: that point at it. The order carries both its own URL and the Meta

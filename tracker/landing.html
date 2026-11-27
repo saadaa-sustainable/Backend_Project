@@ -172,8 +172,8 @@
   .err { color: var(--bad); }
   .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
   /* Each view hides the other's parts; header and controls are shared. */
-  .view-pages #adwrap, .view-pages #adpagewrap, .view-pages #adfunnel { display: none; }
-  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap):not(#adfunnel) { display: none !important; }
+  .view-pages #adwrap, .view-pages #adpagewrap, .view-pages #adfunnel, .view-pages #adheroes { display: none; }
+  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap):not(#adfunnel):not(#adheroes) { display: none !important; }
   .funnels { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
   .fn-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
   .fn-row { display: grid; grid-template-columns: 190px 1fr 250px; gap: 10px;
@@ -276,6 +276,8 @@
       </table>
     </div>
   </div>
+
+  <div class="heroes" id="adheroes"></div>
 
   <div class="card" id="adfunnel" style="margin-bottom:12px">
     <div class="c-head">
@@ -688,6 +690,7 @@ async function loadAds(from, to) {
     return false;
   }
   adPage = undefined;
+  renderAdHeroes();
   renderFunnel();
   renderAdPages();
   renderAds();
@@ -1031,8 +1034,14 @@ function renderHeroes() {
     ["Total sales", salesTop, salesSub],
     ["Shopify orders", ordersTop, ordersSub],
     ["Meta spend",    spendTop, spendSub],
-    ["New customer",  inr0(t.new_customer_sales), num(t.new_customer_orders) + " orders, attributed"],
-    ["Repeat customer", inr0(t.repeat_customer_sales), num(t.repeat_customer_orders) + " orders, attributed"],
+    ["Quantity ordered", num(t.quantity),
+      t.orders ? (t.quantity / t.orders).toFixed(2) + " units per order" : "units"],
+    // Share of ORDERS, with the sales beside it: the two can differ,
+    // because repeat buyers tend to place bigger orders.
+    ["New customer %", fnOf(t.new_customer_orders, t.orders),
+      num(t.new_customer_orders) + " orders · " + inr0(t.new_customer_sales)],
+    ["Repeat customer %", fnOf(t.repeat_customer_orders, t.orders),
+      num(t.repeat_customer_orders) + " orders · " + inr0(t.repeat_customer_sales)],
     ["Bounce / ATC",  pc1(t.bounce_rate) + " / " + pc1(t.atc_rate), "of sessions"],
     ["NCP",           num(t.ncp), t.ncp ? inr0(t.meta_spend / t.ncp) + " each, attributed" : ""],
     ["Meta ROAS",     roas(t.meta_roas, t.meta_spend), "Meta sales ÷ attributed spend"],
@@ -1043,10 +1052,30 @@ function renderHeroes() {
       (c.all_spend ? (storeSales / c.all_spend).toFixed(2) : "—") + "\u00d7",
       "store sales ÷ account spend"],
   ];
-  $("heroes").innerHTML = tiles.map(([l, v, s]) =>
-    '<div class="hero"><div class="h-label">' + esc(l) + '</div>' +
-    '<div class="h-value">' + esc(v) + '</div>' +
-    '<div class="h-sub">' + esc(s) + '</div></div>').join("");
+  $("heroes").innerHTML = tiles.map(tileHtml).join("");
+}
+const tileHtml = ([l, v, s]) =>
+  '<div class="hero"><div class="h-label">' + esc(l) + '</div>' +
+  '<div class="h-value">' + esc(v) + '</div>' +
+  '<div class="h-sub">' + esc(s) + '</div></div>';
+
+// KPI cards for the by-ads tab: the same ads the tables below sum.
+function renderAdHeroes() {
+  if (!ADS) return;
+  const t = ADS.totals;
+  $("adheroes").innerHTML = [
+    ["Ad spend", inr0(t.spend), num(ADS.ad_count) + " ads"],
+    ["Ad sessions", num(t.sessions), "bounce " + pc1(t.bounce_rate) + " · ATC " + pc1(t.atc_rate)],
+    ["Sales from ads", inr0(t.revenue), num(t.orders) + " orders with an ad id"],
+    ["ROAS", t.roas == null ? "—" : xx(t.roas), "ad sales ÷ ad spend"],
+    ["CVR", t.cvr == null ? "—" : (t.cvr * 100).toFixed(2) + "%", "orders ÷ ad sessions"],
+    ["Quantity ordered", num(t.quantity),
+      t.orders ? (t.quantity / t.orders).toFixed(2) + " units per order" : "units"],
+    ["New customer %", fnOf(t.new_orders, t.orders),
+      num(t.new_orders) + " orders · " + inr0(t.new_sales)],
+    ["Repeat customer %", fnOf(t.rep_orders, t.orders),
+      num(t.rep_orders) + " orders · " + inr0(t.rep_sales)],
+  ].map(tileHtml).join("");
 }
 
 /* --- the hour charts ------------------------------------------------

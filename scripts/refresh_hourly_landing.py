@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS hourly_landing_tracker (
     new_customer_sales      numeric     NOT NULL DEFAULT 0,
     repeat_customer_orders  integer     NOT NULL DEFAULT 0,
     repeat_customer_sales   numeric     NOT NULL DEFAULT 0,
+    -- units across the orders' line items, every one placed
+    quantity                integer     NOT NULL DEFAULT 0,
     -- cost (Meta), two ways, never added together
     --
     -- meta_spend is spend on ads whose CREATIVE points at this page.
@@ -243,7 +245,8 @@ ALTER TABLE hourly_landing_tracker
     ADD COLUMN IF NOT EXISTS reached_checkout      integer     NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS sessions_refreshed_at timestamptz,
     ADD COLUMN IF NOT EXISTS orders_refreshed_at   timestamptz,
-    ADD COLUMN IF NOT EXISTS order_spend           numeric     NOT NULL DEFAULT 0
+    ADD COLUMN IF NOT EXISTS order_spend           numeric     NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS quantity              integer     NOT NULL DEFAULT 0
 """
 
 #: Each writer clears only its own columns for the window before
@@ -254,7 +257,7 @@ CLEAR = {
                 "reached_checkout = 0",
     "orders":   "orders = 0, revenue = 0, new_customer_orders = 0, "
                 "new_customer_sales = 0, repeat_customer_orders = 0, "
-                "repeat_customer_sales = 0",
+                "repeat_customer_sales = 0, quantity = 0",
     "meta":     "meta_spend = 0, order_spend = 0, meta_impressions = 0, "
                 "meta_conv_value = 0, meta_purchases = 0, ncp = 0",
     # When Meta's conversions did not arrive: refresh spend, keep the
@@ -279,15 +282,18 @@ UPSERT = {
         INSERT INTO hourly_landing_tracker AS t
             (hour, landing_page_path, source, orders, revenue,
              new_customer_orders, new_customer_sales,
-             repeat_customer_orders, repeat_customer_sales, orders_refreshed_at)
+             repeat_customer_orders, repeat_customer_sales, quantity,
+             orders_refreshed_at)
         VALUES (%(hour)s, %(path)s, %(source)s, %(orders)s, %(revenue)s,
-                %(new_orders)s, %(new_sales)s, %(rep_orders)s, %(rep_sales)s, now())
+                %(new_orders)s, %(new_sales)s, %(rep_orders)s, %(rep_sales)s,
+                %(quantity)s, now())
         ON CONFLICT (hour, landing_page_path, source) DO UPDATE SET
             orders = EXCLUDED.orders, revenue = EXCLUDED.revenue,
             new_customer_orders = EXCLUDED.new_customer_orders,
             new_customer_sales = EXCLUDED.new_customer_sales,
             repeat_customer_orders = EXCLUDED.repeat_customer_orders,
             repeat_customer_sales = EXCLUDED.repeat_customer_sales,
+            quantity = EXCLUDED.quantity,
             orders_refreshed_at = EXCLUDED.orders_refreshed_at
     """,
     "meta": """
@@ -599,7 +605,7 @@ async def fetch_orders(client, store, day: date
 
     acc: dict[tuple[datetime, str, str], dict] = defaultdict(
         lambda: dict(orders=0, revenue=0.0, new_orders=0, new_sales=0.0,
-                     rep_orders=0, rep_sales=0.0))
+                     rep_orders=0, rep_sales=0.0, quantity=0))
     stats = dict(seen=0, excluded=0, no_url=0, placed=0, lost_revenue=0.0,
                  with_ad_id=0)
     mix: dict[tuple[str, str], int] = defaultdict(int)
@@ -620,6 +626,8 @@ async def fetch_orders(client, store, day: date
             amount = float(((n.get("totalPriceSet") or {}).get("shopMoney") or {})
                            .get("amount") or 0)
             attrs = {a["key"]: a["value"] for a in (n.get("customAttributes") or [])}
+            units = sum(int(li["node"].get("quantity") or 0)
+                        for li in (n.get("lineItems") or {}).get("edges", []))
             # The per-ad table takes every order that names an ad,
             # including the ones with no usable URL below: the ad, not
             # the URL, is what ties this order to a landing page there.
@@ -633,8 +641,7 @@ async def fetch_orders(client, store, day: date
                 a["revenue"] += amount
                 a["new_orders" if first else "rep_orders"] += 1
                 a["new_sales" if first else "rep_sales"] += amount
-                a["quantity"] += sum(int(li["node"].get("quantity") or 0)
-                                     for li in (n.get("lineItems") or {}).get("edges", []))
+                a["quantity"] += units
             path = page_path(attrs.get("full_url") or "")
             if not path:
                 # The storefront recorded no landing URL -- a direct
@@ -654,6 +661,7 @@ async def fetch_orders(client, store, day: date
             b = acc[(to_ist_hour(created), path, norm_source(attrs.get("utm_source")))]
             b["orders"] += 1
             b["revenue"] += amount
+            b["quantity"] += units
             if is_new:
                 b["new_orders"] += 1
                 b["new_sales"] += amount
