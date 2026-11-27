@@ -33,7 +33,7 @@
     --border: #e3e6ea; --border-soft: #eef0f3;
     --text: #15181c; --text-2: #5b6470; --text-3: #8b94a1;
     --good: #0f7b3f; --bad: #b4341f;
-    --rev: #0f8a4d; --cost: #1f5fd0; --warn: #b26a00;
+    --rev: #0f8a4d; --cost: #1f5fd0; --warn: #b26a00; --traffic: #7447c9;
     --grid: #eef0f3;
   }
   :root:not([data-theme="light"]) {
@@ -42,7 +42,7 @@
       --border: #272d36; --border-soft: #1f252d;
       --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
       --good: #4ade80; --bad: #f87171;
-      --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a;
+      --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a; --traffic: #a88be6;
       --grid: #1f252d;
     }
   }
@@ -51,7 +51,7 @@
     --border: #272d36; --border-soft: #1f252d;
     --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
     --good: #4ade80; --bad: #f87171;
-    --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a;
+    --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a; --traffic: #a88be6;
     --grid: #1f252d;
   }
   * { box-sizing: border-box; }
@@ -135,7 +135,7 @@
   tr.bandrow th { font-size: 9.5px; letter-spacing: .08em; cursor: default;
                   padding-bottom: 2px; color: var(--text-3); text-align: left;
                   border-bottom: 0; }
-  tr.bandrow th.band-traffic { color: var(--text-2); }
+  tr.bandrow th.band-traffic { color: var(--traffic); }
   tr.bandrow th.band-orders  { color: var(--rev); }
   tr.bandrow th.band-ads     { color: var(--cost); }
   .bandstart { border-left: 1px solid var(--border); }
@@ -216,13 +216,13 @@
   /* Each band of columns carries a faint wash of its own colour, so a
      figure can be placed in its band without reading up to the header.
      Mixed into the surface, so it follows the theme. */
-  td.tint-traffic, th.tint-traffic { background: color-mix(in srgb, var(--text-2) 7%, var(--surface)); }
+  td.tint-traffic, th.tint-traffic { background: color-mix(in srgb, var(--traffic) 9%, var(--surface)); }
   td.tint-orders,  th.tint-orders  { background: color-mix(in srgb, var(--rev) 9%, var(--surface)); }
   td.tint-ads,     th.tint-ads     { background: color-mix(in srgb, var(--cost) 9%, var(--surface)); }
-  tr.total td.tint-traffic { background: color-mix(in srgb, var(--text-2) 15%, var(--surface)); }
+  tr.total td.tint-traffic { background: color-mix(in srgb, var(--traffic) 18%, var(--surface)); }
   tr.total td.tint-orders  { background: color-mix(in srgb, var(--rev) 18%, var(--surface)); }
   tr.total td.tint-ads     { background: color-mix(in srgb, var(--cost) 18%, var(--surface)); }
-  tr.bandrow th.band-traffic { background: color-mix(in srgb, var(--text-2) 15%, var(--surface)); }
+  tr.bandrow th.band-traffic { background: color-mix(in srgb, var(--traffic) 18%, var(--surface)); }
   tr.bandrow th.band-orders  { background: color-mix(in srgb, var(--rev) 18%, var(--surface)); }
   tr.bandrow th.band-ads     { background: color-mix(in srgb, var(--cost) 18%, var(--surface)); }
   .toggle[aria-pressed="true"] { border-color: var(--text-2); }
