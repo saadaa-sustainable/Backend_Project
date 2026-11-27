@@ -170,7 +170,7 @@
 
   .msg { padding: 28px 10px; text-align: center; color: var(--text-3); font-size: 13px; }
   .err { color: var(--bad); }
-  .embed header h1, .embed #cfgbtn, .embed #themebtn { display: none; }
+  .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
 </style>
 </head>
 <body>
@@ -186,7 +186,7 @@
   </header>
 
   <div class="controls">
-    <label class="f">Window
+    <label class="f" id="f-window">Window
       <select id="window">
         <option value="0">Today</option>
         <option value="1" selected>2 days</option>
@@ -409,10 +409,23 @@ let sortDir = -1;
 /* ------------------------------------------------------------------ *
  * load                                                               *
  * ------------------------------------------------------------------ */
+// Inside the Hourly Tracker the dates come from ITS Period control, so
+// every tab reads the same window. Standalone, the Window select rules.
+const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(v || "");
+let RANGE = isDay(qs.get("to"))
+  ? { from: isDay(qs.get("from")) ? qs.get("from") : qs.get("to"), to: qs.get("to") } : null;
+window.setRange = (from, to) => {
+  if (!isDay(to)) return;
+  from = isDay(from) ? from : to;
+  if (RANGE && RANGE.from === from && RANGE.to === to) return;
+  RANGE = { from, to };
+  load();
+};
+
 async function load() {
   const base = apiBase();
-  const today = istToday();
-  const from = daysAgo(today, Number($("window").value));
+  const today = RANGE ? RANGE.to : istToday();
+  const from = RANGE ? RANGE.from : daysAgo(today, Number($("window").value));
   $("span").textContent = from + " → " + today + " (IST)";
   $("msg").hidden = false;
   $("msg").className = "msg";

@@ -2274,6 +2274,22 @@ let VIEW = "tracker";
 const TRACKER_CARDS = ["boot", "totals", "chartcard", "donutcard", "cmpcard",
                        "tablewrap", "kwcard"];
 
+/** Point the embedded Landing Pages view at the Period on screen.
+ *  First call loads the frame; later ones hand it the new dates. */
+function syncLanding() {
+  const f = $("landframe");
+  const to = winTo();
+  const from = $("day-from").value || to;
+  if (!f.getAttribute("src")) {
+    f.src = "landing.html?embed=1&api=" + encodeURIComponent(apiBase()) +
+            "&from=" + encodeURIComponent(from) + "&to=" + encodeURIComponent(to);
+    return;
+  }
+  // Still loading: its own URL already carries a window, and the next
+  // Period change or tab switch brings it up to date.
+  try { f.contentWindow.setRange(from, to); } catch {}
+}
+
 function applyView() {
   $("view-tracker").setAttribute("aria-selected", String(VIEW === "tracker"));
   $("view-pnl").setAttribute("aria-selected", String(VIEW === "pnl"));
@@ -2305,11 +2321,12 @@ function applyView() {
   // now has ONE block that does -- the shipment standing -- so its
   // Period control comes back while Compare stays away: nothing on
   // that tab is measured against another window.
-  // Landing Pages carries its own Window and Source controls.
-  const dayless = VIEW === "inv" || VIEW === "land";
+  const dayless = VIEW === "inv";
   $("f-day").hidden = dayless || false;
-  $("f-cmp").hidden = dayless || VIEW === "coin";
-  $("f-deltas").hidden = dayless || VIEW === "coin";
+  // Landing Pages reads the Period like every other tab, but measures
+  // nothing against another window.
+  $("f-cmp").hidden = dayless || VIEW === "coin" || VIEW === "land";
+  $("f-deltas").hidden = dayless || VIEW === "coin" || VIEW === "land";
   if (VIEW === "inv") $("f-day").hidden = true;
   // Inventory does not move hour to hour and is a separate request, so
   // it is fetched once and then redrawn from memory.
@@ -2318,10 +2335,7 @@ function applyView() {
   if (VIEW === "qty") { loadQty(); return; }
   if (VIEW === "land") {
     // Loaded on first open only, pointed at the same backend as this page.
-    const f = $("landframe");
-    if (!f.getAttribute("src")) {
-      f.src = "landing.html?embed=1&api=" + encodeURIComponent(apiBase());
-    }
+    syncLanding();
     return;
   }
   if (LAST) render(LAST.d, LAST.day);
@@ -5582,6 +5596,7 @@ function bootDone() {
  */
 function reloadWindow() {
   load();
+  if (VIEW === "land") syncLanding();
   if (VIEW === "qty") loadQty();
   // Coin Orders is mostly cumulative, but its shipment block reads the
   // window, so a date change has to reach it too.
