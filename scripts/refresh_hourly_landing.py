@@ -586,6 +586,11 @@ async def fetch_ad_sessions(client, store, day: date, ad_paths: dict[str, str]
 #: resolver for the named ones).
 AD_ID_RE = re.compile(r"^[0-9]{10,20}$")
 
+#: Until this IST hour a default run also re-reads yesterday. Three
+#: hourly runs is enough for one to succeed and for late orders and
+#: Meta's spend for the final hour to have settled.
+CLOSE_YESTERDAY_UNTIL_HOUR = 3
+
 
 async def fetch_orders(client, store, day: date
                        ) -> tuple[list[dict], dict, dict[tuple[str, str], int], list[dict]]:
@@ -1037,8 +1042,15 @@ def main() -> None:
         lo = date.fromisoformat(args.from_day or args.to_day)
         hi = date.fromisoformat(args.to_day or args.from_day)
     else:
-        hi = datetime.now(IST).date()
+        now = datetime.now(IST)
+        hi = now.date()
         lo = hi - timedelta(days=args.days - 1)
+        # The last run of a day happens before midnight, so on its own it
+        # leaves that day's final hour part-filled and its store total
+        # short for good -- the next run would only look at the new day.
+        # For the first hours of a day, go back and close yesterday too.
+        if now.hour < CLOSE_YESTERDAY_UNTIL_HOUR:
+            lo -= timedelta(days=1)
     days = [lo + timedelta(days=i) for i in range((hi - lo).days + 1)]
     only = {s.strip() for s in args.only.split(",") if s.strip()}
     bad = only - {"store", "sessions", "orders", "meta"}
