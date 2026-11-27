@@ -236,6 +236,16 @@
 
   <div class="heroes" id="heroes"></div>
 
+  <div class="card" id="pgfunnel" style="margin-bottom:12px" hidden>
+    <div class="c-head">
+      <span><span class="c-title">Funnel</span>
+        <span class="sub" style="margin-left:8px">how much of the store's sales this view
+          accounts for, and how traffic converts</span></span>
+      <span class="c-note" id="pgfn-note"></span>
+    </div>
+    <div class="funnels" id="pgfunnels"></div>
+  </div>
+
   <div class="charts">
     <div class="card">
       <div class="c-head">
@@ -543,17 +553,64 @@ let pgSortKey = "spend", pgSortDir = -1, adPage;   // adPage: undefined = all, n
 // what falls out between two stages is named in its own colour, so the
 // eye can tell "not an ad order" (grey) from "ad missing from the map"
 // (amber) without reading the labels.
+const fnRow = (label, share, colour, opacity, value, sub) =>
+  '<div class="fn-row"><span>' + esc(label) + '</span><div class="fn-track"><div class="fn-bar" ' +
+  'style="width:' + Math.max(0, Math.min(100, (share || 0) * 100)).toFixed(1) + "%;background:" +
+  colour + ";opacity:" + opacity + '"></div></div><span class="fn-val"><b>' + esc(value) +
+  "</b> " + esc(sub) + "</span></div>";
+const fnDrop = (colour, text) => '<div class="fn-drop"><span class="fn-dot" style="background:' +
+  colour + '"></span>' + esc(text) + "</div>";
+const fnOf = (a, b) => b ? pc1(a / b) : "—";
+
+// The Landing Pages tab's funnel. Same reading as the by-ads one, on
+// this tab's own basis: an order belongs to the page it was PLACED on.
+function renderPageFunnel() {
+  const t = DATA && DATA.totals, c = DATA && DATA.coverage;
+  if (!t || !c) { $("pgfunnel").hidden = true; return; }
+  $("pgfunnel").hidden = false;
+  const row = fnRow, drop = fnDrop, of = fnOf;
+  const S = c.store_total_sales || 0, storeOrders = c.store_orders || 0;
+  const meta = (DATA.sources || []).find(r => r.source === "meta") || { revenue: 0, orders: 0 };
+  const filtered = !!$("source").value;
+
+  // Order values are before returns and Shopify's total is after, so a
+  // later stage can pass the first; bars stop at full width.
+  let sales = '<div><div class="fn-title">Sales considered</div>' +
+    row("Store total sales", S ? 1 : 0, "var(--rev)", 1, inr0(S), num(storeOrders) + " orders") +
+    // Counted in orders: the two sales figures are on different bases
+    // (after and before returns), so their difference is not the gap.
+    drop("var(--warn)", num(Math.max(0, storeOrders - t.orders)) + " orders not placed on a " +
+         "page — no recorded URL, cancelled or excluded" +
+         (filtered ? ", or from another source" : "")) +
+    row(filtered ? "On a page, this source" : "Placed on a landing page", S ? t.revenue / S : 0,
+        "var(--rev)", 0.72, inr0(t.revenue),
+        (t.revenue > S ? "before returns" : of(t.revenue, S)) + " · " + num(t.orders) + " orders");
+  if (!filtered) {
+    sales += drop("var(--text-3)", inr0(Math.max(0, t.revenue - meta.revenue)) +
+                  " from direct, Google and other sources") +
+      row("Of which from Meta", S ? meta.revenue / S : 0, "var(--rev)", 0.48, inr0(meta.revenue),
+          of(meta.revenue, S) + " · " + num(meta.orders) + " orders");
+  }
+  sales += "</div>";
+
+  const se = t.sessions || 0;
+  const traffic = '<div><div class="fn-title">Traffic to orders</div>' +
+    row("Sessions", se ? 1 : 0, "var(--cost)", 1, num(se), num(t.visitors) + " visitors") +
+    drop("var(--text-3)", num(t.bounces) + " bounced (" + of(t.bounces, se) + ")") +
+    row("Added to cart", se ? t.cart_additions / se : 0, "var(--cost)", 0.72,
+        num(t.cart_additions), of(t.cart_additions, se) + " of sessions") +
+    drop("var(--text-3)", num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order") +
+    row("Orders", se ? t.orders / se : 0, "var(--cost)", 0.48, num(t.orders),
+        of(t.orders, se) + " of sessions · " + of(t.orders, t.cart_additions) + " of carts") +
+    "</div>";
+  $("pgfunnels").innerHTML = sales + traffic;
+  $("pgfn-note").textContent = "whole store — fair as a total, not page by page";
+}
+
 function renderFunnel() {
   if (!ADS) return;
   const f = ADS.funnel || {}, t = ADS.totals;
-  const row = (label, share, colour, opacity, value, sub) =>
-    '<div class="fn-row"><span>' + esc(label) + '</span><div class="fn-track"><div class="fn-bar" ' +
-    'style="width:' + Math.max(0, Math.min(100, (share || 0) * 100)).toFixed(1) + "%;background:" +
-    colour + ";opacity:" + opacity + '"></div></div><span class="fn-val"><b>' + esc(value) +
-    "</b> " + esc(sub) + "</span></div>";
-  const drop = (colour, text) => '<div class="fn-drop"><span class="fn-dot" style="background:' +
-    colour + '"></span>' + esc(text) + "</div>";
-  const of = (a, b) => b ? pc1(a / b) : "—";
+  const row = fnRow, drop = fnDrop, of = fnOf;
 
   const S = f.store_sales || 0;
   // Order values are before returns and Shopify's total is after, so on
@@ -770,6 +827,7 @@ function render() {
   renderSources();
   renderCoverage();
   renderHeroes();
+  renderPageFunnel();
   renderCharts();
   renderTable();
 }
