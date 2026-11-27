@@ -8,6 +8,13 @@ Writes Bronze (raw_dump_meta adcreative rows, which the nightly
 scripts/refresh_ad_media.py rebuild reads, newest per ad wins) and mirrors
 the same values into ad_media so the dashboard shows them now.
 
+Every ad in the CSV also goes into ad_landing_map, whether or not
+ad_media knows the ad. ad_media is rebuilt each night from the ads the
+ingest has already seen, so an ad launched since then is not in it and
+used to be skipped here without a word -- and those are the ads doing
+most of the spending. The map is never truncated, so it holds them
+until the nightly catches up, and after.
+
 Usage:
     .venv/bin/python scripts/import_landing_urls_csv.py ~/Downloads/export.csv           # dry run
     .venv/bin/python scripts/import_landing_urls_csv.py ~/Downloads/export.csv --write
@@ -34,6 +41,36 @@ MAX_INDEXABLE_URL = 2000
 COLUMNS = ["id", "meta_id", "raw_payload", "api_endpoint", "api_version", "batch_id",
            "request_params", "extracted_at", "sync_type", "payload_hash",
            "processing_status", "object_type", "parent_ids", "is_nested"]
+
+
+MAP_DDL = """
+CREATE TABLE IF NOT EXISTS public.ad_landing_map (
+    ad_id            text PRIMARY KEY,
+    landing_page_url text NOT NULL,
+    source           text NOT NULL,
+    imported_at      timestamptz NOT NULL DEFAULT now()
+)
+"""
+
+
+def write_map(urls: dict[str, str]) -> int:
+    """Upsert every CSV ad's URL into ad_landing_map. Newest import wins."""
+    import psycopg2.extras
+    rows = [(ad, url, SOURCE) for ad, url in urls.items()]
+    with connect(autocommit=False, statement_timeout="300s") as conn, conn.cursor() as cur:
+        cur.execute(MAP_DDL)
+        conn.commit()
+    for i in range(0, len(rows), 500):
+        with connect(autocommit=False, statement_timeout="300s") as conn, conn.cursor() as cur:
+            psycopg2.extras.execute_values(cur, """
+                INSERT INTO public.ad_landing_map (ad_id, landing_page_url, source)
+                VALUES %s
+                ON CONFLICT (ad_id) DO UPDATE SET
+                    landing_page_url = EXCLUDED.landing_page_url,
+                    source = EXCLUDED.source, imported_at = now()
+            """, rows[i:i + 500])
+            conn.commit()
+    return len(rows)
 
 
 def read_csv(path: str) -> dict[str, str]:
@@ -114,8 +151,11 @@ if __name__ == "__main__":
     ap.add_argument("csv")
     ap.add_argument("--write", action="store_true")
     a = ap.parse_args()
-    todo = plan(read_csv(a.csv))
+    urls = read_csv(a.csv)
+    todo = plan(urls)
     if a.write:
-        write(todo)
+        if todo:
+            write(todo)
+        print(f"ad_landing_map: {write_map(urls):,} ads upserted")
     else:
         print("dry run: pass --write to apply")

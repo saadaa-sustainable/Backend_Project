@@ -153,6 +153,16 @@ CREATE TABLE IF NOT EXISTS landing_ad_order_mix (
     PRIMARY KEY (day, ad_id, landing_page_path)
 );
 
+-- ad -> landing URL straight from Ads Manager exports
+-- (scripts/import_landing_urls_csv.py). Declared here too so the
+-- lookup below never meets a missing table on a fresh database.
+CREATE TABLE IF NOT EXISTS ad_landing_map (
+    ad_id            text PRIMARY KEY,
+    landing_page_url text NOT NULL,
+    source           text NOT NULL,
+    imported_at      timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS landing_store_totals (
     day           date NOT NULL PRIMARY KEY,
     gross_sales   numeric NOT NULL DEFAULT 0,
@@ -547,6 +557,7 @@ def load_ad_paths() -> dict[str, str]:
 
     ad_media first (scripts/backfill_ad_landing_urls.py and
     scripts/import_landing_urls_csv.py keep it current), then
+    ad_landing_map for ads the nightly has not ingested yet, then
     landing_page_ad_breakdown_30d for anything it missed.
 
     Not resolved from the creatives here: that means scanning every
@@ -565,6 +576,13 @@ def load_ad_paths() -> dict[str, str]:
             p = page_path(url)
             if ad_id and p:
                 out[ad_id] = p
+        # Ads the nightly has not ingested yet are in neither table
+        # above or below, only in the export.
+        cur.execute("SELECT ad_id, landing_page_url FROM ad_landing_map")
+        for ad_id, url in cur.fetchall():
+            p = page_path(url)
+            if ad_id and p:
+                out.setdefault(ad_id, p)
         cur.execute("SELECT ad_id, landing_page_path FROM landing_page_ad_breakdown_30d "
                     " WHERE landing_page_path IS NOT NULL")
         for ad_id, raw in cur.fetchall():
