@@ -160,6 +160,36 @@ jobs:
           echo "Running: scripts/fetch_hourly_tracker.py $ARGS"
           python scripts/fetch_hourly_tracker.py $ARGS
 
+      # The same hours, one level down: which LANDING PAGE the hour
+      # belonged to. Separate table, separate step, because the Meta
+      # half is ad-level x hourly and costs ~70 requests for a day
+      # against the ~1 the step above spends -- a cost the main tracker
+      # must not inherit, and a rate limit that must not redden the hour
+      # the main tracker already wrote. Hence --days 1 and
+      # continue-on-error: the Shopify half still runs first inside the
+      # script, so revenue per page stays current even when Meta refuses.
+      - name: Refresh hourly landing pages
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_SYNC: ${{ secrets.DATABASE_URL_SYNC }}
+          # Shopify is now the source of BOTH the sessions and the
+          # orders on this table -- it used to read them out of the
+          # warehouse, which the 01:30 nightly only rebuilds once a day.
+          SHOP_NAME: ${{ secrets.SHOP_NAME }}
+          SHOP_DOMAIN: ${{ secrets.SHOP_DOMAIN }}
+          ADMIN_ACCESS_TOKEN: ${{ secrets.ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_API_VERSION: ${{ secrets.SHOPIFY_API_VERSION }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_API_VERSION: ${{ secrets.META_API_VERSION }}
+          META_ACCOUNT_1_ID: ${{ secrets.META_ACCOUNT_1_ID }}
+          META_ACCOUNT_1_NAME: ${{ secrets.META_ACCOUNT_1_NAME }}
+          META_ACCOUNT_2_ID: ${{ secrets.META_ACCOUNT_2_ID }}
+          META_ACCOUNT_2_NAME: ${{ secrets.META_ACCOUNT_2_NAME }}
+          META_ACCOUNT_3_ID: ${{ secrets.META_ACCOUNT_3_ID }}
+          META_ACCOUNT_3_NAME: ${{ secrets.META_ACCOUNT_3_NAME }}
+        run: python scripts/refresh_hourly_landing.py --days 1
+
       # Returns are settled in Return Prime, outside Shopify, so this is
       # the only place the P&L's Returns line comes from. Seven days is
       # enough for an hourly pass: it catches every new request and the

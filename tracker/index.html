@@ -1028,6 +1028,7 @@
       <button id="view-inv" role="tab" aria-selected="false">Inventory</button>
       <button id="view-coin" role="tab" aria-selected="false">Coin Orders</button>
       <button id="view-qty" role="tab" aria-selected="false">Quantity</button>
+      <button id="view-land" role="tab" aria-selected="false">Landing Pages</button>
     </div>
     <div class="f dpf" id="f-day"><span class="k">Period</span>
       <button type="button" class="dpb" id="day-btn" aria-haspopup="dialog"
@@ -1116,6 +1117,14 @@
       <span class="sub" id="ttl-vs"></span>
     </div>
     <div class="heroes" id="heroes"></div>
+  </div>
+
+  <!-- shortcut: landing.html is embedded whole rather than merged in, so its
+       ids, styles and fetches cannot collide with this page's. Merge it when
+       the two need to share the Period control. -->
+  <div id="landcard" hidden>
+    <iframe id="landframe" title="Landing Pages"
+            style="width:100%;height:calc(100vh - 130px);min-height:640px;border:0;display:block"></iframe>
   </div>
 
   <div class="card" id="qtycard" hidden>
@@ -2271,6 +2280,7 @@ function applyView() {
   $("view-inv").setAttribute("aria-selected", String(VIEW === "inv"));
   $("view-coin").setAttribute("aria-selected", String(VIEW === "coin"));
   $("view-qty").setAttribute("aria-selected", String(VIEW === "qty"));
+  $("view-land").setAttribute("aria-selected", String(VIEW === "land"));
   // Hiding only. Showing is the drawing code's job, so a card with
   // nothing to show stays hidden rather than flashing empty -- and
   // render() below re-applies the gate anyway.
@@ -2279,6 +2289,7 @@ function applyView() {
   if (VIEW !== "inv") $("invcard").hidden = true;
   if (VIEW !== "coin") $("coincard").hidden = true;
   if (VIEW !== "qty") $("qtycard").hidden = true;
+  $("landcard").hidden = VIEW !== "land";
   // The footnote belongs to the Hourly Tracker and explains ITS
   // columns. Left on screen under another section it describes figures
   // that are not there, which is worse than no note at all. render()
@@ -2294,7 +2305,8 @@ function applyView() {
   // now has ONE block that does -- the shipment standing -- so its
   // Period control comes back while Compare stays away: nothing on
   // that tab is measured against another window.
-  const dayless = VIEW === "inv";
+  // Landing Pages carries its own Window and Source controls.
+  const dayless = VIEW === "inv" || VIEW === "land";
   $("f-day").hidden = dayless || false;
   $("f-cmp").hidden = dayless || VIEW === "coin";
   $("f-deltas").hidden = dayless || VIEW === "coin";
@@ -2304,6 +2316,14 @@ function applyView() {
   if (VIEW === "inv") { loadInventory(); return; }
   if (VIEW === "coin") { loadCoins(); return; }
   if (VIEW === "qty") { loadQty(); return; }
+  if (VIEW === "land") {
+    // Loaded on first open only, pointed at the same backend as this page.
+    const f = $("landframe");
+    if (!f.getAttribute("src")) {
+      f.src = "landing.html?embed=1&api=" + encodeURIComponent(apiBase());
+    }
+    return;
+  }
   if (LAST) render(LAST.d, LAST.day);
 }
 
@@ -2312,6 +2332,7 @@ $("view-pnl").onclick = () => { if (VIEW !== "pnl") { VIEW = "pnl"; applyView();
 $("view-inv").onclick = () => { if (VIEW !== "inv") { VIEW = "inv"; applyView(); } };
 $("view-coin").onclick = () => { if (VIEW !== "coin") { VIEW = "coin"; applyView(); } };
 $("view-qty").onclick = () => { if (VIEW !== "qty") { VIEW = "qty"; applyView(); } };
+$("view-land").onclick = () => { if (VIEW !== "land") { VIEW = "land"; applyView(); } };
 
 // The day row and every hour row both come through here, so the summary
 // cannot drift from the breakdown beneath it.
@@ -5748,6 +5769,8 @@ $("theme").onclick = () => {
   const next = el.getAttribute("data-theme") === "dark" ? "light" : "dark";
   el.setAttribute("data-theme", next);
   try { localStorage.setItem("tracker_theme", next); } catch {}
+  // Same origin, so the embedded Landing Pages view follows the toggle.
+  try { $("landframe").contentDocument.documentElement.dataset.theme = next; } catch {}
 };
 try {
   const th = localStorage.getItem("tracker_theme");

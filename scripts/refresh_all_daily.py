@@ -39,6 +39,7 @@ Wall time: ~35-60 min depending on Meta throttle.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import io
 import os
 import pathlib
@@ -186,8 +187,13 @@ PHASE_INGEST = [
     # 2026-08-24, so the ad universe the order-attribution cascade runs
     # against was three weeks behind -- see scripts/refresh_meta_entities.py
     # for what that cost in unattributed orders.
+    # Campaigns and ad sets only: paging all ~27k ads trips Meta's
+    # ads-management rate limit (80004, an hour's backoff) and never
+    # finished inside this step. The ads that matter are refreshed by id
+    # in meta_ads_recent, same Bronze shape, so thumbnails are unaffected.
     ("meta_roster",           ["scripts/ingest_last_15_days.py",
-                               "--roster-only"],                            1800),
+                               "--roster-only", "--skip-ad-roster"],        600),
+    ("meta_ads_recent",       ["scripts/fetch_ads_by_id.py", "--recent"],   1200),
     ("meta_insights_15d",     ["scripts/ingest_last_15_days.py",
                                "--levels", "ad"],                           2700),
     # DAILY rows for adset and campaign. Without this they were fetched
@@ -265,7 +271,10 @@ PHASE_INGEST = [
                                "--preset-windows",
                                "--levels", "adset,campaign"],               1800),
     ("meta_dpa_products",     ["scripts/fetch_ad_product_insights.py"],     1800),
-    ("instagram_posts",       ["scripts/ingest_instagram_chronological.py"], 1800),
+    # --resume-from-db: a fresh runner has no checkpoint file, and without
+    # it every night restarted from the oldest post and timed out.
+    ("instagram_posts",       ["scripts/ingest_instagram_chronological.py",
+                               "--resume-from-db"],                         1800),
     ("shopify_daily",         SHOPIFY_INGEST_CMD,        SHOPIFY_INGEST_TIMEOUT_S),
     # REMOVED 2026-10-16, by request: BigQuery inventory.
     #
@@ -583,6 +592,18 @@ PHASE_SILVER = [
 #: dashboard showing the previous snapshot.) Pass --skip-cpis to stop
 #: after silver when you only care about inventory.
 SHOPIFY_INGEST_STEPS = ["shopify_daily"]
+#: The fetch phase runs as parallel lanes: each external API waits on its
+#: own source, so one queue spent ~2 of the run's 4 hours idle behind the
+#: slowest. Steps sharing the Meta token stay in ONE lane, in order, so they
+#: never compete for its rate budget. The Shopify flatten reads no Meta
+#: table, so it starts as soon as the Shopify fetch lands.
+SHOPIFY_LANE = ["shopify_daily", "silver_shopify"]
+
+
+def _lane_of(label: str) -> int:
+    if label.startswith("meta_") or label == "instagram_posts":
+        return 0
+    return 1 if label in SHOPIFY_LANE else 2
 SHOPIFY_SILVER_STEPS = ["silver_shopify", "silver_shopify_attribution", "cpis_sku_context"]
 SHOPIFY_CPIS_STEPS = ["silver_cpis_daily", "silver_cpis_utm", "cpis_value_weighted", "silver_cpis_by_sku"]
 
@@ -687,7 +708,7 @@ def main() -> int:
         ]
 
     with CronRun(project="backend_project") as run:
-        for name, cmd, timeout in steps:
+        def run_one(name: str, cmd: list[str], timeout: int) -> None:
             with run.step(name, timeout=timeout) as step:
                 if name == "cpis_value_weighted":
                     failed_sources = [source for source in (
@@ -696,18 +717,30 @@ def main() -> int:
                     ) if source in run.steps and run.steps[source]["status"] != "ok"]
                     if failed_sources:
                         step.skip(f"{', '.join(failed_sources)} did not finish; preserving CPIS")
-                        continue
+                        return
                 dependency = {
                     "silver_shopify_attribution": "silver_shopify",
                     "gold_ad_performance": "silver_shopify_attribution",
                 }.get(name)
                 if dependency in run.steps and run.steps[dependency]["status"] != "ok":
                     step.skip(f"{dependency} did not finish; preserving the previous derived table")
-                    continue
+                    return
                 # Prepend the interpreter so the workflow doesn't need to
                 # know each script's shebang; also lets us pin the venv.
                 full_cmd = [PY, str(ROOT / cmd[0]), *cmd[1:]]
                 step.run(full_cmd, cwd=str(ROOT))
+
+        fetch = {label for label, _, _ in PHASE_INGEST} | {"silver_shopify"}
+        if any(label in fetch and label not in SHOPIFY_LANE for label, _, _ in steps):
+            lanes: list[list] = [[], [], []]
+            for st in steps:
+                if st[0] in fetch:
+                    lanes[_lane_of(st[0])].append(st)
+            with ThreadPoolExecutor(len(lanes)) as pool:
+                list(pool.map(lambda lane: [run_one(*st) for st in lane], lanes))
+            steps = [st for st in steps if st[0] not in fetch]
+        for st in steps:
+            run_one(*st)
 
     # Exit red if ANY step failed so GitHub marks the run failed and
     # sends a notification. Partial success still fails the job.

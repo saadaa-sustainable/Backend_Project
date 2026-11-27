@@ -24,6 +24,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("path", nargs="?", default="/user/analytics")
     ap.add_argument("--base", default="http://localhost:3000")
+    ap.add_argument("--api", default=None,
+                    help="send the page's API calls here instead of the base URL "
+                         "its build was given. For shooting against a second API "
+                         "when the dev server's own is down -- next dev refuses a "
+                         "second instance for the same directory, so the port it "
+                         "was started with cannot be changed.")
     ap.add_argument("--width", type=int, default=1600)
     ap.add_argument("--height", type=int, default=1000)
     ap.add_argument("--out", default=None)
@@ -49,6 +55,11 @@ def main() -> int:
         pg.on("console", lambda m: errors.append(f"[{m.type}] {m.text[:160]}")
               if m.type in ("error", "warning") else None)
         pg.on("pageerror", lambda e: errors.append(f"[pageerror] {str(e)[:160]}"))
+        if args.api:
+            def reroute(route):
+                u = route.request.url
+                route.continue_(url=args.api.rstrip("/") + u[u.index("/admin/"):])
+            pg.route("**/admin/**", reroute)
         pg.goto(args.base + args.path, wait_until="networkidle", timeout=90_000)
         pg.wait_for_timeout(int(args.wait * 1000))
 

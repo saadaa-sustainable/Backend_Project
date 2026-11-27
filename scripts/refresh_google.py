@@ -4,8 +4,8 @@ WHY THIS EXISTS
 ---------------
 The nightly runs in CI, where there are no Google credentials, so every
 Google-fed step fails there and the tables only move when somebody runs
-them from a machine that has the credentials. That used to mean nine
-commands in the right order. This is those nine, in that order.
+them from a machine that has the credentials. That used to mean ten
+commands in the right order. This is those ten, in that order.
 
     ./.venv/bin/python scripts/refresh_google.py
 
@@ -17,6 +17,7 @@ WHAT IT RUNS
     ga4_landing     GA4 sessions by landing page
     ga4_arpu        GA4 ARPU by day and by window
     ga4_attribution first click per order, from the GA4 BigQuery export
+    token_resolution the stored token-to-ad map First Click joins
     returns         SKU returns, from the MapleMonk BigQuery table
     landing_gold    the three landing-page tables built on ga4_landing
     snapshots       the materialized views behind the founder sheet
@@ -77,6 +78,8 @@ def build_steps(args: argparse.Namespace) -> list[tuple[str, list[str], int, str
          900, None),
         ("ga4_attribution", ["scripts/fetch_ga4_order_attribution.py",
                              "--days", str(args.attribution_days)], 1800, None),
+        ("token_resolution", ["scripts/refresh_ad_token_resolution.py"],
+         600, "ga4_attribution"),
         ("returns", ["scripts/refresh_master_sku_returns.py"], 900, None),
         ("landing_gold", ["scripts/refresh_landing_page_gold.py"], 1800, "ga4_landing"),
         ("snapshots", ["scripts/refresh_snapshot_views.py"], 900, None),

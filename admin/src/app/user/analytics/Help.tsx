@@ -50,6 +50,57 @@ const Code = ({ children }: { children: React.ReactNode }) => (
 
 export const HELP_ARTICLES: Article[] = [
   {
+    id: "landing-two-roas",
+    topic: "attribution",
+    sections: ["hourly-landing"],
+    question: "Why a landing page has two different ROAS figures",
+    body: (
+      <>
+        <P>
+          They answer different questions. <strong>Meta ROAS</strong> is what Meta reports for the
+          ads <em>pointing at</em> that page — its own conversion value over its own spend.{" "}
+          <strong>Shopify ROAS</strong> is what the store actually booked from people who{" "}
+          <em>landed on</em> it, over the same spend.
+        </P>
+        <P>
+          An ad can send someone to a collection who then buys from a product page. Meta credits the
+          collection; the store credits the product. Neither is wrong and they will not agree, so
+          both sit on the row rather than one being picked and called &ldquo;revenue&rdquo;.
+        </P>
+        <P>
+          The home page shows this most starkly: it takes organic and brand traffic no ad paid for,
+          so its Shopify ROAS runs into the dozens against a tiny spend. Read that as
+          &ldquo;this page earns without ads&rdquo;, not as a campaign result.
+        </P>
+      </>
+    ),
+  },
+  {
+    id: "landing-coverage",
+    topic: "freshness",
+    sections: ["hourly-landing"],
+    question: "Why the landing page totals are smaller than the store's",
+    body: (
+      <>
+        <P>
+          An order only reaches a page if GA4 saw the session that placed it. About 72% of orders
+          and 84% of revenue do; the rest sit in no page&apos;s row. The banner at the top of the
+          section states the figure for the window you are looking at.
+        </P>
+        <P>
+          Spend has the same problem from the other side. An ad is placed on a page by reading its
+          creative&apos;s landing URL, and that URL is only known once the creative has been
+          fetched — which happens nightly. <strong>Ads launched today are therefore missing</strong>,
+          and on a day of heavy launching the placed share of spend can fall below a fifth.
+        </P>
+        <P>
+          So compare pages against each other, not against the <Code>Hourly Tracker</Code>, which
+          counts every order and every rupee.
+        </P>
+      </>
+    ),
+  },
+  {
     id: "data-floor",
     topic: "freshness",
     sections: ["*"],

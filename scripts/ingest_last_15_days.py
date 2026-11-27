@@ -784,15 +784,14 @@ def _bulk_insert_rows(conn, rows: list[dict[str, Any]], *, chunk_size: int = 100
 # ----------------------------------------------------------------------
 
 
-async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: str, since: date, until: date, time_increment: str, include_roster: bool, levels: list[str] | None = None, roster_only: bool = False) -> list[FetchResult]:
+async def _run(accounts: list[AccountConfig], *, base_url: str, access_token: str, since: date, until: date, time_increment: str, include_roster: bool, levels: list[str] | None = None, roster_only: bool = False, roster_types: tuple[str, ...] = ("campaign", "adset", "ad")) -> list[FetchResult]:
     limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
     async with httpx.AsyncClient(limits=limits) as client:
         tasks = []
         for account in accounts:
             if include_roster:
-                tasks.append(_fetch_campaigns(client, base_url, account, access_token))
-                tasks.append(_fetch_adsets(client, base_url, account, access_token))
-                tasks.append(_fetch_ads(client, base_url, account, access_token))
+                fetchers = {"campaign": _fetch_campaigns, "adset": _fetch_adsets, "ad": _fetch_ads}
+                tasks += [fetchers[t](client, base_url, account, access_token) for t in roster_types]
             if not roster_only:
                 for level in (levels or ["ad"]):
                     tasks.append(
@@ -891,6 +890,9 @@ def main() -> int:
                              "yesterday. Pass today to include a PARTIAL "
                              "day -- what a live tracker wants, and what a "
                              "reconciliation does not.")
+    parser.add_argument("--skip-ad-roster", action="store_true",
+                        help="With --roster-only, fetch campaigns and ad sets only. The nightly "
+                             "refreshes ads by id instead (scripts/fetch_ads_by_id.py --recent).")
     parser.add_argument("--roster-only", action="store_true",
                         help="Fetch ONLY the campaign/adset/ad rosters and no insights at all. "
                              "Implies --include-roster. This is the nightly entity refresh: "
@@ -970,8 +972,15 @@ def main() -> int:
     grand_total_rows = 0
     grand_total_inserted = 0
 
-    for i, (w_since, w_until) in enumerate(windows, 1):
-        label = f"[{i}/{len(windows)}] {w_since} .. {w_until}"
+    # Roster-only runs in two passes, each written before the next: the ad
+    # roster (creative expansion, 50 per page) can outrun the step's
+    # timeout, and when all three were gathered together that took the
+    # campaign and ad set statuses down with it -- nothing was written.
+    passes = ([("campaign", "adset")] + ([] if args.skip_ad_roster else [("ad",)])
+              if args.roster_only else [("campaign", "adset", "ad")])
+    work = [(w, p) for w in windows for p in passes]
+    for i, ((w_since, w_until), roster_types) in enumerate(work, 1):
+        label = f"[{i}/{len(work)}] {w_since} .. {w_until}"
         print(f"{label}  fetching ...", flush=True)
         results = asyncio.run(
             _run(
@@ -980,6 +989,7 @@ def main() -> int:
                 time_increment=args.time_increment,
                 include_roster=args.include_roster or args.roster_only,
                 levels=levels, roster_only=args.roster_only,
+                roster_types=roster_types,
             )
         )
         for r in results:

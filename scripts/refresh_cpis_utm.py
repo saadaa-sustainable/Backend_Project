@@ -1,26 +1,22 @@
-"""Populate cpis_by_sku_utm — Option-A revenue-proportional attribution.
+"""Populate cpis_by_sku_utm -- landing-page (URL-pooled) attribution.
 
-For each order driven by an ad (utm_content -> ad_id):
+    1. Spend of every ad pointing at a page is pooled per page (the ad's
+       landing URL in ad_media, normalised by page_path).
+    2. Last-click ad orders (utm_content -> a Meta ad) share the spend of
+       the page their Shopify full_url landed on: equally per order
+       (ad_spend) or by order value (ad_spend_vw).
+    3. Inside an order the share goes to its line items by line value,
+       each line counted at face value for its master SKU.
 
-    for each line item L in the basket:
-        line_revenue     = qty × unit_price
-        share            = line_revenue / SUM(line_revenue for basket)
-        L.ad_spend_share = ad_spend_of_ad_in_window × share
+So a homepage, collection or campaign page (/collections/diwali-special/men)
+needs no product map: the orders say what was bought. Rs 0 lines (free
+gifts) are not items. Orders on a page with no ad spend are left out;
+spend on a page with no order, or on an ad with no store URL, stays
+unattributed. Both are printed per window.
 
-    each L contributes its own qty / revenue AT FACE VALUE to L.master_sku
-    (no fractional weighting -- if SMCP sold for 899 in the basket, SMCP
-    gets +899 attributed_revenue, +qty attributed_units).
-
-Nice property: because spend follows revenue share, ROAS is identical
-across every SKU in a given basket. CPIS / cost-per-order absorbs the
-absolute-cost difference between higher- and lower-priced SKUs.
-
-Halo columns (halo_orders, halo_units, halo_revenue, halo_spend) remain
-in the schema as placeholders — under Option A every line item is
-attributed at face value, so halo has no natural definition yet. When
-the halo-mapping approach lands (e.g. via product taxonomy / DPA
-product_id / landing collection), those columns can be populated
-without another migration.
+Halo = the rest of the basket (same orders), so per SKU
+attributed_revenue + halo_revenue = order_revenue. halo_spend stays 0:
+spend is already spread over every line.
 
 Runs via psycopg2 sync against DATABASE_URL_SYNC (port 5432).
 
@@ -38,8 +34,13 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
+import sys  # noqa: E402
+
 import psycopg2  # noqa: E402
 import psycopg2.extras  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.services.gold.cpis import page_path  # noqa: E402
 
 
 DSN = os.environ["DATABASE_URL_SYNC"].replace("postgresql+psycopg2://", "postgresql://")
@@ -89,100 +90,46 @@ ALTER TABLE cpis_by_sku_utm
 # each line as line_revenue / order_total_revenue.
 SQL_STEP1 = """
 WITH orders_in_window AS (
-  SELECT so.order_id, so.utm_content AS raw_ad, so.utm_term AS raw_adset,
-         so.line_items
+  -- Last-click ad orders: utm_content names a Meta ad we know. full_url is
+  -- the landing URL GoKwik records at checkout (on every such order); it
+  -- decides which URL's spend the order shares.
+  SELECT so.order_id, so.utm_content AS ad_id, so.line_items,
+         (SELECT a->>'value' FROM jsonb_array_elements(so.custom_attributes) a
+           WHERE a->>'key' = 'full_url' LIMIT 1)                  AS full_url
   FROM shopify_orders so
   -- IST, because Meta reports its days in the ad account's timezone
-  -- (Asia/Kolkata on all three accounts). Windowing orders in UTC while
-  -- the spend they are divided by is counted in IST misaligns the two
-  -- by 5.5 hours. Over a 30-day window the edges very nearly cancel
-  -- (+6 orders, Rs 2,395, +0.01 pct), but the daily grain does not, so
-  -- both are done the same way.
-  --
-  -- Expressed as timestamptz BOUNDS rather than by transforming every
-  -- row: an IST calendar day is a fixed instant range, so the index on
-  -- processed_at is still usable. Filtering on
-  -- (processed_at AT TIME ZONE ...)::date instead is not sargable and
-  -- took this query from seconds to over nine minutes.
+  -- (Asia/Kolkata on all three accounts). Expressed as timestamptz BOUNDS
+  -- rather than by transforming every row, so the index on processed_at
+  -- is still usable (the cast form took this query to over nine minutes).
   WHERE so.processed_at >= (%(window_from)s::date::timestamp
                               AT TIME ZONE 'Asia/Kolkata')
     AND so.processed_at <  ((%(window_to)s::date + 1)::timestamp
                               AT TIME ZONE 'Asia/Kolkata')
-    -- Cancelled orders are out of units and sales, per the CPIS spec.
-    -- financial_status is the only signal we have: shopify_fulfillments
-    -- carries is_canceled_order but it is never set. VOIDED is safe to
-    -- read as cancelled -- all 1,730 of them in a 30-day window are
-    -- UNFULFILLED, so none ever shipped. PENDING is NOT cancelled: it is
-    -- COD awaiting payment and is overwhelmingly fulfilled (16,245 of
-    -- 16,409). REFUNDED stays too -- the spec keeps gross units, because
-    -- return status arrives long after the sale.
+    AND so.utm_content ~ '^[0-9]{10,20}$'
+    AND EXISTS (SELECT 1 FROM ad_lifecycle al WHERE al.ad_id = so.utm_content)
+    -- Cancelled orders are out, per the CPIS spec. VOIDED is the signal:
+    -- every VOIDED order is UNFULFILLED. PENDING is COD awaiting payment
+    -- and stays; REFUNDED stays too (gross units).
     AND COALESCE(so.financial_status, '') <> 'VOIDED'
     AND jsonb_typeof(so.line_items->'edges') = 'array'
-),
--- WHICH ENTITY PAYS FOR THIS ORDER.
---
--- Step 3 of the spec: utm_content maps to the ad, utm_term to the ad
--- set. When an order carries an ad set we can see but no ad we can
--- resolve, the spec falls back a level: "that ad set is allocated as one
--- unit: its total spend is shared across all its orders".
---
--- So the fallback is decided PER AD SET, not per order. If any of an ad
--- set's orders cannot name an ad, the whole ad set switches to ad-set
--- allocation -- every one of its orders, including the ones that did
--- name an ad. Allocating some of its orders per ad and the rest from the
--- ad set total would count the overlap twice and break the spec's own
--- reconciliation check (allocated + unattributed = total spend).
-matched AS (
-  SELECT o.order_id, o.line_items,
-         CASE WHEN o.raw_ad ~ '^[0-9]{10,20}$' AND al.ad_id IS NOT NULL
-              THEN o.raw_ad END                                   AS ad_id,
-         -- The ad set comes from the ad when we resolved one; otherwise
-         -- from utm_term, but ONLY if it is a real ad set. Without that
-         -- existence check any numeric utm_term becomes an entity with
-         -- no spend, which would add orders to a SKU at zero cost and
-         -- quietly improve its CPIS.
-         COALESCE(al.adset_id, s.adset_id)                        AS adset_id
-  FROM orders_in_window o
-  LEFT JOIN ad_lifecycle al
-         ON al.ad_id = o.raw_ad AND o.raw_ad ~ '^[0-9]{10,20}$'
-  LEFT JOIN meta_adsets s
-         ON s.adset_id = o.raw_adset AND o.raw_adset ~ '^[0-9]{6,20}$'
-),
-fallback_adsets AS (
-  SELECT adset_id FROM matched
-   WHERE adset_id IS NOT NULL
-   GROUP BY adset_id
-  HAVING bool_or(ad_id IS NULL)
-),
-resolved AS (
-  SELECT m.order_id, m.line_items,
-         CASE WHEN f.adset_id IS NOT NULL THEN 'adset:' || m.adset_id
-              WHEN m.ad_id   IS NOT NULL  THEN 'ad:'    || m.ad_id
-         END AS ad_id
-  FROM matched m
-  LEFT JOIN fallback_adsets f ON f.adset_id = m.adset_id
-),
-entity_orders AS (
-  -- Orders that name neither a resolvable ad nor an ad set stay UNMAPPED
-  -- and are left out of CPIS, exactly as the spec says.
-  SELECT order_id, ad_id, line_items FROM resolved WHERE ad_id IS NOT NULL
+    AND jsonb_typeof(so.custom_attributes) = 'array'
 ),
 line_items AS (
   SELECT
-    ow.order_id, ow.ad_id,
+    ow.order_id, ow.ad_id, ow.full_url,
     (edge->'node'->>'sku')                                          AS variant_sku,
     COALESCE((edge->'node'->>'quantity')::int, 0)                   AS qty,
     COALESCE(
       (edge->'node'->'originalUnitPriceSet'->'shopMoney'->>'amount')::numeric,
       0
     )                                                               AS unit_price
-  FROM entity_orders ow,
+  FROM orders_in_window ow,
        LATERAL jsonb_array_elements(ow.line_items->'edges') edge
   WHERE edge->'node'->>'sku' IS NOT NULL
 ),
 parsed AS (
   SELECT
-    order_id, ad_id, variant_sku, qty, unit_price,
+    order_id, ad_id, full_url, variant_sku, qty, unit_price,
     (qty * unit_price)                                                AS line_revenue,
     SUBSTRING(
       regexp_replace(variant_sku, '_[A-Za-z0-9]+$', '')
@@ -194,52 +141,55 @@ parsed AS (
   FROM line_items
 ),
 tagged AS (
+  -- Free gifts (the silver coin, Rs 0) are not items sold: they would
+  -- add units at no cost and pull every cost per item down.
   SELECT * FROM parsed
-  WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$'
+  WHERE master_sku ~ '^(SD|SM|SU)[A-Z]{1,4}$' AND unit_price > 0
 ),
 order_totals AS (
-  SELECT order_id, ad_id,
+  SELECT order_id,
          SUM(line_revenue) AS order_total_revenue,
          SUM(qty)          AS order_total_qty
   FROM tagged
-  GROUP BY order_id, ad_id
+  GROUP BY order_id
 )
 SELECT
-  t.ad_id, t.order_id, t.master_sku,
+  t.full_url, t.ad_id, t.order_id, t.master_sku,
   SUM(t.qty)::int          AS qty,
   SUM(t.line_revenue)      AS line_revenue,
   ot.order_total_revenue,
   ot.order_total_qty
 FROM tagged t
-JOIN order_totals ot USING (order_id, ad_id)
-GROUP BY t.ad_id, t.order_id, t.master_sku,
+JOIN order_totals ot USING (order_id)
+GROUP BY t.full_url, t.ad_id, t.order_id, t.master_sku,
          ot.order_total_revenue, ot.order_total_qty
 """
 
 
+# Spend per ad landing URL. Python normalises each URL to its page and
+# pools the ads that share one.
 SQL_STEP2 = """
--- Keyed to match SQL_STEP1's `resolved` CTE: 'ad:<id>' for an order that
--- named a resolvable ad, 'adset:<id>' for one that fell back a level.
--- Both kinds are returned in one map so the allocator does not care
--- which level an order landed on.
---
--- The two never overlap. An ad set only appears here as 'adset:' if the
--- allocator asked for it, and when it does, none of its ads are asked
--- for -- see the fallback note in SQL_STEP1. Spend is therefore counted
--- once, and the spec's reconciliation (allocated + unattributed =
--- total) still holds.
-SELECT 'ad:' || ad_id AS ad_id, SUM(spend) AS spend
-FROM public.insights_daily_by_ad
-WHERE day BETWEEN %(window_from)s AND %(window_to)s
-  AND ad_id IS NOT NULL
-GROUP BY 1
-UNION ALL
-SELECT 'adset:' || adset_id, SUM(spend)
-FROM public.insights_daily_by_adset
-WHERE day BETWEEN %(window_from)s AND %(window_to)s
-  AND adset_id IS NOT NULL
+SELECT m.landing_page_url, SUM(i.spend) AS spend
+FROM public.insights_daily_by_ad i
+LEFT JOIN public.ad_media m USING (ad_id)
+WHERE i.day BETWEEN %(window_from)s AND %(window_to)s
+  AND i.spend > 0
 GROUP BY 1
 """
+
+
+def pool_spend_by_page(rows) -> tuple[dict[str, float], float]:
+    """(landing_url, spend) rows -> spend per store page, plus the spend
+    on ads with no URL or one off the store, which no order can match."""
+    pooled: dict[str, float] = defaultdict(float)
+    lost = 0.0
+    for url, spend in rows:
+        page = page_path(url)
+        if page in (None, "OFFSITE"):
+            lost += float(spend or 0)
+        else:
+            pooled[page] += float(spend or 0)
+    return dict(pooled), lost
 
 
 def _refresh_window(cur, window_key: str, window_from: date, window_to: date) -> int:
@@ -248,13 +198,26 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
     print(f"[{window_key}] step1: (ad, order, sku) lines with basket totals "
           f"({window_from}..{window_to}) ...", flush=True)
     cur.execute(SQL_STEP1, {"window_from": window_from, "window_to": window_to})
-    lines = cur.fetchall()
-    print(f"[{window_key}]   -> {len(lines)} (ad, order, sku) rows", flush=True)
+    raw = cur.fetchall()
+    print(f"[{window_key}]   -> {len(raw)} (order, sku) rows", flush=True)
 
-    print(f"[{window_key}] step2: ad_id -> spend map from insights ...", flush=True)
+    print(f"[{window_key}] step2: landing URL -> spend map from insights ...", flush=True)
     cur.execute(SQL_STEP2, {"window_from": window_from, "window_to": window_to})
-    spend_map: dict[str, float] = {r[0]: float(r[1] or 0) for r in cur.fetchall()}
-    print(f"[{window_key}]   -> {len(spend_map)} distinct ad_ids with spend", flush=True)
+    spend_map, lost = pool_spend_by_page(cur.fetchall())
+    print(f"[{window_key}]   -> {len(spend_map)} pages with spend; "
+          f"Rs {lost:,.0f} on ads with no store URL stays unattributed", flush=True)
+
+    # Each order shares the spend of the page it landed on. An order whose
+    # page had no ad spend is left out: counting it would add units at no
+    # cost and make its products look cheaper than they are.
+    lines = [(page_path(u), *rest) for u, *rest in raw]
+    kept = [ln for ln in lines if ln[0] in spend_map]
+    sold_on = {ln[0] for ln in kept}
+    print(f"[{window_key}]   -> {len({ln[2] for ln in lines}) - len({ln[2] for ln in kept})} "
+          f"orders landed on a page with no spend (left out); "
+          f"Rs {sum(v for k, v in spend_map.items() if k not in sold_on):,.0f} "
+          f"on pages with no order", flush=True)
+    lines = kept
 
     # Compute TWO spend allocations in the same pass:
     #
@@ -271,9 +234,9 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
     # Both sum to A.spend exactly. Frontend toggle picks which to display.
     ad_order_counts: dict[str, set] = defaultdict(set)
     ad_total_rev:    dict[str, float] = defaultdict(float)
-    for ad_id, order_id, _sku, _q, line_rev, _otr, _otq in lines:
-        ad_order_counts[ad_id].add(order_id)
-        ad_total_rev[ad_id] += float(line_rev or 0)
+    for page, _ad, order_id, _sku, _q, line_rev, _otr, _otq in lines:
+        ad_order_counts[page].add(order_id)
+        ad_total_rev[page] += float(line_rev or 0)
 
     sku_agg: dict[str, dict] = defaultdict(lambda: {
         "orders": set(), "units": 0, "revenue": 0.0,
@@ -299,7 +262,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         # twin of order_revenue. attributed_units counts only this SKU.
         "order_units_by_order": {},
     })
-    for ad_id, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
+    for page, ad_id, order_id, master_sku, qty, line_rev, order_total_rev, order_total_qty in lines:
         qty      = int(qty or 0)
         line_rev = float(line_rev or 0)
         order_total_rev = float(order_total_rev or 0)
@@ -334,10 +297,10 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
             agg["halo_units"]   += halo_units_here
             agg["halo_revenue"] += halo_rev_here
 
-        ad_total_spend  = spend_map.get(ad_id, 0.0)
+        ad_total_spend  = spend_map[page]
 
         # --- equal-per-order allocation ---
-        n_orders_for_ad = len(ad_order_counts[ad_id]) or 1
+        n_orders_for_ad = len(ad_order_counts[page]) or 1
         per_order_share = ad_total_spend / n_orders_for_ad
         if order_total_rev > 0:
             within_order_share = line_rev / order_total_rev
@@ -348,7 +311,7 @@ def _refresh_window(cur, window_key: str, window_from: date, window_to: date) ->
         agg["ad_spend"] += per_order_share * within_order_share
 
         # --- value-weighted allocation ---
-        ad_rev_total = ad_total_rev[ad_id]
+        ad_rev_total = ad_total_rev[page]
         if ad_rev_total > 0:
             agg["ad_spend_vw"] += ad_total_spend * (line_rev / ad_rev_total)
         else:

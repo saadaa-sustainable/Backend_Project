@@ -19,6 +19,25 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 1
+
+# One run at a time. Two of these writing the same hourly rows is a real
+# hazard, and it happened: a run outlived its session and overlapped the
+# next one. mkdir is the atomic test-and-set that macOS has without flock.
+# The holder's pid is in the lock, because the trap below does not always
+# run: a background task killed outright leaves the directory behind, and
+# a lock nobody holds silently no-ops every later run -- which it did, for
+# two hours, reporting exit 0 each time.
+LOCK="${TMPDIR:-/tmp}/refresh_google_arpu.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if kill -0 "$(cat "$LOCK/pid" 2>/dev/null)" 2>/dev/null; then
+    echo "another run (pid $(cat "$LOCK/pid")) holds $LOCK -- exiting"; exit 0
+  fi
+  echo "clearing stale lock $LOCK"
+  rm -rf "$LOCK"
+  mkdir "$LOCK" 2>/dev/null || { echo "lost the race for $LOCK -- exiting"; exit 0; }
+fi
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
 DAYS="${1:-2}"
 PY=.venv/bin/python
 export GRPC_DNS_RESOLVER=native
