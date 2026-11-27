@@ -33,7 +33,7 @@
     --border: #e3e6ea; --border-soft: #eef0f3;
     --text: #15181c; --text-2: #5b6470; --text-3: #8b94a1;
     --good: #0f7b3f; --bad: #b4341f;
-    --rev: #0f8a4d; --cost: #1f5fd0;
+    --rev: #0f8a4d; --cost: #1f5fd0; --warn: #b26a00;
     --grid: #eef0f3;
   }
   :root:not([data-theme="light"]) {
@@ -42,7 +42,7 @@
       --border: #272d36; --border-soft: #1f252d;
       --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
       --good: #4ade80; --bad: #f87171;
-      --rev: #2fa862; --cost: #5f93e0;
+      --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a;
       --grid: #1f252d;
     }
   }
@@ -51,7 +51,7 @@
     --border: #272d36; --border-soft: #1f252d;
     --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
     --good: #4ade80; --bad: #f87171;
-    --rev: #2fa862; --cost: #5f93e0;
+    --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a;
     --grid: #1f252d;
   }
   * { box-sizing: border-box; }
@@ -172,8 +172,19 @@
   .err { color: var(--bad); }
   .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
   /* Each view hides the other's parts; header and controls are shared. */
-  .view-pages #adwrap, .view-pages #adpagewrap { display: none; }
-  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap) { display: none !important; }
+  .view-pages #adwrap, .view-pages #adpagewrap, .view-pages #adfunnel { display: none; }
+  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap):not(#adfunnel) { display: none !important; }
+  .funnels { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+  .fn-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+  .fn-row { display: grid; grid-template-columns: 190px 1fr 250px; gap: 10px;
+            align-items: center; margin: 3px 0; font-size: 12px; }
+  .fn-track { height: 22px; border-radius: 5px; background: var(--muted); overflow: hidden; }
+  .fn-bar { height: 100%; border-radius: 5px; min-width: 2px; }
+  .fn-val { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .fn-val b { font-weight: 650; }
+  .fn-drop { margin: 1px 0 6px; padding-left: 200px; font-size: 11px; color: var(--text-2); }
+  .fn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  @media (max-width: 560px) { .fn-drop { padding-left: 0; } .fn-row { grid-template-columns: 1fr; gap: 2px; } }
   #adpagebody tr { cursor: pointer; }
   #adpagebody tr.sel td { background: var(--muted); }
   .view-ads .controls > *:not(#f-window):not(#reload):not(#cfg) { display: none; }
@@ -254,6 +265,16 @@
         <tbody id="srcbody"></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card" id="adfunnel" style="margin-bottom:12px">
+    <div class="c-head">
+      <span><span class="c-title">Funnel</span>
+        <span class="sub" style="margin-left:8px">how much of the store's sales this view
+          accounts for, and how ad traffic converts</span></span>
+      <span class="c-note" id="fn-note"></span>
+    </div>
+    <div class="funnels" id="funnels"></div>
   </div>
 
   <div class="card" id="adpagewrap" style="padding:0;margin-bottom:12px">
@@ -518,6 +539,51 @@ PAGE_COLS.sort((a, b) => (a.g === "ads" ? 0 : a.g === "traffic" ? 1 : 2) -
                          (b.g === "ads" ? 0 : b.g === "traffic" ? 1 : 2));
 let pgSortKey = "spend", pgSortDir = -1, adPage;   // adPage: undefined = all, null = unmapped
 
+// Two funnels. Kept stages are one hue stepping lighter as they narrow;
+// what falls out between two stages is named in its own colour, so the
+// eye can tell "not an ad order" (grey) from "ad missing from the map"
+// (amber) without reading the labels.
+function renderFunnel() {
+  if (!ADS) return;
+  const f = ADS.funnel || {}, t = ADS.totals;
+  const row = (label, share, colour, opacity, value, sub) =>
+    '<div class="fn-row"><span>' + esc(label) + '</span><div class="fn-track"><div class="fn-bar" ' +
+    'style="width:' + Math.max(0, Math.min(100, (share || 0) * 100)).toFixed(1) + "%;background:" +
+    colour + ";opacity:" + opacity + '"></div></div><span class="fn-val"><b>' + esc(value) +
+    "</b> " + esc(sub) + "</span></div>";
+  const drop = (colour, text) => '<div class="fn-drop"><span class="fn-dot" style="background:' +
+    colour + '"></span>' + esc(text) + "</div>";
+  const of = (a, b) => b ? pc1(a / b) : "—";
+
+  const S = f.store_sales || 0;
+  // Order values are before returns and Shopify's total is after, so on
+  // a window with returns a later stage can pass the first; bars stop
+  // at full width rather than overflow.
+  const sales = '<div><div class="fn-title">Sales considered</div>' +
+    row("Store total sales", S ? 1 : 0, "var(--rev)", 1, inr0(S), num(f.store_orders) + " orders") +
+    drop("var(--text-3)", inr0(Math.max(0, S - f.ad_sales)) +
+         " not counted — orders with no Meta ad id (direct, Google, other)") +
+    row("With a Meta ad id", S ? f.ad_sales / S : 0, "var(--rev)", 0.72, inr0(f.ad_sales),
+        of(f.ad_sales, S) + " · " + num(f.ad_orders) + " orders") +
+    drop("var(--warn)", inr0(f.ad_sales - f.mapped_sales) + " on ads not in the ad map") +
+    row("On a mapped landing page", S ? f.mapped_sales / S : 0, "var(--rev)", 0.48,
+        inr0(f.mapped_sales), of(f.mapped_sales, S) + " · " + num(f.mapped_orders) + " orders") +
+    "</div>";
+
+  const se = t.sessions || 0;
+  const traffic = '<div><div class="fn-title">Ad traffic to orders</div>' +
+    row("Ad sessions", se ? 1 : 0, "var(--cost)", 1, num(se), "utm_content is an ad id") +
+    drop("var(--text-3)", num(t.bounces) + " bounced (" + of(t.bounces, se) + ")") +
+    row("Added to cart", se ? t.cart_additions / se : 0, "var(--cost)", 0.72,
+        num(t.cart_additions), of(t.cart_additions, se) + " of sessions") +
+    drop("var(--text-3)", num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order") +
+    row("Orders", se ? t.orders / se : 0, "var(--cost)", 0.48, num(t.orders),
+        of(t.orders, se) + " of sessions · " + of(t.orders, t.cart_additions) + " of carts") +
+    "</div>";
+  $("funnels").innerHTML = sales + traffic;
+  $("fn-note").textContent = S ? "" : "store total not recorded for this window";
+}
+
 function renderAdPages() {
   if (!ADS) return;
   const arr = k => pgSortKey === k ? ' <span class="arrow">' + (pgSortDir < 0 ? "▼" : "▲") + "</span>" : "";
@@ -565,6 +631,7 @@ async function loadAds(from, to) {
     return false;
   }
   adPage = undefined;
+  renderFunnel();
   renderAdPages();
   renderAds();
   return true;

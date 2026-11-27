@@ -15151,7 +15151,24 @@ class LandingAdPageRow(LandingAdRow):
     ad_count: int = 0
 
 
+class LandingAdsFunnel(BaseModel):
+    """How much of the store's sales the by-ad view accounts for.
+
+    Three nested amounts: everything Shopify booked, the part whose
+    orders name a Meta ad, and the part of that whose ad the map can
+    place on a landing page. The first is Shopify's total sales (after
+    returns); the other two are order values at the time of sale.
+    """
+    store_sales: float = 0.0
+    store_orders: int = 0
+    ad_sales: float = 0.0
+    ad_orders: int = 0
+    mapped_sales: float = 0.0
+    mapped_orders: int = 0
+
+
 class LandingAdsResponse(BaseModel):
+    funnel: LandingAdsFunnel = LandingAdsFunnel()
     from_day: date
     to_day: date
     #: One row per mapped landing page, biggest spend first. Ads the
@@ -15239,6 +15256,14 @@ async def get_landing_ads(
         pages.append(pr)
     pages.sort(key=lambda x: (-x.spend, -x.revenue))
     rows = rows[:limit]
+    st = (await session.execute(text(_LANDING_STORE_SQL),
+                                {"lo_day": lo_day, "hi_day": target})).mappings().first() or {}
+    funnel = LandingAdsFunnel(
+        store_sales=float(st.get("store_total") or 0),
+        store_orders=int(st.get("store_orders") or 0),
+        ad_sales=sum(x.revenue for x in pages), ad_orders=sum(x.orders for x in pages),
+        mapped_sales=sum(x.revenue for x in pages if x.landing_page_path),
+        mapped_orders=sum(x.orders for x in pages if x.landing_page_path))
     total = dict((await session.execute(text(_LANDING_ADS_TOTAL_SQL),
                                         bounds)).mappings().first() or {})
     totals = _ad_row(total)
@@ -15246,7 +15271,7 @@ async def get_landing_ads(
     totals.page_status = None
     return LandingAdsResponse(
         from_day=lo_day, to_day=target,
-        pages=pages,
+        pages=pages, funnel=funnel,
         ads=[_ad_row(dict(r)) for r in rows],
         totals=totals, ad_count=int(total.get("ads") or 0), empty=not rows)
 
