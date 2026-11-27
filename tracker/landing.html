@@ -172,8 +172,8 @@
   .err { color: var(--bad); }
   .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
   /* Each view hides the other's parts; header and controls are shared. */
-  .view-pages #adwrap, .view-pages #adpagewrap, .view-pages #adfunnel, .view-pages #adheroes { display: none; }
-  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap):not(#adfunnel):not(#adheroes) { display: none !important; }
+  .view-pages #adwrap, .view-pages #adpagewrap, .view-pages #adfunnel, .view-pages #adheroes, .view-pages #adhourcard { display: none; }
+  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap):not(#adfunnel):not(#adheroes):not(#adhourcard) { display: none !important; }
   .funnels { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
   .fn-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
   .fn-row { display: grid; grid-template-columns: 190px 1fr 250px; gap: 10px;
@@ -193,6 +193,26 @@
           border: 1px solid var(--border); color: var(--text-2); }
   .chip.bad { color: var(--cost); border-color: var(--cost); }
   .chip.ok { color: var(--rev); border-color: var(--rev); }
+  /* funnel: tapering stages, the step rate on the left, the figures and
+     what fell out on the right */
+  .fnl { display: grid; grid-template-columns: 150px minmax(120px, 1fr) minmax(190px, 1.1fr);
+         column-gap: 14px; align-items: center; font-size: 12px; }
+  .fnl-name { font-weight: 600; }
+  .fnl-step { font-size: 11px; color: var(--text-2); }
+  .fnl-shape { height: 44px; }
+  .fnl-fig b { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .fnl-fig span { color: var(--text-2); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .fnl-gap { height: 26px; display: flex; align-items: center; }
+  .fnl-lost { font-size: 11px; color: var(--text-2); }
+  .insights { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; }
+  .insight { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
+             font-size: 11.5px; color: var(--text-2); }
+  .insight b { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+  .hit2 { fill: transparent; }
+  .hit2:hover { fill: var(--text); fill-opacity: .06; }
+  .panel-label { fill: var(--text-2); font-size: 10.5px; font-weight: 600; }
+  .ref-line { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
+  @media (max-width: 620px) { .fnl { grid-template-columns: 1fr; row-gap: 2px; } .fnl-gap { height: auto; } }
 </style>
 </head>
 <body>
@@ -246,21 +266,15 @@
     <div class="funnels" id="pgfunnels"></div>
   </div>
 
-  <div class="charts">
-    <div class="card">
-      <div class="c-head">
-        <span class="c-title">Shopify sales by hour</span>
-        <span class="c-note" id="rev-note">IST &middot; summed over the window</span>
-      </div>
-      <div id="chart-rev"></div>
+  <div class="card" id="hourcard" style="margin-bottom:12px">
+    <div class="c-head" style="flex-wrap:wrap">
+      <span><span class="c-title">Hour by hour</span>
+        <span class="sub" style="margin-left:8px">IST &middot; each measure on its own scale
+          &middot; hover a column for the hour</span></span>
+      <span class="c-note" id="rev-note"></span>
     </div>
-    <div class="card">
-      <div class="c-head">
-        <span class="c-title">Meta spend by hour</span>
-        <span class="c-note">its own scale, never shared with revenue</span>
-      </div>
-      <div id="chart-spend"></div>
-    </div>
+    <div class="insights" id="hour-insights"></div>
+    <div id="hourpanels"></div>
   </div>
 
   <div class="card" id="srcwrap" hidden style="padding:0;margin-bottom:12px">
@@ -287,6 +301,16 @@
       <span class="c-note" id="fn-note"></span>
     </div>
     <div class="funnels" id="funnels"></div>
+  </div>
+
+  <div class="card" id="adhourcard" style="margin-bottom:12px">
+    <div class="c-head" style="flex-wrap:wrap">
+      <span><span class="c-title">Hour by hour</span>
+        <span class="sub" style="margin-left:8px">IST &middot; ads only &middot; each measure
+          on its own scale &middot; hover a column for the hour</span></span>
+    </div>
+    <div class="insights" id="adhour-insights"></div>
+    <div id="adhourpanels"></div>
   </div>
 
   <div class="card" id="adpagewrap" style="padding:0;margin-bottom:12px">
@@ -564,6 +588,147 @@ const fnDrop = (colour, text) => '<div class="fn-drop"><span class="fn-dot" styl
   colour + '"></span>' + esc(text) + "</div>";
 const fnOf = (a, b) => b ? pc1(a / b) : "—";
 
+/** A tapering funnel.
+ *
+ *  stages: [{label, n, value, sub}] -- n is what the stage is measured
+ *  in, and every width is n over the first stage's n. Each stage tapers
+ *  to the width of the next, so the slope of an edge IS the drop.
+ *  drops[i] sits between stage i and i+1: {colour, text}, naming what
+ *  fell out there. The left column gives each stage as a share of the
+ *  one before it, which is the rate a reader acts on.
+ */
+function funnelHtml(title, colour, stages, drops) {
+  const top = stages[0].n || 0;
+  const w = st => top ? Math.max(7, Math.min(100, (st.n / top) * 100)) : 7;
+  let h = '<div><div class="fn-title">' + esc(title) + '</div><div class="fnl">';
+  stages.forEach((st, i) => {
+    const a = w(st), b = i + 1 < stages.length ? w(stages[i + 1]) : a;
+    const prev = i ? stages[i - 1].n : 0;
+    h += '<div><div class="fnl-name">' + esc(st.label) + '</div><div class="fnl-step">' +
+         esc(i ? (st.n > prev ? "more than the stage above" : fnOf(st.n, prev) + " of the stage above")
+               : "start") + "</div></div>" +
+         '<div class="fnl-shape" style="background:' + colour + ";opacity:" + (1 - i * 0.22).toFixed(2) +
+         ";clip-path:polygon(" + (50 - a / 2).toFixed(1) + "% 0," + (50 + a / 2).toFixed(1) + "% 0," +
+         (50 + b / 2).toFixed(1) + "% 100%," + (50 - b / 2).toFixed(1) + '% 100%)"></div>' +
+         '<div class="fnl-fig"><b>' + esc(st.value) + "</b><span>" + esc(st.sub || "") + "</span></div>";
+    const d = drops[i];
+    if (i + 1 < stages.length) {
+      h += '<div class="fnl-gap"></div><div class="fnl-gap"></div><div class="fnl-gap fnl-lost">' +
+           (d ? '<span class="fn-dot" style="background:' + d.colour + '"></span>' + esc(d.text) : "") +
+           "</div>";
+    }
+  });
+  return h + "</div></div>";
+}
+
+/* ------------------------------------------------------------------ *
+ * hour by hour                                                       *
+ * ------------------------------------------------------------------ */
+// Small multiples on one hour axis. Sales, spend and a ratio of the two
+// cannot share a y-axis honestly, so each gets its own panel and its
+// own scale, stacked so a column of the page is one hour in all of
+// them. Amounts are bars (an hour is a bucket); rates are lines.
+function hourPanels(hostId, hours, panels, liveHour) {
+  const host = $(hostId);
+  const rows = Array.from({ length: 24 }, (_, h) => hours.find(r => r.hour_of_day === h) || { hour_of_day: h });
+  if (!hours.length) { host.innerHTML = '<div class="msg">No hours in this window.</div>'; return; }
+  const W = 1100, L = 52, R = 10, PH = 84, GAP = 22, T = 16, B = 20;
+  const iw = W - L - R, slot = iw / 24, bw = Math.max(3, slot - 4);
+  const PI = PH - 14;          // plot height: the panel less label headroom
+  const H = T + panels.length * PH + (panels.length - 1) * GAP + B;
+  let out = "";
+  panels.forEach((p, pi) => {
+    const y0 = T + pi * (PH + GAP);
+    const vals = rows.map(r => p.get(r));
+    const max = Math.max(...vals.map(v => v || 0), p.ref || 0) || 1;
+    out += '<text class="panel-label" x="' + L + '" y="' + (y0 - 5) + '">' + esc(p.label) + "</text>";
+    for (let g = 0; g <= 2; g++) {
+      const v = max * g / 2, y = y0 + PH - (v / max) * PI;
+      out += '<line class="grid-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>' +
+             '<text class="axis-text" x="' + (L - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + esc(p.fmt(v)) + "</text>";
+    }
+    if (p.ref) {
+      const y = y0 + PH - (p.ref / max) * PI;
+      out += '<line class="ref-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>' +
+             '<text class="axis-text" x="' + (W - R) + '" y="' + (y - 3).toFixed(1) + '" text-anchor="end">window ' + esc(p.fmt(p.ref)) + "</text>";
+    }
+    const peak = vals.reduce((a, v, i) => (v != null && v > (vals[a] || 0) ? i : a), 0);
+    if (p.line) {
+      let d = "", dots = "";
+      vals.forEach((v, h) => {
+        if (v == null) return;
+        const x = L + h * slot + slot / 2, y = y0 + PH - (v / max) * PI;
+        d += (d ? " L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+        dots += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="2.6" fill="var(' + p.colour +
+                ')" stroke="var(--surface)" stroke-width="1.5"' + (h === liveHour ? ' opacity=".45"' : "") + "/>";
+      });
+      out += '<path d="' + d + '" fill="none" stroke="var(' + p.colour + ')" stroke-width="2"/>' + dots;
+    } else {
+      vals.forEach((v, h) => {
+        const ht = ((v || 0) / max) * PI;
+        if (ht <= 0.5) return;
+        const x = L + h * slot + (slot - bw) / 2, y = y0 + PH - ht, rad = Math.min(4, bw / 2, ht);
+        out += '<path d="M' + x.toFixed(1) + " " + (y0 + PH) + " V" + (y + rad).toFixed(1) +
+               " a" + rad + " " + rad + " 0 0 1 " + rad + " -" + rad + " h" + (bw - 2 * rad).toFixed(1) +
+               " a" + rad + " " + rad + " 0 0 1 " + rad + " " + rad + " V" + (y0 + PH) +
+               ' Z" fill="var(' + p.colour + ')"' + (h === liveHour ? ' opacity=".45"' : "") + "/>";
+      });
+    }
+    if (vals[peak] > 0) {
+      const x = L + peak * slot + slot / 2, y = y0 + PH - (vals[peak] / max) * PI;
+      out += '<text class="bar-label" x="' + x.toFixed(1) + '" y="' + (y - 5).toFixed(1) +
+             '" text-anchor="middle">' + esc(p.fmt(vals[peak])) + "</text>";
+    }
+  });
+  for (let h = 0; h < 24; h++) {
+    out += '<text class="axis-text" x="' + (L + h * slot + slot / 2).toFixed(1) + '" y="' + (H - 6) +
+           '" text-anchor="middle">' + String(h).padStart(2, "0") + "</text>";
+    const r = rows[h];
+    const tipHtml = "<b>" + String(h).padStart(2, "0") + ":00–" + String(h).padStart(2, "0") + ":59 IST" +
+      (h === liveHour ? " · in progress" : "") + "</b><br>" +
+      panels.map(p => '<span class="k">' + esc(p.label) + "</span> " +
+                      esc(p.get(r) == null ? "—" : p.tip ? p.tip(r) : p.fmt(p.get(r)))).join("<br>");
+    // One hit column across every panel: the hour is the unit, so the
+    // whole column answers, not whichever bar the pointer happens on.
+    out += '<rect class="hit2" x="' + (L + h * slot).toFixed(1) + '" y="' + (T - 8) + '" width="' +
+           slot.toFixed(1) + '" height="' + (H - T - B + 8) + '" data-tip="' + esc(tipHtml) + '"/>';
+  }
+  host.innerHTML = '<div style="overflow-x:auto"><svg viewBox="0 0 ' + W + " " + H +
+    '" style="min-width:680px" role="img" aria-label="' +
+    esc(panels.map(p => p.label).join(", ")) + ' by hour of day">' + out + "</svg></div>";
+}
+
+// What a reader would otherwise have to work out from the bars.
+function hourInsights(hostId, hours, salesKey, spendOfRow, liveHour) {
+  const done = hours.filter(r => r.hour_of_day !== liveHour);
+  const total = hours.reduce((a, r) => a + (r[salesKey] || 0), 0);
+  const chips = [];
+  const hh = h => String(h).padStart(2, "0") + ":00";
+  if (total > 0) {
+    const peak = hours.reduce((a, b) => ((b[salesKey] || 0) > (a[salesKey] || 0) ? b : a));
+    chips.push("Peak sales hour <b>" + hh(peak.hour_of_day) + "</b> · <b>" + esc(inr0(peak[salesKey])) +
+               "</b> (" + pc1(peak[salesKey] / total) + " of the window)");
+    let run = 0;
+    for (const r of hours.slice().sort((a, b) => a.hour_of_day - b.hour_of_day)) {
+      run += r[salesKey] || 0;
+      if (run >= total / 2) { chips.push("Half of sales in by <b>" + hh(r.hour_of_day + 1 > 23 ? 23 : r.hour_of_day + 1) + "</b>"); break; }
+    }
+  }
+  const rated = done.filter(r => spendOfRow(r) >= ROAS_MIN_SPEND);
+  if (rated.length > 1) {
+    const q = r => (r[salesKey] || 0) / spendOfRow(r);
+    const best = rated.reduce((a, b) => (q(b) > q(a) ? b : a)), worst = rated.reduce((a, b) => (q(b) < q(a) ? b : a));
+    chips.push("Best ROAS hour <b>" + hh(best.hour_of_day) + "</b> · <b>" + xx(q(best)) + "</b>");
+    chips.push("Weakest <b>" + hh(worst.hour_of_day) + "</b> · <b>" + xx(q(worst)) + "</b>");
+  }
+  if (liveHour != null) chips.push("<b>" + hh(liveHour) + "</b> is still in progress (shown faded)");
+  $(hostId).innerHTML = chips.map(c => '<span class="insight">' + c + "</span>").join("");
+}
+// The hour now running, when the window ends today; otherwise none.
+const liveHourFor = to => to === istToday()
+  ? Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", hour12: false }).format(new Date())) % 24
+  : null;
+
 // The Landing Pages tab's funnel. Same reading as the by-ads one, on
 // this tab's own basis: an order belongs to the page it was PLACED on.
 function renderPageFunnel() {
@@ -577,34 +742,33 @@ function renderPageFunnel() {
 
   // Order values are before returns and Shopify's total is after, so a
   // later stage can pass the first; bars stop at full width.
-  let sales = '<div><div class="fn-title">Sales considered</div>' +
-    row("Store total sales", S ? 1 : 0, "var(--rev)", 1, inr0(S), num(storeOrders) + " orders") +
-    // Counted in orders: the two sales figures are on different bases
-    // (after and before returns), so their difference is not the gap.
-    drop("var(--warn)", num(Math.max(0, storeOrders - t.orders)) + " orders not placed on a " +
-         "page — no recorded URL, cancelled or excluded" +
-         (filtered ? ", or from another source" : "")) +
-    row(filtered ? "On a page, this source" : "Placed on a landing page", S ? t.revenue / S : 0,
-        "var(--rev)", 0.72, inr0(t.revenue),
-        (t.revenue > S ? "before returns" : of(t.revenue, S)) + " · " + num(t.orders) + " orders");
+  const stages = [
+    { label: "Store total sales", n: storeOrders, value: inr0(S), sub: num(storeOrders) + " orders" },
+    { label: filtered ? "On a page, this source" : "Placed on a landing page", n: t.orders,
+      value: inr0(t.revenue), sub: num(t.orders) + " orders" },
+  ];
+  // Widths are ORDERS: the store total is after returns and the page
+  // figure before, so their rupee difference is not the gap.
+  const drops = [{ colour: "var(--warn)", text: num(Math.max(0, storeOrders - t.orders)) +
+    " orders not on a page — no recorded URL, cancelled or excluded" +
+    (filtered ? ", or another source" : "") }];
   if (!filtered) {
-    sales += drop("var(--text-3)", inr0(Math.max(0, t.revenue - meta.revenue)) +
-                  " from direct, Google and other sources") +
-      row("Of which from Meta", S ? meta.revenue / S : 0, "var(--rev)", 0.48, inr0(meta.revenue),
-          of(meta.revenue, S) + " · " + num(meta.orders) + " orders");
+    stages.push({ label: "Of which from Meta", n: meta.orders, value: inr0(meta.revenue),
+                  sub: num(meta.orders) + " orders" });
+    drops.push({ colour: "var(--text-3)", text: inr0(Math.max(0, t.revenue - meta.revenue)) +
+                 " from direct, Google and other sources" });
   }
-  sales += "</div>";
+  const sales = funnelHtml("Sales considered · by orders", "var(--rev)", stages, drops);
 
   const se = t.sessions || 0;
-  const traffic = '<div><div class="fn-title">Traffic to orders</div>' +
-    row("Sessions", se ? 1 : 0, "var(--cost)", 1, num(se), num(t.visitors) + " visitors") +
-    drop("var(--text-3)", num(t.bounces) + " bounced (" + of(t.bounces, se) + ")") +
-    row("Added to cart", se ? t.cart_additions / se : 0, "var(--cost)", 0.72,
-        num(t.cart_additions), of(t.cart_additions, se) + " of sessions") +
-    drop("var(--text-3)", num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order") +
-    row("Orders", se ? t.orders / se : 0, "var(--cost)", 0.48, num(t.orders),
-        of(t.orders, se) + " of sessions · " + of(t.orders, t.cart_additions) + " of carts") +
-    "</div>";
+  const traffic = funnelHtml("Traffic to orders · by sessions", "var(--cost)", [
+    { label: "Sessions", n: se, value: num(se), sub: num(t.visitors) + " visitors" },
+    { label: "Added to cart", n: t.cart_additions, value: num(t.cart_additions), sub: of(t.cart_additions, se) + " of sessions" },
+    { label: "Orders", n: t.orders, value: num(t.orders), sub: of(t.orders, se) + " of sessions" },
+  ], [
+    { colour: "var(--text-3)", text: num(t.bounces) + " bounced (" + of(t.bounces, se) + " of sessions)" },
+    { colour: "var(--text-3)", text: num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order" },
+  ]);
   $("pgfunnels").innerHTML = sales + traffic;
   $("pgfn-note").textContent = "whole store — fair as a total, not page by page";
 }
@@ -615,30 +779,24 @@ function renderFunnel() {
   const row = fnRow, drop = fnDrop, of = fnOf;
 
   const S = f.store_sales || 0;
-  // Order values are before returns and Shopify's total is after, so on
-  // a window with returns a later stage can pass the first; bars stop
-  // at full width rather than overflow.
-  const sales = '<div><div class="fn-title">Sales considered</div>' +
-    row("Store total sales", S ? 1 : 0, "var(--rev)", 1, inr0(S), num(f.store_orders) + " orders") +
-    drop("var(--text-3)", inr0(Math.max(0, S - f.ad_sales)) +
-         " not counted — orders with no Meta ad id (direct, Google, other)") +
-    row("With a Meta ad id", S ? f.ad_sales / S : 0, "var(--rev)", 0.72, inr0(f.ad_sales),
-        of(f.ad_sales, S) + " · " + num(f.ad_orders) + " orders") +
-    drop("var(--warn)", inr0(f.ad_sales - f.mapped_sales) + " on ads not in the ad map") +
-    row("On a mapped landing page", S ? f.mapped_sales / S : 0, "var(--rev)", 0.48,
-        inr0(f.mapped_sales), of(f.mapped_sales, S) + " · " + num(f.mapped_orders) + " orders") +
-    "</div>";
-
+  const sales = funnelHtml("Sales considered · by orders", "var(--rev)", [
+    { label: "Store total sales", n: f.store_orders, value: inr0(S), sub: num(f.store_orders) + " orders" },
+    { label: "With a Meta ad id", n: f.ad_orders, value: inr0(f.ad_sales), sub: num(f.ad_orders) + " orders" },
+    { label: "On a mapped landing page", n: f.mapped_orders, value: inr0(f.mapped_sales), sub: num(f.mapped_orders) + " orders" },
+  ], [
+    { colour: "var(--text-3)", text: num(Math.max(0, f.store_orders - f.ad_orders)) +
+      " orders with no Meta ad id (direct, Google, other)" },
+    { colour: "var(--warn)", text: inr0(f.ad_sales - f.mapped_sales) + " on ads not in the ad map" },
+  ]);
   const se = t.sessions || 0;
-  const traffic = '<div><div class="fn-title">Ad traffic to orders</div>' +
-    row("Ad sessions", se ? 1 : 0, "var(--cost)", 1, num(se), "utm_content is an ad id") +
-    drop("var(--text-3)", num(t.bounces) + " bounced (" + of(t.bounces, se) + ")") +
-    row("Added to cart", se ? t.cart_additions / se : 0, "var(--cost)", 0.72,
-        num(t.cart_additions), of(t.cart_additions, se) + " of sessions") +
-    drop("var(--text-3)", num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order") +
-    row("Orders", se ? t.orders / se : 0, "var(--cost)", 0.48, num(t.orders),
-        of(t.orders, se) + " of sessions · " + of(t.orders, t.cart_additions) + " of carts") +
-    "</div>";
+  const traffic = funnelHtml("Ad traffic to orders · by sessions", "var(--cost)", [
+    { label: "Ad sessions", n: se, value: num(se), sub: num(t.visitors) + " visitors" },
+    { label: "Added to cart", n: t.cart_additions, value: num(t.cart_additions), sub: of(t.cart_additions, se) + " of sessions" },
+    { label: "Orders", n: t.orders, value: num(t.orders), sub: of(t.orders, se) + " of sessions" },
+  ], [
+    { colour: "var(--text-3)", text: num(t.bounces) + " bounced (" + of(t.bounces, se) + " of sessions)" },
+    { colour: "var(--text-3)", text: num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order" },
+  ]);
   $("funnels").innerHTML = sales + traffic;
   $("fn-note").textContent = S ? "" : "store total not recorded for this window";
 }
@@ -692,6 +850,7 @@ async function loadAds(from, to) {
   adPage = undefined;
   renderAdHeroes();
   renderFunnel();
+  renderAdCharts();
   renderAdPages();
   renderAds();
   return true;
@@ -1042,15 +1201,13 @@ function renderHeroes() {
       num(t.new_customer_orders) + " orders · " + inr0(t.new_customer_sales)],
     ["Repeat customer %", fnOf(t.repeat_customer_orders, t.orders),
       num(t.repeat_customer_orders) + " orders · " + inr0(t.repeat_customer_sales)],
-    ["Bounce / ATC",  pc1(t.bounce_rate) + " / " + pc1(t.atc_rate), "of sessions"],
+    ["Bounce rate",   pc1(t.bounce_rate), num(t.bounces) + " of " + num(t.sessions) + " sessions"],
+    ["ATC rate",      pc1(t.atc_rate), num(t.cart_additions) + " sessions added to cart"],
     ["NCP",           num(t.ncp), t.ncp ? inr0(t.meta_spend / t.ncp) + " each, attributed" : ""],
-    ["Meta ROAS",     roas(t.meta_roas, t.meta_spend), "Meta sales ÷ attributed spend"],
-    // Both sides account-level, so this is the quotient that matches
-    // Ads Manager. Attributed revenue over attributed spend would mix
-    // ~95% of one with ~37% of the other and read 10.07x against 3.96x.
-    ["Store ROAS",
-      (c.all_spend ? (storeSales / c.all_spend).toFixed(2) : "—") + "\u00d7",
-      "store sales ÷ account spend"],
+    // Meta's own purchase value over the spend of the same ads: the
+    // figure Ads Manager shows, for the ads the map can place.
+    ["Meta ROAS",     roas(t.meta_roas, t.meta_spend),
+      inr0(t.meta_conv_value) + " Meta sales ÷ " + inr0(t.meta_spend)],
   ];
   $("heroes").innerHTML = tiles.map(tileHtml).join("");
 }
@@ -1065,7 +1222,9 @@ function renderAdHeroes() {
   const t = ADS.totals;
   $("adheroes").innerHTML = [
     ["Ad spend", inr0(t.spend), num(ADS.ad_count) + " ads"],
-    ["Ad sessions", num(t.sessions), "bounce " + pc1(t.bounce_rate) + " · ATC " + pc1(t.atc_rate)],
+    ["Ad sessions", num(t.sessions), num(t.visitors) + " visitors"],
+    ["Bounce rate", pc1(t.bounce_rate), num(t.bounces) + " of " + num(t.sessions) + " sessions"],
+    ["ATC rate", pc1(t.atc_rate), num(t.cart_additions) + " sessions added to cart"],
     ["Sales from ads", inr0(t.revenue), num(t.orders) + " orders with an ad id"],
     ["ROAS", t.roas == null ? "—" : xx(t.roas), "ad sales ÷ ad spend"],
     ["CVR", t.cvr == null ? "—" : (t.cvr * 100).toFixed(2) + "%", "orders ÷ ad sessions"],
@@ -1088,74 +1247,49 @@ function renderAdHeroes() {
  * Bars, not a line: an hour is a bucket, and a line between buckets
  * claims a value at 13:30 that was never measured.
  */
-function barChart(hostId, rows, key, colorVar, fmt) {
-  const host = $(hostId);
-  if (!rows || !rows.length) { host.innerHTML = '<div class="msg">No hours in this window.</div>'; return; }
-  const W = 560, H = 170, L = 40, R = 8, T = 14, B = 20;
-  const iw = W - L - R, ih = H - T - B;
-  const max = Math.max(...rows.map(r => r[key] || 0), 1);
-  const slot = iw / 24;
-  const bw = Math.max(3, slot - 2);          // a 2px gap between bars
-  const peak = rows.reduce((a, b) => ((b[key] || 0) > (a[key] || 0) ? b : a), rows[0]);
-
-  // Four recessive gridlines; the axis says the magnitude, the bars say
-  // the shape, and the exact figure is a hover away.
-  let g = "";
-  for (let i = 0; i <= 3; i++) {
-    const v = max * i / 3, y = T + ih - (v / max) * ih;
-    g += '<line class="grid-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'
-       + '<text class="axis-text" x="' + (L - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
-  }
-
-  let bars = "";
-  rows.forEach(r => {
-    const v = r[key] || 0;
-    const h = (v / max) * ih;
-    const x = L + r.hour_of_day * slot + (slot - bw) / 2;
-    const y = T + ih - h;
-    // 4px rounded data-end, square against the baseline: the rounding
-    // marks where the value ENDS, so rounding the foot too would round
-    // the axis.
-    const rad = Math.min(4, bw / 2, h);
-    bars += h <= 0.5 ? "" :
-      '<path d="M' + x.toFixed(1) + ' ' + (T + ih).toFixed(1) +
-      ' V' + (y + rad).toFixed(1) +
-      ' a' + rad + ' ' + rad + ' 0 0 1 ' + rad + ' -' + rad +
-      ' h' + (bw - 2 * rad).toFixed(1) +
-      ' a' + rad + ' ' + rad + ' 0 0 1 ' + rad + ' ' + rad +
-      ' V' + (T + ih).toFixed(1) + ' Z" fill="var(' + colorVar + ')"/>';
-    // One direct label, on the peak only. A number over every bar is
-    // the table again, printed smaller.
-    if (r === peak && v > 0) {
-      bars += '<text class="bar-label" x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 4).toFixed(1) +
-              '" text-anchor="middle">' + esc(fmt(v)) + '</text>';
-    }
-    // The hit area is the whole column, not the bar: a 3px-tall 04:00
-    // is otherwise unhoverable.
-    bars += '<rect class="hit" x="' + (L + r.hour_of_day * slot).toFixed(1) + '" y="' + T +
-            '" width="' + slot.toFixed(1) + '" height="' + ih + '"' +
-            ' data-h="' + r.hour_of_day + '" data-k="' + esc(key) + '"/>';
-  });
-
-  let ax = "";
-  for (let h = 0; h < 24; h += 3) {
-    ax += '<text class="axis-text" x="' + (L + h * slot + slot / 2).toFixed(1) + '" y="' + (H - 6) +
-          '" text-anchor="middle">' + String(h).padStart(2, "0") + '</text>';
-  }
-
-  host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' +
-    esc(key.replace(/_/g, " ")) + ' by hour of day">' + g + bars + ax + '</svg>';
-}
-
 function renderCharts() {
   const hours = (DATA && DATA.hours) || [];
-  const c = DATA && DATA.coverage;
-  $("rev-note").textContent = (c && c.stale)
-    ? "IST · last pulled " + ist(c.data_through)
-    : "IST · summed over the window";
-  barChart("chart-rev",   hours, "revenue",    "--rev",  inrK);
-  barChart("chart-spend", hours, hours.some(h => h.order_spend) ? "order_spend" : "meta_spend",
-           "--cost", inrK);
+  const c = DATA && DATA.coverage, t = (DATA && DATA.totals) || {};
+  $("rev-note").textContent = (c && c.stale) ? "last pulled " + ist(c.data_through) : "summed over the window";
+  const live = liveHourFor(RANGE ? RANGE.to : istToday());
+  const sp = r => spendOf(r);
+  const allSpend = hours.reduce((a, r) => a + sp(r), 0), allRev = hours.reduce((a, r) => a + (r.revenue || 0), 0);
+  const allSess = hours.reduce((a, r) => a + (r.sessions || 0), 0), allCart = hours.reduce((a, r) => a + (r.cart_additions || 0), 0);
+  hourInsights("hour-insights", hours, "revenue", sp, live);
+  hourPanels("hourpanels", hours, [
+    { label: "Shopify sales", colour: "--rev", fmt: inrK, get: r => r.revenue || 0,
+      tip: r => inr0(r.revenue) + " · " + num(r.orders) + " orders" },
+    { label: "Meta spend", colour: "--cost", fmt: inrK, get: sp, tip: r => inr0(sp(r)) },
+    { label: "Sales ÷ Meta spend", colour: "--text-2", fmt: v => v.toFixed(1) + "×", line: true,
+      get: r => sp(r) >= ROAS_MIN_SPEND ? (r.revenue || 0) / sp(r) : null,
+      ref: allSpend ? allRev / allSpend : 0 },
+    { label: "Sessions", colour: "--text-3", fmt: n => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n)),
+      get: r => r.sessions || 0, tip: r => num(r.sessions) },
+    { label: "ATC rate", colour: "--text-2", fmt: v => (v * 100).toFixed(1) + "%", line: true,
+      get: r => r.sessions ? (r.cart_additions || 0) / r.sessions : null,
+      ref: allSess ? allCart / allSess : 0 },
+  ], live);
+}
+
+function renderAdCharts() {
+  if (!ADS) return;
+  const hours = ADS.hours || [];
+  const live = liveHourFor(ADS.to_day);
+  const sum = k => hours.reduce((a, r) => a + (r[k] || 0), 0);
+  hourInsights("adhour-insights", hours, "revenue", r => r.spend || 0, live);
+  hourPanels("adhourpanels", hours, [
+    { label: "Sales from ads", colour: "--rev", fmt: inrK, get: r => r.revenue || 0,
+      tip: r => inr0(r.revenue) + " · " + num(r.orders) + " orders" },
+    { label: "Ad spend", colour: "--cost", fmt: inrK, get: r => r.spend || 0, tip: r => inr0(r.spend) },
+    { label: "ROAS", colour: "--text-2", fmt: v => v.toFixed(1) + "×", line: true,
+      get: r => (r.spend || 0) >= ROAS_MIN_SPEND ? (r.revenue || 0) / r.spend : null,
+      ref: sum("spend") ? sum("revenue") / sum("spend") : 0 },
+    { label: "Ad sessions", colour: "--text-3", fmt: n => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n)),
+      get: r => r.sessions || 0, tip: r => num(r.sessions) },
+    { label: "CVR", colour: "--text-2", fmt: v => (v * 100).toFixed(2) + "%", line: true,
+      get: r => r.sessions ? (r.orders || 0) / r.sessions : null,
+      ref: sum("sessions") ? sum("orders") / sum("sessions") : 0 },
+  ], live);
 }
 
 function renderTable() {
@@ -1221,20 +1355,9 @@ function showTip(html, x, y) {
 function hideTip() { tip.style.opacity = "0"; }
 
 document.addEventListener("mousemove", e => {
-  const hit = e.target.closest ? e.target.closest("rect.hit") : null;
-  if (!hit || !DATA) { hideTip(); return; }
-  const h = Number(hit.dataset.h);
-  const row = DATA.hours.find(r => r.hour_of_day === h);
-  if (!row) { hideTip(); return; }
-  showTip(
-    "<b>" + String(h).padStart(2, "0") + ":00–" + String(h).padStart(2, "0") + ":59 IST</b><br>" +
-    '<span class="k">Shopify sales</span> ' + esc(inr0(row.revenue)) + "<br>" +
-    '<span class="k">Orders</span> ' + esc(num(row.orders)) + "<br>" +
-    '<span class="k">New / repeat</span> ' + esc(inr0(row.new_customer_sales)) + " / " + esc(inr0(row.repeat_customer_sales)) + "<br>" +
-    '<span class="k">Meta spend</span> ' + esc(inr0(spendOf(row))) + "<br>" +
-    '<span class="k">Meta sales</span> ' + esc(inr0(row.meta_conv_value)) + "<br>" +
-    '<span class="k">NCP</span> ' + esc(num(row.ncp)),
-    e.clientX, e.clientY);
+  const hit = e.target.closest ? e.target.closest("rect.hit2") : null;
+  if (!hit) { hideTip(); return; }
+  showTip(hit.dataset.tip, e.clientX, e.clientY);   // built from numbers, already escaped
 });
 
 $("thead").addEventListener("click", e => {

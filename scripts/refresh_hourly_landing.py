@@ -847,23 +847,27 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
     by_ad: dict[tuple[datetime, str], dict] = defaultdict(
         lambda: dict(spend=0.0, impressions=0))
 
-    async def insights(account, fields: str, limit: int):
+    async def insights(account, fields: str, limit: int, hourly: bool = True):
         url = f"{base}/act_{account.account_id}/insights"
         params = {
             "access_token": token, "level": "ad", "fields": fields,
             "time_range": json.dumps({"since": day.isoformat(), "until": day.isoformat()}),
-            "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone",
             "limit": limit,
             # Ads that did not serve are most of an account's rows and
             # none of its spend.
             "filtering": json.dumps([{"field": "impressions",
                                       "operator": "GREATER_THAN", "value": 0}]),
         }
+        if hourly:
+            params["breakdowns"] = "hourly_stats_aggregated_by_advertiser_time_zone"
         while True:
             body = await meta_get(client, url, params)
             if "error" in body:
                 raise RuntimeError(f"{account.name}: {body['error'].get('message')}")
             for row in body.get("data", []):
+                if not hourly:
+                    yield None, row.get("ad_id") or "", row
+                    continue
                 label = row.get("hourly_stats_aggregated_by_advertiser_time_zone", "")
                 if label:
                     # Already the advertiser's timezone, which is the store's.
@@ -901,20 +905,35 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
             else:
                 unplaced += spend
 
+    # CONVERSIONS per ad for the whole DAY, not per hour. The hourly
+    # form is the one that times out; the daily form is a twenty-fourth
+    # of the rows and answers. Each ad's day is then laid over its hours
+    # in proportion to its spend, so the day's totals -- and Meta ROAS,
+    # which is read from them -- are Meta's own figures exactly, while
+    # the hour-by-hour split of conversions is an allocation.
+    ad_hours: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
+    for (hour, ad_id), b in by_ad.items():
+        ad_hours[ad_id].append((hour, b["spend"]))
     actions_ok = True
     try:
         for account in accounts:
-            async for hour, ad_id, row in insights(account, "ad_id,actions,action_values", 100):
+            async for _, ad_id, row in insights(account, "ad_id,actions,action_values",
+                                                200, hourly=False):
                 path = ad_paths.get(ad_id)
-                if not path:
+                hours = ad_hours.get(ad_id)
+                if not path or not hours:
                     continue
-                b = acc[(hour, path)]
-                b["conv_value"] += _first(row.get("action_values"),
-                                          ("omni_purchase", "purchase"))
-                b["purchases"] += _first(row.get("actions"), ("omni_purchase", "purchase"))
-                b["ncp"] += sum(float(a.get("value") or 0)
-                                for a in (row.get("actions") or [])
-                                if a.get("action_type") in ncp_types)
+                value = _first(row.get("action_values"), ("omni_purchase", "purchase"))
+                bought = _first(row.get("actions"), ("omni_purchase", "purchase"))
+                ncp = sum(float(a.get("value") or 0) for a in (row.get("actions") or [])
+                          if a.get("action_type") in ncp_types)
+                total = sum(sp for _, sp in hours)
+                for hour, sp in hours:
+                    share = (sp / total) if total > 0 else 1 / len(hours)
+                    b = acc[(hour, path)]
+                    b["conv_value"] += value * share
+                    b["purchases"] += bought * share
+                    b["ncp"] += ncp * share
     except RuntimeError as exc:
         actions_ok = False
         print(f"  meta:     conversions not refreshed for {day} -- {str(exc)[:120]}")
@@ -922,7 +941,7 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
     rows = [{"hour": h, "path": p, "spend": round(b["spend"], 2),
              "order_spend": round(b["order_spend"], 2),
              "impressions": b["impressions"], "conv_value": round(b["conv_value"], 2),
-             "purchases": b["purchases"], "ncp": b["ncp"]}
+             "purchases": round(b["purchases"], 3), "ncp": round(b["ncp"], 3)}
             for (h, p), b in acc.items()]
     ad_rows = [{"hour": h, "ad_id": a, "spend": round(b["spend"], 2),
                 "impressions": b["impressions"]} for (h, a), b in by_ad.items()]

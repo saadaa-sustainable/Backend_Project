@@ -15096,6 +15096,15 @@ SELECT t.ad_id,
  LIMIT :limit
 """
 
+# The same ads folded onto the 24 hours of the day, for the hourly chart.
+_LANDING_ADS_HOURS_SQL = f"""
+SELECT EXTRACT(HOUR FROM t.hour AT TIME ZONE 'Asia/Kolkata')::int AS hour_of_day,
+       {_LANDING_ADS_MEASURES}
+  FROM public.hourly_ad_tracker t
+ WHERE t.hour >= :lo AND t.hour < :hi
+ GROUP BY 1 ORDER BY 1
+"""
+
 _LANDING_ADS_TOTAL_SQL = f"""
 SELECT COUNT(DISTINCT t.ad_id) AS ads, {_LANDING_ADS_MEASURES}
   FROM public.hourly_ad_tracker t
@@ -15173,8 +15182,22 @@ class LandingAdsFunnel(BaseModel):
     mapped_orders: int = 0
 
 
+class LandingAdHourRow(BaseModel):
+    hour_of_day: int
+    spend: float = 0.0
+    sessions: int = 0
+    bounces: int = 0
+    cart_additions: int = 0
+    orders: int = 0
+    revenue: float = 0.0
+    new_sales: float = 0.0
+    rep_sales: float = 0.0
+    quantity: int = 0
+
+
 class LandingAdsResponse(BaseModel):
     funnel: LandingAdsFunnel = LandingAdsFunnel()
+    hours: list[LandingAdHourRow] = []
     from_day: date
     to_day: date
     #: One row per mapped landing page, biggest spend first. Ads the
@@ -15278,6 +15301,10 @@ async def get_landing_ads(
     return LandingAdsResponse(
         from_day=lo_day, to_day=target,
         pages=pages, funnel=funnel,
+        hours=[LandingAdHourRow(**{k: v for k, v in dict(h).items()
+                                   if k in LandingAdHourRow.model_fields})
+               for h in (await session.execute(text(_LANDING_ADS_HOURS_SQL),
+                                               bounds)).mappings().all()],
         ads=[_ad_row(dict(r)) for r in rows],
         totals=totals, ad_count=int(total.get("ads") or 0), empty=not rows)
 
