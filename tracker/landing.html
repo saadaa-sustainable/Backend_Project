@@ -213,6 +213,19 @@
   .panel-label { fill: var(--text-2); font-size: 10.5px; font-weight: 600; }
   .ref-line { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
   @media (max-width: 620px) { .fnl { grid-template-columns: 1fr; row-gap: 2px; } .fnl-gap { height: auto; } }
+  /* Each band of columns carries a faint wash of its own colour, so a
+     figure can be placed in its band without reading up to the header.
+     Mixed into the surface, so it follows the theme. */
+  td.tint-traffic, th.tint-traffic { background: color-mix(in srgb, var(--text-2) 7%, var(--surface)); }
+  td.tint-orders,  th.tint-orders  { background: color-mix(in srgb, var(--rev) 9%, var(--surface)); }
+  td.tint-ads,     th.tint-ads     { background: color-mix(in srgb, var(--cost) 9%, var(--surface)); }
+  tr.total td.tint-traffic { background: color-mix(in srgb, var(--text-2) 15%, var(--surface)); }
+  tr.total td.tint-orders  { background: color-mix(in srgb, var(--rev) 18%, var(--surface)); }
+  tr.total td.tint-ads     { background: color-mix(in srgb, var(--cost) 18%, var(--surface)); }
+  tr.bandrow th.band-traffic { background: color-mix(in srgb, var(--text-2) 15%, var(--surface)); }
+  tr.bandrow th.band-orders  { background: color-mix(in srgb, var(--rev) 18%, var(--surface)); }
+  tr.bandrow th.band-ads     { background: color-mix(in srgb, var(--cost) 18%, var(--surface)); }
+  .toggle[aria-pressed="true"] { border-color: var(--text-2); }
 </style>
 </head>
 <body>
@@ -261,12 +274,13 @@
       <span><span class="c-title">Funnel</span>
         <span class="sub" style="margin-left:8px">how much of the store's sales this view
           accounts for, and how traffic converts</span></span>
-      <span class="c-note" id="pgfn-note"></span>
+      <span style="display:flex;gap:10px;align-items:center"><span class="c-note" id="pgfn-note"></span>
+        <button class="toggle hourbtn" aria-pressed="false">Hour-by-hour analysis</button></span>
     </div>
     <div class="funnels" id="pgfunnels"></div>
   </div>
 
-  <div class="card" id="hourcard" style="margin-bottom:12px">
+  <div class="card" id="hourcard" style="margin-bottom:12px" hidden>
     <div class="c-head" style="flex-wrap:wrap">
       <span><span class="c-title">Hour by hour</span>
         <span class="sub" style="margin-left:8px">IST &middot; each measure on its own scale
@@ -298,12 +312,13 @@
       <span><span class="c-title">Funnel</span>
         <span class="sub" style="margin-left:8px">how much of the store's sales this view
           accounts for, and how ad traffic converts</span></span>
-      <span class="c-note" id="fn-note"></span>
+      <span style="display:flex;gap:10px;align-items:center"><span class="c-note" id="fn-note"></span>
+        <button class="toggle hourbtn" aria-pressed="false">Hour-by-hour analysis</button></span>
     </div>
     <div class="funnels" id="funnels"></div>
   </div>
 
-  <div class="card" id="adhourcard" style="margin-bottom:12px">
+  <div class="card" id="adhourcard" style="margin-bottom:12px" hidden>
     <div class="c-head" style="flex-wrap:wrap">
       <span><span class="c-title">Hour by hour</span>
         <span class="sub" style="margin-left:8px">IST &middot; ads only &middot; each measure
@@ -810,7 +825,7 @@ function renderAdPages() {
       '<th class="band band-' + g.g + '" colspan="' + PAGE_COLS.filter(c => c.g === g.g).length +
       '">' + esc(g.label) + "</th>").join("") + "</tr>" +
     '<tr><th data-pk="landing_page_path">Landing page' + arr("landing_page_path") + "</th>" +
-    PAGE_COLS.map((c, i) => '<th class="' + (start(i) ? "bandstart" : "") + '" data-pk="' + c.k +
+    PAGE_COLS.map((c, i) => '<th class="tint-' + c.g + (start(i) ? " bandstart" : "") + '" data-pk="' + c.k +
       '" title="' + esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
   const k = pgSortKey;
   const rows = (ADS.pages || []).slice().sort((a, b) => {
@@ -821,7 +836,7 @@ function renderAdPages() {
     return (typeof x === "string" ? x.localeCompare(y) : x - y) * pgSortDir;
   });
   const line = (r, label, cls, key) => '<tr class="' + cls + '"' + key + "><td>" + esc(label) + "</td>" +
-    PAGE_COLS.map((c, i) => '<td class="' + (start(i) ? "bandstart" : "") + '">' +
+    PAGE_COLS.map((c, i) => '<td class="tint-' + c.g + (start(i) ? " bandstart" : "") + '">' +
       esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
   $("adpagebody").innerHTML =
     line(Object.assign({ ad_count: ADS.ad_count }, ADS.totals), "All pages", "total", ' data-all="1"') +
@@ -883,17 +898,17 @@ function renderAds() {
       '<th class="band band-' + g.g + '" colspan="' + AD_COLS.filter(c => c.g === g.g).length +
       '">' + esc(g.label) + "</th>").join("") + "</tr>" +
     '<tr><th data-ak="ad_id">Ad' + arr("ad_id") + "</th>" + AD_COLS.map((c, i) =>
-      '<th class="' + (start(i) ? "bandstart" : "") + '"' + (c.text ? ' style="text-align:left"' : "") +
+      '<th class="tint-' + c.g + (start(i) ? " bandstart" : "") + '"' + (c.text ? ' style="text-align:left"' : "") +
       ' data-ak="' + c.k + '" title="' +
       esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
-  const cell = (c, i, r) => '<td class="' + (start(i) ? "bandstart" : "") + '"' +
+  const cell = (c, i, r) => '<td class="tint-' + c.g + (start(i) ? " bandstart" : "") + '"' +
     (c.text ? ' style="text-align:left"' : "") + ">" +
     (c.html ? c.f(r[c.k], r) : esc(c.f(r[c.k], r))) + "</td>";
   const rows = adRows();
   const t = ADS.totals;
   $("adbody").innerHTML =
     '<tr class="total"><td>All ads (' + num(ADS.ad_count) + ")</td>" +
-      AD_COLS.map((c, i) => (c.text || c.html) ? '<td class="' + (start(i) ? "bandstart" : "") + '"></td>'
+      AD_COLS.map((c, i) => (c.text || c.html) ? '<td class="tint-' + c.g + (start(i) ? " bandstart" : "") + '"></td>'
                                    : cell(c, i, t)).join("") + "</tr>" +
     rows.map(r =>
       '<tr><td title="' + esc((r.ad_name || "") + (r.campaign_name ? " · " + r.campaign_name : "")) +
@@ -1304,7 +1319,7 @@ function renderTable() {
     "<tr>" +
     '<th data-k="landing_page_path">Landing page' + arrow("landing_page_path") + "</th>" +
     COLS.map((c, i) => '<th class="' + (isBandStart(i) ? "bandstart " : "") +
-                  'col-' + c.g + '" data-k="' + c.k + '" title="' +
+                  'tint-' + c.g + ' col-' + c.g + '" data-k="' + c.k + '" title="' +
                   esc(COL_HELP[c.k] || "") + '">' + esc(c.label) + arrow(c.k) +
                   "</th>").join("") +
     "</tr>";
@@ -1316,7 +1331,7 @@ function renderTable() {
   // whole-window total above a filtered list invites subtraction that
   // does not work.
   const totalRow = (t && !q) ? '<tr class="total"><td>All pages</td>' +
-    COLS.map(c => "<td>" + esc(c.f(t[c.k], t)) + "</td>").join("") + "</tr>" : "";
+    COLS.map(c => '<td class="tint-' + c.g + '">' + esc(c.f(t[c.k], t)) + "</td>").join("") + "</tr>" : "";
 
   const max = rows.length ? Math.max(...rows.map(r => r.revenue || 0), 1) : 1;
   $("tbody").innerHTML = totalRow + rows.map(r => {
@@ -1324,7 +1339,7 @@ function renderTable() {
     return '<tr><td class="pagecell" title="' + esc(r.landing_page_path) + '">' +
       '<span class="pagebar" style="width:' + (share * 100).toFixed(1) + '%"></span>' +
       '<span class="pagetext">' + esc(r.landing_page_path) + "</span></td>" +
-      COLS.map(c => "<td>" + esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
+      COLS.map(c => '<td class="tint-' + c.g + '">' + esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
   }).join("");
 
   const m = $("msg");
@@ -1389,6 +1404,26 @@ $("csv").addEventListener("click", () => {
   a.click();
   URL.revokeObjectURL(a.href);
 });
+
+// --- hour by hour: opened on request ------------------------------------
+// The tables are what a reader comes for, so they follow the funnel; the
+// hourly analysis waits behind its button and stays as it was last left.
+function setHours(open) {
+  $(VIEW_ADS ? "adhourcard" : "hourcard").hidden = !open;
+  for (const b of document.querySelectorAll(".hourbtn")) {
+    b.setAttribute("aria-pressed", String(open));
+    b.textContent = open ? "Hide hour-by-hour" : "Hour-by-hour analysis";
+  }
+  try { localStorage.setItem("tracker_landing_hours", open ? "1" : "0"); } catch {}
+}
+for (const b of document.querySelectorAll(".hourbtn")) {
+  b.addEventListener("click", () => {
+    const open = b.getAttribute("aria-pressed") !== "true";
+    setHours(open);
+    if (open) $(VIEW_ADS ? "adhourcard" : "hourcard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+try { if (localStorage.getItem("tracker_landing_hours") === "1") setHours(true); } catch {}
 
 // --- by ad: sort, filter, export ---------------------------------------
 $("adhead").addEventListener("click", e => {
