@@ -245,6 +245,28 @@
     </div>
   </div>
 
+  <div class="card" id="adwrap" style="padding:0;margin-bottom:12px">
+    <div class="c-head" style="padding:12px 14px 0;flex-wrap:wrap">
+      <span><span class="c-title">By ad</span>
+        <span class="sub" style="margin-left:8px">spend by ad id &middot; Shopify sessions
+          and orders by utm_content &middot; landing page from the ad map</span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="c-note" id="adnote"></span>
+        <input id="adfilter" placeholder="Filter: ad id, name or page"
+               style="font:inherit;font-size:12px;padding:5px 8px;border-radius:8px;
+                      border:1px solid var(--border);background:transparent;color:var(--text);width:210px">
+        <button id="adexport">Export CSV</button>
+      </span>
+    </div>
+    <div class="tablewrap" style="max-height:560px;overflow-y:auto">
+      <table id="adtable">
+        <thead id="adhead"></thead>
+        <tbody id="adbody"></tbody>
+      </table>
+    </div>
+    <div class="msg" id="admsg">Loading…</div>
+  </div>
+
   <div class="card" style="padding:0">
     <div class="tablewrap">
       <table id="table">
@@ -403,6 +425,108 @@ const COL_HELP = {
 };
 
 let DATA = null;
+
+/* ------------------------------------------------------------------ *
+ * by ad                                                              *
+ * ------------------------------------------------------------------ */
+// One row per Meta ad. Unlike the page table, every band here is tied
+// to the SAME thing -- the ad -- so CVR and ROAS on a row are fair.
+const mmss = s => (s === null || s === undefined) ? "—"
+  : Math.floor(s / 60) + ":" + String(Math.round(s % 60)).padStart(2, "0");
+const AD_GROUPS = [
+  { g: "ads",     label: "Meta — the ad" },
+  { g: "traffic", label: "Shopify sessions — utm_content" },
+  { g: "orders",  label: "Shopify orders — utm_content" },
+];
+const AD_COLS = [
+  { g: "ads",     k: "landing_page_path",   label: "Landing page",  f: v => v || "not in ad map", text: true },
+  { g: "ads",     k: "spend",               label: "Ad spend",      f: inr0 },
+  { g: "traffic", k: "sessions",            label: "Sessions",      f: num },
+  { g: "traffic", k: "page_match",          label: "On mapped page", f: pc1 },
+  { g: "traffic", k: "atc_rate",            label: "ATC %",         f: pc1 },
+  { g: "traffic", k: "bounce_rate",         label: "Bounce %",      f: pc1 },
+  { g: "traffic", k: "avg_session_seconds", label: "Avg. duration", f: mmss },
+  { g: "orders",  k: "revenue",             label: "Total sales",   f: inr0 },
+  { g: "orders",  k: "new_sales",           label: "New cust. sales", f: inr0 },
+  { g: "orders",  k: "rep_sales",           label: "Repeat sales",  f: inr0 },
+  { g: "orders",  k: "new_orders",          label: "New orders",    f: num },
+  { g: "orders",  k: "rep_orders",          label: "Repeat orders", f: num },
+  { g: "orders",  k: "quantity",            label: "Qty ordered",   f: num },
+  { g: "orders",  k: "cvr",                 label: "CVR",           f: v => v == null ? "—" : (v * 100).toFixed(2) + "%" },
+  { g: "orders",  k: "roas",                label: "ROAS",          f: v => v == null ? "—" : xx(v) },
+];
+const AD_HELP = {
+  landing_page_path: "The page the ad map names for this ad -- from the Ads Manager export, not from the order.",
+  page_match: "Share of this ad's sessions that Shopify saw land on the mapped page. Low means the map is wrong for this ad.",
+  cvr: "Orders with this ad id over sessions with this ad id.",
+  roas: "Sales with this ad id over the ad's spend. Shown from Rs 1,000 of spend.",
+};
+let ADS = null, adSortKey = "spend", adSortDir = -1;
+
+async function loadAds(from, to) {
+  $("admsg").hidden = false; $("admsg").className = "msg"; $("admsg").textContent = "Loading…";
+  try {
+    const res = await fetch(apiBase() + "/admin/analytics/landing-ads?day=" +
+      encodeURIComponent(to) + "&from_day=" + encodeURIComponent(from) + "&limit=1000");
+    if (res.status === 404) throw new Error("this backend does not serve per-ad data yet");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    ADS = await res.json();
+  } catch (e) {
+    ADS = null;
+    $("adhead").innerHTML = $("adbody").innerHTML = "";
+    $("admsg").className = "msg err";
+    $("admsg").textContent = "By ad: " + e.message + ".";
+    return;
+  }
+  renderAds();
+}
+
+function adRows() {
+  const q = $("adfilter").value.trim().toLowerCase();
+  let rows = ADS.ads;
+  if (q) rows = rows.filter(r => (r.ad_id + " " + (r.ad_name || "") + " " +
+                                  (r.landing_page_path || "")).toLowerCase().includes(q));
+  const k = adSortKey;
+  return rows.slice().sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;            // blanks last, whichever way
+    if (y == null) return -1;
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) * adSortDir;
+  });
+}
+
+function renderAds() {
+  if (!ADS) return;
+  const arr = k => adSortKey === k ? ' <span class="arrow">' + (adSortDir < 0 ? "▼" : "▲") + "</span>" : "";
+  const start = i => i > 0 && AD_COLS[i].g !== AD_COLS[i - 1].g;
+  $("adhead").innerHTML =
+    '<tr class="bandrow"><th class="band"></th>' + AD_GROUPS.map(g =>
+      '<th class="band band-' + g.g + '" colspan="' + AD_COLS.filter(c => c.g === g.g).length +
+      '">' + esc(g.label) + "</th>").join("") + "</tr>" +
+    '<tr><th data-ak="ad_id">Ad' + arr("ad_id") + "</th>" + AD_COLS.map((c, i) =>
+      '<th class="' + (start(i) ? "bandstart" : "") + '"' + (c.text ? ' style="text-align:left"' : "") +
+      ' data-ak="' + c.k + '" title="' +
+      esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
+  const cell = (c, i, r) => '<td class="' + (start(i) ? "bandstart" : "") + '"' +
+    (c.text ? ' style="text-align:left"' : "") + ">" + esc(c.f(r[c.k], r)) + "</td>";
+  const rows = adRows();
+  const t = ADS.totals;
+  $("adbody").innerHTML =
+    '<tr class="total"><td>All ads (' + num(ADS.ad_count) + ")</td>" +
+      AD_COLS.map((c, i) => c.text ? '<td class="' + (start(i) ? "bandstart" : "") + '"></td>'
+                                   : cell(c, i, t)).join("") + "</tr>" +
+    rows.map(r =>
+      '<tr><td title="' + esc((r.ad_name || "") + (r.campaign_name ? " · " + r.campaign_name : "")) +
+      '"><div>' + esc(r.ad_id) + '</div><div class="sub" style="max-width:260px;overflow:hidden;' +
+      'text-overflow:ellipsis;white-space:nowrap">' + esc(r.ad_name || "") + "</div></td>" +
+      AD_COLS.map((c, i) => cell(c, i, r)).join("") + "</tr>").join("");
+  const mapped = ADS.ads.filter(r => r.landing_page_path).length;
+  $("adnote").textContent = num(rows.length) + " of " + num(ADS.ad_count) + " ads · " +
+    num(ADS.ads.length - mapped) + " shown without a mapped page";
+  $("admsg").hidden = rows.length > 0;
+  if (!rows.length) { $("admsg").className = "msg"; $("admsg").textContent = "No ads in this window."; }
+}
 let sortKey = "revenue";
 let sortDir = -1;
 
@@ -427,6 +551,7 @@ async function load() {
   const today = RANGE ? RANGE.to : istToday();
   const from = RANGE ? RANGE.from : daysAgo(today, Number($("window").value));
   $("span").textContent = from + " → " + today + " (IST)";
+  loadAds(from, today);          // its own request; never blocks the page table
   $("msg").hidden = false;
   $("msg").className = "msg";
   $("msg").textContent = "Loading…";
@@ -886,6 +1011,30 @@ $("csv").addEventListener("click", () => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = "landing-pages-" + istToday() + ".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+// --- by ad: sort, filter, export ---------------------------------------
+$("adhead").addEventListener("click", e => {
+  const k = (e.target.closest("th") || {}).dataset?.ak;
+  if (!k) return;
+  if (k === adSortKey) adSortDir = -adSortDir;
+  else { adSortKey = k; adSortDir = (k === "ad_id" || k === "landing_page_path") ? 1 : -1; }
+  renderAds();
+});
+$("adfilter").addEventListener("input", renderAds);
+$("adexport").addEventListener("click", () => {
+  if (!ADS) return;
+  const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+  const keys = ["ad_id", "ad_name", "campaign_name", "landing_page_url", "spend", "impressions",
+                "sessions", "visitors", "page_match", "atc_rate", "bounce_rate",
+                "avg_session_seconds", "orders", "revenue", "new_sales", "rep_sales",
+                "new_orders", "rep_orders", "quantity", "cvr", "roas"];
+  const csv = [keys.join(",")].concat(adRows().map(r => keys.map(k => q(r[k])).join(","))).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "landing-ads-" + ADS.from_day + "_" + ADS.to_day + ".csv";
   a.click();
   URL.revokeObjectURL(a.href);
 });

@@ -246,6 +246,9 @@ CLEAR = {
                 "repeat_customer_sales = 0",
     "meta":     "meta_spend = 0, order_spend = 0, meta_impressions = 0, "
                 "meta_conv_value = 0, meta_purchases = 0, ncp = 0",
+    # When Meta's conversions did not arrive: refresh spend, keep the
+    # conversion figures the previous run wrote.
+    "meta_spend": "meta_spend = 0, order_spend = 0, meta_impressions = 0",
 }
 
 UPSERT = {
@@ -325,6 +328,19 @@ def write_ads(kind: str, rows: list[dict], lo: date, hi: date) -> int:
         conn.commit()
     return len(rows)
 
+
+UPSERT["meta_spend"] = """
+    INSERT INTO hourly_landing_tracker AS t
+        (hour, landing_page_path, source, meta_spend, order_spend,
+         meta_impressions, meta_refreshed_at)
+    VALUES (%(hour)s, %(path)s, 'meta', %(spend)s, %(order_spend)s,
+            %(impressions)s, now())
+    ON CONFLICT (hour, landing_page_path, source) DO UPDATE SET
+        meta_spend = EXCLUDED.meta_spend,
+        order_spend = EXCLUDED.order_spend,
+        meta_impressions = EXCLUDED.meta_impressions,
+        meta_refreshed_at = EXCLUDED.meta_refreshed_at
+"""
 
 DELETE_EMPTY = """
 DELETE FROM hourly_landing_tracker
@@ -768,7 +784,18 @@ async def meta_get(client, url, params, attempt: int = 0):
 async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
                          ncp_types: set[str],
                          ad_mix: dict[str, dict[str, float]],
-                         ) -> tuple[list[dict], float, float, list[dict]]:
+                         ) -> tuple[list[dict], float, float, list[dict], bool]:
+    """One day of ad x hour insights, in two requests per account.
+
+    SPEND first, on its own: ad_id, spend and impressions answer in
+    seconds at any hour. Meta's conversions (actions, action_values) are
+    what make the request heavy, and late in a busy day that request
+    times out whatever the page size -- seen 2026-11-27, when even 25
+    rows a page failed while the spend-only form returned 500 at once.
+    Asked for together, a timeout on conversions cost the hour its spend
+    as well. Asked for apart, it costs only Meta's own conversion
+    figures, and the last value says whether they arrived.
+    """
     from ingest_last_15_days import _discover_accounts  # noqa: PLC0415
 
     token = os.environ.get("META_ACCESS_TOKEN")
@@ -782,17 +809,17 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
     by_ad: dict[tuple[datetime, str], dict] = defaultdict(
         lambda: dict(spend=0.0, impressions=0))
 
-    for account in _discover_accounts().values():
+    async def insights(account, fields: str, limit: int):
         url = f"{base}/act_{account.account_id}/insights"
         params = {
-            "access_token": token, "level": "ad",
-            "fields": "ad_id,spend,impressions,actions,action_values",
+            "access_token": token, "level": "ad", "fields": fields,
             "time_range": json.dumps({"since": day.isoformat(), "until": day.isoformat()}),
             "breakdowns": "hourly_stats_aggregated_by_advertiser_time_zone",
-            # 500 makes Meta answer code 2 part-way through an
-            # account-day: ad x hour x actions is too much for one page.
-            # 200 pages cleanly at ~40 requests per account-day.
-            "limit": 200,
+            "limit": limit,
+            # Ads that did not serve are most of an account's rows and
+            # none of its spend.
+            "filtering": json.dumps([{"field": "impressions",
+                                      "operator": "GREATER_THAN", "value": 0}]),
         }
         while True:
             body = await meta_get(client, url, params)
@@ -800,45 +827,59 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
                 raise RuntimeError(f"{account.name}: {body['error'].get('message')}")
             for row in body.get("data", []):
                 label = row.get("hourly_stats_aggregated_by_advertiser_time_zone", "")
-                if not label:
-                    continue
-                spend = float(row.get("spend") or 0)
-                ad_id = row.get("ad_id") or ""
-                # Already the advertiser's timezone, which is the store's.
-                hour = ist_hour_utc(day, int(label.split(":", 1)[0]))
-
-                if ad_id:
-                    a = by_ad[(hour, ad_id)]
-                    a["spend"] += spend
-                    a["impressions"] += int(float(row.get("impressions") or 0))
-
-                # (a) the page the ad POINTS AT, from its creative.
-                path = ad_paths.get(ad_id)
-                if path:
-                    b = acc[(hour, path)]
-                    b["spend"] += spend
-                    b["impressions"] += int(float(row.get("impressions") or 0))
-                    b["conv_value"] += _first(row.get("action_values"),
-                                              ("omni_purchase", "purchase"))
-                    b["purchases"] += _first(row.get("actions"),
-                                             ("omni_purchase", "purchase"))
-                    b["ncp"] += sum(float(a.get("value") or 0)
-                                    for a in (row.get("actions") or [])
-                                    if a.get("action_type") in ncp_types)
-                else:
-                    unmapped += spend
-
-                # (b) the pages the ad's own ORDERS landed on, by share.
-                mix = ad_mix.get(ad_id)
-                if mix:
-                    for page, share in mix.items():
-                        acc[(hour, page)]["order_spend"] += spend * share
-                else:
-                    unplaced += spend
+                if label:
+                    # Already the advertiser's timezone, which is the store's.
+                    yield (ist_hour_utc(day, int(label.split(":", 1)[0])),
+                           row.get("ad_id") or "", row)
             nxt = (body.get("paging") or {}).get("next")
             if not nxt:
                 break
             url, params = nxt, None
+
+    accounts = list(_discover_accounts().values())
+    for account in accounts:
+        async for hour, ad_id, row in insights(account, "ad_id,spend,impressions", 500):
+            spend = float(row.get("spend") or 0)
+            shown = int(float(row.get("impressions") or 0))
+            if ad_id:
+                a = by_ad[(hour, ad_id)]
+                a["spend"] += spend
+                a["impressions"] += shown
+
+            # (a) the page the ad POINTS AT, from the ad map.
+            path = ad_paths.get(ad_id)
+            if path:
+                b = acc[(hour, path)]
+                b["spend"] += spend
+                b["impressions"] += shown
+            else:
+                unmapped += spend
+
+            # (b) the pages the ad's own ORDERS landed on, by share.
+            mix = ad_mix.get(ad_id)
+            if mix:
+                for page, share in mix.items():
+                    acc[(hour, page)]["order_spend"] += spend * share
+            else:
+                unplaced += spend
+
+    actions_ok = True
+    try:
+        for account in accounts:
+            async for hour, ad_id, row in insights(account, "ad_id,actions,action_values", 100):
+                path = ad_paths.get(ad_id)
+                if not path:
+                    continue
+                b = acc[(hour, path)]
+                b["conv_value"] += _first(row.get("action_values"),
+                                          ("omni_purchase", "purchase"))
+                b["purchases"] += _first(row.get("actions"), ("omni_purchase", "purchase"))
+                b["ncp"] += sum(float(a.get("value") or 0)
+                                for a in (row.get("actions") or [])
+                                if a.get("action_type") in ncp_types)
+    except RuntimeError as exc:
+        actions_ok = False
+        print(f"  meta:     conversions not refreshed for {day} -- {str(exc)[:120]}")
 
     rows = [{"hour": h, "path": p, "spend": round(b["spend"], 2),
              "order_spend": round(b["order_spend"], 2),
@@ -847,7 +888,7 @@ async def fetch_meta_day(client, day: date, ad_paths: dict[str, str],
             for (h, p), b in acc.items()]
     ad_rows = [{"hour": h, "ad_id": a, "spend": round(b["spend"], 2),
                 "impressions": b["impressions"]} for (h, a), b in by_ad.items()]
-    return rows, unmapped, unplaced, ad_rows
+    return rows, unmapped, unplaced, ad_rows, actions_ok
 
 
 # -------------------------------------------------------------------- main
@@ -904,16 +945,18 @@ async def run(days: list[date], only: set[str]) -> None:
             ad_paths, ncp_types = load_ad_paths(), ncp_action_types()
             print(f"  {len(ad_paths):,} ads carry a readable landing URL; "
                   f"{len(ncp_types)} NCP custom conversion(s)")
-            rows, unmapped, unplaced, ad_rows = [], 0.0, 0.0, []
+            rows, unmapped, unplaced, ad_rows, got_actions = [], 0.0, 0.0, [], True
             for day in days:
                 ad_mix = load_ad_mix(day)
-                r, u, n, ar = await fetch_meta_day(client, day, ad_paths, ncp_types,
-                                                   ad_mix)
+                r, u, n, ar, ok = await fetch_meta_day(client, day, ad_paths,
+                                                       ncp_types, ad_mix)
                 rows += r
                 ad_rows += ar
+                got_actions = got_actions and ok
                 unmapped += u
                 unplaced += n
-            print(f"  meta:     {write('meta', rows, lo, hi):,} (hour, page) rows, "
+            kind = "meta" if got_actions else "meta_spend"
+            print(f"  meta:     {write(kind, rows, lo, hi):,} (hour, page) rows, "
                   f"{write_ads('meta', ad_rows, lo, hi):,} (hour, ad) rows")
             print(f"            by creative URL: Rs {unmapped:,.0f} unplaced "
                   f"(ad has no readable landing URL)")
