@@ -172,8 +172,10 @@
   .err { color: var(--bad); }
   .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
   /* Each view hides the other's parts; header and controls are shared. */
-  .view-pages #adwrap { display: none; }
-  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap) { display: none !important; }
+  .view-pages #adwrap, .view-pages #adpagewrap { display: none; }
+  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap) { display: none !important; }
+  #adpagebody tr { cursor: pointer; }
+  #adpagebody tr.sel td { background: var(--muted); }
   .view-ads .controls > *:not(#f-window):not(#reload):not(#cfg) { display: none; }
   .view-ads #adwrap .tablewrap { max-height: none !important; }
   .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px;
@@ -250,6 +252,22 @@
       <table id="srctable">
         <thead id="srchead"></thead>
         <tbody id="srcbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" id="adpagewrap" style="padding:0;margin-bottom:12px">
+    <div class="c-head" style="padding:12px 14px 0;flex-wrap:wrap">
+      <span><span class="c-title">By landing page</span>
+        <span class="sub" style="margin-left:8px">every ad counted on the page the ad map
+          gives it &middot; an order belongs to the page its ad sent the buyer to
+          &middot; click a page to see its ads</span></span>
+      <span class="c-note" id="adpagenote"></span>
+    </div>
+    <div class="tablewrap" style="max-height:520px;overflow-y:auto">
+      <table id="adpagetable">
+        <thead id="adpagehead"></thead>
+        <tbody id="adpagebody"></tbody>
       </table>
     </div>
   </div>
@@ -491,11 +509,51 @@ const AD_HELP = {
 };
 let ADS = null, adSortKey = "spend", adSortDir = -1;
 
+// The same measures, summed over every ad the map sends to one page.
+const PAGE_COLS = [
+  { g: "ads", k: "ad_count", label: "Ads", f: num },
+].concat(AD_COLS.filter(c => !["landing_page_path", "seen_page", "page_status"].includes(c.k)));
+// PAGE_COLS[0] sits beside spend in the Meta band; put spend second.
+PAGE_COLS.sort((a, b) => (a.g === "ads" ? 0 : a.g === "traffic" ? 1 : 2) -
+                         (b.g === "ads" ? 0 : b.g === "traffic" ? 1 : 2));
+let pgSortKey = "spend", pgSortDir = -1, adPage;   // adPage: undefined = all, null = unmapped
+
+function renderAdPages() {
+  if (!ADS) return;
+  const arr = k => pgSortKey === k ? ' <span class="arrow">' + (pgSortDir < 0 ? "▼" : "▲") + "</span>" : "";
+  const start = i => i > 0 && PAGE_COLS[i].g !== PAGE_COLS[i - 1].g;
+  $("adpagehead").innerHTML =
+    '<tr class="bandrow"><th class="band"></th>' + AD_GROUPS.map(g =>
+      '<th class="band band-' + g.g + '" colspan="' + PAGE_COLS.filter(c => c.g === g.g).length +
+      '">' + esc(g.label) + "</th>").join("") + "</tr>" +
+    '<tr><th data-pk="landing_page_path">Landing page' + arr("landing_page_path") + "</th>" +
+    PAGE_COLS.map((c, i) => '<th class="' + (start(i) ? "bandstart" : "") + '" data-pk="' + c.k +
+      '" title="' + esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
+  const k = pgSortKey;
+  const rows = (ADS.pages || []).slice().sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) * pgSortDir;
+  });
+  const line = (r, label, cls, key) => '<tr class="' + cls + '"' + key + "><td>" + esc(label) + "</td>" +
+    PAGE_COLS.map((c, i) => '<td class="' + (start(i) ? "bandstart" : "") + '">' +
+      esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
+  $("adpagebody").innerHTML =
+    line(Object.assign({ ad_count: ADS.ad_count }, ADS.totals), "All pages", "total", ' data-all="1"') +
+    rows.map(r => line(r, r.landing_page_path || "Not in ad map",
+      (adPage !== undefined && adPage === r.landing_page_path) ? "sel" : "",
+      ' data-page="' + esc(r.landing_page_path == null ? "\u0000" : r.landing_page_path) + '"')).join("");
+  const mapped = rows.filter(r => r.landing_page_path);
+  $("adpagenote").textContent = num(mapped.length) + " landing pages";
+}
+
 async function loadAds(from, to) {
   $("admsg").hidden = false; $("admsg").className = "msg"; $("admsg").textContent = "Loading…";
   try {
     const res = await fetch(apiBase() + "/admin/analytics/landing-ads?day=" +
-      encodeURIComponent(to) + "&from_day=" + encodeURIComponent(from) + "&limit=1000");
+      encodeURIComponent(to) + "&from_day=" + encodeURIComponent(from) + "&limit=2000");
     if (res.status === 404) throw new Error("this backend does not serve per-ad data yet");
     if (!res.ok) throw new Error("HTTP " + res.status);
     ADS = await res.json();
@@ -506,6 +564,8 @@ async function loadAds(from, to) {
     $("admsg").textContent = "Landing Pages by Ads: " + e.message + ".";
     return false;
   }
+  adPage = undefined;
+  renderAdPages();
   renderAds();
   return true;
 }
@@ -513,6 +573,7 @@ async function loadAds(from, to) {
 function adRows() {
   const q = $("adfilter").value.trim().toLowerCase();
   let rows = ADS.ads;
+  if (adPage !== undefined) rows = rows.filter(r => (r.landing_page_path ?? null) === adPage);
   const want = $("adcheck").value;
   if (want) rows = rows.filter(r => r.page_status === want);
   if (q) rows = rows.filter(r => (r.ad_id + " " + (r.ad_name || "") + " " +
@@ -1059,6 +1120,27 @@ $("adhead").addEventListener("click", e => {
   if (k === adSortKey) adSortDir = -adSortDir;
   else { adSortKey = k; adSortDir = (k === "ad_id" || k === "landing_page_path") ? 1 : -1; }
   renderAds();
+});
+$("adpagehead").addEventListener("click", e => {
+  const k = (e.target.closest("th") || {}).dataset?.pk;
+  if (!k) return;
+  if (k === pgSortKey) pgSortDir = -pgSortDir;
+  else { pgSortKey = k; pgSortDir = k === "landing_page_path" ? 1 : -1; }
+  renderAdPages();
+});
+// Click a page to list only its ads below; click it again, or "All
+// pages", to clear.
+$("adpagebody").addEventListener("click", e => {
+  const tr = e.target.closest("tr");
+  if (!tr) return;
+  if (tr.dataset.all) adPage = undefined;
+  else {
+    const p = tr.dataset.page === "\u0000" ? null : tr.dataset.page;
+    adPage = adPage === p ? undefined : p;
+  }
+  renderAdPages();
+  renderAds();
+  if (adPage !== undefined) $("adwrap").scrollIntoView({ behavior: "smooth", block: "start" });
 });
 $("adfilter").addEventListener("input", renderAds);
 $("adcheck").addEventListener("change", renderAds);

@@ -15140,9 +15140,23 @@ class LandingAdRow(BaseModel):
     roas: float | None = None
 
 
+class LandingAdPageRow(LandingAdRow):
+    """The ads rolled up onto the landing page the ad map gives them.
+
+    This is the page view the ad map exists for: an order counts for
+    the page its AD sent the buyer to, wherever on the site the order
+    was finally placed, so a collection page gets the sales its ads
+    earned even though the checkout happened on a product page.
+    """
+    ad_count: int = 0
+
+
 class LandingAdsResponse(BaseModel):
     from_day: date
     to_day: date
+    #: One row per mapped landing page, biggest spend first. Ads the
+    #: map does not know are gathered in one row with a null path.
+    pages: list[LandingAdPageRow] = []
     ads: list[LandingAdRow]
     totals: LandingAdRow
     ad_count: int = 0
@@ -15196,9 +15210,35 @@ async def get_landing_ads(
     lo_day = min(from_day or target, target)
     bounds = {"lo": datetime.combine(lo_day, datetime.min.time(), ist),
               "hi": datetime.combine(target + timedelta(days=1), datetime.min.time(), ist)}
+    # Every ad, not the first `limit`: the page rollup below has to
+    # cover the whole account or its pages would not add up to it.
     rows = (await session.execute(
         text(_LANDING_ADS_SQL),
-        {**bounds, "limit": limit, "lo_day": lo_day, "hi_day": target})).mappings().all()
+        {**bounds, "limit": 100000, "lo_day": lo_day, "hi_day": target})).mappings().all()
+
+    summed = ("spend", "impressions", "sessions", "visitors", "bounces",
+              "cart_additions", "duration_seconds", "sessions_on_page", "orders",
+              "revenue", "new_orders", "new_sales", "rep_orders", "rep_sales", "quantity")
+    by_page: dict[str | None, dict] = {}
+    for r in rows:
+        path = (page_path(r["landing_page_url"]) or None) if r["landing_page_url"] else None
+        b = by_page.setdefault(path, {k: 0 for k in summed} | {"ad_count": 0})
+        b["ad_count"] += 1
+        for k in summed:
+            b[k] += float(r[k] or 0)
+    pages = []
+    for path, b in by_page.items():
+        ints = {k: int(b[k]) for k in ("impressions", "sessions", "visitors", "bounces",
+                                       "cart_additions", "orders", "new_orders",
+                                       "rep_orders", "quantity", "ad_count")}
+        pr = LandingAdPageRow(**{**_ad_row({**b, **ints}).model_dump(), "ad_count": ints["ad_count"]})
+        pr.landing_page_path = path
+        pr.page_status = None
+        if path and pr.sessions:
+            pr.page_match = b["sessions_on_page"] / pr.sessions
+        pages.append(pr)
+    pages.sort(key=lambda x: (-x.spend, -x.revenue))
+    rows = rows[:limit]
     total = dict((await session.execute(text(_LANDING_ADS_TOTAL_SQL),
                                         bounds)).mappings().first() or {})
     totals = _ad_row(total)
@@ -15206,6 +15246,7 @@ async def get_landing_ads(
     totals.page_status = None
     return LandingAdsResponse(
         from_day=lo_day, to_day=target,
+        pages=pages,
         ads=[_ad_row(dict(r)) for r in rows],
         totals=totals, ad_count=int(total.get("ads") or 0), empty=not rows)
 
