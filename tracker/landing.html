@@ -33,7 +33,7 @@
     --border: #e3e6ea; --border-soft: #eef0f3;
     --text: #15181c; --text-2: #5b6470; --text-3: #8b94a1;
     --good: #0f7b3f; --bad: #b4341f;
-    --rev: #0f8a4d; --cost: #1f5fd0;
+    --rev: #0f8a4d; --cost: #1f5fd0; --warn: #b26a00; --traffic: #7447c9;
     --grid: #eef0f3;
   }
   :root:not([data-theme="light"]) {
@@ -42,7 +42,7 @@
       --border: #272d36; --border-soft: #1f252d;
       --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
       --good: #4ade80; --bad: #f87171;
-      --rev: #2fa862; --cost: #5f93e0;
+      --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a; --traffic: #a88be6;
       --grid: #1f252d;
     }
   }
@@ -51,7 +51,7 @@
     --border: #272d36; --border-soft: #1f252d;
     --text: #eef1f5; --text-2: #9aa4b2; --text-3: #6b7482;
     --good: #4ade80; --bad: #f87171;
-    --rev: #2fa862; --cost: #5f93e0;
+    --rev: #2fa862; --cost: #5f93e0; --warn: #e0a84a; --traffic: #a88be6;
     --grid: #1f252d;
   }
   * { box-sizing: border-box; }
@@ -135,7 +135,7 @@
   tr.bandrow th { font-size: 9.5px; letter-spacing: .08em; cursor: default;
                   padding-bottom: 2px; color: var(--text-3); text-align: left;
                   border-bottom: 0; }
-  tr.bandrow th.band-traffic { color: var(--text-2); }
+  tr.bandrow th.band-traffic { color: var(--traffic); }
   tr.bandrow th.band-orders  { color: var(--rev); }
   tr.bandrow th.band-ads     { color: var(--cost); }
   .bandstart { border-left: 1px solid var(--border); }
@@ -170,7 +170,62 @@
 
   .msg { padding: 28px 10px; text-align: center; color: var(--text-3); font-size: 13px; }
   .err { color: var(--bad); }
-  .embed header h1, .embed #cfgbtn, .embed #themebtn { display: none; }
+  .embed header h1, .embed #cfgbtn, .embed #themebtn, .embed #f-window { display: none; }
+  /* Each view hides the other's parts; header and controls are shared. */
+  .view-pages #adwrap, .view-pages #adpagewrap, .view-pages #adfunnel, .view-pages #adheroes, .view-pages #adhourcard { display: none; }
+  .view-ads .wrap > *:not(header):not(.controls):not(#adwrap):not(#adpagewrap):not(#adfunnel):not(#adheroes):not(#adhourcard) { display: none !important; }
+  .funnels { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+  .fn-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+  .fn-row { display: grid; grid-template-columns: 190px 1fr 250px; gap: 10px;
+            align-items: center; margin: 3px 0; font-size: 12px; }
+  .fn-track { height: 22px; border-radius: 5px; background: var(--muted); overflow: hidden; }
+  .fn-bar { height: 100%; border-radius: 5px; min-width: 2px; }
+  .fn-val { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .fn-val b { font-weight: 650; }
+  .fn-drop { margin: 1px 0 6px; padding-left: 200px; font-size: 11px; color: var(--text-2); }
+  .fn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  @media (max-width: 560px) { .fn-drop { padding-left: 0; } .fn-row { grid-template-columns: 1fr; gap: 2px; } }
+  #adpagebody tr { cursor: pointer; }
+  #adpagebody tr.sel td { background: var(--muted); }
+  .view-ads .controls > *:not(#f-window):not(#reload):not(#cfg) { display: none; }
+  .view-ads #adwrap .tablewrap { max-height: none !important; }
+  .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px;
+          border: 1px solid var(--border); color: var(--text-2); }
+  .chip.bad { color: var(--cost); border-color: var(--cost); }
+  .chip.ok { color: var(--rev); border-color: var(--rev); }
+  /* funnel: tapering stages, the step rate on the left, the figures and
+     what fell out on the right */
+  .fnl { display: grid; grid-template-columns: 150px minmax(120px, 1fr) minmax(190px, 1.1fr);
+         column-gap: 14px; align-items: center; font-size: 12px; }
+  .fnl-name { font-weight: 600; }
+  .fnl-step { font-size: 11px; color: var(--text-2); }
+  .fnl-shape { height: 44px; }
+  .fnl-fig b { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .fnl-fig span { color: var(--text-2); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .fnl-gap { height: 26px; display: flex; align-items: center; }
+  .fnl-lost { font-size: 11px; color: var(--text-2); }
+  .insights { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; }
+  .insight { border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
+             font-size: 11.5px; color: var(--text-2); }
+  .insight b { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+  .hit2 { fill: transparent; }
+  .hit2:hover { fill: var(--text); fill-opacity: .06; }
+  .panel-label { fill: var(--text-2); font-size: 10.5px; font-weight: 600; }
+  .ref-line { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
+  @media (max-width: 620px) { .fnl { grid-template-columns: 1fr; row-gap: 2px; } .fnl-gap { height: auto; } }
+  /* Each band of columns carries a faint wash of its own colour, so a
+     figure can be placed in its band without reading up to the header.
+     Mixed into the surface, so it follows the theme. */
+  td.tint-traffic, th.tint-traffic { background: color-mix(in srgb, var(--traffic) 9%, var(--surface)); }
+  td.tint-orders,  th.tint-orders  { background: color-mix(in srgb, var(--rev) 9%, var(--surface)); }
+  td.tint-ads,     th.tint-ads     { background: color-mix(in srgb, var(--cost) 9%, var(--surface)); }
+  tr.total td.tint-traffic { background: color-mix(in srgb, var(--traffic) 18%, var(--surface)); }
+  tr.total td.tint-orders  { background: color-mix(in srgb, var(--rev) 18%, var(--surface)); }
+  tr.total td.tint-ads     { background: color-mix(in srgb, var(--cost) 18%, var(--surface)); }
+  tr.bandrow th.band-traffic { background: color-mix(in srgb, var(--traffic) 18%, var(--surface)); }
+  tr.bandrow th.band-orders  { background: color-mix(in srgb, var(--rev) 18%, var(--surface)); }
+  tr.bandrow th.band-ads     { background: color-mix(in srgb, var(--cost) 18%, var(--surface)); }
+  .toggle[aria-pressed="true"] { border-color: var(--text-2); }
 </style>
 </head>
 <body>
@@ -186,7 +241,7 @@
   </header>
 
   <div class="controls">
-    <label class="f">Window
+    <label class="f" id="f-window">Window
       <select id="window">
         <option value="0">Today</option>
         <option value="1" selected>2 days</option>
@@ -214,21 +269,26 @@
 
   <div class="heroes" id="heroes"></div>
 
-  <div class="charts">
-    <div class="card">
-      <div class="c-head">
-        <span class="c-title">Shopify sales by hour</span>
-        <span class="c-note" id="rev-note">IST &middot; summed over the window</span>
-      </div>
-      <div id="chart-rev"></div>
+  <div class="card" id="pgfunnel" style="margin-bottom:12px" hidden>
+    <div class="c-head">
+      <span><span class="c-title">Funnel</span>
+        <span class="sub" style="margin-left:8px">how much of the store's sales this view
+          accounts for, and how traffic converts</span></span>
+      <span style="display:flex;gap:10px;align-items:center"><span class="c-note" id="pgfn-note"></span>
+        <button class="toggle hourbtn" aria-pressed="false">Hour-by-hour analysis</button></span>
     </div>
-    <div class="card">
-      <div class="c-head">
-        <span class="c-title">Meta spend by hour</span>
-        <span class="c-note">its own scale, never shared with revenue</span>
-      </div>
-      <div id="chart-spend"></div>
+    <div class="funnels" id="pgfunnels"></div>
+  </div>
+
+  <div class="card" id="hourcard" style="margin-bottom:12px" hidden>
+    <div class="c-head" style="flex-wrap:wrap">
+      <span><span class="c-title">Hour by hour</span>
+        <span class="sub" style="margin-left:8px">IST &middot; each measure on its own scale
+          &middot; hover a column for the hour</span></span>
+      <span class="c-note" id="rev-note"></span>
     </div>
+    <div class="insights" id="hour-insights"></div>
+    <div id="hourpanels"></div>
   </div>
 
   <div class="card" id="srcwrap" hidden style="padding:0;margin-bottom:12px">
@@ -243,6 +303,74 @@
         <tbody id="srcbody"></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="heroes" id="adheroes"></div>
+
+  <div class="card" id="adfunnel" style="margin-bottom:12px">
+    <div class="c-head">
+      <span><span class="c-title">Funnel</span>
+        <span class="sub" style="margin-left:8px">how much of the store's sales this view
+          accounts for, and how ad traffic converts</span></span>
+      <span style="display:flex;gap:10px;align-items:center"><span class="c-note" id="fn-note"></span>
+        <button class="toggle hourbtn" aria-pressed="false">Hour-by-hour analysis</button></span>
+    </div>
+    <div class="funnels" id="funnels"></div>
+  </div>
+
+  <div class="card" id="adhourcard" style="margin-bottom:12px" hidden>
+    <div class="c-head" style="flex-wrap:wrap">
+      <span><span class="c-title">Hour by hour</span>
+        <span class="sub" style="margin-left:8px">IST &middot; ads only &middot; each measure
+          on its own scale &middot; hover a column for the hour</span></span>
+    </div>
+    <div class="insights" id="adhour-insights"></div>
+    <div id="adhourpanels"></div>
+  </div>
+
+  <div class="card" id="adpagewrap" style="padding:0;margin-bottom:12px">
+    <div class="c-head" style="padding:12px 14px 0;flex-wrap:wrap">
+      <span><span class="c-title">By landing page</span>
+        <span class="sub" style="margin-left:8px">every ad counted on the page the ad map
+          gives it &middot; an order belongs to the page its ad sent the buyer to
+          &middot; click a page to see its ads</span></span>
+      <span class="c-note" id="adpagenote"></span>
+    </div>
+    <div class="tablewrap" style="max-height:520px;overflow-y:auto">
+      <table id="adpagetable">
+        <thead id="adpagehead"></thead>
+        <tbody id="adpagebody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" id="adwrap" style="padding:0;margin-bottom:12px">
+    <div class="c-head" style="padding:12px 14px 0;flex-wrap:wrap">
+      <span><span class="c-title">Landing Pages by Ads</span>
+        <span class="sub" style="margin-left:8px">spend by ad id &middot; Shopify sessions
+          and orders by utm_content &middot; landing page from the ad map</span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="c-note" id="adnote"></span>
+        <select id="adcheck" style="font:inherit;font-size:12px;padding:5px 8px;border-radius:8px;
+                border:1px solid var(--border);background:transparent;color:var(--text)">
+          <option value="">All ads</option>
+          <option value="mismatch">Page mismatch</option>
+          <option value="unmapped">Not in ad map</option>
+          <option value="match">Page matches</option>
+        </select>
+        <input id="adfilter" placeholder="Filter: ad id, name or page"
+               style="font:inherit;font-size:12px;padding:5px 8px;border-radius:8px;
+                      border:1px solid var(--border);background:transparent;color:var(--text);width:210px">
+        <button id="adexport">Export CSV</button>
+      </span>
+    </div>
+    <div class="tablewrap" style="max-height:560px;overflow-y:auto">
+      <table id="adtable">
+        <thead id="adhead"></thead>
+        <tbody id="adbody"></tbody>
+      </table>
+    </div>
+    <div class="msg" id="admsg">Loading…</div>
   </div>
 
   <div class="card" style="padding:0">
@@ -268,6 +396,9 @@ const qs = new URLSearchParams(location.search);
 // Inside the Hourly Tracker the host page already has the title, the
 // backend field and the theme toggle.
 if (qs.get("embed")) document.documentElement.classList.add("embed");
+// One file, two views: the page view, and "Landing Pages by Ads".
+const VIEW_ADS = qs.get("view") === "ads";
+document.documentElement.classList.add(VIEW_ADS ? "view-ads" : "view-pages");
 function apiBase() {
   const fromUrl = qs.get("api");
   if (fromUrl) { try { localStorage.setItem("tracker_api", fromUrl); } catch {} return fromUrl.replace(/\/+$/, ""); }
@@ -403,17 +534,423 @@ const COL_HELP = {
 };
 
 let DATA = null;
+
+/* ------------------------------------------------------------------ *
+ * by ad                                                              *
+ * ------------------------------------------------------------------ */
+// One row per Meta ad. Unlike the page table, every band here is tied
+// to the SAME thing -- the ad -- so CVR and ROAS on a row are fair.
+const mmss = s => (s === null || s === undefined) ? "—"
+  : Math.floor(s / 60) + ":" + String(Math.round(s % 60)).padStart(2, "0");
+const AD_GROUPS = [
+  { g: "ads",     label: "Meta — the ad" },
+  { g: "traffic", label: "Shopify sessions — utm_content" },
+  { g: "orders",  label: "Shopify orders — utm_content" },
+];
+const AD_COLS = [
+  { g: "ads",     k: "landing_page_path",   label: "Landing page",  f: v => v || "not in ad map", text: true },
+  { g: "ads",     k: "spend",               label: "Ad spend",      f: inr0 },
+  { g: "traffic", k: "seen_page",           label: "Shopify landing page",
+    f: (v, r) => v ? v + " (" + pc1(r.seen_share) + ")" : "—", text: true },
+  { g: "traffic", k: "page_status",         label: "Check", html: true,
+    f: v => v === "match" ? '<span class="chip ok">match</span>'
+          : v === "mismatch" ? '<span class="chip bad">mismatch</span>'
+          : v === "unmapped" ? '<span class="chip">not in map</span>'
+          : v === "no_sessions" ? '<span class="chip">no sessions</span>' : "" },
+  { g: "traffic", k: "sessions",            label: "Sessions",      f: num },
+  { g: "traffic", k: "page_match",          label: "On mapped page", f: pc1 },
+  { g: "traffic", k: "atc_rate",            label: "ATC %",         f: pc1 },
+  { g: "traffic", k: "bounce_rate",         label: "Bounce %",      f: pc1 },
+  { g: "traffic", k: "avg_session_seconds", label: "Avg. duration", f: mmss },
+  { g: "orders",  k: "revenue",             label: "Total sales",   f: inr0 },
+  { g: "orders",  k: "new_sales",           label: "New cust. sales", f: inr0 },
+  { g: "orders",  k: "rep_sales",           label: "Repeat sales",  f: inr0 },
+  { g: "orders",  k: "new_orders",          label: "New orders",    f: num },
+  { g: "orders",  k: "rep_orders",          label: "Repeat orders", f: num },
+  { g: "orders",  k: "quantity",            label: "Qty ordered",   f: num },
+  { g: "orders",  k: "cvr",                 label: "CVR",           f: v => v == null ? "—" : (v * 100).toFixed(2) + "%" },
+  { g: "orders",  k: "roas",                label: "ROAS",          f: v => v == null ? "—" : xx(v) },
+];
+const AD_HELP = {
+  landing_page_path: "The page the ad map names for this ad -- from the Ads Manager export, not from the order.",
+  seen_page: "Where most of this ad's sessions really landed, per Shopify, and that page's share of them.",
+  page_status: "match: the ad map and Shopify name the same page. mismatch: they differ.",
+  page_match: "Share of this ad's sessions that Shopify saw land on the mapped page. Low means the map is wrong for this ad.",
+  cvr: "Orders with this ad id over sessions with this ad id.",
+  roas: "Sales with this ad id over the ad's spend. Shown from Rs 1,000 of spend.",
+};
+let ADS = null, adSortKey = "spend", adSortDir = -1;
+
+// The same measures, summed over every ad the map sends to one page.
+const PAGE_COLS = [
+  { g: "ads", k: "ad_count", label: "Ads", f: num },
+].concat(AD_COLS.filter(c => !["landing_page_path", "seen_page", "page_status"].includes(c.k)));
+// PAGE_COLS[0] sits beside spend in the Meta band; put spend second.
+PAGE_COLS.sort((a, b) => (a.g === "ads" ? 0 : a.g === "traffic" ? 1 : 2) -
+                         (b.g === "ads" ? 0 : b.g === "traffic" ? 1 : 2));
+let pgSortKey = "spend", pgSortDir = -1, adPage;   // adPage: undefined = all, null = unmapped
+
+// Two funnels. Kept stages are one hue stepping lighter as they narrow;
+// what falls out between two stages is named in its own colour, so the
+// eye can tell "not an ad order" (grey) from "ad missing from the map"
+// (amber) without reading the labels.
+const fnRow = (label, share, colour, opacity, value, sub) =>
+  '<div class="fn-row"><span>' + esc(label) + '</span><div class="fn-track"><div class="fn-bar" ' +
+  'style="width:' + Math.max(0, Math.min(100, (share || 0) * 100)).toFixed(1) + "%;background:" +
+  colour + ";opacity:" + opacity + '"></div></div><span class="fn-val"><b>' + esc(value) +
+  "</b> " + esc(sub) + "</span></div>";
+const fnDrop = (colour, text) => '<div class="fn-drop"><span class="fn-dot" style="background:' +
+  colour + '"></span>' + esc(text) + "</div>";
+const fnOf = (a, b) => b ? pc1(a / b) : "—";
+
+/** A tapering funnel.
+ *
+ *  stages: [{label, n, value, sub}] -- n is what the stage is measured
+ *  in, and every width is n over the first stage's n. Each stage tapers
+ *  to the width of the next, so the slope of an edge IS the drop.
+ *  drops[i] sits between stage i and i+1: {colour, text}, naming what
+ *  fell out there. The left column gives each stage as a share of the
+ *  one before it, which is the rate a reader acts on.
+ */
+function funnelHtml(title, colour, stages, drops) {
+  const top = stages[0].n || 0;
+  const w = st => top ? Math.max(7, Math.min(100, (st.n / top) * 100)) : 7;
+  let h = '<div><div class="fn-title">' + esc(title) + '</div><div class="fnl">';
+  stages.forEach((st, i) => {
+    const a = w(st), b = i + 1 < stages.length ? w(stages[i + 1]) : a;
+    const prev = i ? stages[i - 1].n : 0;
+    h += '<div><div class="fnl-name">' + esc(st.label) + '</div><div class="fnl-step">' +
+         esc(i ? (st.n > prev ? "more than the stage above" : fnOf(st.n, prev) + " of the stage above")
+               : "start") + "</div></div>" +
+         '<div class="fnl-shape" style="background:' + colour + ";opacity:" + (1 - i * 0.22).toFixed(2) +
+         ";clip-path:polygon(" + (50 - a / 2).toFixed(1) + "% 0," + (50 + a / 2).toFixed(1) + "% 0," +
+         (50 + b / 2).toFixed(1) + "% 100%," + (50 - b / 2).toFixed(1) + '% 100%)"></div>' +
+         '<div class="fnl-fig"><b>' + esc(st.value) + "</b><span>" + esc(st.sub || "") + "</span></div>";
+    const d = drops[i];
+    if (i + 1 < stages.length) {
+      h += '<div class="fnl-gap"></div><div class="fnl-gap"></div><div class="fnl-gap fnl-lost">' +
+           (d ? '<span class="fn-dot" style="background:' + d.colour + '"></span>' + esc(d.text) : "") +
+           "</div>";
+    }
+  });
+  return h + "</div></div>";
+}
+
+/* ------------------------------------------------------------------ *
+ * hour by hour                                                       *
+ * ------------------------------------------------------------------ */
+// Small multiples on one hour axis. Sales, spend and a ratio of the two
+// cannot share a y-axis honestly, so each gets its own panel and its
+// own scale, stacked so a column of the page is one hour in all of
+// them. Amounts are bars (an hour is a bucket); rates are lines.
+function hourPanels(hostId, hours, panels, liveHour) {
+  const host = $(hostId);
+  const rows = Array.from({ length: 24 }, (_, h) => hours.find(r => r.hour_of_day === h) || { hour_of_day: h });
+  if (!hours.length) { host.innerHTML = '<div class="msg">No hours in this window.</div>'; return; }
+  const W = 1100, L = 52, R = 10, PH = 84, GAP = 22, T = 16, B = 20;
+  const iw = W - L - R, slot = iw / 24, bw = Math.max(3, slot - 4);
+  const PI = PH - 14;          // plot height: the panel less label headroom
+  const H = T + panels.length * PH + (panels.length - 1) * GAP + B;
+  let out = "";
+  panels.forEach((p, pi) => {
+    const y0 = T + pi * (PH + GAP);
+    const vals = rows.map(r => p.get(r));
+    const max = Math.max(...vals.map(v => v || 0), p.ref || 0) || 1;
+    out += '<text class="panel-label" x="' + L + '" y="' + (y0 - 5) + '">' + esc(p.label) + "</text>";
+    for (let g = 0; g <= 2; g++) {
+      const v = max * g / 2, y = y0 + PH - (v / max) * PI;
+      out += '<line class="grid-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>' +
+             '<text class="axis-text" x="' + (L - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + esc(p.fmt(v)) + "</text>";
+    }
+    if (p.ref) {
+      const y = y0 + PH - (p.ref / max) * PI;
+      out += '<line class="ref-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>' +
+             '<text class="axis-text" x="' + (W - R) + '" y="' + (y - 3).toFixed(1) + '" text-anchor="end">window ' + esc(p.fmt(p.ref)) + "</text>";
+    }
+    const peak = vals.reduce((a, v, i) => (v != null && v > (vals[a] || 0) ? i : a), 0);
+    if (p.line) {
+      let d = "", dots = "";
+      vals.forEach((v, h) => {
+        if (v == null) return;
+        const x = L + h * slot + slot / 2, y = y0 + PH - (v / max) * PI;
+        d += (d ? " L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
+        dots += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="2.6" fill="var(' + p.colour +
+                ')" stroke="var(--surface)" stroke-width="1.5"' + (h === liveHour ? ' opacity=".45"' : "") + "/>";
+      });
+      out += '<path d="' + d + '" fill="none" stroke="var(' + p.colour + ')" stroke-width="2"/>' + dots;
+    } else {
+      vals.forEach((v, h) => {
+        const ht = ((v || 0) / max) * PI;
+        if (ht <= 0.5) return;
+        const x = L + h * slot + (slot - bw) / 2, y = y0 + PH - ht, rad = Math.min(4, bw / 2, ht);
+        out += '<path d="M' + x.toFixed(1) + " " + (y0 + PH) + " V" + (y + rad).toFixed(1) +
+               " a" + rad + " " + rad + " 0 0 1 " + rad + " -" + rad + " h" + (bw - 2 * rad).toFixed(1) +
+               " a" + rad + " " + rad + " 0 0 1 " + rad + " " + rad + " V" + (y0 + PH) +
+               ' Z" fill="var(' + p.colour + ')"' + (h === liveHour ? ' opacity=".45"' : "") + "/>";
+      });
+    }
+    if (vals[peak] > 0) {
+      const x = L + peak * slot + slot / 2, y = y0 + PH - (vals[peak] / max) * PI;
+      out += '<text class="bar-label" x="' + x.toFixed(1) + '" y="' + (y - 5).toFixed(1) +
+             '" text-anchor="middle">' + esc(p.fmt(vals[peak])) + "</text>";
+    }
+  });
+  for (let h = 0; h < 24; h++) {
+    out += '<text class="axis-text" x="' + (L + h * slot + slot / 2).toFixed(1) + '" y="' + (H - 6) +
+           '" text-anchor="middle">' + String(h).padStart(2, "0") + "</text>";
+    const r = rows[h];
+    const tipHtml = "<b>" + String(h).padStart(2, "0") + ":00–" + String(h).padStart(2, "0") + ":59 IST" +
+      (h === liveHour ? " · in progress" : "") + "</b><br>" +
+      panels.map(p => '<span class="k">' + esc(p.label) + "</span> " +
+                      esc(p.get(r) == null ? "—" : p.tip ? p.tip(r) : p.fmt(p.get(r)))).join("<br>");
+    // One hit column across every panel: the hour is the unit, so the
+    // whole column answers, not whichever bar the pointer happens on.
+    out += '<rect class="hit2" x="' + (L + h * slot).toFixed(1) + '" y="' + (T - 8) + '" width="' +
+           slot.toFixed(1) + '" height="' + (H - T - B + 8) + '" data-tip="' + esc(tipHtml) + '"/>';
+  }
+  host.innerHTML = '<div style="overflow-x:auto"><svg viewBox="0 0 ' + W + " " + H +
+    '" style="min-width:680px" role="img" aria-label="' +
+    esc(panels.map(p => p.label).join(", ")) + ' by hour of day">' + out + "</svg></div>";
+}
+
+// What a reader would otherwise have to work out from the bars.
+function hourInsights(hostId, hours, salesKey, spendOfRow, liveHour) {
+  const done = hours.filter(r => r.hour_of_day !== liveHour);
+  const total = hours.reduce((a, r) => a + (r[salesKey] || 0), 0);
+  const chips = [];
+  const hh = h => String(h).padStart(2, "0") + ":00";
+  if (total > 0) {
+    const peak = hours.reduce((a, b) => ((b[salesKey] || 0) > (a[salesKey] || 0) ? b : a));
+    chips.push("Peak sales hour <b>" + hh(peak.hour_of_day) + "</b> · <b>" + esc(inr0(peak[salesKey])) +
+               "</b> (" + pc1(peak[salesKey] / total) + " of the window)");
+    let run = 0;
+    for (const r of hours.slice().sort((a, b) => a.hour_of_day - b.hour_of_day)) {
+      run += r[salesKey] || 0;
+      if (run >= total / 2) { chips.push("Half of sales in by <b>" + hh(r.hour_of_day + 1 > 23 ? 23 : r.hour_of_day + 1) + "</b>"); break; }
+    }
+  }
+  const rated = done.filter(r => spendOfRow(r) >= ROAS_MIN_SPEND);
+  if (rated.length > 1) {
+    const q = r => (r[salesKey] || 0) / spendOfRow(r);
+    const best = rated.reduce((a, b) => (q(b) > q(a) ? b : a)), worst = rated.reduce((a, b) => (q(b) < q(a) ? b : a));
+    chips.push("Best ROAS hour <b>" + hh(best.hour_of_day) + "</b> · <b>" + xx(q(best)) + "</b>");
+    chips.push("Weakest <b>" + hh(worst.hour_of_day) + "</b> · <b>" + xx(q(worst)) + "</b>");
+  }
+  if (liveHour != null) chips.push("<b>" + hh(liveHour) + "</b> is still in progress (shown faded)");
+  $(hostId).innerHTML = chips.map(c => '<span class="insight">' + c + "</span>").join("");
+}
+// The hour now running, when the window ends today; otherwise none.
+const liveHourFor = to => to === istToday()
+  ? Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", hour12: false }).format(new Date())) % 24
+  : null;
+
+// The Landing Pages tab's funnel. Same reading as the by-ads one, on
+// this tab's own basis: an order belongs to the page it was PLACED on.
+function renderPageFunnel() {
+  const t = DATA && DATA.totals, c = DATA && DATA.coverage;
+  if (!t || !c) { $("pgfunnel").hidden = true; return; }
+  $("pgfunnel").hidden = false;
+  const row = fnRow, drop = fnDrop, of = fnOf;
+  const S = c.store_total_sales || 0, storeOrders = c.store_orders || 0;
+  const meta = (DATA.sources || []).find(r => r.source === "meta") || { revenue: 0, orders: 0 };
+  const filtered = !!$("source").value;
+
+  // Order values are before returns and Shopify's total is after, so a
+  // later stage can pass the first; bars stop at full width.
+  const stages = [
+    { label: "Store total sales", n: storeOrders, value: inr0(S), sub: num(storeOrders) + " orders" },
+    { label: filtered ? "On a page, this source" : "Placed on a landing page", n: t.orders,
+      value: inr0(t.revenue), sub: num(t.orders) + " orders" },
+  ];
+  // Widths are ORDERS: the store total is after returns and the page
+  // figure before, so their rupee difference is not the gap.
+  const drops = [{ colour: "var(--warn)", text: num(Math.max(0, storeOrders - t.orders)) +
+    " orders not on a page — no recorded URL, cancelled or excluded" +
+    (filtered ? ", or another source" : "") }];
+  if (!filtered) {
+    stages.push({ label: "Of which from Meta", n: meta.orders, value: inr0(meta.revenue),
+                  sub: num(meta.orders) + " orders" });
+    drops.push({ colour: "var(--text-3)", text: inr0(Math.max(0, t.revenue - meta.revenue)) +
+                 " from direct, Google and other sources" });
+  }
+  const sales = funnelHtml("Sales considered · by orders", "var(--rev)", stages, drops);
+
+  const se = t.sessions || 0;
+  const traffic = funnelHtml("Traffic to orders · by sessions", "var(--cost)", [
+    { label: "Sessions", n: se, value: num(se), sub: num(t.visitors) + " visitors" },
+    { label: "Added to cart", n: t.cart_additions, value: num(t.cart_additions), sub: of(t.cart_additions, se) + " of sessions" },
+    { label: "Orders", n: t.orders, value: num(t.orders), sub: of(t.orders, se) + " of sessions" },
+  ], [
+    { colour: "var(--text-3)", text: num(t.bounces) + " bounced (" + of(t.bounces, se) + " of sessions)" },
+    { colour: "var(--text-3)", text: num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order" },
+  ]);
+  $("pgfunnels").innerHTML = sales + traffic;
+  $("pgfn-note").textContent = "whole store — fair as a total, not page by page";
+}
+
+function renderFunnel() {
+  if (!ADS) return;
+  const f = ADS.funnel || {}, t = ADS.totals;
+  const row = fnRow, drop = fnDrop, of = fnOf;
+
+  const S = f.store_sales || 0;
+  const sales = funnelHtml("Sales considered · by orders", "var(--rev)", [
+    { label: "Store total sales", n: f.store_orders, value: inr0(S), sub: num(f.store_orders) + " orders" },
+    { label: "With a Meta ad id", n: f.ad_orders, value: inr0(f.ad_sales), sub: num(f.ad_orders) + " orders" },
+    { label: "On a mapped landing page", n: f.mapped_orders, value: inr0(f.mapped_sales), sub: num(f.mapped_orders) + " orders" },
+  ], [
+    { colour: "var(--text-3)", text: num(Math.max(0, f.store_orders - f.ad_orders)) +
+      " orders with no Meta ad id (direct, Google, other)" },
+    { colour: "var(--warn)", text: inr0(f.ad_sales - f.mapped_sales) + " on ads not in the ad map" },
+  ]);
+  const se = t.sessions || 0;
+  const traffic = funnelHtml("Ad traffic to orders · by sessions", "var(--cost)", [
+    { label: "Ad sessions", n: se, value: num(se), sub: num(t.visitors) + " visitors" },
+    { label: "Added to cart", n: t.cart_additions, value: num(t.cart_additions), sub: of(t.cart_additions, se) + " of sessions" },
+    { label: "Orders", n: t.orders, value: num(t.orders), sub: of(t.orders, se) + " of sessions" },
+  ], [
+    { colour: "var(--text-3)", text: num(t.bounces) + " bounced (" + of(t.bounces, se) + " of sessions)" },
+    { colour: "var(--text-3)", text: num(Math.max(0, t.cart_additions - t.orders)) + " carts without an order" },
+  ]);
+  $("funnels").innerHTML = sales + traffic;
+  $("fn-note").textContent = S ? "" : "store total not recorded for this window";
+}
+
+function renderAdPages() {
+  if (!ADS) return;
+  const arr = k => pgSortKey === k ? ' <span class="arrow">' + (pgSortDir < 0 ? "▼" : "▲") + "</span>" : "";
+  const start = i => i > 0 && PAGE_COLS[i].g !== PAGE_COLS[i - 1].g;
+  $("adpagehead").innerHTML =
+    '<tr class="bandrow"><th class="band"></th>' + AD_GROUPS.map(g =>
+      '<th class="band band-' + g.g + '" colspan="' + PAGE_COLS.filter(c => c.g === g.g).length +
+      '">' + esc(g.label) + "</th>").join("") + "</tr>" +
+    '<tr><th data-pk="landing_page_path">Landing page' + arr("landing_page_path") + "</th>" +
+    PAGE_COLS.map((c, i) => '<th class="tint-' + c.g + (start(i) ? " bandstart" : "") + '" data-pk="' + c.k +
+      '" title="' + esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
+  const k = pgSortKey;
+  const rows = (ADS.pages || []).slice().sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) * pgSortDir;
+  });
+  const line = (r, label, cls, key) => '<tr class="' + cls + '"' + key + "><td>" + esc(label) + "</td>" +
+    PAGE_COLS.map((c, i) => '<td class="tint-' + c.g + (start(i) ? " bandstart" : "") + '">' +
+      esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
+  $("adpagebody").innerHTML =
+    line(Object.assign({ ad_count: ADS.ad_count }, ADS.totals), "All pages", "total", ' data-all="1"') +
+    rows.map(r => line(r, r.landing_page_path || "Not in ad map",
+      (adPage !== undefined && adPage === r.landing_page_path) ? "sel" : "",
+      ' data-page="' + esc(r.landing_page_path == null ? "\u0000" : r.landing_page_path) + '"')).join("");
+  const mapped = rows.filter(r => r.landing_page_path);
+  $("adpagenote").textContent = num(mapped.length) + " landing pages";
+}
+
+async function loadAds(from, to) {
+  $("admsg").hidden = false; $("admsg").className = "msg"; $("admsg").textContent = "Loading…";
+  try {
+    const res = await fetch(apiBase() + "/admin/analytics/landing-ads?day=" +
+      encodeURIComponent(to) + "&from_day=" + encodeURIComponent(from) + "&limit=2000");
+    if (res.status === 404) throw new Error("this backend does not serve per-ad data yet");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    ADS = await res.json();
+  } catch (e) {
+    ADS = null;
+    $("adhead").innerHTML = $("adbody").innerHTML = "";
+    $("admsg").className = "msg err";
+    $("admsg").textContent = "Landing Pages by Ads: " + e.message + ".";
+    return false;
+  }
+  adPage = undefined;
+  renderAdHeroes();
+  renderFunnel();
+  renderAdCharts();
+  renderAdPages();
+  renderAds();
+  return true;
+}
+
+function adRows() {
+  const q = $("adfilter").value.trim().toLowerCase();
+  let rows = ADS.ads;
+  if (adPage !== undefined) rows = rows.filter(r => (r.landing_page_path ?? null) === adPage);
+  const want = $("adcheck").value;
+  if (want) rows = rows.filter(r => r.page_status === want);
+  if (q) rows = rows.filter(r => (r.ad_id + " " + (r.ad_name || "") + " " +
+                                  (r.landing_page_path || "")).toLowerCase().includes(q));
+  const k = adSortKey;
+  return rows.slice().sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;            // blanks last, whichever way
+    if (y == null) return -1;
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) * adSortDir;
+  });
+}
+
+function renderAds() {
+  if (!ADS) return;
+  const arr = k => adSortKey === k ? ' <span class="arrow">' + (adSortDir < 0 ? "▼" : "▲") + "</span>" : "";
+  const start = i => i > 0 && AD_COLS[i].g !== AD_COLS[i - 1].g;
+  $("adhead").innerHTML =
+    '<tr class="bandrow"><th class="band"></th>' + AD_GROUPS.map(g =>
+      '<th class="band band-' + g.g + '" colspan="' + AD_COLS.filter(c => c.g === g.g).length +
+      '">' + esc(g.label) + "</th>").join("") + "</tr>" +
+    '<tr><th data-ak="ad_id">Ad' + arr("ad_id") + "</th>" + AD_COLS.map((c, i) =>
+      '<th class="tint-' + c.g + (start(i) ? " bandstart" : "") + '"' + (c.text ? ' style="text-align:left"' : "") +
+      ' data-ak="' + c.k + '" title="' +
+      esc(AD_HELP[c.k] || "") + '">' + esc(c.label) + arr(c.k) + "</th>").join("") + "</tr>";
+  const cell = (c, i, r) => '<td class="tint-' + c.g + (start(i) ? " bandstart" : "") + '"' +
+    (c.text ? ' style="text-align:left"' : "") + ">" +
+    (c.html ? c.f(r[c.k], r) : esc(c.f(r[c.k], r))) + "</td>";
+  const rows = adRows();
+  const t = ADS.totals;
+  $("adbody").innerHTML =
+    '<tr class="total"><td>All ads (' + num(ADS.ad_count) + ")</td>" +
+      AD_COLS.map((c, i) => (c.text || c.html) ? '<td class="tint-' + c.g + (start(i) ? " bandstart" : "") + '"></td>'
+                                   : cell(c, i, t)).join("") + "</tr>" +
+    rows.map(r =>
+      '<tr><td title="' + esc((r.ad_name || "") + (r.campaign_name ? " · " + r.campaign_name : "")) +
+      '"><div>' + esc(r.ad_id) + '</div><div class="sub" style="max-width:260px;overflow:hidden;' +
+      'text-overflow:ellipsis;white-space:nowrap">' + esc(r.ad_name || "") + "</div></td>" +
+      AD_COLS.map((c, i) => cell(c, i, r)).join("") + "</tr>").join("");
+  const mapped = ADS.ads.filter(r => r.landing_page_path).length;
+  $("adnote").textContent = num(rows.length) + " of " + num(ADS.ad_count) + " ads · " +
+    num(ADS.ads.length - mapped) + " shown without a mapped page";
+  $("admsg").hidden = rows.length > 0;
+  if (!rows.length) { $("admsg").className = "msg"; $("admsg").textContent = "No ads in this window."; }
+}
 let sortKey = "revenue";
 let sortDir = -1;
 
 /* ------------------------------------------------------------------ *
  * load                                                               *
  * ------------------------------------------------------------------ */
+// Inside the Hourly Tracker the dates come from ITS Period control, so
+// every tab reads the same window. Standalone, the Window select rules.
+const isDay = v => /^\d{4}-\d{2}-\d{2}$/.test(v || "");
+let RANGE = isDay(qs.get("to"))
+  ? { from: isDay(qs.get("from")) ? qs.get("from") : qs.get("to"), to: qs.get("to") } : null;
+window.setRange = (from, to) => {
+  if (!isDay(to)) return;
+  from = isDay(from) ? from : to;
+  if (RANGE && RANGE.from === from && RANGE.to === to) return;
+  RANGE = { from, to };
+  load();
+};
+
 async function load() {
   const base = apiBase();
-  const today = istToday();
-  const from = daysAgo(today, Number($("window").value));
+  const today = RANGE ? RANGE.to : istToday();
+  const from = RANGE ? RANGE.from : daysAgo(today, Number($("window").value));
   $("span").textContent = from + " → " + today + " (IST)";
+  if (VIEW_ADS) {
+    const ok = await loadAds(from, today);
+    $("livedot").className = ok ? "dot" : "dot stale";
+    $("livetext").textContent = ok ? "live" : "offline";
+    return;
+  }
   $("msg").hidden = false;
   $("msg").className = "msg";
   $("msg").textContent = "Loading…";
@@ -467,6 +1004,7 @@ function render() {
   renderSources();
   renderCoverage();
   renderHeroes();
+  renderPageFunnel();
   renderCharts();
   renderTable();
 }
@@ -670,22 +1208,48 @@ function renderHeroes() {
     ["Total sales", salesTop, salesSub],
     ["Shopify orders", ordersTop, ordersSub],
     ["Meta spend",    spendTop, spendSub],
-    ["New customer",  inr0(t.new_customer_sales), num(t.new_customer_orders) + " orders, attributed"],
-    ["Repeat customer", inr0(t.repeat_customer_sales), num(t.repeat_customer_orders) + " orders, attributed"],
-    ["Bounce / ATC",  pc1(t.bounce_rate) + " / " + pc1(t.atc_rate), "of sessions"],
+    ["Quantity ordered", num(t.quantity),
+      t.orders ? (t.quantity / t.orders).toFixed(2) + " units per order" : "units"],
+    // Share of ORDERS, with the sales beside it: the two can differ,
+    // because repeat buyers tend to place bigger orders.
+    ["New customer %", fnOf(t.new_customer_orders, t.orders),
+      num(t.new_customer_orders) + " orders · " + inr0(t.new_customer_sales)],
+    ["Repeat customer %", fnOf(t.repeat_customer_orders, t.orders),
+      num(t.repeat_customer_orders) + " orders · " + inr0(t.repeat_customer_sales)],
+    ["Bounce rate",   pc1(t.bounce_rate), num(t.bounces) + " of " + num(t.sessions) + " sessions"],
+    ["ATC rate",      pc1(t.atc_rate), num(t.cart_additions) + " sessions added to cart"],
     ["NCP",           num(t.ncp), t.ncp ? inr0(t.meta_spend / t.ncp) + " each, attributed" : ""],
-    ["Meta ROAS",     roas(t.meta_roas, t.meta_spend), "Meta sales ÷ attributed spend"],
-    // Both sides account-level, so this is the quotient that matches
-    // Ads Manager. Attributed revenue over attributed spend would mix
-    // ~95% of one with ~37% of the other and read 10.07x against 3.96x.
-    ["Store ROAS",
-      (c.all_spend ? (storeSales / c.all_spend).toFixed(2) : "—") + "\u00d7",
-      "store sales ÷ account spend"],
+    // Meta's own purchase value over the spend of the same ads: the
+    // figure Ads Manager shows, for the ads the map can place.
+    ["Meta ROAS",     roas(t.meta_roas, t.meta_spend),
+      inr0(t.meta_conv_value) + " Meta sales ÷ " + inr0(t.meta_spend)],
   ];
-  $("heroes").innerHTML = tiles.map(([l, v, s]) =>
-    '<div class="hero"><div class="h-label">' + esc(l) + '</div>' +
-    '<div class="h-value">' + esc(v) + '</div>' +
-    '<div class="h-sub">' + esc(s) + '</div></div>').join("");
+  $("heroes").innerHTML = tiles.map(tileHtml).join("");
+}
+const tileHtml = ([l, v, s]) =>
+  '<div class="hero"><div class="h-label">' + esc(l) + '</div>' +
+  '<div class="h-value">' + esc(v) + '</div>' +
+  '<div class="h-sub">' + esc(s) + '</div></div>';
+
+// KPI cards for the by-ads tab: the same ads the tables below sum.
+function renderAdHeroes() {
+  if (!ADS) return;
+  const t = ADS.totals;
+  $("adheroes").innerHTML = [
+    ["Ad spend", inr0(t.spend), num(ADS.ad_count) + " ads"],
+    ["Ad sessions", num(t.sessions), num(t.visitors) + " visitors"],
+    ["Bounce rate", pc1(t.bounce_rate), num(t.bounces) + " of " + num(t.sessions) + " sessions"],
+    ["ATC rate", pc1(t.atc_rate), num(t.cart_additions) + " sessions added to cart"],
+    ["Sales from ads", inr0(t.revenue), num(t.orders) + " orders with an ad id"],
+    ["ROAS", t.roas == null ? "—" : xx(t.roas), "ad sales ÷ ad spend"],
+    ["CVR", t.cvr == null ? "—" : (t.cvr * 100).toFixed(2) + "%", "orders ÷ ad sessions"],
+    ["Quantity ordered", num(t.quantity),
+      t.orders ? (t.quantity / t.orders).toFixed(2) + " units per order" : "units"],
+    ["New customer %", fnOf(t.new_orders, t.orders),
+      num(t.new_orders) + " orders · " + inr0(t.new_sales)],
+    ["Repeat customer %", fnOf(t.rep_orders, t.orders),
+      num(t.rep_orders) + " orders · " + inr0(t.rep_sales)],
+  ].map(tileHtml).join("");
 }
 
 /* --- the hour charts ------------------------------------------------
@@ -698,74 +1262,49 @@ function renderHeroes() {
  * Bars, not a line: an hour is a bucket, and a line between buckets
  * claims a value at 13:30 that was never measured.
  */
-function barChart(hostId, rows, key, colorVar, fmt) {
-  const host = $(hostId);
-  if (!rows || !rows.length) { host.innerHTML = '<div class="msg">No hours in this window.</div>'; return; }
-  const W = 560, H = 170, L = 40, R = 8, T = 14, B = 20;
-  const iw = W - L - R, ih = H - T - B;
-  const max = Math.max(...rows.map(r => r[key] || 0), 1);
-  const slot = iw / 24;
-  const bw = Math.max(3, slot - 2);          // a 2px gap between bars
-  const peak = rows.reduce((a, b) => ((b[key] || 0) > (a[key] || 0) ? b : a), rows[0]);
-
-  // Four recessive gridlines; the axis says the magnitude, the bars say
-  // the shape, and the exact figure is a hover away.
-  let g = "";
-  for (let i = 0; i <= 3; i++) {
-    const v = max * i / 3, y = T + ih - (v / max) * ih;
-    g += '<line class="grid-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'
-       + '<text class="axis-text" x="' + (L - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
-  }
-
-  let bars = "";
-  rows.forEach(r => {
-    const v = r[key] || 0;
-    const h = (v / max) * ih;
-    const x = L + r.hour_of_day * slot + (slot - bw) / 2;
-    const y = T + ih - h;
-    // 4px rounded data-end, square against the baseline: the rounding
-    // marks where the value ENDS, so rounding the foot too would round
-    // the axis.
-    const rad = Math.min(4, bw / 2, h);
-    bars += h <= 0.5 ? "" :
-      '<path d="M' + x.toFixed(1) + ' ' + (T + ih).toFixed(1) +
-      ' V' + (y + rad).toFixed(1) +
-      ' a' + rad + ' ' + rad + ' 0 0 1 ' + rad + ' -' + rad +
-      ' h' + (bw - 2 * rad).toFixed(1) +
-      ' a' + rad + ' ' + rad + ' 0 0 1 ' + rad + ' ' + rad +
-      ' V' + (T + ih).toFixed(1) + ' Z" fill="var(' + colorVar + ')"/>';
-    // One direct label, on the peak only. A number over every bar is
-    // the table again, printed smaller.
-    if (r === peak && v > 0) {
-      bars += '<text class="bar-label" x="' + (x + bw / 2).toFixed(1) + '" y="' + (y - 4).toFixed(1) +
-              '" text-anchor="middle">' + esc(fmt(v)) + '</text>';
-    }
-    // The hit area is the whole column, not the bar: a 3px-tall 04:00
-    // is otherwise unhoverable.
-    bars += '<rect class="hit" x="' + (L + r.hour_of_day * slot).toFixed(1) + '" y="' + T +
-            '" width="' + slot.toFixed(1) + '" height="' + ih + '"' +
-            ' data-h="' + r.hour_of_day + '" data-k="' + esc(key) + '"/>';
-  });
-
-  let ax = "";
-  for (let h = 0; h < 24; h += 3) {
-    ax += '<text class="axis-text" x="' + (L + h * slot + slot / 2).toFixed(1) + '" y="' + (H - 6) +
-          '" text-anchor="middle">' + String(h).padStart(2, "0") + '</text>';
-  }
-
-  host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' +
-    esc(key.replace(/_/g, " ")) + ' by hour of day">' + g + bars + ax + '</svg>';
-}
-
 function renderCharts() {
   const hours = (DATA && DATA.hours) || [];
-  const c = DATA && DATA.coverage;
-  $("rev-note").textContent = (c && c.stale)
-    ? "IST · last pulled " + ist(c.data_through)
-    : "IST · summed over the window";
-  barChart("chart-rev",   hours, "revenue",    "--rev",  inrK);
-  barChart("chart-spend", hours, hours.some(h => h.order_spend) ? "order_spend" : "meta_spend",
-           "--cost", inrK);
+  const c = DATA && DATA.coverage, t = (DATA && DATA.totals) || {};
+  $("rev-note").textContent = (c && c.stale) ? "last pulled " + ist(c.data_through) : "summed over the window";
+  const live = liveHourFor(RANGE ? RANGE.to : istToday());
+  const sp = r => spendOf(r);
+  const allSpend = hours.reduce((a, r) => a + sp(r), 0), allRev = hours.reduce((a, r) => a + (r.revenue || 0), 0);
+  const allSess = hours.reduce((a, r) => a + (r.sessions || 0), 0), allCart = hours.reduce((a, r) => a + (r.cart_additions || 0), 0);
+  hourInsights("hour-insights", hours, "revenue", sp, live);
+  hourPanels("hourpanels", hours, [
+    { label: "Shopify sales", colour: "--rev", fmt: inrK, get: r => r.revenue || 0,
+      tip: r => inr0(r.revenue) + " · " + num(r.orders) + " orders" },
+    { label: "Meta spend", colour: "--cost", fmt: inrK, get: sp, tip: r => inr0(sp(r)) },
+    { label: "Sales ÷ Meta spend", colour: "--text-2", fmt: v => v.toFixed(1) + "×", line: true,
+      get: r => sp(r) >= ROAS_MIN_SPEND ? (r.revenue || 0) / sp(r) : null,
+      ref: allSpend ? allRev / allSpend : 0 },
+    { label: "Sessions", colour: "--text-3", fmt: n => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n)),
+      get: r => r.sessions || 0, tip: r => num(r.sessions) },
+    { label: "ATC rate", colour: "--text-2", fmt: v => (v * 100).toFixed(1) + "%", line: true,
+      get: r => r.sessions ? (r.cart_additions || 0) / r.sessions : null,
+      ref: allSess ? allCart / allSess : 0 },
+  ], live);
+}
+
+function renderAdCharts() {
+  if (!ADS) return;
+  const hours = ADS.hours || [];
+  const live = liveHourFor(ADS.to_day);
+  const sum = k => hours.reduce((a, r) => a + (r[k] || 0), 0);
+  hourInsights("adhour-insights", hours, "revenue", r => r.spend || 0, live);
+  hourPanels("adhourpanels", hours, [
+    { label: "Sales from ads", colour: "--rev", fmt: inrK, get: r => r.revenue || 0,
+      tip: r => inr0(r.revenue) + " · " + num(r.orders) + " orders" },
+    { label: "Ad spend", colour: "--cost", fmt: inrK, get: r => r.spend || 0, tip: r => inr0(r.spend) },
+    { label: "ROAS", colour: "--text-2", fmt: v => v.toFixed(1) + "×", line: true,
+      get: r => (r.spend || 0) >= ROAS_MIN_SPEND ? (r.revenue || 0) / r.spend : null,
+      ref: sum("spend") ? sum("revenue") / sum("spend") : 0 },
+    { label: "Ad sessions", colour: "--text-3", fmt: n => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(Math.round(n)),
+      get: r => r.sessions || 0, tip: r => num(r.sessions) },
+    { label: "CVR", colour: "--text-2", fmt: v => (v * 100).toFixed(2) + "%", line: true,
+      get: r => r.sessions ? (r.orders || 0) / r.sessions : null,
+      ref: sum("sessions") ? sum("orders") / sum("sessions") : 0 },
+  ], live);
 }
 
 function renderTable() {
@@ -780,7 +1319,7 @@ function renderTable() {
     "<tr>" +
     '<th data-k="landing_page_path">Landing page' + arrow("landing_page_path") + "</th>" +
     COLS.map((c, i) => '<th class="' + (isBandStart(i) ? "bandstart " : "") +
-                  'col-' + c.g + '" data-k="' + c.k + '" title="' +
+                  'tint-' + c.g + ' col-' + c.g + '" data-k="' + c.k + '" title="' +
                   esc(COL_HELP[c.k] || "") + '">' + esc(c.label) + arrow(c.k) +
                   "</th>").join("") +
     "</tr>";
@@ -792,7 +1331,7 @@ function renderTable() {
   // whole-window total above a filtered list invites subtraction that
   // does not work.
   const totalRow = (t && !q) ? '<tr class="total"><td>All pages</td>' +
-    COLS.map(c => "<td>" + esc(c.f(t[c.k], t)) + "</td>").join("") + "</tr>" : "";
+    COLS.map(c => '<td class="tint-' + c.g + '">' + esc(c.f(t[c.k], t)) + "</td>").join("") + "</tr>" : "";
 
   const max = rows.length ? Math.max(...rows.map(r => r.revenue || 0), 1) : 1;
   $("tbody").innerHTML = totalRow + rows.map(r => {
@@ -800,7 +1339,7 @@ function renderTable() {
     return '<tr><td class="pagecell" title="' + esc(r.landing_page_path) + '">' +
       '<span class="pagebar" style="width:' + (share * 100).toFixed(1) + '%"></span>' +
       '<span class="pagetext">' + esc(r.landing_page_path) + "</span></td>" +
-      COLS.map(c => "<td>" + esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
+      COLS.map(c => '<td class="tint-' + c.g + '">' + esc(c.f(r[c.k], r)) + "</td>").join("") + "</tr>";
   }).join("");
 
   const m = $("msg");
@@ -831,20 +1370,9 @@ function showTip(html, x, y) {
 function hideTip() { tip.style.opacity = "0"; }
 
 document.addEventListener("mousemove", e => {
-  const hit = e.target.closest ? e.target.closest("rect.hit") : null;
-  if (!hit || !DATA) { hideTip(); return; }
-  const h = Number(hit.dataset.h);
-  const row = DATA.hours.find(r => r.hour_of_day === h);
-  if (!row) { hideTip(); return; }
-  showTip(
-    "<b>" + String(h).padStart(2, "0") + ":00–" + String(h).padStart(2, "0") + ":59 IST</b><br>" +
-    '<span class="k">Shopify sales</span> ' + esc(inr0(row.revenue)) + "<br>" +
-    '<span class="k">Orders</span> ' + esc(num(row.orders)) + "<br>" +
-    '<span class="k">New / repeat</span> ' + esc(inr0(row.new_customer_sales)) + " / " + esc(inr0(row.repeat_customer_sales)) + "<br>" +
-    '<span class="k">Meta spend</span> ' + esc(inr0(spendOf(row))) + "<br>" +
-    '<span class="k">Meta sales</span> ' + esc(inr0(row.meta_conv_value)) + "<br>" +
-    '<span class="k">NCP</span> ' + esc(num(row.ncp)),
-    e.clientX, e.clientY);
+  const hit = e.target.closest ? e.target.closest("rect.hit2") : null;
+  if (!hit) { hideTip(); return; }
+  showTip(hit.dataset.tip, e.clientX, e.clientY);   // built from numbers, already escaped
 });
 
 $("thead").addEventListener("click", e => {
@@ -873,6 +1401,73 @@ $("csv").addEventListener("click", () => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = "landing-pages-" + istToday() + ".csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+// --- hour by hour: opened on request ------------------------------------
+// The tables are what a reader comes for, so they follow the funnel; the
+// hourly analysis waits behind its button and stays as it was last left.
+function setHours(open) {
+  $(VIEW_ADS ? "adhourcard" : "hourcard").hidden = !open;
+  for (const b of document.querySelectorAll(".hourbtn")) {
+    b.setAttribute("aria-pressed", String(open));
+    b.textContent = open ? "Hide hour-by-hour" : "Hour-by-hour analysis";
+  }
+  try { localStorage.setItem("tracker_landing_hours", open ? "1" : "0"); } catch {}
+}
+for (const b of document.querySelectorAll(".hourbtn")) {
+  b.addEventListener("click", () => {
+    const open = b.getAttribute("aria-pressed") !== "true";
+    setHours(open);
+    if (open) $(VIEW_ADS ? "adhourcard" : "hourcard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+try { if (localStorage.getItem("tracker_landing_hours") === "1") setHours(true); } catch {}
+
+// --- by ad: sort, filter, export ---------------------------------------
+$("adhead").addEventListener("click", e => {
+  const k = (e.target.closest("th") || {}).dataset?.ak;
+  if (!k) return;
+  if (k === adSortKey) adSortDir = -adSortDir;
+  else { adSortKey = k; adSortDir = (k === "ad_id" || k === "landing_page_path") ? 1 : -1; }
+  renderAds();
+});
+$("adpagehead").addEventListener("click", e => {
+  const k = (e.target.closest("th") || {}).dataset?.pk;
+  if (!k) return;
+  if (k === pgSortKey) pgSortDir = -pgSortDir;
+  else { pgSortKey = k; pgSortDir = k === "landing_page_path" ? 1 : -1; }
+  renderAdPages();
+});
+// Click a page to list only its ads below; click it again, or "All
+// pages", to clear.
+$("adpagebody").addEventListener("click", e => {
+  const tr = e.target.closest("tr");
+  if (!tr) return;
+  if (tr.dataset.all) adPage = undefined;
+  else {
+    const p = tr.dataset.page === "\u0000" ? null : tr.dataset.page;
+    adPage = adPage === p ? undefined : p;
+  }
+  renderAdPages();
+  renderAds();
+  if (adPage !== undefined) $("adwrap").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+$("adfilter").addEventListener("input", renderAds);
+$("adcheck").addEventListener("change", renderAds);
+$("adexport").addEventListener("click", () => {
+  if (!ADS) return;
+  const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+  const keys = ["ad_id", "ad_name", "campaign_name", "landing_page_url", "landing_page_path",
+                "seen_page", "seen_share", "page_status", "spend", "impressions",
+                "sessions", "visitors", "page_match", "atc_rate", "bounce_rate",
+                "avg_session_seconds", "orders", "revenue", "new_sales", "rep_sales",
+                "new_orders", "rep_orders", "quantity", "cvr", "roas"];
+  const csv = [keys.join(",")].concat(adRows().map(r => keys.map(k => q(r[k])).join(","))).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "landing-ads-" + ADS.from_day + "_" + ADS.to_day + ".csv";
   a.click();
   URL.revokeObjectURL(a.href);
 });

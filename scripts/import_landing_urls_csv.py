@@ -8,9 +8,16 @@ Writes Bronze (raw_dump_meta adcreative rows, which the nightly
 scripts/refresh_ad_media.py rebuild reads, newest per ad wins) and mirrors
 the same values into ad_media so the dashboard shows them now.
 
+Every ad in the CSV also goes into ad_landing_map, whether or not
+ad_media knows the ad. ad_media is rebuilt each night from the ads the
+ingest has already seen, so an ad launched since then is not in it and
+used to be skipped here without a word -- and those are the ads doing
+most of the spending. The map is never truncated, so it holds them
+until the nightly catches up, and after.
+
 Usage:
     .venv/bin/python scripts/import_landing_urls_csv.py ~/Downloads/export.csv           # dry run
-    .venv/bin/python scripts/import_landing_urls_csv.py ~/Downloads/export.csv --write
+    .venv/bin/python scripts/import_landing_urls_csv.py ~/Downloads/new.csv ~/Downloads/old.xlsx --write
 """
 from __future__ import annotations
 
@@ -36,9 +43,56 @@ COLUMNS = ["id", "meta_id", "raw_payload", "api_endpoint", "api_version", "batch
            "processing_status", "object_type", "parent_ids", "is_nested"]
 
 
-def read_csv(path: str) -> dict[str, str]:
+MAP_DDL = """
+CREATE TABLE IF NOT EXISTS public.ad_landing_map (
+    ad_id            text PRIMARY KEY,
+    landing_page_url text NOT NULL,
+    source           text NOT NULL,
+    imported_at      timestamptz NOT NULL DEFAULT now()
+)
+"""
+
+
+def write_map(urls: dict[str, str]) -> tuple[int, int]:
+    """Add CSV ads to ad_landing_map; returns (added, skipped).
+
+    An ad already in the map is left alone, so exports can be loaded in
+    any number and any overlap: the first file to name an ad decides its
+    page. Load the newest export first.
+    """
+    import psycopg2.extras
+    rows = [(ad, url, SOURCE) for ad, url in urls.items()]
+    with connect(autocommit=False, statement_timeout="300s") as conn, conn.cursor() as cur:
+        cur.execute(MAP_DDL)
+        conn.commit()
+    added = 0
+    for i in range(0, len(rows), 500):
+        with connect(autocommit=False, statement_timeout="300s") as conn, conn.cursor() as cur:
+            got = psycopg2.extras.execute_values(cur, """
+                INSERT INTO public.ad_landing_map (ad_id, landing_page_url, source)
+                VALUES %s
+                ON CONFLICT (ad_id) DO NOTHING
+                RETURNING ad_id
+            """, rows[i:i + 500], fetch=True)
+            added += len(got)
+            conn.commit()
+    return added, len(rows) - added
+
+
+def _rows(path: str) -> list[dict]:
+    """Rows of a CSV or .xlsx export as dicts keyed by the header."""
+    if path.lower().endswith(".xlsx"):
+        import openpyxl
+        ws = openpyxl.load_workbook(path, read_only=True, data_only=True).active
+        it = ws.iter_rows(values_only=True)
+        head = [str(h or "").strip() for h in next(it, [])]
+        return [{h: ("" if v is None else str(v)) for h, v in zip(head, r)} for r in it]
     with open(path, encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.DictReader(f))
+        return list(csv.DictReader(f))
+
+
+def read_csv(path: str) -> dict[str, str]:
+    rows = _rows(path)
     col = next((c for c in URL_COLUMNS if rows and c in rows[0]), None)
     if not rows or "Ad ID" not in rows[0] or col is None:
         raise SystemExit(f"CSV needs 'Ad ID' and one of {URL_COLUMNS}")
@@ -111,11 +165,17 @@ def write(todo: list[tuple]) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("csv")
+    ap.add_argument("csv", nargs="+", help="exports, newest first")
     ap.add_argument("--write", action="store_true")
     a = ap.parse_args()
-    todo = plan(read_csv(a.csv))
-    if a.write:
-        write(todo)
-    else:
-        print("dry run: pass --write to apply")
+    for path in a.csv:
+        print(f"== {Path(path).name}")
+        urls = read_csv(path)
+        todo = plan(urls)
+        if a.write:
+            if todo:
+                write(todo)
+            added, skipped = write_map(urls)
+            print(f"ad_landing_map: {added:,} added, {skipped:,} already there (skipped)")
+        else:
+            print("dry run: pass --write to apply")
