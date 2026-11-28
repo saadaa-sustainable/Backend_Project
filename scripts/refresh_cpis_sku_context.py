@@ -319,6 +319,15 @@ products_as_of AS (
     SELECT MAX(extracted_at) AS inventory_as_of
     FROM raw_dump_shopify WHERE object_type = 'products'
 ),
+-- The 30 days first, then the join. Joined straight to variant_stock, the
+-- planner took each SKU's whole history through the SKU index and dropped
+-- all but 30 days after reading it -- growing every day until the step
+-- passed its 600s limit.
+inv_recent AS MATERIALIZED (
+    SELECT * FROM shopify_inventory
+    WHERE day >= (SELECT anchor_day FROM inv_window) - 29
+      AND day <= (SELECT anchor_day FROM inv_window)
+),
 inv_daily AS (
     SELECT vs.master_sku,
            si.product_variant_sku                 AS variant_sku,
@@ -326,11 +335,8 @@ inv_daily AS (
            COALESCE(si.inventory_units_sold, 0)   AS units_sold,
            COALESCE(si.ending_inventory_units, 0) AS ending_units,
            si.product_status                      AS product_status
-    FROM shopify_inventory si
+    FROM inv_recent si
     JOIN variant_stock vs ON vs.variant_sku = si.product_variant_sku
-    CROSS JOIN inv_window w
-    WHERE si.day >= w.anchor_day - 29
-      AND si.day <= w.anchor_day
 ),
 -- One stock figure per variant per day before any OOS day can be counted.
 -- shopify_inventory carries a row per LISTING, and 29,282 of 167,200
