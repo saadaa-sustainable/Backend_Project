@@ -5917,7 +5917,7 @@ class CpisUtmRow(BaseModel):
 # matter which attribution rule the active view used.
 _CPIS_RECONCILIATION_INPUTS = """
 WITH spend AS MATERIALIZED (
-    SELECT ad_id, day AS d, spend
+    SELECT ad_id, day AS d, spend, ncp_count
       FROM public.insights_daily_by_ad
      WHERE day BETWEEN :wf AND :wt
 ),
@@ -6013,6 +6013,9 @@ def _cpis_reconciliation_sql(custom: bool) -> str:
         # the rows beneath it come from one place.
         "SELECT b.*, (SELECT COALESCE(SUM(spend), 0) "
         "FROM spend) AS meta_total_spend, "
+        # Meta's NCP for the window. The per-SKU NCP column gives each SKU
+        # the full NCP of every ad that sold it, so it cannot be summed.
+        "(SELECT COALESCE(SUM(ncp_count), 0) FROM spend) AS meta_total_ncp, "
         # The newest day the sum above actually covers. Meta lands
         # insights a day in arrears, so a window ending today is
         # summed only to yesterday. Printing the requested end date
@@ -6060,6 +6063,9 @@ class CpisUtmResponse(BaseModel):
     #                       that ran in the window but drove no
     #                       UTM-attributed orders
     meta_total_spend: float | None
+    #: Meta's new-customer purchases in the window, summed over ads (each
+    #: NCP is credited to one ad, so this equals the account total).
+    meta_total_ncp: float | None = None
     attributed_spend: float | None
     untethered_spend: float | None
     #: Newest day meta_total_spend actually covers, which is earlier
@@ -7053,6 +7059,7 @@ async def get_cpis_utm(
         wf, wt = (bnds_row[0], bnds_row[1]) if bnds_row else (None, None)
 
     meta_total_spend: float | None = None
+    meta_total_ncp: float | None = None
     attributed_spend: float | None = None
     untethered_spend: float | None = None
     untethered_ad_unknown: float | None = None
@@ -7069,6 +7076,7 @@ async def get_cpis_utm(
         else:
             rec = await _get_cpis_reconciliation(session, wf, wt, window, bool(from_date and to_date))
         meta_total_spend = float(rec["meta_total_spend"] or 0)
+        meta_total_ncp = float(rec.get("meta_total_ncp") or 0)
         spend_through = rec["spend_through"]
         attributed_orders_distinct = rec["attributed_orders_distinct"]
         attributed_spend = float(rec["attributed_spend"] or 0)
@@ -7090,6 +7098,7 @@ async def get_cpis_utm(
         total=total,
         attribution_mode=attribution_mode,
         meta_total_spend=meta_total_spend,
+        meta_total_ncp=meta_total_ncp,
         attributed_spend=attributed_spend,
         untethered_spend=untethered_spend,
         untethered_ad_unknown=untethered_ad_unknown,
